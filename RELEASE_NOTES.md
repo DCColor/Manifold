@@ -90,6 +90,7 @@ bullet.
 - Fixed: SDI output could go back to an earlier source's color label when a file with sound was opened after output started.
 - Fixed: an HDR10 file's first frames over SDI and HDMI could carry default HDR metadata instead of the file's own. The file's values are now sent from the first frame.
 - Fixed: starting SDI output while the picture was paused sent black until you pressed Play. The paused frame now goes out as soon as output starts, including when the output mode changes and when output starts on launch.
+- Fixed: when another application, such as DaVinci Resolve, was using the DeckLink output, starting output in Manifold failed with no explanation. Manifold now says the output is in use by another application, and output stays off until you start it again.
 - Fixed: streams using the BT.470BG color matrix, common from European encoders, were decoded with Rec. 709 coefficients, giving a small color shift.
 - Fixed: H.264 4:2:2 streams over SRT were shown at 4:2:0 color resolution without saying so.
 - Fixed: all-intra HEVC 4:2:0 streams over SRT (x265's "Main 10 Intra") were refused.

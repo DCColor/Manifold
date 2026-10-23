@@ -189,6 +189,10 @@ targets:
       # can replay the traced bursts. Used by App/MetalVideoRenderer.swift only.
       - package: ManifoldCore
         product: FrameQueuePolicy
+      # What a refused DeckLink output start says (docs/BUGS.md, the 2160p23.98 refusal) — a leaf target so `swift test`
+      # can pin that only the measured busy code is mapped. Used by App/DeckLink/DeckLinkService.swift only.
+      - package: ManifoldCore
+        product: DeckLinkRefusal
       # Log and diagnostics redaction (docs/PRIVACY_AUDIT.md, stage P1) — a leaf target so `swift test`
       # can run every rule against real log lines. Used by DiagnosticsExport, WHEPClient, SRTClient, NDI.
       - package: ManifoldCore

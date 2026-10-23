@@ -48,6 +48,8 @@ let package = Package(
         .library(name: "AudioOutputLayout", targets: ["AudioOutputLayout"]),
         // Linked by the APP target directly (project.yml), for the renderer's paused-picture rules.
         .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"]),
+        // Linked by the APP target directly (project.yml): what a refused DeckLink output start says (docs/BUGS.md).
+        .library(name: "DeckLinkRefusal", targets: ["DeckLinkRefusal"]),
         // Linked by the APP target directly (project.yml): log and diagnostics redaction (privacy P1).
         .library(name: "PrivacyRedaction", targets: ["PrivacyRedaction"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
@@ -442,6 +444,24 @@ let package = Package(
             name: "FrameQueuePolicyTests",
             dependencies: ["FrameQueuePolicy"],
             path: "Tests/FrameQueuePolicyTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // What a refused DeckLink output start says to the operator: the measured busy answer from EnableVideoOutput
+        // gets a message, every other refusal keeps its log line (docs/BUGS.md, the 2160p23.98 refusal). A leaf target,
+        // no dependencies, so `swift test` pins that only that code from that call is mapped; the bridge is app code.
+        .target(
+            name: "DeckLinkRefusal",
+            path: "Sources/DeckLinkRefusal",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "DeckLinkRefusalTests",
+            dependencies: ["DeckLinkRefusal"],
+            path: "Tests/DeckLinkRefusalTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

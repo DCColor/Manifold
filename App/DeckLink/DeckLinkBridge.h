@@ -55,6 +55,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// support fallback. nil on failure / paths that don't resolve a mode. Lets the UI status line show
 /// the REAL active mode instead of a hardcoded string.
 @property (nonatomic, copy, readonly, nullable) NSString *activeModeName;
+/// The DeckLink call whose failure stopped the start (e.g. "EnableVideoOutput"), and its HRESULT. nil and 0 on
+/// success, and on a failure that is not a call's answer (no device, no API information object). Lets the service
+/// tell "the card is in use by another app" from every other refusal (docs/BUGS.md).
+@property (nonatomic, copy, readonly, nullable) NSString *failedCall;
+@property (nonatomic, readonly) int32_t failureHResult;
 @end
 
 /// Colour S7: one frame's output signal — what the frame is tagged with (COLOR_MANAGEMENT_FINDINGS.md §6.11, S7).

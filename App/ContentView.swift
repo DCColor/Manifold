@@ -1335,6 +1335,7 @@ struct ContentView: View {
             VStack(spacing: 8) {
                 arbitrationNotice
                 connectErrorBanner
+                deckLinkRefusalBanner
             }
         }
         .animation(.easeInOut(duration: 0.25), value: whep.lastError)
@@ -2264,6 +2265,8 @@ struct ContentView: View {
                   // the green tv.fill icon is actively misleading, so it is said in the tooltip
                   // rather than only inside the menu.
                   ?? deckLink.rasterMismatch
+                  // A refused start (another app holds the card): output is off, and the button says why.
+                  ?? (deckLink.isOutputting ? nil : deckLink.startRefusal)
                   // SDI scaling (D8): a placed or scaled picture is said here too, so the green icon is never
                   // taken for a native 1:1 output.
                   ?? (deckLink.isOutputting ? deckLink.placementLine.map { "DeckLink output ON — \($0) — click to stop (⌃⌥⇧O)" } : nil)
@@ -2358,6 +2361,13 @@ struct ContentView: View {
                 if let reason = status.blockedReason, !deckLink.devices.isEmpty {
                     Section("Unavailable") {
                         Button(reason) {}.disabled(true)
+                    }
+                }
+                // The last start was refused with a message (another app holds the card). Output is off until the
+                // user starts it again; see DeckLinkService.startRefusal.
+                if let refusal = deckLink.startRefusal, !deckLink.isOutputting {
+                    Section("Not started") {
+                        Button("⚠️ \(refusal)") {}.disabled(true)
                     }
                 }
             } label: {
@@ -2730,6 +2740,39 @@ struct ContentView: View {
             .frame(maxWidth: 520, alignment: .leading)
             .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.22)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// A refused DeckLink output start that has a message (`DeckLinkService.startRefusal`: another app holds the card).
+    ///
+    /// ITS OWN BANNER, NOT A TERM ON `connectErrorBanner`: that one's single `??` slot holds only mutually exclusive
+    /// messages, and a window can fail a connect and have its output refused at once. No timer: output stays off until
+    /// the user starts it again, so the message stays until then or until it is closed. Shown only in a window that may
+    /// drive the card.
+    @ViewBuilder private var deckLinkRefusalBanner: some View {
+        if let message = deckLink.startRefusal, !deckLink.isOutputting, deck.gate.deviceControlsEnabled {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button {
+                    DeckLinkService.shared.clearStartRefusal()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.55)))
             .padding(.top, 16)
             .transition(.move(edge: .top).combined(with: .opacity))
         }

@@ -95,9 +95,19 @@
     BOOL _success;
     NSArray<NSString *> *_log;
     NSString *_activeModeName;
+    NSString *_failedCall;
+    int32_t _failureHResult;
 }
 - (instancetype)initWithSuccess:(BOOL)success log:(NSArray<NSString *> *)log {
     return [self initWithSuccess:success log:log activeModeName:nil];
+}
+// A failure that is a DeckLink call's answer: the call and its code travel with the log line.
+- (instancetype)initFailureWithLog:(NSArray<NSString *> *)log call:(NSString *)call hresult:(HRESULT)hr {
+    if ((self = [self initWithSuccess:NO log:log activeModeName:nil])) {
+        _failedCall = [call copy];
+        _failureHResult = (int32_t)hr;
+    }
+    return self;
 }
 - (instancetype)initWithSuccess:(BOOL)success
                             log:(NSArray<NSString *> *)log
@@ -112,6 +122,8 @@
 - (BOOL)success { return _success; }
 - (NSArray<NSString *> *)log { return _log; }
 - (NSString *)activeModeName { return _activeModeName; }
+- (NSString *)failedCall { return _failedCall; }
+- (int32_t)failureHResult { return _failureHResult; }
 @end
 
 #pragma mark - Audio config (D4b-2)
@@ -312,19 +324,24 @@ public:
         return r;
     }
 
-    bool enableOutput() {
-        return m_output->EnableVideoOutput(m_displayMode, bmdVideoOutputFlagDefault) == S_OK;
+    // A setup step's answer: which DeckLink call it was and its HRESULT, so every failure line names both (docs/BUGS.md:
+    // a refusal logged without its code cannot tell "the card is in use by another app" from anything else).
+    struct CallResult { const char *call; HRESULT hr; bool ok() const { return hr == S_OK; } };
+
+    CallResult enableOutput() {
+        return { "EnableVideoOutput", m_output->EnableVideoOutput(m_displayMode, bmdVideoOutputFlagDefault) };
     }
 
-    bool createPool(int poolSize) {
+    CallResult createPool(int poolSize) {
         for (int i = 0; i < poolSize; i++) {
             IDeckLinkMutableVideoFrame *f = NULL;
-            if (m_output->CreateVideoFrame(m_width, m_height, m_rowBytes, bmdFormat10BitYUV,
-                                           bmdFrameFlagDefault, &f) != S_OK || f == NULL)
-                return false;
+            const HRESULT hr = m_output->CreateVideoFrame(m_width, m_height, m_rowBytes, bmdFormat10BitYUV,
+                                                          bmdFrameFlagDefault, &f);
+            if (hr != S_OK) return { "CreateVideoFrame", hr };
+            if (f == NULL) return { "CreateVideoFrame", E_POINTER };   // S_OK with no frame: logged as E_POINTER
             m_pool.push_back(f);
         }
-        return true;
+        return { "CreateVideoFrame", S_OK };
     }
 
     // Register self as the completion callback + arm the running flag.
@@ -334,19 +351,20 @@ public:
     }
 
     // Pre-roll: fill + schedule one frame per pool slot (indices 0..pool-1).
-    bool preroll() {
+    CallResult preroll() {
         for (size_t i = 0; i < m_pool.size(); i++) {
             const int64_t idx = m_nextIndex.fetch_add(1);
-            if (!fillFrame(m_pool[i], idx)) return false;
+            const CallResult filled = fillFrame(m_pool[i], idx);
+            if (!filled.ok()) return filled;
             tagFrame(m_pool[i], idx);   // the signal this frame's picture was rendered under (colour S7, D1)
-            if (m_output->ScheduleVideoFrame(m_pool[i], idx * m_frameDuration, m_frameDuration, m_timeScale) != S_OK)
-                return false;
+            const HRESULT hr = m_output->ScheduleVideoFrame(m_pool[i], idx * m_frameDuration, m_frameDuration, m_timeScale);
+            if (hr != S_OK) return { "ScheduleVideoFrame", hr };
         }
-        return true;
+        return { "ScheduleVideoFrame", S_OK };
     }
 
-    bool startPlayback() {
-        return m_output->StartScheduledPlayback(0, m_timeScale, 1.0) == S_OK;
+    CallResult startPlayback() {
+        return { "StartScheduledPlayback", m_output->StartScheduledPlayback(0, m_timeScale, 1.0) };
     }
 
     // --- D4b-2 audio setup (ordering matters; see the start sequence in the bridge) ---
@@ -355,19 +373,19 @@ public:
     // TIMESTAMPED stream type (we position samples explicitly on the playback timeline via streamTime,
     // rather than letting the card append them blind). Channel count is the SDK-legal PADDED count.
     // Preallocates the two scratch buffers so the callback never allocates.
-    bool enableAudio(const AudioSource &src) {
+    CallResult enableAudio(const AudioSource &src) {
         m_audio = src;
-        if (m_output->EnableAudioOutput((BMDAudioSampleRate)m_audio.sampleRate,
-                                        bmdAudioSampleType32bitInteger,
-                                        m_audio.dlChannels,
-                                        bmdAudioOutputStreamTimestamped) != S_OK)
-            return false;
+        const HRESULT hr = m_output->EnableAudioOutput((BMDAudioSampleRate)m_audio.sampleRate,
+                                                       bmdAudioSampleType32bitInteger,
+                                                       m_audio.dlChannels,
+                                                       bmdAudioOutputStreamTimestamped);
+        if (hr != S_OK) return { "EnableAudioOutput", hr };
         const size_t maxFrames = (size_t)std::lround(m_audio.sampleRate * kAudioMaxCallbackSeconds);
         m_maxCallbackFrames = (int32_t)maxFrames;
         m_srcScratch.assign(maxFrames * m_audio.srcChannels, 0);   // ring layout (source channels)
         m_outScratch.assign(maxFrames * m_audio.dlChannels, 0);    // wire layout (padded channels)
         m_audioEnabled = true;
-        return true;
+        return { "EnableAudioOutput", S_OK };
     }
 
     // (b)+(c) Register the pull callback and open the preroll window. The card starts calling
@@ -787,13 +805,17 @@ private:
         fflush(stdout);
     }
 
-    bool fillFrame(IDeckLinkMutableVideoFrame *frame, int64_t frameIndex) {
+    CallResult fillFrame(IDeckLinkMutableVideoFrame *frame, int64_t frameIndex) {
         IDeckLinkVideoBuffer *buffer = NULL;
-        if (frame->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&buffer) != S_OK || buffer == NULL) return false;
-        if (buffer->StartAccess(bmdBufferAccessWrite) != S_OK) { buffer->Release(); return false; }
+        HRESULT hr = frame->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&buffer);
+        if (hr != S_OK || buffer == NULL) return { "QueryInterface(IDeckLinkVideoBuffer)", hr != S_OK ? hr : E_POINTER };
+        hr = buffer->StartAccess(bmdBufferAccessWrite);
+        if (hr != S_OK) { buffer->Release(); return { "StartAccess", hr }; }
         void *bytes = NULL;
-        if (buffer->GetBytes(&bytes) != S_OK || bytes == NULL) {
-            buffer->EndAccess(bmdBufferAccessWrite); buffer->Release(); return false;
+        hr = buffer->GetBytes(&bytes);
+        if (hr != S_OK || bytes == NULL) {
+            buffer->EndAccess(bmdBufferAccessWrite); buffer->Release();
+            return { "GetBytes", hr != S_OK ? hr : E_POINTER };
         }
         // Pluggable — no DeckLink knowledge. A picture brings its own signal; a neutral fill keeps the one in force
         // (S7 D5). Preroll (start thread) and completions (SDK thread) never overlap: completions begin only after
@@ -802,7 +824,7 @@ private:
         if (m_fill(frameIndex, (uint8_t *)bytes, m_rowBytes, m_width, m_height, &signal)) m_signal = signal;
         buffer->EndAccess(bmdBufferAccessWrite);
         buffer->Release();
-        return true;
+        return { "GetBytes", S_OK };
     }
 
     // Colour S7: tag the frame with the signal its picture was rendered under (`m_signal`, set by `fillFrame`). The
@@ -1067,13 +1089,16 @@ static const int kDeckLinkFloorMinor = 0;
 // output attempt: CreateDeckLinkAPIInformationInstance() is vended by the loaded Desktop Video
 // framework itself, so it answers at startup exactly as it answers at output time. Nothing here is
 // inferred or probed indirectly. Returns NO only when the framework isn't loaded (driver absent) or
-// the query itself fails — i.e. when we genuinely do not know the version.
-static BOOL DeckLinkReadInstalledVersion(int *outMajor, int *outMinor, int *outPoint) {
+// the query itself fails — i.e. when we genuinely do not know the version. `outHR`, when given, gets GetInt's answer,
+// or S_OK when there was no information object to ask.
+static BOOL DeckLinkReadInstalledVersion(int *outMajor, int *outMinor, int *outPoint, HRESULT *outHR = NULL) {
+    if (outHR) { *outHR = S_OK; }
     IDeckLinkAPIInformation *apiInfo = CreateDeckLinkAPIInformationInstance();
     if (apiInfo == NULL) { return NO; }
     int64_t apiVersion = 0;
     HRESULT hr = apiInfo->GetInt(BMDDeckLinkAPIVersion, &apiVersion);
     apiInfo->Release();
+    if (outHR) { *outHR = hr; }
     if (hr != S_OK) { return NO; }
     if (outMajor) { *outMajor = (int)((apiVersion & 0xFF000000) >> 24); }
     if (outMinor) { *outMinor = (int)((apiVersion & 0x00FF0000) >> 16); }
@@ -1209,10 +1234,11 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     // same answer BEFORE the button is clickable, so reaching an abort here means the driver changed
     // under a running app; it stays as the last line of defence.
     {
-        int major = 0, minor = 0, point = 0;
-        if (!DeckLinkReadInstalledVersion(&major, &minor, &point)) {
-            [log addObject:@"version: DeckLink API information unavailable (driver not reachable) — aborting"];
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        int major = 0, minor = 0, point = 0; HRESULT verHR = S_OK;
+        if (!DeckLinkReadInstalledVersion(&major, &minor, &point, &verHR)) {
+            [log addObject:[NSString stringWithFormat:@"version: DeckLink API information unavailable (driver not reachable; GetInt hr=0x%08X) — aborting",
+                            (unsigned)verHR]];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"GetInt(BMDDeckLinkAPIVersion)" hresult:verHR];
         }
         NSString *verStr = [NSString stringWithFormat:@"%d.%d.%d", major, minor, point];
         if (!DeckLinkVersionMeetsFloor(major, minor)) {
@@ -1254,8 +1280,8 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     NSString *name = NSStringTakeDeckLink(nameRef);
     target->Release();   // `output` holds its own reference; safe to drop the device now
     if (hr != S_OK || output == NULL) {
-        [log addObject:@"device: index 0 has no IDeckLinkOutput — aborting"];
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        [log addObject:[NSString stringWithFormat:@"device: index 0 has no IDeckLinkOutput (QueryInterface hr=0x%08X) — aborting", (unsigned)hr]];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"QueryInterface(IDeckLinkOutput)" hresult:hr];
     }
     [log addObject:[NSString stringWithFormat:@"device: index 0 = \"%@\", IDeckLinkOutput acquired", name]];
 
@@ -1270,9 +1296,10 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                                       &actualMode,
                                       &supported);
     if (hr != S_OK || !supported) {
-        [log addObject:@"mode: 2160p23.98 / 8-bit YUV NOT supported on device 0 — aborting"];
+        [log addObject:[NSString stringWithFormat:@"mode: 2160p23.98 / 8-bit YUV NOT supported on device 0 (DoesSupportVideoMode hr=0x%08X supported=%d) — aborting",
+                        (unsigned)hr, supported ? 1 : 0]];
         output->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"DoesSupportVideoMode" hresult:hr];
     }
     [log addObject:@"mode: 2160p23.98 / 8-bit YUV supported"];
 
@@ -1281,7 +1308,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     if (hr != S_OK) {
         [log addObject:[NSString stringWithFormat:@"enable: EnableVideoOutput failed (hr=0x%08X) — aborting", (unsigned)hr]];
         output->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"EnableVideoOutput" hresult:hr];
     }
     [log addObject:@"enable: video output enabled"];
 
@@ -1295,7 +1322,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         [log addObject:[NSString stringWithFormat:@"frame: CreateVideoFrame failed (hr=0x%08X) — aborting", (unsigned)hr]];
         output->DisableVideoOutput();
         output->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"CreateVideoFrame" hresult:hr];
     }
     [log addObject:[NSString stringWithFormat:@"frame: created %dx%d 2vuy, rowBytes=%d", width, height, rowBytes]];
 
@@ -1307,21 +1334,23 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         IDeckLinkVideoBuffer *buffer = NULL;
         hr = frame->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&buffer);
         if (hr != S_OK || buffer == NULL) {
-            [log addObject:@"fill: IDeckLinkVideoBuffer unavailable — aborting"];
+            [log addObject:[NSString stringWithFormat:@"fill: IDeckLinkVideoBuffer unavailable (QueryInterface hr=0x%08X) — aborting", (unsigned)hr]];
             frame->Release(); output->DisableVideoOutput(); output->Release();
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"QueryInterface(IDeckLinkVideoBuffer)" hresult:hr];
         }
-        if (buffer->StartAccess(bmdBufferAccessWrite) != S_OK) {
-            [log addObject:@"fill: StartAccess(write) failed — aborting"];
+        hr = buffer->StartAccess(bmdBufferAccessWrite);
+        if (hr != S_OK) {
+            [log addObject:[NSString stringWithFormat:@"fill: StartAccess(write) failed (hr=0x%08X) — aborting", (unsigned)hr]];
             buffer->Release(); frame->Release(); output->DisableVideoOutput(); output->Release();
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"StartAccess" hresult:hr];
         }
         void *bytes = NULL;
-        if (buffer->GetBytes(&bytes) != S_OK || bytes == NULL) {
-            [log addObject:@"fill: GetBytes failed — aborting"];
+        hr = buffer->GetBytes(&bytes);
+        if (hr != S_OK || bytes == NULL) {
+            [log addObject:[NSString stringWithFormat:@"fill: GetBytes failed (hr=0x%08X) — aborting", (unsigned)hr]];
             buffer->EndAccess(bmdBufferAccessWrite); buffer->Release();
             frame->Release(); output->DisableVideoOutput(); output->Release();
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"GetBytes" hresult:hr];
         }
         uint8_t *base = (uint8_t *)bytes;
         for (int y = 0; y < height; y++) {
@@ -1341,7 +1370,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     if (hr != S_OK) {
         [log addObject:[NSString stringWithFormat:@"display: DisplayVideoFrameSync failed (hr=0x%08X) — aborting", (unsigned)hr]];
         frame->Release(); output->DisableVideoOutput(); output->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"DisplayVideoFrameSync" hresult:hr];
     }
     [log addObject:@"display: DisplayVideoFrameSync OK — frame on output"];
 
@@ -1382,10 +1411,11 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 
     // Version floor — same shared check as D2.
     {
-        int major = 0, minor = 0, point = 0;
-        if (!DeckLinkReadInstalledVersion(&major, &minor, &point)) {
-            [log addObject:@"version: DeckLink API information unavailable — aborting"];
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        int major = 0, minor = 0, point = 0; HRESULT verHR = S_OK;
+        if (!DeckLinkReadInstalledVersion(&major, &minor, &point, &verHR)) {
+            [log addObject:[NSString stringWithFormat:@"version: DeckLink API information unavailable (GetInt hr=0x%08X) — aborting",
+                            (unsigned)verHR]];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"GetInt(BMDDeckLinkAPIVersion)" hresult:verHR];
         }
         NSString *verStr = [NSString stringWithFormat:@"%d.%d.%d", major, minor, point];
         if (!DeckLinkVersionMeetsFloor(major, minor)) {
@@ -1423,8 +1453,9 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     NSString *name = NSStringTakeDeckLink(nameRef);
     target->Release();
     if (hr != S_OK || output == NULL) {
-        [log addObject:[NSString stringWithFormat:@"device: index %ld has no IDeckLinkOutput — aborting", (long)deviceIndex]];
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        [log addObject:[NSString stringWithFormat:@"device: index %ld has no IDeckLinkOutput (QueryInterface hr=0x%08X) — aborting",
+                        (long)deviceIndex, (unsigned)hr]];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"QueryInterface(IDeckLinkOutput)" hresult:hr];
     }
     [log addObject:[NSString stringWithFormat:@"device: index %ld = \"%@\", IDeckLinkOutput acquired", (long)deviceIndex, name]];
 
@@ -1438,10 +1469,12 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         if (mode) { mode->Release(); mode = NULL; }
         [log addObject:@"mode: requested display mode unresolved — falling back to 2160p23.98"];
         wantMode = bmdMode4K2160p2398;
-        if (output->GetDisplayMode(wantMode, &mode) != S_OK || mode == NULL) {
-            [log addObject:@"mode: could not resolve fallback 2160p23.98 display mode — aborting"];
+        hr = output->GetDisplayMode(wantMode, &mode);
+        if (hr != S_OK || mode == NULL) {
+            [log addObject:[NSString stringWithFormat:
+                @"mode: could not resolve fallback 2160p23.98 display mode (GetDisplayMode hr=0x%08X) — aborting", (unsigned)hr]];
             output->Release();
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"GetDisplayMode" hresult:hr];
         }
     }
     const int32_t width  = (int32_t)mode->GetWidth();
@@ -1487,16 +1520,28 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                         modeName, (unsigned)support.hr, support.supported ? 1 : 0, FourCCString(support.actual)]];
     }
     if (!support.ok()) {
-        [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV NOT supported — aborting", modeName]];
+        [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV NOT supported (DoesSupportVideoMode hr=0x%08X supported=%d) — aborting",
+                        modeName, (unsigned)support.hr, support.supported ? 1 : 0]];
         player->stop(); player->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@"DoesSupportVideoMode" hresult:support.hr];
     }
     [log addObject:[NSString stringWithFormat:@"mode: %@ / v210 10-bit YUV supported", modeName]];
 
-    if (!player->enableOutput()) {
-        [log addObject:@"enable: EnableVideoOutput failed — aborting"];
+    DeckLinkScheduledPlayer::CallResult step = player->enableOutput();
+    NSString *forcedEnable = @"";
+#ifdef DEBUG
+    // Test hook (pre-ship removal, docs/BUGS.md): MANIFOLD_DECKLINK_ENABLE_HR=<hex> makes every EnableVideoOutput of the
+    // process read as failed with that code, so the busy and the generic refusal can be run with no other app holding
+    // the card. A real enable that succeeded is undone by the abort's player->stop(), as for any later failure.
+    if (const char *forceHR = getenv("MANIFOLD_DECKLINK_ENABLE_HR")) {
+        step.hr = (HRESULT)(uint32_t)strtoul(forceHR, NULL, 16);
+        forcedEnable = @" (forced by MANIFOLD_DECKLINK_ENABLE_HR)";
+    }
+#endif
+    if (!step.ok()) {
+        [log addObject:[NSString stringWithFormat:@"enable: %s failed (hr=0x%08X)%@ — aborting", step.call, (unsigned)step.hr, forcedEnable]];
         player->stop(); player->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@(step.call) hresult:step.hr];
     }
     [log addObject:@"enable: video output enabled"];
 
@@ -1515,12 +1560,13 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         src.sourceTime = [timeBlock]() -> double { return timeBlock(); };
         src.isSilent   = [silentBlock]() -> bool { return silentBlock() ? true : false; };
         src.read       = [readBlock](double t, int32_t n, int32_t *dst) -> int32_t { return readBlock(t, n, dst); };
-        if (!player->enableAudio(src)) {
+        step = player->enableAudio(src);
+        if (!step.ok()) {
             [log addObject:[NSString stringWithFormat:
-                @"audio: EnableAudioOutput(%u Hz, 32-bit int, %u ch, timestamped) failed — aborting",
-                src.sampleRate, src.dlChannels]];
+                @"audio: EnableAudioOutput(%u Hz, 32-bit int, %u ch, timestamped) failed (hr=0x%08X) — aborting",
+                src.sampleRate, src.dlChannels, (unsigned)step.hr]];
             player->stop(); player->Release();
-            return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+            return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@(step.call) hresult:step.hr];
         }
         [log addObject:[NSString stringWithFormat:
             @"audio: enabled — %u Hz · 32-bit int · %u ch on the wire (source %u ch, %u padded silent) · "
@@ -1532,10 +1578,11 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     }
 
     const int poolSize = 4;
-    if (!player->createPool(poolSize)) {
-        [log addObject:@"pool: CreateVideoFrame failed — aborting"];
+    step = player->createPool(poolSize);
+    if (!step.ok()) {
+        [log addObject:[NSString stringWithFormat:@"pool: %s failed (hr=0x%08X) — aborting", step.call, (unsigned)step.hr]];
         player->stop(); player->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@(step.call) hresult:step.hr];
     }
     [log addObject:[NSString stringWithFormat:@"pool: %d reusable frames created", poolSize]];
 
@@ -1550,10 +1597,11 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         [log addObject:@"audio: SetAudioCallback installed + BeginAudioPreroll (prefilling during video preroll)"];
     }
 
-    if (!player->preroll()) {
-        [log addObject:@"preroll: ScheduleVideoFrame failed — aborting"];
+    step = player->preroll();
+    if (!step.ok()) {
+        [log addObject:[NSString stringWithFormat:@"preroll: %s failed (hr=0x%08X) — aborting", step.call, (unsigned)step.hr]];
         player->stop(); player->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@(step.call) hresult:step.hr];
     }
     [log addObject:[NSString stringWithFormat:@"preroll: %d frames scheduled (indices 0..%d)", poolSize, poolSize - 1]];
 
@@ -1564,10 +1612,11 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         [log addObject:@"audio: EndAudioPreroll — audio stream armed"];
     }
 
-    if (!player->startPlayback()) {
-        [log addObject:@"start: StartScheduledPlayback failed — aborting"];
+    step = player->startPlayback();
+    if (!step.ok()) {
+        [log addObject:[NSString stringWithFormat:@"start: %s failed (hr=0x%08X) — aborting", step.call, (unsigned)step.hr]];
         player->stop(); player->Release();
-        return [[DeckLinkOutputResult alloc] initWithSuccess:NO log:log];
+        return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@(step.call) hresult:step.hr];
     }
     [log addObject:[NSString stringWithFormat:@"start: StartScheduledPlayback(0, %lld, 1.0) OK — free-running at %@%@",
                     (long long)timeScale, modeName, player->audioEnabled() ? @" (video + SDI audio)" : @" (video only)"]];

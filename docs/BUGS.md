@@ -1157,11 +1157,16 @@ to send Export Diagnostics for a sync problem.
     after each change of the renderer's placement, with the placement in the JSON and the `[SDI-DUMP]` line, so
     every rendition of a live session is read back as the card got it. `FrameDump.onPlacement` and
     `MetalVideoRenderer.deckLinkPlacementForDebug`, both `#if DEBUG`.
-- **Gating:** all ten `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+  - **`MANIFOLD_DECKLINK_ENABLE_HR=<hex>`** (launch environment, added 2026-10-23, the busy-card message): every
+    `EnableVideoOutput` of the process reads as failed with that code (`80000009` the busy answer, `80000008` E_FAIL),
+    with ` (forced by MANIFOLD_DECKLINK_ENABLE_HR)` on the log line, so the busy message and the generic refusal can be
+    run with no other app holding the card (*output start at 2160p23.98 failed*, below). `#ifdef DEBUG` in
+    `App/DeckLink/DeckLinkBridge.mm`.
+- **Gating:** all eleven `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all ten before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all eleven before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -1506,7 +1511,7 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   2160p23.98 `EnableVideoOutput failed` that evening was DaVinci Resolve holding the output (entry below). Whether
   Resolve or another DeckLink app was running at the L4 refusal was not recorded. This entry stays open on its cause.
 
-## ✅ EXPLAINED 2026-10-22 — NOT A MANIFOLD DEFECT — DeckLink: output start at 2160p23.98 failed with `EnableVideoOutput failed`
+## ✅ CLOSED 2026-10-23 (commit: TO FILL) — EXPLAINED 2026-10-22, NOT A MANIFOLD DEFECT — DeckLink: output start at 2160p23.98 failed with `EnableVideoOutput failed`
 
 - **What happened (23:31:16, 2026-10-22, unattended run on `hdr10-9-16-9-p3mastering-resolve-prores.mov`):** the start
   passed the mode check (`mode: 2160p23.98 / v210 10-bit YUV supported`), then logged
@@ -1519,6 +1524,36 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 - **A gap, not changed:** this path does not log the HRESULT. `enableOutput()` returns only `== S_OK`
   (`App/DeckLink/DeckLinkBridge.mm:315-317`), and the failure line has no code (`:1475-1476`). So the log cannot tell
   "device in use" from another refusal.
+- **Closed 2026-10-23 — the gap, and a message for the busy case:**
+  - **Every failure path in the bridge logs its call and HRESULT:** the version read (`GetInt`), `QueryInterface`,
+    `GetDisplayMode`, `DoesSupportVideoMode`, `EnableVideoOutput`, `EnableAudioOutput`, `CreateVideoFrame`, the
+    preroll's fill calls and `ScheduleVideoFrame`, `StartScheduledPlayback`, and the D2 test-frame path's calls. The
+    player's setup steps return a `CallResult` (call name, HRESULT) instead of a bool. `DeckLinkOutputResult` carries
+    `failedCall` and `failureHResult`. The two aborts with no call behind them (no iterator, no device at the index)
+    are unchanged.
+  - **Measured, attended (Robbie, 2026-10-23):** with DaVinci Resolve's video output holding the DeckLink 8K Pro,
+    Manifold's start passed the mode check, then logged `enable: EnableVideoOutput failed (hr=0x80000009) — aborting`.
+    `0x80000009` is `E_ACCESSDENIED` on macOS (`CFPlugInCOM.h`), the SDK manual's "Unable to access the hardware"
+    (§2.5.3.6). It was the code predicted from the manual (`build/decklink-busy/run-busy/`).
+  - **Only that code from that call is mapped** (`DeckLinkRefusal`, a leaf target in ManifoldCore, with tests). It
+    reads "DeckLink output is in use by another application (for example DaVinci Resolve). Start output again when it
+    is free." It appears in the log (`DeckLink: output not started — …`), the output button's tooltip, a "Not started"
+    row in the DeckLink menu, and an orange banner at the top of the window (`DeckLinkService.startRefusal`). The next
+    start, or the banner's close button, clears it. Every other refusal keeps its wording, with the code added, and has
+    no banner. The same code from another call is not mapped: it has not been measured there.
+  - **No retry.** Output stays off. A failed start now also clears `activeStart`, so an audio-format change cannot
+    replay it.
+  - **Results** (`build/decklink-busy/`; tree Profile build, and HEAD `6be1fa8` built from a copy of the tree with the
+    changed files reset; chart `patches-1-1-1-prores.mov`, paused):
+
+    | # | Prediction | Result | Verdict |
+    |---|---|---|---|
+    | P1 | Busy (Resolve holding): message in banner, tooltip, menu and log; no automatic retry | `hr=0x80000009`; the message in the log, the tooltip and the "Not started" row (read by Accessibility), and in the banner (Robbie, by eye: Accessibility does not expose the overlay's text); 1 `output start` line and no `SUCCESS` in 60 s | **PASS** |
+    | P1s | The same, with `MANIFOLD_DECKLINK_ENABLE_HR=80000009` | As P1, with `(forced by …)`. Robbie saw the banner | **PASS** |
+    | P2 | Another refusal (`…ENABLE_HR=80000008`, E_FAIL): wording as before plus the code | `enable: EnableVideoOutput failed (hr=0x80000008) (forced …) — aborting`, `FAILED`; tooltip `DeckLink output — click to start (⌃⌥O)` as on HEAD; no "Not started" row, no `output not started` line | **PASS** |
+    | P3 | A normal start unchanged; v210 byte-identical to HEAD | 1080p25 and 2160p23.98: `SUCCESS`, the `[SDI-DUMP]` frames `cmp`-identical to HEAD's (FNV-1a `4b74837be25c2215`, `5a425ffd2f045ec9`), the D-real lines identical, `late=0 dropped=0` | **PASS** |
+    | P4 | `MANIFOLD_DECKLINK_REFUSE_MODE_ONCE=1` still runs the retry | `refused — hr=0x00000000 supported=0 …; retrying once in 100 ms`, `retry — … supported=1`, `SUCCESS` | **PASS** |
+    | P5 | `swift test` and the Profile build | 525 / 525 (4 new). No warnings in the changed files | **PASS** |
 
 ## ☐ UNCONFIRMED — DeckLink output started with no click on its button (17:49:01, 2026-10-22)
 

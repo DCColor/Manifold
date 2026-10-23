@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import ManifoldCore
 import ColorimetryModel   // OutputSignal — what each frame is tagged with (colour S7)
+import DeckLinkRefusal     // what a refused start says: the busy card gets a message, the rest stay in the log
 
 /// App-side service for Blackmagic DeckLink OUTPUT. Hardware I/O lives in the App layer, decoupled
 /// from ManifoldCore's engine logic. Owns the output on/off state + selected device as observable
@@ -389,6 +390,19 @@ final class DeckLinkService: ObservableObject {
         dispatchPrecondition(condition: .onQueue(.main))
         guard sourceAdvisory != message else { return }
         sourceAdvisory = message
+    }
+
+    /// Why the last output start was refused, as one operator-facing sentence, or nil. Set only for a refusal that has a
+    /// message (`DeckLinkRefusal`: today, another application holding the card); every other refusal is in the log only,
+    /// with its call and HRESULT. Cleared by the next start and by the banner's close button. MAIN THREAD.
+    ///
+    /// ⚠️ OUTPUT STAYS OFF. A refused start is never retried: the other app frees the card only when the operator acts
+    /// there, and the message tells them to start output again then (docs/BUGS.md, the 2160p23.98 refusal).
+    @Published private(set) var startRefusal: String?
+
+    func clearStartRefusal() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        startRefusal = nil
     }
 
     // MARK: - D4b-2: SDI audio
@@ -803,6 +817,7 @@ final class DeckLinkService: ObservableObject {
             return
         }
         isOutputting = true
+        startRefusal = nil    // a new attempt; a refusal is said again if it recurs
         applyAudioRouting()   // D4b-3: ENABLE transition — with .sdi (the default), the Mac goes silent
         let deviceIndex = selectedDeviceIndex
         let mode = currentMode   // D4a: display mode derived from the current source (or default)
@@ -892,8 +907,13 @@ final class DeckLinkService: ObservableObject {
             }
         } else {
             self.renderer?.stopDeckLinkOutput()
+            // Nothing replays a refused start: an audio-format change re-establishes only a live output.
+            self.activeStart = nil
+            let refusal = DeckLinkRefusal.message(call: result.failedCall, hresult: result.failureHResult)
+            if let refusal { print("DeckLink: output not started — \(refusal)") }
             DispatchQueue.main.async {
                 self.isOutputting = false      // keep the button honest
+                self.startRefusal = refusal
                 self.applyAudioRouting()       // D4b-3: a FAILED start must not leave the Mac muted
             }
         }
