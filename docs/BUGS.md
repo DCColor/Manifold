@@ -1511,7 +1511,7 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   2160p23.98 `EnableVideoOutput failed` that evening was DaVinci Resolve holding the output (entry below). Whether
   Resolve or another DeckLink app was running at the L4 refusal was not recorded. This entry stays open on its cause.
 
-## ✅ CLOSED 2026-10-23 (commit: TO FILL) — EXPLAINED 2026-10-22, NOT A MANIFOLD DEFECT — DeckLink: output start at 2160p23.98 failed with `EnableVideoOutput failed`
+## ✅ CLOSED 2026-10-23 (`6b885d4`) — EXPLAINED 2026-10-22, NOT A MANIFOLD DEFECT — DeckLink: output start at 2160p23.98 failed with `EnableVideoOutput failed`
 
 - **What happened (23:31:16, 2026-10-22, unattended run on `hdr10-9-16-9-p3mastering-resolve-prores.mov`):** the start
   passed the mode check (`mode: 2160p23.98 / v210 10-bit YUV supported`), then logged
