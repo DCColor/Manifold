@@ -212,7 +212,7 @@ held back until after release, and the numbered defect entries follow.
        metadata), from the file's HDR10 metadata or the stream's `[HDR10-SEI]`, with stated defaults when a PQ source
        carries none. Scope: *SDI and HDMI never signal PQ or HLG*, below. **Decided 2026-10-22 (D1–D7, §6.11 *S7*);
        S7-0 to S7-4 built and run unattended 2026-10-22, committed (`aec418e`); follow-ups 1–3 built and run
-       unattended the same day, not committed. S7-5 (the reference monitor over SDI and HDMI) is attended and still
+       unattended the same day, committed (`982a73e`). S7-5 (the reference monitor over SDI and HDMI) is attended and still
        to do.**
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
@@ -1484,6 +1484,23 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 - **One thing the hook run shows about the API:** a refusal can come back with `hr=S_OK` and `supported=0`, not only as
   an error code. The next real refusal will say which it was. If it is `S_OK` with `supported=0` straight after a stop,
   the teardown race above is the likely cause, and the retry covers it.
+- **Another candidate, added 2026-10-22 (not shown for this refusal):** another app holding the DeckLink output. The
+  2160p23.98 `EnableVideoOutput failed` that evening was DaVinci Resolve holding the output (entry below). Whether
+  Resolve or another DeckLink app was running at the L4 refusal was not recorded. This entry stays open on its cause.
+
+## ✅ EXPLAINED 2026-10-22 — NOT A MANIFOLD DEFECT — DeckLink: output start at 2160p23.98 failed with `EnableVideoOutput failed`
+
+- **What happened (23:31:16, 2026-10-22, unattended run on `hdr10-9-16-9-p3mastering-resolve-prores.mov`):** the start
+  passed the mode check (`mode: 2160p23.98 / v210 10-bit YUV supported`), then logged
+  `enable: EnableVideoOutput failed — aborting`, `FAILED` and `[ARBITER] exclusive device released`
+  (`build/colour-s7/resolve/run/app.log:110-113`).
+- **Cause (Robbie, 2026-10-22):** DaVinci Resolve was running and holding the DeckLink output.
+- **Since then:** before any run that starts output, check that Resolve is not running. If it is, stop and ask Robbie
+  to quit it; never quit it from a session. With Resolve not running, the same mode started first time on the
+  ProRes 4444 HDR10 fixtures (`SUCCESS … @ 2160p23.98`, `build/colour-s7/r4444/`).
+- **A gap, not changed:** this path does not log the HRESULT. `enableOutput()` returns only `== S_OK`
+  (`App/DeckLink/DeckLinkBridge.mm:315-317`), and the failure line has no code (`:1475-1476`). So the log cannot tell
+  "device in use" from another refusal.
 
 ## ☐ UNCONFIRMED — DeckLink output started with no click on its button (17:49:01, 2026-10-22)
 
@@ -3145,7 +3162,7 @@ SRT through `LiveDisplayRoute.updateHDR10` (passed with every colour call the ro
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 FOLLOW-UP 1 — PRE-EXISTING, ALL BUILDS — P3 sources went out signalled Rec.2020 but encoded with their own 709 matrix
+## ✅ FIXED 2026-10-22 (`982a73e`) — COLOUR S7 FOLLOW-UP 1 — PRE-EXISTING, ALL BUILDS — P3 sources went out signalled Rec.2020 but encoded with their own 709 matrix
 
 **Decided (Robbie, 2026-10-22):** a P3-tagged source converted to Rec.2020 primaries for SDI is also encoded with the
 BT.2020 NCL matrix, because the signal says Rec.2020 and receivers decode with that matrix. That covers every
@@ -3181,7 +3198,7 @@ one frame. Not fixed.
 
 ---
 
-## ✅ FIXED 2026-10-22 (commit: to be filled in) — COLOUR S7 FOLLOW-UP 2 — found in colour S7 — an HDR10 file's first frames could carry the defaults until inspection
+## ✅ FIXED 2026-10-22 (`982a73e`) — COLOUR S7 FOLLOW-UP 2 — found in colour S7 — an HDR10 file's first frames could carry the defaults until inspection
 
 **Decided (Robbie, 2026-10-22):** HDR10 files must not start with the default metadata.
 

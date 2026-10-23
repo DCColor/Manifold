@@ -189,7 +189,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | File playback feeds the SDI audio tap 250 ms ahead with a 4 s ring: no dropouts every few seconds | `109cfc3` | Yes. **Unsure on status**: the attended SDI check on the Resolve workstation is still pending (BUGS.md L1652) |
 | Follow source uses SRT's declared, then measured, frame rate | `ce3d828` `a8b70fa` | Yes |
 | HDR signalling (colour S7): per-frame colorspace + EOTF, PQ static metadata (HDMI), HDR10 from file MDCV/CLLI and SRT SEI, defaults stated; P3 → 2020 on SDI only; stream and audio re-establish tag defects fixed | `aec418e` |
-| S7 follow-ups: P3 converted for SDI is also encoded with the BT.2020 matrix; an HDR10 file's metadata is read at load, so SDI frame #0 carries it | not committed | Yes. **Unsure on status**: S7-5, the reference monitor over SDI and HDMI, is still to do |
+| S7 follow-ups: P3 converted for SDI is also encoded with the BT.2020 matrix; an HDR10 file's metadata is read at load, so SDI frame #0 carries it | `982a73e` | Yes. **Unsure on status**: S7-5, the reference monitor over SDI and HDMI, is still to do |
 | Output started while paused sends the current frame: one render primed before the preroll (paused only; playing starts unchanged), with a first-scheduled-frame log. A refused output mode is logged with the API's answer and retried once | not committed | Yes |
 
 #### Color, display and scopes
