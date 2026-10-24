@@ -4381,19 +4381,83 @@ final class MetalVideoRenderer {
     /// Desktop, tagged with the layer's source-derived colorspace so a
     /// non-color-managed app (e.g. Resolve) reads the raw code values. Manual only.
     ///
-    /// `diagnosticSet` (DEBUG only; File ▸ Export Frame (Diagnostic Set)): also write the v210 dump, the raw readback
-    /// and its JSON beside the PNG, as every export did until 2026-10-24. Export Frame itself writes the PNG alone
-    /// (docs/SHORTCUTS_AUDIT.md §8 item 1); the PNG is the same bytes either way.
+    /// `diagnosticSet` (Help ▸ Export Frame for Support…, `exportFrameForSupport`): also write the v210 dump, the raw
+    /// readback and its JSON beside the PNG, as every export did until 2026-10-24. Export Frame itself writes the PNG
+    /// alone (docs/SHORTCUTS_AUDIT.md §8 item 1); the PNG is the same bytes either way.
     func exportCurrentFrame(diagnosticSet: Bool = false) {
-        // ONE SLOT, READ ONCE: the PNG and (DEBUG) the v210 dump below are the same frame.
+        guard let export = captureFrameExport(diagnosticSet: diagnosticSet) else { return }
+        // Write into the user-chosen folder (security-scoped, resolved from a bookmark),
+        // or ~/Desktop by default / on stale bookmark. Image encoding/colorspace above
+        // is unchanged — only the destination differs.
+        Preferences.shared.withExportDirectory { dir in
+            writeFrameExport(export, to: dir.appendingPathComponent(export.filename))
+        }
+    }
+
+    /// Help ▸ Export Frame for Support… (Robbie, 2026-10-24): the diagnostic set — `.png`, `.v210` (exactly what goes
+    /// to SDI), `.rgba16f` (the renderer's output) and `.v210.json` (what a reader needs) — through a save panel. A
+    /// public support feature, not a debug action: no `#if DEBUG`, no `ShortcutDebugGate`. The bytes are
+    /// `exportCurrentFrame(diagnosticSet: true)`'s; only the name and the folder are the user's.
+    ///
+    /// The frame is captured at the click, before the panel opens, so a playing source exports the frame that was on
+    /// screen when it was asked for. The suggested name carries the date and time, never the source's name: the files
+    /// may be sent to support, and the name is the one part a user may not look at. The panel says what the files hold.
+    ///
+    /// ⚠️ NEVER ADDED TO THE DIAGNOSTICS EXPORT. These files carry the picture; Export Diagnostics carries text about
+    /// the session and nothing else. A user sends them deliberately or not at all.
+    func exportFrameForSupport(window: NSWindow?) {
+        guard let export = captureFrameExport(diagnosticSet: true) else { return }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd-HHmmss"
+        let name = "Manifold-frame-\(f.string(from: Date()))" + (export.parTag.map { "_\($0)" } ?? "") + ".png"
+
+        #if DEBUG
+        // MANIFOLD_FRAME_EXPORT_DIR (pre-ship removal, docs/BUGS.md): an unattended run writes the set into this folder
+        // under the suggested name instead of offering the save panel, whose contents are drawn out of process and
+        // cannot be driven by Accessibility (MANIFOLD_DIAG_EXPORT_PATH's reason). Unset, nothing changes.
+        if let dir = ProcessInfo.processInfo.environment["MANIFOLD_FRAME_EXPORT_DIR"], !dir.isEmpty {
+            writeFrameExport(export, to: URL(fileURLWithPath: dir).appendingPathComponent(name))
+            return
+        }
+        #endif
+
+        let panel = NSSavePanel()
+        panel.title = "Export Frame for Support"
+        panel.message = "Includes the current frame's picture. Share only with people allowed to see this footage."
+        panel.nameFieldStringValue = name
+        panel.allowedContentTypes = [.png]
+        panel.isExtensionHidden = false
+        Preferences.shared.withExportDirectory { panel.directoryURL = $0 }
+        let done: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.writeFrameExport(export, to: url)
+        }
+        if let window { panel.beginSheetModal(for: window, completionHandler: done) } else { panel.begin(completionHandler: done) }
+    }
+
+    /// One frame, read back once, ready to write: the PNG's image and properties and, for the diagnostic set, the v210
+    /// dump and the raw readback it came from.
+    struct FrameExport {
+        let image: CGImage
+        let properties: [CFString: Any]?
+        let colorSpace: CGColorSpace
+        let width: Int, height: Int
+        let pixelAspect: DeclaredPixelAspect
+        let parTag: String?
+        let filename: String
+        let readback: [UInt8], readbackBytesPerRow: Int
+        let v210Dump: V210Dump?
+    }
+
+    private func captureFrameExport(diagnosticSet: Bool) -> FrameExport? {
+        // ONE SLOT, READ ONCE: the PNG and the v210 dump below are the same frame.
         guard let readable = readableOffscreen(), let frame = readback(readable.texture) else {
-            print("[EXPORT] no rendered frame yet"); return
+            print("[EXPORT] no rendered frame yet"); return nil
         }
         let (bytes, width, height, bytesPerRow) = frame
-        #if DEBUG
         let v210Dump = diagnosticSet
             ? makeV210Dump(of: readable.texture, chroma: readable.chroma, output: readable.output) : nil
-        #endif
 
         // CRITICAL: tag with the SOURCE-derived colorspace (CoreMedia709), NOT deviceRGB/sRGB —
         // so the consumer reads the raw code values under the file's real colorspace.
@@ -4430,7 +4494,7 @@ final class MetalVideoRenderer {
                                     bitmapInfo: bitmapInfo, provider: provider,
                                     decode: nil, shouldInterpolate: false,
                                     intent: .defaultIntent) else {
-            print("[EXPORT] CGImage creation failed"); return
+            print("[EXPORT] CGImage creation failed"); return nil
         }
 
         // ── THE PIXEL ASPECT TRAVELS WITH THE FILE; THE PIXELS STAY NATIVE ───────────────────
@@ -4497,39 +4561,38 @@ final class MetalVideoRenderer {
 
         let ts = Int(Date().timeIntervalSince1970)
         let filename = "Manifold_frame_\(ts)" + (parTag.map { "_\($0)" } ?? "") + ".png"
+        return FrameExport(image: cgImage, properties: properties, colorSpace: cs, width: width, height: height,
+                           pixelAspect: pixelAspect, parTag: parTag, filename: filename,
+                           readback: bytes, readbackBytesPerRow: bytesPerRow, v210Dump: v210Dump)
+    }
 
-        // Write into the user-chosen folder (security-scoped, resolved from a bookmark),
-        // or ~/Desktop by default / on stale bookmark. Image encoding/colorspace above
-        // is unchanged — only the destination differs.
-        Preferences.shared.withExportDirectory { dir in
-            let url = dir.appendingPathComponent(filename)
-            guard let dest = CGImageDestinationCreateWithURL(
-                url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-                print("[EXPORT] destination create failed"); return
+    /// The PNG at `url`, and the diagnostic set's files beside it when the export carries a v210 dump.
+    private func writeFrameExport(_ export: FrameExport, to url: URL) {
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            print("[EXPORT] destination create failed"); return
+        }
+        CGImageDestinationAddImage(dest, export.image, export.properties as CFDictionary?)
+        if CGImageDestinationFinalize(dest) {
+            let cs = export.colorSpace
+            let csName = cs.name.map { "\($0)" } ?? "\(cs)"
+            print("[EXPORT] wrote \(url.path)")
+            print("[EXPORT] texture format=\(Self.renderPixelFormat) colorspace=\(csName)")
+            // SAY WHAT WENT INTO THE FILE, including the absence. "pHYs omitted" is a
+            // reportable outcome, not a silent default — see the three-state note above.
+            print("[EXPORT] \(export.width)x\(export.height) native pixels (not desqueezed)"
+                + " | pixel aspect \(export.pixelAspect.displayString)"
+                + " | pHYs \(export.properties == nil ? "omitted (nothing declared)" : "written")")
+            if export.v210Dump != nil {
+                Self.writeV210Dump(export.v210Dump, readback: export.readback,
+                                   readbackBytesPerRow: export.readbackBytesPerRow, besidePNG: url)
             }
-            CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary?)
-            if CGImageDestinationFinalize(dest) {
-                let csName = cs.name.map { "\($0)" } ?? "\(cs)"
-                print("[EXPORT] wrote \(url.path)")
-                print("[EXPORT] texture format=\(Self.renderPixelFormat) colorspace=\(csName)")
-                // SAY WHAT WENT INTO THE FILE, including the absence. "pHYs omitted" is a
-                // reportable outcome, not a silent default — see the three-state note above.
-                print("[EXPORT] \(width)x\(height) native pixels (not desqueezed)"
-                    + " | pixel aspect \(pixelAspect.displayString)"
-                    + " | pHYs \(properties == nil ? "omitted (nothing declared)" : "written")")
-                #if DEBUG
-                if diagnosticSet {
-                    Self.writeV210Dump(v210Dump, readback: bytes, readbackBytesPerRow: bytesPerRow, besidePNG: url)
-                }
-                #endif
-            } else {
-                print("[EXPORT] PNG finalize failed")
-            }
+        } else {
+            print("[EXPORT] PNG finalize failed")
         }
     }
 
-    #if DEBUG
-    // MARK: - DEBUG v210 dump (Stage 3b S1; pre-ship removal, docs/BUGS.md)
+    // MARK: - The v210 dump (Stage 3b S1; shipped with Help ▸ Export Frame for Support… since 2026-10-24)
 
     /// What the DeckLink output would carry for one offscreen slot: the SAME `rgbToV210` pipeline and
     /// uniforms `pushDeckLinkConvert` uses, at the slot's own raster (no output mode needed, so it
@@ -4593,7 +4656,6 @@ final class MetalVideoRenderer {
             print("[V210-DUMP] write failed: \(error)")
         }
     }
-    #endif
 
     /// Read the YCbCr matrix from the pixel buffer's attachment and return the
     /// RGB conversion coefficients. Defaults to Rec.709 if absent/unknown.

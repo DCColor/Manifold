@@ -248,6 +248,9 @@ struct ManifoldApp: App {
             CommandGroup(after: .help) {
                 Button("Keyboard Shortcuts…") { openWindow(id: KeyboardShortcutsScene.windowID) }
                 Button("Download Sync Clips…") { SyncClipLibrary.openDownload() }
+                // The frame's diagnostic set, for support (Robbie, 2026-10-24). Not gated: it ships, and the release
+                // gate's debug switch must not hide it. Never part of Export Diagnostics (`exportFrameForSupport`).
+                ShortcutMenuItem(id: .exportFrameForSupport, registry: shortcuts)
             }
             // ⌘O, in the File menu directly under New Window (`.newItem` is that group), where a
             // Mac user looks for it. The app had no Open item at all: opening a file meant finding
@@ -270,12 +273,8 @@ struct ManifoldApp: App {
                 // ⌥⌘E, formerly the hidden ⌃⌥E (docs/SHORTCUTS_AUDIT.md §4.2). The control bar's button is the same
                 // action. The image only, since 2026-10-24 (§8 item 1).
                 ShortcutMenuItem(id: .exportFrame, registry: shortcuts)
-                // The measurement set Export Frame used to write (.rgba16f, .v210, .v210.json beside the PNG), for the
-                // scripts that compare exports. A debug action: shown only while `ShortcutDebugGate` is on, which in
-                // Profile is every build (the release-gate item in docs/BUGS.md).
-                if ShortcutDebugGate.isEnabled(.profile) {
-                    ShortcutMenuItem(id: .debugExportFrameDiagnostic, registry: shortcuts)
-                }
+                // The measurement set (.rgba16f, .v210, .v210.json beside the PNG) is Help ▸ Export Frame for Support…
+                // since 2026-10-24, a public item; it was a debug item here that morning.
                 Divider()
                 // Device claims (§8: ⌥⌘⌫ and ⇧⌘D since 2026-10-24). One Disconnect replaces three retire keys (audit
                 // C1); one item starts or stops the DeckLink output. A window that does not own the devices beeps.

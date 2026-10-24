@@ -773,12 +773,14 @@ window. Judge anything by eye on the LG. Keys are written in `code` here so that
       rather than changing the volume.
 - [ ] View ▸ Show All Tabs: compare its glyph with Finder's View ▸ Show All Tabs (`⇧⌘\`). If the two look the same,
       item 2 was the backslash glyph, as measured.
-- [ ] File has Export Frame and Export Frame (Diagnostic Set), and no Connect to First NDI Source.
+- [ ] File has Export Frame, and no Connect to First NDI Source. (Export Frame (Diagnostic Set) moved to Help ▸
+      Export Frame for Support… after this checklist was written, 2026-10-24.)
 - [ ] Manifold ▸ Keyboard Shortcuts… (below Settings…) opens the window; Help ▸ Keyboard Shortcuts… still does.
 
 **Export.**
 - [ ] `⌥⌘E` (or the control-bar button): one `.png` on the Desktop, nothing else.
-- [ ] File ▸ Export Frame (Diagnostic Set): `.png`, `.rgba16f`, `.v210`, `.v210.json`.
+- [ ] Help ▸ Export Frame for Support… (was File ▸ Export Frame (Diagnostic Set)): a save panel with a dated name
+      and the note about the picture; Save writes `.png`, `.rgba16f`, `.v210`, `.v210.json`.
 
 **Wording.**
 - [ ] Color ▸ Next Tag Override and Reset Tags to Source work on a file and on a stream.

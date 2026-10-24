@@ -70,10 +70,11 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case mute = "audio.mute"
     case volumeUp = "audio.volumeUp"
     case volumeDown = "audio.volumeDown"
+    // Help
+    case exportFrameForSupport = "help.exportFrameForSupport"
     // Debug — the Profile tier
     case debugToneTest = "debug.ndiToneTest"
     case debugScrubBench = "debug.chromaScrubBench"
-    case debugExportFrameDiagnostic = "debug.exportFrameDiagnosticSet"
     case debugNDIConnect = "debug.ndiConnectFirst"
     case debugWebRTCSmoke = "debug.webrtcSmoke"
     case debugWHEPConnect = "debug.whepConnect"
@@ -100,6 +101,7 @@ public enum ShortcutCategory: String, CaseIterable, Sendable {
     case audio = "Audio"
     case file = "File"
     case sources = "Sources and Output"
+    case help = "Help"
     case debug = "Debug"
 }
 
@@ -302,12 +304,14 @@ public enum ShortcutCatalog {
         .init(.volumeDown, "Volume Down", .audio, .window, .menu, .code(KeyCode.down, cmd), repeats: true),
         .init(.mute, "Mute / Unmute", .audio, .window, .menu, .code(KeyCode.down, optCmd)),
 
+        // ── Help ────────────────────────────────────────────────────────────────────────────────
+        // The full measurement set (PNG, .rgba16f, .v210, .v210.json) that Export Frame wrote until 2026-10-24: a
+        // debug action that day, a public support feature since (Robbie, 2026-10-24). No default key.
+        .init(.exportFrameForSupport, "Export Frame for Support…", .help, .window, .menu, nil),
+
         // ── Debug: ⌃⌥ is the debug namespace (audit §4.1 rule 3). Not rebindable. ────────────────
         .init(.debugToneTest, "NDI Audio Tone Test", .debug, .app, .menu, .char("a", ctlOpt), debug: .profile),
         .init(.debugScrubBench, "Chroma Scrub Bench", .debug, .app, .menu, .char("b", ctlOptShift), debug: .profile),
-        // The full measurement set (PNG, .rgba16f, .v210, .v210.json) that Export Frame wrote until 2026-10-24.
-        .init(.debugExportFrameDiagnostic, "Export Frame (Diagnostic Set)", .debug, .window, .menu, nil,
-              debug: .profile),
         .init(.debugNDIConnect, "Connect to First NDI Source", .debug, .window, .key, .char("n", ctlOpt),
               debug: .profile),
         .init(.debugWebRTCSmoke, "libdatachannel Link Smoke Test", .debug, .window, .key, .char("w", ctlOpt),

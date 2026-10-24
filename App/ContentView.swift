@@ -1603,6 +1603,10 @@ struct ContentView: View {
             .fileName: DeckShortcut { showFileNameOverlay.toggle() },
             .alwaysShowControls: DeckShortcut(enabled: { hasSource && !isDocked }) { togglePin() },
             .exportFrame: DeckShortcut(enabled: { metalRenderer != nil }) { metalRenderer?.exportCurrentFrame() },
+            // Help ▸ Export Frame for Support…: the diagnostic set through a save panel, on this window.
+            .exportFrameForSupport: DeckShortcut(enabled: { metalRenderer != nil }) {
+                metalRenderer?.exportFrameForSupport(window: deck.window)
+            },
             // The readout hangs off the display-transform control, so the controls are woken to show it.
             .transformChain: DeckShortcut(enabled: { hasSource }) {
                 if !chrome.showTransformChain { wakeHUD() }
@@ -1668,10 +1672,6 @@ struct ContentView: View {
     /// gate, as their hidden buttons did.
     private func debugShortcutHandlers(device: @escaping @MainActor () -> Bool) -> [ShortcutID: DeckShortcut] {
         [
-            // Export Frame's full measurement set: PNG, .rgba16f, .v210, .v210.json (§8 item 1).
-            .debugExportFrameDiagnostic: DeckShortcut(enabled: { metalRenderer != nil }) {
-                metalRenderer?.exportCurrentFrame(diagnosticSet: true)
-            },
             // ⌃⌥N, its key before the registry; a File menu item 2026-10-23 → 10-24.
             .debugNDIConnect: DeckShortcut(enabled: device) {
                 DeckRegistry.shared.connectLive(.ndi, from: deck) { LiveSource.connectNDIFirstSource() }

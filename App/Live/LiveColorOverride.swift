@@ -488,9 +488,13 @@ struct ColorInterpretationControl: View {
     /// ⚠️ GREYED PER ROW, NOT ON THE `Menu` — MEASURED. `.disabled` on the submenu itself left it and its rows
     /// reading enabled (Accessibility) with no LUT loaded, and a press would have done nothing, silently. Each row
     /// carries `.disabled` instead, which a `Toggle` row honours.
+    ///
+    /// "LUT Outputs" and "Same as Source (no change)" since 2026-10-24 (Robbie): the menu's words only; the stored
+    /// value is still `ColorimetryOverride.storageID`, so saved LUT state loads as before. The closing rows say when
+    /// to change it, as disabled `Button`s so Accessibility reads them (the readout row's construction).
     @ViewBuilder private var outputSpaceMenu: some View {
-        Menu("LUT Output Space") {
-            Toggle("Same as Source", isOn: outputBinding(.auto))
+        Menu("LUT Outputs") {
+            Toggle("Same as Source (no change)", isOn: outputBinding(.auto))
                 .disabled(lut.name == nil)
             ForEach(ColorimetryOverride.allCases.filter { $0 != .auto }) { o in
                 Toggle(o.label, isOn: outputBinding(o))
@@ -503,6 +507,11 @@ struct ColorInterpretationControl: View {
                 outputAxisMenu("Transfer", 1, CustomColorimetry.transfers)
                 outputAxisMenu("Matrix", 2, CustomColorimetry.matrices)
             }
+            Divider()
+            Button("Only change this for LUTs that convert to another color space (e.g. Rec.709 → PQ).") {}
+                .disabled(true)
+            Button("Display or calibration LUTs aren't supported here; use Bypass.") {}
+                .disabled(true)
         }
     }
 

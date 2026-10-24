@@ -55,6 +55,9 @@ struct DisplayChain: Equatable {
     var overriddenWords: String? = nil
     /// The LUT is changing the picture (loaded, not bypassed): the view draws the LUT line in amber, as the face is.
     var lutApplied: Bool = false
+    /// The window's chosen mode is Reference, the only mode that reads the display's calibration: the calibration
+    /// section is enabled only then (Robbie, 2026-10-24). The chosen mode, not a hold's.
+    var calibrationApplies: Bool = false
 }
 
 @MainActor
@@ -298,7 +301,8 @@ final class DisplayChainModel: ObservableObject {
                                 headroom: HeadroomReadout.text(renderer?.displayHeadroom),
                                 lut: deck.lut.readoutLine,
                                 overriddenWords: overriddenWords,
-                                lutApplied: deck.lut.isApplied)
+                                lutApplied: deck.lut.isApplied,
+                                calibrationApplies: deck.chrome?.displayTransform == .reference)
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         // Colour S3: the Source and Tags lines in the log, once per change, so an unattended run reads

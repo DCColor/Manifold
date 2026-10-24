@@ -62,7 +62,8 @@ held back until after release, and the numbered defect entries follow.
        2.4), and a per-display "calibrated to Rec.709 / BT.1886" setting, default off. On a calibrated display
        Reference sends the code values untouched. **Built and run unattended 2026-10-12; every unattended
        prediction passed; committed (`532c83f`)** (§6.11, *S1 — results*). Open: the attended LG items (S1-5 by eye,
-       S1-6 with the HDR switch, S1-9) and clicking the popover's calibration section. The Reference subtitle is
+       S1-6 with the HDR switch, S1-9) and clicking the popover's calibration section. Since 2026-10-24 the section
+       is enabled only in Reference ("Applies in Reference mode only." otherwise; the UI wording entry under item 3). The Reference subtitle is
        now "BT.1886, as a reference monitor shows it" (Robbie, 2026-10-12).
      - **S2** — hold-to-compare: the other of macOS and Reference; Shift-hold compares against Bypass. The key
        is chosen in the shortcut registry. **Built and run unattended 2026-10-12 with a TEMPORARY key, backslash;
@@ -73,7 +74,7 @@ held back until after release, and the numbered defect entries follow.
        aside while a text field is typed into. Built and run unattended 2026-10-23, committed (`9bedbe6`) (`SHORTCUTS_AUDIT.md` §5).
        ✅ **Moved to C 2026-10-24** (Robbie, from his checklist: "D doesn't mean compare"): hold C = the other of macOS
        and Reference, ⇧C = Bypass, and a new ⌥C = the window's LUT off while held (nothing with no LUT applied). D is
-       free. Built and run unattended 2026-10-24, commit `<commit — to be filled in>` (`SHORTCUTS_AUDIT.md` §8–§9).
+       free. Built and run unattended 2026-10-24, commit `0a938f7` (`SHORTCUTS_AUDIT.md` §8–§9).
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
        four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below). **Built and run
        unattended 2026-10-12; committed (`94961b9`)** (§6.11, *S3 — results*). The table is in
@@ -140,7 +141,8 @@ held back until after release, and the numbered defect entries follow.
          ⚠️ **Check at the release gate:** 4K playback with a 65³ trilinear LUT on the M4 MacBook Air.
          L1 since committed (`cdff752`).
        - **L2 built and run unattended 2026-10-13, not committed** (§6.11, *L2 — results*): source codes and picture
-         codes (D3), the *LUT Output Space* picker (D4: Same as Source, presets, Custom), and the tags. Scope
+         codes (D3), the *LUT Output Space* picker (D4: Same as Source, presets, Custom; *LUT Outputs*, "Same as
+         Source (no change)" since 2026-10-24), and the tags. Scope
          headers, scope maths, the SDI tag, the v210 matrix, the export ICC, EDR, Reference and the CIE scope follow
          the picture; the Source line and the decode matrix stay the source's. The CLAUDE.md colour-setter rule is
          amended. P1 (16 files byte-identical to HEAD with no LUT), P2, P4, P5, P7, P8 and the gates pass; P6 by
@@ -246,8 +248,9 @@ held back until after release, and the numbered defect entries follow.
    dispatch through it; Help ▸ Keyboard Shortcuts… rebinds. The scheme, the results and Robbie's by-hand checklist:
    `SHORTCUTS_AUDIT.md` §4.2, §5, §6.
    ✅ **Follow-ups from Robbie's checklist (2026-10-24).** Built and run unattended 2026-10-24, commit
-   `<commit — to be filled in>` (`SHORTCUTS_AUDIT.md` §8 predictions, §9 results, §10 checklist):
+   `0a938f7` (`SHORTCUTS_AUDIT.md` §8 predictions, §9 results, §10 checklist):
    - Export Frame writes the PNG only; the measurement set is File ▸ Export Frame (Diagnostic Set), a debug action.
+     (Moved the same day to Help ▸ Export Frame for Support…, public: the next entry.)
    - Show All Tabs: measured unchanged (⇧⌘\); the "diagonal arrow" is the backslash glyph. Guard test added.
    - ⌃⌘F works again (a fixed alias of ⌘F); fn-F is left to the system.
    - ⌃⌥R removed: the AVFoundation-layer A/B no longer served a purpose (§8 item 4).
@@ -260,6 +263,27 @@ held back until after release, and the numbered defect entries follow.
      no longer shakes.
    - **Not done, from the same notes, not in the brief:** scaling the control bar at small window sizes, and a
      resizable Settings window like the shortcuts window.
+   ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
+   `<commit — to be filled in>` (results in the session report; base `0a938f7`):
+   - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row
+     reads "Same as Source (no change)", and two disabled rows at the foot say when to change it ("Only change this
+     for LUTs that convert to another color space (e.g. Rec.709 → PQ)." / "Display or calibration LUTs aren't
+     supported here; use Bypass."). Stored values unchanged (`ColorimetryOverride.storageID`, `recentLUTs`). The LUT
+     readout line names the output space only when one is stated: "out same as source" is gone.
+   - **The chain readout's calibration section** (checkbox, White, Black) is enabled only when the window's chosen
+     mode is Reference; in macOS and Bypass it is disabled and its line reads "Applies in Reference mode only." The
+     stored per-display record is untouched and applies the moment Reference is chosen. The chosen mode, not a
+     hold's: holding C to Reference does not enable it.
+   - **Help ▸ Export Frame for Support…** replaces File ▸ Export Frame (Diagnostic Set): the same four files
+     (`.png`, `.v210`, `.rgba16f`, `.v210.json`), byte for byte, through a save panel. Suggested name
+     `Manifold-frame-<yyyy-MM-dd-HHmmss>.png` (never the source's name), the panel's note "Includes the current
+     frame's picture. Share only with people allowed to see this footage." The frame is captured at the click. Not
+     `#if DEBUG` and not behind `ShortcutDebugGate`; a `.help` registry action with no default key. Never part of
+     Export Diagnostics. Unattended runs use `MANIFOLD_FRAME_EXPORT_DIR` (pre-ship list). The local drivers
+     `build/interlaced-i1/drv.py` and `build/sdi-paused-fix/drv.py` click it first, then the two older shapes.
+   - **User guide:** three entries for Robbie's flagged priority in `USER_GUIDE_SYNC.md`, *Notes for the editor ▸
+     Sections still to write*.
+   - "color", not Robbie's "colour", in the new strings: the user-facing strings are American English.
 4. **The release gate:**
    - the sync leftovers;
    - the user guide, including a note that an interlaced NDI source is deinterlaced by the NDI SDK before
@@ -286,8 +310,9 @@ held back until after release, and the numbered defect entries follow.
    - the pre-ship cleanup (the pre-ship checklist below, including every temporary probe it lists).
    - **the debug hooks' predicate** (`ShortcutDebugGate`, `App/Shortcuts/ShortcutCenter.swift`). Its `.profile` tier
      is `#if DEBUG`, and **the shipped Profile configuration defines `DEBUG`**, so every ⌃⌥ debug hook (⌃⌥N, ⌃⌥W,
-     ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, and the Debug menu's ⌃⌥A and ⌃⌥⇧B) answers, and File ▸ Export Frame
-     (Diagnostic Set) is shown, in every tester build (⌃⌥R was removed 2026-10-24). Before a public
+     ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, and the Debug menu's ⌃⌥A and ⌃⌥⇧B) answers in every tester build (⌃⌥R was
+     removed 2026-10-24). The frame's diagnostic set is no longer behind it: it is Help ▸ Export Frame for Support…,
+     a public item, so the switch cannot hide it (2026-10-24). Before a public
      build, switch that one predicate to a flag only a developer build carries. It is the one place to change: the
      hooks are registry actions behind it, not hidden buttons. The build configuration was deliberately not
      changed when the registry was built (2026-10-23).
@@ -803,8 +828,9 @@ The shortcut registry (`SHORTCUTS_AUDIT.md` §4.4) made every hook above a `debu
 `ShortcutCatalog`: not rebindable, and listed in Help ▸ Keyboard Shortcuts… only when the Debug menu's opt-in is
 on. Whether one answers is `ShortcutDebugGate` (`App/Shortcuts/ShortcutCenter.swift`):
 - the `.profile` tier (`#if DEBUG`, so ON IN PROFILE): ⌃⌥W, ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, the Debug menu's ⌃⌥A and
-  ⌃⌥⇧B, and since 2026-10-24 ⌃⌥N (Connect to First NDI Source, out of the File menu) and File ▸ Export Frame
-  (Diagnostic Set) (the `.v210` / `.rgba16f` / `.v210.json` set Export Frame no longer writes). ⌃⌥R, which moved here
+  ⌃⌥⇧B, and since 2026-10-24 ⌃⌥N (Connect to First NDI Source, out of the File menu). File ▸ Export Frame
+  (Diagnostic Set) was here for part of 2026-10-24; it is now Help ▸ Export Frame for Support…, not a debug action.
+  ⌃⌥R, which moved here
   from the shipping set on 2026-10-23 (decision 7: the render-layer A/B), was **removed** on 2026-10-24
   (`SHORTCUTS_AUDIT.md` §8 item 4);
 - the `.configDebug` tier (`MANIFOLD_CONFIG_DEBUG`, the Debug configuration only): ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S,
@@ -1183,9 +1209,15 @@ to send Export Diagnostics for a sync problem.
 (`MANIFOLD_FORCE_SOFTWARE_DECODE`, and the force switch reaching SRT; §6.10, *Stage 3b, S3 and S4*).
 
 - **What they are:**
-  - **The v210 dump:** in DEBUG, ⌃⌥E also runs `rgbToV210` on the frame it exports and writes the raw
+  - ~~**The v210 dump:** in DEBUG, ⌃⌥E also runs `rgbToV210` on the frame it exports and writes the raw
     v210 (`.v210`) and the raw `rgba16Float` readback (`.rgba16f`) next to the PNG, with a `[V210-DUMP]`
-    line. It is how P1–P5 read the SDI bytes without a capture card.
+    line. It is how P1–P5 read the SDI bytes without a capture card.~~ **Not removed: it ships** as Help ▸ Export
+    Frame for Support… (Robbie, 2026-10-24; no longer `#if DEBUG`, no longer behind `ShortcutDebugGate`). The
+    shortcut follow-ups' UI wording entry, under the release scope's item 3.
+  - **`MANIFOLD_FRAME_EXPORT_DIR=<dir>`** (launch environment, added 2026-10-24 with the support export): Help ▸
+    Export Frame for Support… writes its set into that folder under the suggested name instead of opening the save
+    panel, which Accessibility cannot drive (`MANIFOLD_DIAG_EXPORT_PATH`'s reason). `exportFrameForSupport` in
+    `App/MetalVideoRenderer.swift`, `#if DEBUG`.
   - **`MANIFOLD_FORCE_CHROMA_420=1`** (launch environment, never `defaults`): every path that would carry
     4:2:2 or 4:4:4 converts to `x420` instead, and the chain readout names the switch. It is how the
     fallback (P10) is tested on a Mac that never needs it.
@@ -1230,7 +1262,8 @@ to send Export Diagnostics for a sync problem.
     with ` (forced by MANIFOLD_DECKLINK_ENABLE_HR)` on the log line, so the busy message and the generic refusal can be
     run with no other app holding the card (*output start at 2160p23.98 failed*, below). `#ifdef DEBUG` in
     `App/DeckLink/DeckLinkBridge.mm`.
-- **Gating:** all eleven `#if DEBUG`: absent from Release, present in Profile. `FileChromaPolicy` itself
+- **Gating:** all eleven `#if DEBUG` (ten, plus `MANIFOLD_FRAME_EXPORT_DIR`, since the v210 dump ships): absent
+  from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.

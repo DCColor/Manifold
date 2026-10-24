@@ -94,7 +94,7 @@ final class ShortcutRegistryTests: XCTestCase {
             .audioLater10: "⌥⇧]", .audioEarlier10: "⌥⇧[",
             // No default.
             .cycleInterpretation: nil, .resetInterpretation: nil, .cieSpace: nil, .vectorscopeGraticule: nil,
-            .vectorscopeBoxes: nil, .cie709: nil, .cieP3: nil, .cie2020: nil, .debugExportFrameDiagnostic: nil,
+            .vectorscopeBoxes: nil, .cie709: nil, .cieP3: nil, .cie2020: nil, .exportFrameForSupport: nil,
             // Debug. ⌃⌥R is gone (§8 item 4); Connect to First NDI Source is back on ⌃⌥N, as a debug hook (item 6).
             .debugToneTest: "⌃⌥A", .debugScrubBench: "⌃⌥⇧B", .debugNDIConnect: "⌃⌥N", .debugWebRTCSmoke: "⌃⌥W",
             .debugWHEPConnect: "⌃⌥H", .debugWHEPRetire: "⌃⌥⇧H", .debugWHEPExportFrame: "⌃⌥⇧E",
@@ -106,9 +106,21 @@ final class ShortcutRegistryTests: XCTestCase {
             XCTAssertEqual(r.label(for: id), label, id.rawValue)
         }
         XCTAssertEqual(r.definition(.debugNDIConnect).debug, .profile)
-        XCTAssertEqual(r.definition(.debugExportFrameDiagnostic).debug, .profile)
+        // The support export is public (2026-10-24): no debug tier, so the release-gate switch cannot hide it.
+        XCTAssertNil(r.definition(.exportFrameForSupport).debug)
+        XCTAssertEqual(r.definition(.exportFrameForSupport).title, "Export Frame for Support…")
         XCTAssertEqual(r.definition(.cycleInterpretation).title, "Next Tag Override")
         XCTAssertEqual(r.definition(.resetInterpretation).title, "Reset Tags to Source")
+    }
+
+    /// Help ▸ Export Frame for Support… is not a debug action: with every debug tier off (the release-gate switch) it
+    /// can still be given a key, and its menu item carries it.
+    func testSupportExportSurvivesTheDebugSwitch() {
+        let r = registry(debug: false)
+        let chord = KeyChord.char("g", [.control, .option, .command])
+        XCTAssertEqual(r.definition(.exportFrameForSupport).category, .help)
+        XCTAssertTrue(r.assign(chord, to: .exportFrameForSupport))
+        XCTAssertEqual(r.menuChord(for: .exportFrameForSupport), chord)
     }
 
     /// ⌥⌘D is macOS's Show or Hide the Dock: it never reaches an app, so it is refused (§8).

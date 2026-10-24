@@ -467,6 +467,52 @@ The server's name stays, so we can tell which service you were using.
 
 ### Sections still to write
 
+The first three are **Robbie's flagged priority (2026-10-24)**. They are notes to be written up properly later, not
+guide text. The app's wording they quote is the 2026-10-24 build's (`BUGS.md`, the UI wording entry under the release
+scope's item 3).
+
+- ⚑ **Reference mode and the per-display "Calibrated to Rec.709 / BT.1886" setting** (Robbie's flagged priority,
+  added 2026-10-24). Where: Color ▸ Show/Hide Transform Chain (⌥⌘4), the section under "This display — *name*".
+  - **What Reference promises:** the light a BT.1886 reference monitor would put out for these code values.
+  - **Unchecked** (the default): the display is described by its profile, and Manifold converts the codes from that
+    profile to BT.1886, using **White** and **Black** (Lw and Lb, in cd/m²). Black 0 is exactly gamma 2.4.
+  - **Checked:** the codes go out untouched, because the display itself applies BT.1886. White and Black are
+    greyed: the display applies them.
+  - **Remembered per display**, not per window. Moving a window to another display shows that display's setting,
+    so the picture can change when the window moves.
+  - ⚠️ **Fails silently** if ticked on a display that is not calibrated to BT.1886: Manifold trusts the tick and
+    converts nothing, so the picture is wrong and nothing says so.
+  - **macOS and Bypass ignore it.** In macOS mode ColorSync converts for the display; Bypass sends the codes
+    untouched. The section is greyed in both and reads "Applies in Reference mode only."; the values are kept and
+    apply as soon as Reference is chosen.
+  - **Why macOS mode can look different from Reference:** macOS decodes Rec.709 at about γ1.961 (the curve every
+    SDR colorspace `makeColorSpace` makes carries, `COLOR_MANAGEMENT_FINDINGS.md` §2), not BT.1886's 2.4.
+  - **Scopes measure the file, not the display:** no display mode or calibration setting moves a scope.
+- ⚑ **LUTs** (Robbie's flagged priority, added 2026-10-24). Where: the Color control's LUT section.
+  - **What LUT Outputs means:** the color space the LUT's output is in. It becomes the picture's color space for
+    everything after the LUT: the window, HDR, the scopes, the SDI tag and exported frames. The Source line keeps
+    describing the source.
+  - **Why Same as Source (no change) is the default:** most LUTs (looks, creative grades) leave the picture in the
+    color space it came in.
+  - **When to change it:** only for a LUT that converts to another color space, e.g. Rec.709 → PQ.
+  - **A LUT with a display transform baked in for a standard** (e.g. LogC → Rec.709) is described by the standard
+    it outputs: Rec.709 for that example.
+  - **Display- or calibration-specific LUTs** (one made for one monitor) aren't supported in this slot. The menu
+    says to use Bypass.
+  - The readout names the LUT's output space only when it isn't Same as Source.
+- ⚑ **Export Frame for Support** (Robbie, 2026-10-24). Where: Help ▸ Export Frame for Support….
+  - **What it writes**, after a save panel (the suggested name is the date and time, never the source's name):
+    - `.png`: the frame, as Export Frame writes it;
+    - `.v210`: exactly what goes to SDI for this frame, the same conversion the DeckLink output uses, so it can be
+      read without a capture card;
+    - `.rgba16f`: the renderer's output, the raw picture the PNG and the `.v210` were made from;
+    - `.v210.json`: the color state and the metadata a reader needs (size, row length, chroma, matrix, and any
+      primaries conversion for SDI).
+  - **Say plainly that the files hold the picture.** The panel says "Includes the current frame's picture. Share
+    only with people allowed to see this footage." They are never added to Export Diagnostics; a user sends them
+    deliberately.
+  - **When support may ask for them:** the picture, the scopes or SDI look wrong for one frame or one file (color,
+    levels, chroma, an HDR or Rec.2020 SDI signal), and a log alone cannot show what was drawn.
 - **Sender setup recipes** (added 2026-10-07). OBS settings per transport (SRT, WHEP, NDI/DistroAV),
   SDR and HDR, with the expected Manifold chain readout for each.
   - **HDR:** Color Format P010 (10-bit), Color Space Rec. 2100 PQ or HLG, Color Range Limited, SDR

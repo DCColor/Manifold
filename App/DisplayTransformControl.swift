@@ -288,7 +288,7 @@ struct DisplayChainReadout: View {
             // as a bug."
             // Colour S1: this display's calibration — per DISPLAY, not per window (§6.11 decision 1).
             Divider()
-            DisplayCalibrationSection(screen: model.currentScreen)
+            DisplayCalibrationSection(screen: model.currentScreen, applies: model.chain.calibrationApplies)
 
             Divider()
             Text("Scopes are unaffected by this setting — they measure the file, not the display.")
@@ -345,8 +345,15 @@ struct DisplayChainReadout: View {
 /// Per DISPLAY: the same record applies to every window on that display, and moving a window to
 /// another display shows that display's record. Default off, Lw 100, Lb 0 (= gamma 2.4). The
 /// white and black fields are greyed while "calibrated" is on, because the display applies them.
+///
+/// Only Reference reads the record (macOS mode leaves the conversion to ColorSync; Bypass sends the codes
+/// untouched), so outside Reference the whole section is disabled and says so (Robbie, 2026-10-24). `.disabled`
+/// reaches Accessibility as each control's enabled state. Nothing is written: the stored record is untouched and
+/// takes effect the moment Reference is chosen.
 struct DisplayCalibrationSection: View {
     let screen: NSScreen?
+    /// The window is in Reference. `DisplayChain.calibrationApplies`.
+    let applies: Bool
     @ObservedObject private var store = DisplayCalibrationStore.shared
 
     var body: some View {
@@ -360,12 +367,15 @@ struct DisplayCalibrationSection: View {
                     get: { cal.calibrated },
                     set: { var c = cal; c.calibrated = $0; store.set(c, for: screen) }))
                     .font(.caption)
+                    .disabled(!applies)
                 HStack(spacing: 12) {
                     nitsField("White", value: cal.whiteNits) { var c = cal; c.whiteNits = $0; store.set(c, for: screen) }
                     nitsField("Black", value: cal.blackNits) { var c = cal; c.blackNits = $0; store.set(c, for: screen) }
                 }
-                .disabled(cal.calibrated)
-                Text(cal.calibrated
+                .disabled(!applies || cal.calibrated)
+                Text(!applies
+                     ? "Applies in Reference mode only."
+                     : cal.calibrated
                      ? "Reference sends the code values untouched; the display applies BT.1886."
                      : "Reference applies BT.1886 from these values. Black 0 is exactly gamma 2.4.")
                     .font(.caption2)
