@@ -1,4 +1,5 @@
 import SwiftUI
+import ShortcutRegistry
 import CoreGraphics
 import Metal
 import Combine
@@ -391,16 +392,16 @@ struct VectorscopeScopeView: View {
     /// `$graticule` binding is enough because the overlay reads the same @AppStorage (no kernel push
     /// needed — the math already tracks the source matrix).
     ///
-    /// The ⌃⌥G / ⌃⌥B hints STAY IN THE SECTION HEADINGS, where the menu's `Section` titles carried
-    /// them. A caption heading is the popover's spelling of that title, so the hint keeps both its
-    /// wording and its position; nothing had to be found a new home.
+    /// The key hints STAY IN THE SECTION HEADINGS, where the menu's `Section` titles carried them. The keys are the
+    /// shortcut registry's and have no default since 2026-10-23 (they were ⌃⌥G and ⌃⌥B), so a hint shows only when
+    /// the user has bound one (`ShortcutCenter.hint`).
     private var vectorscopeOptions: some View {
         ScopeGear(title: "Vectorscope options", help: "Vectorscope options") {
-            ScopeGearSectionHeader("Graticule reference · ⌃⌥G", isFirst: true)
+            ScopeGearSectionHeader(ShortcutCenter.hint("Graticule reference", .vectorscopeGraticule), isFirst: true)
             ForEach(VectorscopeGraticule.allCases) { g in
                 ScopeGearRadioRow(label: g.label, selected: graticule == g) { graticule = g }
             }
-            ScopeGearSectionHeader("Target boxes · ⌃⌥B")
+            ScopeGearSectionHeader(ShortcutCenter.hint("Target boxes", .vectorscopeBoxes))
             ForEach(VectorscopeBoxAmplitude.allCases) { a in
                 ScopeGearRadioRow(label: a.label, selected: boxAmplitude == a) { boxAmplitude = a }
             }

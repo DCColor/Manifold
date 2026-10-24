@@ -1,4 +1,5 @@
 import SwiftUI
+import ShortcutRegistry
 import AppKit
 import ManifoldCore
 
@@ -26,6 +27,9 @@ struct ManifoldApp: App {
     // Opens the About scene below. `openWindow` and not `orderFrontStandardAboutPanel`, because the
     // standard panel cannot host the attributions — see AboutWindow.swift.
     @Environment(\.openWindow) private var openWindow
+    // Every menu key below is the registry's; observing it re-evaluates the commands after a rebind, so the menus
+    // show the new key without a relaunch.
+    @ObservedObject private var shortcuts = ShortcutCenter.shared.registry
 
     init() {
         // ⚠️ BEFORE THE FIRST LOG LINE, AND THAT ORDERING IS THE POINT. The tap reserves a head
@@ -40,9 +44,10 @@ struct ManifoldApp: App {
         // Privacy P1: NDI discovery starts when an "NDI" submenu OPENS, which SwiftUI does not
         // report (see NDIMenuOpenWatcher.swift).
         NDIMenuOpenWatcher.install()
-        // Colour S2: hold-to-compare's key monitor. App-level because a hold needs key-up and
-        // `ContentView` can take no more modifiers (§6.7); see HoldToCompare.swift.
-        MainActor.assumeIsolated { HoldToCompare.shared.install() }
+        // The shortcut registry's one key monitor (docs/SHORTCUTS_AUDIT.md §4.4): every key the menus do not
+        // take — transport, holds, timecode entry, the debug hooks. App-level because a hold needs key-up and
+        // `ContentView` can take no more modifiers (§6.7); see Shortcuts/ShortcutCenter.swift.
+        MainActor.assumeIsolated { ShortcutCenter.shared.install() }
         #if DEBUG
         // ⚠️ THE ONLY THING THAT TURNS [LIVECLOCK] ON, AND IT IS `#if DEBUG` ON PURPOSE.
         //
@@ -229,6 +234,7 @@ struct ManifoldApp: App {
             // `SyncClipLibrary.downloadURL` is the single source of truth (A/V ▸ Download ProRes Sync
             // Clips… opens the same). Not gated: calibration ships.
             CommandGroup(after: .help) {
+                Button("Keyboard Shortcuts…") { openWindow(id: KeyboardShortcutsScene.windowID) }
                 Button("Download Sync Clips…") { SyncClipLibrary.openDownload() }
             }
             // ⌘O, in the File menu directly under New Window (`.newItem` is that group), where a
@@ -241,13 +247,25 @@ struct ManifoldApp: App {
             // acts on.
             CommandGroup(after: .newItem) {
                 Button("Open…") { DeckRegistry.shared.presentOpenPanel(from: nil) }
-                    .keyboardShortcut("o", modifiers: .command)
+                    .registryShortcut(.fileOpen, shortcuts)
                 // Directly under Open…, where a Mac user looks for it. A SwiftUI command rather
                 // than an item inserted into `NSApp.mainMenu`: the insertion approach was built,
                 // measured, and RETIRED — SwiftUI removes a foreign item the first time the menu
                 // bar is displayed, so it passed every in-process check and was never once on
                 // screen. The measurement is written up on `OpenRecentMenu`.
                 OpenRecentMenu(recents: recents)
+                Divider()
+                // ⌥⌘E, formerly the hidden ⌃⌥E (docs/SHORTCUTS_AUDIT.md §4.2). The control bar's button is the same
+                // action.
+                ShortcutMenuItem(id: .exportFrame, registry: shortcuts)
+                Divider()
+                // Device claims: no default key (§4.1 rule 4). They were the hidden ⌃⌥N / ⌃⌥⇧N / ⌃⌥O / ⌃⌥⇧O; one
+                // Disconnect replaces three retire keys (audit C1). A window that does not own the devices beeps.
+                ShortcutMenuItem(id: .connectFirstNDI, registry: shortcuts)
+                ShortcutMenuItem(id: .disconnectLive, registry: shortcuts)
+                Divider()
+                ShortcutMenuItem(id: .startDeckLink, registry: shortcuts)
+                ShortcutMenuItem(id: .stopDeckLink, registry: shortcuts)
             }
             // The View menu: raster size (⌘1–⌘4, ⌘0) — how large the picture is drawn, as a
             // percentage of the source raster. The app's first real menu of window commands; see
@@ -275,18 +293,13 @@ struct ManifoldApp: App {
             // So the menu is opt-in at launch. Nothing behind it changed; only whether it exists.
             if DebugMenuGate.isEnabled {
             //
-            // The ⌃⌥A binding for this lives in `ContentView.syntheticLiveShortcuts` as a hidden
-            // Button, which fires only when that view is mounted AND nothing upstream has already
-            // claimed the chord. That space is crowded — ⌃⌥T, for instance, is the scope tray — and
-            // a chord that loses the race fails SILENTLY, as a system beep. A CommandMenu is bound
-            // to the application, not to whatever has focus, so it cannot be shadowed and cannot be
-            // missed. When a diagnostic has to be reachable on demand during a live capture, this
-            // is the shape it should take.
+            // ⌃⌥A and ⌃⌥⇧B are these menu items' own keys, from the registry (debug actions: not rebindable). A
+            // CommandMenu is bound to the application, not to whatever has focus, so its key cannot be shadowed.
             //
             // `#if DEBUG`, matching the trigger it drives — Profile carries DEBUG, so this is
             // present in the builds testers actually run, and absent from Release.
             CommandMenu("Debug") {
-                NDIAudioToneTestCommand()
+                NDIAudioToneTestCommand(registry: shortcuts)
                 NDIAudioGroupedCommand()
                 NDIAudioLeadCommand()
                 Divider()
@@ -295,7 +308,7 @@ struct ManifoldApp: App {
                 Divider()
                 NDIAudioWAVCaptureCommand()
                 Divider()
-                ChromaScrubBenchCommand()
+                ChromaScrubBenchCommand(registry: shortcuts)
             }
             }
             #endif
@@ -310,6 +323,13 @@ struct ManifoldApp: App {
         // twice should raise the window that is already open, not stack a second copy of it.
         // NOT gated behind the license gate — attribution and licence text must be readable
         // whatever the app's own licensing state is.
+        // Help ▸ Keyboard Shortcuts… (docs/SHORTCUTS_AUDIT.md §4.5). Single-instance, like About, and for the
+        // same reason; its automatic Window-menu item is removed the same way.
+        Window("Keyboard Shortcuts", id: KeyboardShortcutsScene.windowID) {
+            KeyboardShortcutsView(registry: ShortcutCenter.shared.registry)
+        }
+        .commandsRemoved()
+
         Window("About Manifold", id: AboutScene.windowID) {
             AboutView()
         }
@@ -405,9 +425,10 @@ enum DebugMenuGate {
 /// output is on. Do not leave it running into a real output.
 private struct NDIAudioToneTestCommand: View {
     @ObservedObject private var ndi = NDIService.shared
+    let registry: ShortcutRegistry
     var body: some View {
         Button(ndi.audioToneTestTitle) { NDIService.shared.cycleAudioToneTest() }
-            .keyboardShortcut("a", modifiers: [.control, .option])
+            .registryShortcut(.debugToneTest, registry)
     }
 }
 
@@ -428,9 +449,10 @@ private struct NDIAudioToneTestCommand: View {
 /// the release, which prints the `[SCRUB]` latency line (with `MANIFOLD_SCRUB_STATS=1`). The two
 /// exports' `.rgba16f` are what P6 compares.
 private struct ChromaScrubBenchCommand: View {
+    let registry: ShortcutRegistry
     var body: some View {
         Button("Chroma Scrub Bench") { ChromaScrubBench.run() }
-            .keyboardShortcut("b", modifiers: [.control, .option, .shift])
+            .registryShortcut(.debugScrubBench, registry)
     }
 }
 

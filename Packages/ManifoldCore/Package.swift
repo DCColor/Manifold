@@ -52,6 +52,9 @@ let package = Package(
         .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"]),
         // Linked by the APP target directly (project.yml): what a refused DeckLink output start says (docs/BUGS.md).
         .library(name: "DeckLinkRefusal", targets: ["DeckLinkRefusal"]),
+        // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
+        // key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4).
+        .library(name: "ShortcutRegistry", targets: ["ShortcutRegistry"]),
         // Linked by the APP target directly (project.yml): log and diagnostics redaction (privacy P1).
         .library(name: "PrivacyRedaction", targets: ["PrivacyRedaction"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
@@ -484,6 +487,25 @@ let package = Package(
             name: "DeckLinkRefusalTests",
             dependencies: ["DeckLinkRefusal"],
             path: "Tests/DeckLinkRefusalTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The shortcut registry (docs/SHORTCUTS_AUDIT.md §4.4): the catalog of every shortcut, the overrides stored in
+        // one defaults key, the conflict / reserved / warning rules, and the key dispatcher the app's one NSEvent monitor
+        // feeds. AppKit and SwiftUI only for the NSEvent adapter and the menu key; the tests drive the dispatcher with
+        // synthesized NSEvents.
+        .target(
+            name: "ShortcutRegistry",
+            path: "Sources/ShortcutRegistry",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "ShortcutRegistryTests",
+            dependencies: ["ShortcutRegistry"],
+            path: "Tests/ShortcutRegistryTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

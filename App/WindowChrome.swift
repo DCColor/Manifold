@@ -105,7 +105,7 @@ final class WindowChrome: ObservableObject {
         static let rasterSize  = RasterSize.defaultsKey
     }
 
-    /// Scopes tray open/close for THIS window. Toggled by ⌃⌥T and the control-bar scopes button.
+    /// Scopes tray open/close for THIS window. Toggled by View ▸ Show/Hide Scopes (⌘7) and the control-bar scopes button.
     @Published var showTray: Bool { didSet { defaults.set(showTray, forKey: Key.showTray) } }
 
     /// Height of the scopes tray in THIS window, in points — what the divider drags (Arc C).

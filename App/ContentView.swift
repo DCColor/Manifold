@@ -1,4 +1,5 @@
 import SwiftUI
+import ShortcutRegistry
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 import StreamBookmarkModel
@@ -345,7 +346,7 @@ struct ContentView: View {
     @StateObject private var rendererStore = RendererStore()
     private var metalRenderer: MetalVideoRenderer? { rendererStore.renderer }
     /// NDI connection state — the empty-state overlay has to know a stream is on screen even
-    /// though no file is loaded. Observed, so ⌃⌥N / ⌃⌥⇧N update the UI.
+    /// though no file is loaded. Observed, so File ▸ Connect to First NDI Source / Disconnect Live Source update the UI.
     @ObservedObject private var ndi = NDIService.shared
     // WHEP's published connection state — feeds `hasSource` so the empty-state overlay hides while a
     // web stream drives the shared renderer, and drives the teardown scope-clear below.
@@ -369,11 +370,14 @@ struct ContentView: View {
     // Diagnostics export prompt. Observed rather than @State because the menu item that raises it
     // lives in the App scene — see DiagnosticsExporter.
     @ObservedObject private var diagnostics = DiagnosticsExporter.shared
-    // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer, toggled by ⌃⌥R. KEPT — this is the A/B
+    // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer, toggled by ⌃⌥R (a DEBUG hook since the shortcut
+    // registry, decision 7 of docs/SHORTCUTS_AUDIT.md §4.6). KEPT — this is the A/B
     // switch itself (it selects the surface at the `metalRenderer` branch below), not the removed
     // on-screen METAL/REFERENCE badge that used to read it. With the badge gone the switch is
     // silent, which is correct for a shipped build: nothing announces the render path unasked.
     @State private var showReferenceLayer = false
+    /// The shortcut registry, for tooltips that name a key (`helpText`), so a rebound key is the one they name.
+    private var keys: ShortcutRegistry { ShortcutCenter.shared.registry }
     // A droppable file is hovering over this window's picture — see the drop destination on
     // `videoRegion`. Purely the highlight's state; the drop itself carries no view state.
     @State private var dropTargeted = false
@@ -413,10 +417,10 @@ struct ContentView: View {
     @AppStorage("manifold.cie.show709")  private var cieShow709 = true
     @AppStorage("manifold.cie.showP3")   private var cieShowP3 = true
     @AppStorage("manifold.cie.show2020") private var cieShow2020 = true
-    // Persisted vectorscope graticule reference (written by ⌃⌥G, read here + by VectorscopeScopeView
+    // Persisted vectorscope graticule reference (written by the graticule shortcut, read here + by VectorscopeScopeView
     // via the same key). Overlay-only — no kernel push, so a toggle just redraws the boxes.
     @AppStorage("manifold.vectorscope.graticule") private var vectorscopeGraticule: VectorscopeGraticule = .fixed709
-    // Persisted vectorscope target-box amplitude (75%/100%/both), cycled by ⌃⌥B, read here + by
+    // Persisted vectorscope target-box amplitude (75%/100%/both), cycled by the boxes shortcut, read here + by
     // VectorscopeScopeView via the same key. Overlay-only — a change just redraws the boxes.
     @AppStorage("manifold.vectorscope.boxAmplitude") private var vectorscopeBoxAmplitude: VectorscopeBoxAmplitude = .percent75
     // The four scope models (one each, rendered wherever its kind is selected — duplicates share
@@ -430,7 +434,7 @@ struct ContentView: View {
     /// every source. Bound in `.onAppear`; see ScopeColorFeed.swift and CLAUDE.md.
     @StateObject private var scopeColorFeed = ScopeColorFeed()
     /// DeckLink output state (on/off + selected device) — shared singleton, observed so the toolbar
-    /// control and the ⌃⌥O/⌃⌥⇧O shortcuts always agree.
+    /// control and File ▸ Start / Stop DeckLink Output always agree.
     @ObservedObject private var deckLink = DeckLinkService.shared
     /// External .srt sidecar state (cues + on/off). Per-window like the scope models, not a
     /// singleton: captions are view-level overlay state synced to the engine's clock, with no
@@ -548,97 +552,15 @@ struct ContentView: View {
             }
         }
         .ignoresSafeArea()
-        .background(
-            Button("") { showInspector.toggle() }
-                .keyboardShortcut("i", modifiers: [])
-                .opacity(0)
-        )
-        .background(
-            Button("") { showFileNameOverlay.toggle() }
-                .keyboardShortcut("n", modifiers: [])
-                .opacity(0)
-        )
-        .background(
-            Button("") { showReferenceLayer.toggle() }
-                .keyboardShortcut("r", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        .background(
-            Button("") { metalRenderer?.exportCurrentFrame() }
-                .keyboardShortcut("e", modifiers: [.control, .option])
-                .opacity(0)
-        )
-        // Scope shortcuts (tray + per-scope toggles + CIE live toggles) consolidated into one
-        // hidden group so the view body's modifier chain stays type-checkable.
-        .background(scopeShortcuts)
-        // Device-CLAIM accelerators. Gated together, because they all reach a singleton that
-        // another window may be holding, and silently stealing a broadcast output is the worst
-        // outcome available here. Non-owning windows keep every INSPECTION shortcut (⌃⌥E, I, ⌃⌥T,
-        // the scope shortcuts, ⌃⌥R, N, Tab) — it is the device, not the window, that is claimed.
-        .background(deckLinkShortcuts.disabled(!deck.gate.deviceControlsEnabled))
-        .background(ndiShortcuts.disabled(!deck.gate.deviceControlsEnabled))
-        .background(syntheticLiveShortcuts.disabled(!deck.gate.deviceControlsEnabled))
-        // JKL shuttle + frame jog (bare keys — pro NLE muscle memory). Mounted UNCONDITIONALLY,
-        // outside the `if hasSource` branch, so before stage 2 they were live even in a window
-        // with no media (they no-oped on the engine) and in a window arbitration had gated. They
-        // need the explicit transport gate below.
+        // ── NO HIDDEN SHORTCUT BUTTONS HERE ANY MORE ────────────────────────────────────────────
         //
-        // ⚠️ `.disabled` ON A HIDDEN BUTTON REALLY DOES SUPPRESS ITS SHORTCUT — MEASURED, not
-        // assumed, because the whole disable layer rests on it and the audit flagged it untested.
-        // A probe harness mounted the exact constructs used here (hidden `.background` Button,
-        // hidden Button inside a disabled `Group`, and a visible Button) with `⌃⌥`-modified keys,
-        // bare Space and a bare arrow key. Disabled: none fired. The SAME build with the Space and
-        // arrow cases re-enabled: both fired. So the null result is the gate working, not the
-        // keystroke going astray — the failure mode docs/MULTIWINDOW_FINDINGS.md §3.1 warns about.
-        //
-        // K is "pause" and a gated deck is already paused, so disabling it changes nothing —
-        // it is in the set to keep the set COHERENT, because a transport row where one key still
-        // responds reads as broken rather than as gated.
-        .background(
-            Group {
-                Button("") { engine.shuttleBackward() }
-                    .keyboardShortcut("j", modifiers: [])
-                Button("") { engine.shuttlePause() }
-                    .keyboardShortcut("k", modifiers: [])
-                Button("") { engine.shuttleForward() }
-                    .keyboardShortcut("l", modifiers: [])
-                // ══════════════════════════════════════════════════════════════════════════════
-                // ⚠️ ← / → / ⇧← / ⇧→ ARE NOT HERE, AND THE REASON IS A SwiftUI/AppKit GOTCHA
-                //    THAT WILL COST YOU AN AFTERNOON IF YOU MEET IT COLD.
-                //
-                // **AppKit's key-equivalent matcher does not discriminate `.shift` on the arrow
-                // keys.** A `.keyboardShortcut` IS a key equivalent, so ⇧+arrow cannot be expressed
-                // as one: if you need shift on an arrow, you have to read `modifierFlags` off the
-                // NSEvent yourself.
-                //
-                // HOW IT PRESENTED, because the failure does not look like a dispatch problem.
-                // These four were hidden buttons here like everything else — ←(1 frame), →(1
-                // frame), ⇧←(1 second), ⇧→(1 second), all four declarations correct. Each arrow
-                // therefore had TWO claimants differing only by the modifier the matcher ignores,
-                // and one of each pair won for BOTH presses. Measured on the built app:
-                //
-                //      →   1 frame        ⇧→  1 frame     ← both bindings collapsed onto the
-                //      ←   1 second       ⇧←  1 second      unshifted one, → onto the shifted one
-                //
-                // It reads exactly like two transposed literals, and it is not — transposing them
-                // would have "fixed" two of the four cases and broken the other two.
-                //
-                // All four now live in `TransportKeyMonitor` (TimecodeEntry.swift), which already
-                // runs the app's only `NSEvent` local monitor for type-to-enter and so has the
-                // event — and its exact modifier flags — in hand. Nothing else about them changed:
-                // same transport gate, same one-second-from-the-file's-rate rule.
-                //
-                // Everything ABOVE this comment is a plain unmodified key with a single claimant,
-                // which the matcher handles correctly. The trap is specifically two bindings on one
-                // arrow key distinguished only by shift.
-                // ══════════════════════════════════════════════════════════════════════════════
-            }
-            .opacity(0)
-            // POSITION, not merely transport: J/K/L shuttle and the arrow jog move the playhead,
-            // and a live source has none. `.disabled` on a hidden Button does suppress its
-            // keyboard shortcut — measured, see the note above.
-            .disabled(!deck.gate.transportEnabled || !deck.gate.positionControlsEnabled)
-        )
+        // I, N, ⌃⌥R, ⌃⌥E, the scope keys, the device-claim keys, the debug hooks and J/K/L were zero-opacity
+        // `.background` Buttons on this chain. They are now the shortcut registry's (docs/SHORTCUTS_AUDIT.md §4.4):
+        // this window registers what each action DOES in `installShortcutHandlers()` (called from `.onAppear`, so this
+        // chain gains nothing), and `ShortcutCenter`'s one key monitor and the menus dispatch to it. The gates the
+        // buttons carried through `.disabled` (MEASURED to suppress a key, docs/MULTIWINDOW_FINDINGS.md §3.1) are each
+        // handler's `enabled` closure, with the same predicates: position for J/K/L and the arrows, device control for
+        // DeckLink, NDI and the debug connects.
         .onContinuousHover { phase in
             if case .active = phase { wakeHUD() }
         }
@@ -738,10 +660,11 @@ struct ContentView: View {
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
             updateScopeSampling()
-            // Timecode entry's key monitor. Installed here rather than as its own `.onAppear`
-            // because this view's modifier chain is at the type-checker's limit — see the note on
-            // the currentURL observer below. Idempotent, so a second onAppear costs nothing.
+            // Timecode entry, and this window's shortcut actions (docs/SHORTCUTS_AUDIT.md §4.4). Here rather than
+            // as their own `.onAppear` because this view's modifier chain is at the type-checker's limit — see the
+            // note on the currentURL observer below. Both idempotent, so a second onAppear costs nothing.
             transportKeys.attach(deck: deck, engine: engine)
+            installShortcutHandlers()
             // A WINDOW-EDGE DRAG (or the zoom button) ENDS THE RASTER POLICY. The sizer detects it —
             // it is the window's delegate and nothing else sees a live resize — and this is the wire
             // back to the state that owns the answer. `[weak chrome]` because the closure is held by
@@ -763,8 +686,10 @@ struct ContentView: View {
             DisplayTransformMenuState.shared.setNeedsRefresh()
         }
         .onDisappear {
-            // Before the engine goes: a closed window must stop inspecting keystrokes.
+            // Before the engine goes: a closed window must stop answering keystrokes, and its handlers (which hold
+            // this view's objects) must not outlive it.
             transportKeys.detach()
+            deck.shortcutHandlers = [:]
             engine.stop()
             metalRenderer?.stop()
             waveformModel.stop()
@@ -1266,9 +1191,6 @@ struct ContentView: View {
             WindowDeckRegistrar(deck: deck, engine: engine, renderer: metalRenderer, chrome: chrome)
                 .frame(width: 0, height: 0)
 
-            Button("") { togglePin() }
-                .keyboardShortcut(.tab, modifiers: [])
-                .opacity(0)
         }
         .clipped()
         .overlay(alignment: .topTrailing) {
@@ -1644,263 +1566,113 @@ struct ContentView: View {
         cieModel.clear()
     }
 
-    /// Hidden keyboard shortcuts for the scopes tray + CIE live toggles. Grouped into one view
-    /// (instead of many chained `.background(Button…)`) to keep the main body's type-check tractable.
-    /// Per-scope presence shortcuts (formerly ⌃⌥W/P/V) are gone — tray content is now the per-slot
-    /// picker. The CIE shortcuts act on the CIE model wherever it sits (no-op if it's in no slot).
-    ///   ⌃⌥T  scopes tray open/close.
-    ///   ⌃⌥X  CIE u'v' ↔ xy — flips renderer (kernel) + model (graticule/header) together, then
-    ///        setNeedsRefresh re-plots the current frame (covers paused).
-    ///   ⌃⌥G  Vectorscope graticule FIXED 709 ↔ SOURCE-PRIMARIES (overlay-only → redraws immediately).
-    ///   ⌃⌥B  Vectorscope target boxes cycle 75% → 100% → both (overlay-only → redraws immediately).
-    ///   ⌃⌥1/2/3  CIE per-triangle show/hide (overlay-only → SwiftUI re-renders immediately).
-    @ViewBuilder private var scopeShortcuts: some View {
-        Group {
-            Button("") { chrome.showTray.toggle(); updateScopeSampling() }
-                .keyboardShortcut("t", modifiers: [.control, .option])
-            Button("") {
-                // Shared path with the header options menu — writes the stored value, drives the
-                // kernel copy, and re-plots. Toggle = apply the negation of the current value.
+    // MARK: - Shortcut actions
+
+    /// What this window does for each shortcut (docs/SHORTCUTS_AUDIT.md §4.4). The registry (`ShortcutCatalog`) says
+    /// which key; `ShortcutCenter` sends menu picks and keys here, for this window only (the key window's deck, the
+    /// scoping MULTIWINDOW_FINDINGS.md §3.1 measured for the hidden buttons these replace). Each `enabled` is the
+    /// gate the old hidden button carried through `.disabled`, or the control bar's for the same action, so a key
+    /// and its button never disagree. Closures read this view's state when they run, not when they are built.
+    private func installShortcutHandlers() {
+        // POSITION, not merely transport: J/K/L and the arrows move the playhead, and a live source has none.
+        let position = { deck.gate.transportEnabled && deck.gate.positionControlsEnabled }
+        let transport = { deck.gate.transportEnabled }
+        // Device claims: they reach a singleton another window may hold, and silently stealing a broadcast output
+        // is the worst outcome available here.
+        let device = { deck.gate.deviceControlsEnabled }
+        let playhead = { transportKeys.canMovePlayhead }
+        let nudge = { (ms: Int) in
+            DeckShortcut(enabled: { DeckRegistry.shared.liveLabel(for: deck) != nil }) { deck.audioOffset.nudge(byMs: ms) }
+        }
+        var handlers: [ShortcutID: DeckShortcut] = [
+            // Transport
+            .playPause: DeckShortcut(enabled: { hasSource && position() }) { engine.togglePlayPause() },
+            .shuttleReverse: DeckShortcut(enabled: position) { engine.shuttleBackward() },
+            .shuttlePause: DeckShortcut(enabled: position) { engine.shuttlePause() },
+            .shuttleForward: DeckShortcut(enabled: position) { engine.shuttleForward() },
+            .stepBackFrame: DeckShortcut(enabled: playhead) { engine.stepFrame(by: -1) },
+            .stepForwardFrame: DeckShortcut(enabled: playhead) { engine.stepFrame(by: 1) },
+            .stepBackSecond: DeckShortcut(enabled: playhead) { engine.stepFrame(by: -transportKeys.framesPerSecondStep) },
+            .stepForwardSecond: DeckShortcut(enabled: playhead) { engine.stepFrame(by: transportKeys.framesPerSecondStep) },
+            .goToStart: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: false) },
+            .goToEnd: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: true) },
+            .goToStartAlternate: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: false) },
+            .goToEndAlternate: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: true) },
+            .loop: DeckShortcut(enabled: { engine.hasMedia && position() }) { engine.toggleLoop() },
+            // View
+            .inspector: DeckShortcut { showInspector.toggle() },
+            .fileName: DeckShortcut { showFileNameOverlay.toggle() },
+            .alwaysShowControls: DeckShortcut(enabled: { hasSource && !isDocked }) { togglePin() },
+            .exportFrame: DeckShortcut(enabled: { metalRenderer != nil }) { metalRenderer?.exportCurrentFrame() },
+            // Scopes. The CIE keys act on the CIE model wherever it sits (a no-op if it is in no slot).
+            .scopesTray: DeckShortcut { chrome.showTray.toggle(); updateScopeSampling() },
+            // u′v′ ↔ xy flips the renderer's kernel and the model's graticule together; setNeedsRefresh re-plots
+            // the current frame, which covers a paused picture.
+            .cieSpace: DeckShortcut {
                 CIEScopeModel.applyMode(useUV: !cieUseUV, storage: $cieUseUV, renderer: metalRenderer)
-            }
-            .keyboardShortcut("x", modifiers: [.control, .option])
-            // ⌃⌥G  Vectorscope graticule: FIXED 709 ↔ SOURCE-PRIMARIES. Overlay-only — write the
-            // stored value; VectorscopeScopeView's @AppStorage on the same key redraws immediately
-            // (the trace math already tracks the source matrix, so no re-plot is needed).
-            Button("") {
+            },
+            .vectorscopeGraticule: DeckShortcut {
                 vectorscopeGraticule = (vectorscopeGraticule == .fixed709) ? .sourcePrimaries : .fixed709
-            }
-            .keyboardShortcut("g", modifiers: [.control, .option])
-            // ⌃⌥B  Vectorscope target boxes: cycle 75% → 100% → both. Overlay-only (redraws the boxes).
-            Button("") {
+            },
+            .vectorscopeBoxes: DeckShortcut {
                 switch vectorscopeBoxAmplitude {
                 case .percent75:  vectorscopeBoxAmplitude = .percent100
                 case .percent100: vectorscopeBoxAmplitude = .both
                 case .both:       vectorscopeBoxAmplitude = .percent75
                 }
-            }
-            .keyboardShortcut("b", modifiers: [.control, .option])
-            // Triangle visibility is overlay-only — write the stored flag; CIEScopeView's @AppStorage
-            // on the same key redraws immediately (no re-plot needed).
-            Button("") { cieShow709.toggle() }
-                .keyboardShortcut("1", modifiers: [.control, .option])
-            Button("") { cieShowP3.toggle() }
-                .keyboardShortcut("2", modifiers: [.control, .option])
-            Button("") { cieShow2020.toggle() }
-                .keyboardShortcut("3", modifiers: [.control, .option])
-        }
-        .opacity(0)
-    }
-
-    /// DeckLink output accelerators — route through the SAME start/stop path as the toolbar control,
-    /// so button and shortcut never disagree. ⌃⌥O = start, ⌃⌥⇧O = stop (both no-op if already there).
-    @ViewBuilder private var deckLinkShortcuts: some View {
-        Group {
-            Button("") { DeckRegistry.shared.startDeckLinkOutput(from: deck) }
-                .keyboardShortcut("o", modifiers: [.control, .option])
-            Button("") { DeckRegistry.shared.stopDeckLinkOutput(from: deck) }
-                .keyboardShortcut("o", modifiers: [.control, .option, .shift])
-        }
-        .opacity(0)
-    }
-
-    /// NDI keyboard accelerators — the fast path for the SAME actions the toolbar streaming control
-    /// drives (one action, two triggers): ⌃⌥N quick-connects (the first discovered source, or a
-    /// blocking discovery when the picker hasn't run yet), ⌃⌥⇧N disconnects. The toolbar chevron is
-    /// the discoverable path (pick/switch a specific source); these are the muscle-memory path. NDI
-    /// takes over the display while connected (see NDIService); file<->NDI handoff is a later step.
-    @ViewBuilder private var ndiShortcuts: some View {
-        Group {
-            Button("") {
-                DeckRegistry.shared.connectLive(.ndi, from: deck) {
-                    LiveSource.connectNDIFirstSource()
-                }
-            }
-            .keyboardShortcut("n", modifiers: [.control, .option])
-            Button("") { DeckRegistry.shared.retireLiveIfOwned(by: deck) }
-                .keyboardShortcut("n", modifiers: [.control, .option, .shift])
-            // ⌃⌥C cycles the colorimetry override. The toolbar picker is the real control; this is
-            // a keyboard path for driving it hands-off (and for A/B-ing a preset against the picture
-            // without moving the pointer, which is how you actually judge one).
-            Button("") { deck.cycleColorOverride(live: activeLiveSource) }
-                .keyboardShortcut("c", modifiers: [.control, .option])
-        }
-        .opacity(0)
-    }
-
-    /// DEBUG-only synthetic live-source probe — Step 1 of the live-streaming clock foundation.
-    /// Replays the CURRENTLY-LOADED file through the LIVE path (driven by `LiveClock`, not the
-    /// file-timeline synchronizer), with zero networking, to validate the anchor + presentation-
-    /// clock skeleton before any WHEP transport exists. Same keyboard-probe role the early NDI
-    /// ⌃⌥N trigger played — a test harness, NOT user-facing UI. Compiled out of Release.
-    ///   ⌃⌥L   start: re-feed the loaded file's decoded frames as if they were arriving live
-    ///   ⌃⌥⇧L  stop: restore normal file playback (also ABORTS a running ⌃⌥S sweep, with a partial table)
-    ///   ⌃⌥P   cycle drift/jitter tuning preset (clean → drift → drift+jitter), live + next start
-    ///   ⌃⌥U   toggle control loop OFF (rate≡1.0) to read measured depth at unity — live + next start
-    ///   ⌃⌥A   NDI audio TONE TEST — cycle OFF → 1 kHz 0 dBFS → 1 kHz −6 dBFS → OFF. Replaces the
-    ///         pulled NDI samples with a continuous synthesised sine and changes nothing else about
-    ///         the buffers, so a crackle that survives it is in the PATH, not the samples. Also
-    ///         reaches the meters and SDI — see NDIService.
-    ///         ⚠️ NOT DEFINED IN THIS FILE — it is `Debug ▸ NDI Audio Tone Test` in ManifoldApp,
-    ///         which owns the ⌃⌥A binding too. Listed here only so this table stays the one place
-    ///         that answers "what are the dev chords".
-    ///   ⌃⌥S   auto-sweep the (targetDepth × jitter) grid — 24 cells × 15s, per-cell verdict + summary
-    ///         table to stderr; load a clip, hit ⌃⌥S, walk away. Second ⌃⌥S aborts early.
-    ///   ⌃⌥W   libdatachannel link smoke test (WHEP step 1) — logs version + PeerConnection
-    ///         create/delete. No networking; proves the static lib linked and runs. Temporary.
-    ///   ⌃⌥H   WHEP session (steps 2–4) — recvonly offer → POST → answer → ICE/DTLS, then RTP
-    ///         → RFC 6184 depacketize → VideoToolbox decode → promote → LiveClock → SCREEN.
-    ///         WHEP takes the display while connected (a loaded file is retired), so this is
-    ///         also the source-activation trigger. Watch [WHEP-RTP] for NAL counts,
-    ///         [WHEP-DECODE] for the decode rate, and [WHEP-FLOW] + [LIVECLOCK] for the
-    ///         producer/consumer pair. Connects the FIRST saved stream bookmark (a convenience over
-    ///         the shipping Stream Sources sheet); no-op with a log if none is saved. ⌃⌥⇧H tears down.
-    ///   ⌃⌥⇧E  export the next decoded WHEP frame to a PNG (pre-render, decoder-side check)
-    ///   ⌃⌥D   SRT session (stage 3d) — libsrt caller → AVIOContext → mpegts demux → access
-    ///         units → VideoToolbox decode → promote → LiveClock → SCREEN. SRT takes the display
-    ///         while connected (a loaded file is retired), so this is a source-activation trigger
-    ///         like ⌃⌥H. Watch [SRT] for the connect facts and colorimetry, [SRT-AU] for the
-    ///         demux/reader counters and the reorder measurement, and [SRT-FLOW] + [LIVECLOCK] for
-    ///         the producer/consumer pair. ⌃⌥⇧D tears it down.
-    ///         TARGET IS HARDCODED to srt://127.0.0.1:9000 — the SHORTCUT is the temporary part,
-    ///         not the path it drives. Stage 3e wires the stream-bookmark UI (StreamType.srt is
-    ///         still marked unsupported there, deliberately, until it does).
-    /// The property is defined in all configs (the `.background` mounting it is unconditional);
-    /// only the triggers are conditional.
-    ///
-    /// ⚠️ TWO GATES, AND THEY ARE NOT THE SAME GATE. The outer `#if DEBUG` is TRUE IN PROFILE, which
-    /// is the configuration every shipped build has used — it excludes these triggers from Release
-    /// and from nothing else. The inner `#if MANIFOLD_CONFIG_DEBUG` blocks are the real Debug-only
-    /// gate (Debug is the only configuration carrying that flag), and they hold every trigger that
-    /// reaches a LiveClock setpoint mutator: ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S and — the reason it matters —
-    /// ⌃⌥[ / ⌃⌥], which step a live WHEP or SRT clock. Do not "simplify" the inner gate to `#if
-    /// DEBUG`; that would put all six back in front of testers.
-    @ViewBuilder private var syntheticLiveShortcuts: some View {
+            },
+            .cie709: DeckShortcut { cieShow709.toggle() },
+            .cieP3: DeckShortcut { cieShowP3.toggle() },
+            .cie2020: DeckShortcut { cieShow2020.toggle() },
+            // Colour interpretation: the control bar's Color control, for whatever this window shows.
+            .cycleInterpretation: DeckShortcut(enabled: device) { deck.cycleColorOverride(live: activeLiveSource) },
+            .resetInterpretation: DeckShortcut(enabled: device) {
+                if let live = activeLiveSource { deck.colorOverride.set(.auto, on: live) } else { deck.fileColor.reset() }
+            },
+            // Audio. The nudge acts only while this window shows a live source; otherwise ⌥[ / ⌥] go on (to a text
+            // field, as “ and ‘), as they always have. Mute and volume are `transport`, as the fader is.
+            .audioLater1: nudge(1), .audioEarlier1: nudge(-1), .audioLater10: nudge(10), .audioEarlier10: nudge(-10),
+            .mute: DeckShortcut(enabled: transport) { engine.toggleMute() },
+            .volumeUp: DeckShortcut(enabled: transport) { engine.setVolume(engine.volume + 0.1) },
+            .volumeDown: DeckShortcut(enabled: transport) { engine.setVolume(engine.volume - 0.1) },
+            // Sources and output: the SAME funnels as the toolbar controls, so a menu pick and a button never
+            // disagree.
+            .connectFirstNDI: DeckShortcut(enabled: device) {
+                DeckRegistry.shared.connectLive(.ndi, from: deck) { LiveSource.connectNDIFirstSource() }
+            },
+            .disconnectLive: DeckShortcut(enabled: { device() && DeckRegistry.shared.liveLabel(for: deck) != nil }) {
+                DeckRegistry.shared.retireLiveIfOwned(by: deck)
+            },
+            .startDeckLink: DeckShortcut(enabled: device) { DeckRegistry.shared.startDeckLinkOutput(from: deck) },
+            .stopDeckLink: DeckShortcut(enabled: device) { DeckRegistry.shared.stopDeckLinkOutput(from: deck) },
+        ]
         #if DEBUG
-        Group {
-            // ⚠️ THE GATE BELOW IS `MANIFOLD_CONFIG_DEBUG`, NOT `#if DEBUG`, AND THE DIFFERENCE IS THE
-            // WHOLE POINT. Profile defines DEBUG (project.yml, target-level
-            // SWIFT_ACTIVE_COMPILATION_CONDITIONS) and every build cut to date has been Profile — so
-            // the enclosing `#if DEBUG` has never gated anything in a tester's hands. Only the Debug
-            // configuration gets MANIFOLD_CONFIG_DEBUG (project.yml `settings.configs`, and Debug is
-            // the one config with no target-level override of that key), so it is the real gate.
-            //
-            // WHAT IS INSIDE IT: every trigger here reaches a LiveClock setpoint mutator.
-            //   ⌃⌥L   start()      → setForceUnityRate   (SyntheticLiveSource.swift:185)
-            //   ⌃⌥⇧L  stop()       → reset()             (:297)
-            //   ⌃⌥U   toggle       → setForceUnityRate   (:488)
-            //   ⌃⌥S   startSweep() → setForceUnityRate + setDepths + reset() (:531, :565, :566)
-            // ⌃⌥P mutates no clock — it only moves driftRate/jitterAmplitude — but it configures a
-            // harness that nothing can start once the other four are gated, so leaving it live would
-            // buy nothing except a misleading `[SyntheticLive] preset →` line in a tester's
-            // diagnostics. It is in here for that reason and no other.
-            //
-            // The mutators these reach all land on SyntheticLiveSource's OWN private LiveClock
-            // (built at :183), never on a transport's — that containment is why this block is a
-            // tidiness fix. The ⌃⌥[ / ⌃⌥] block further down is the one that was not.
-            #if MANIFOLD_CONFIG_DEBUG
-            Button("") {
-                guard let url = engine.currentURL, let renderer = metalRenderer else {
-                    NSLog("[SyntheticLive] load a file first — ⌃⌥L replays the loaded file through the live path")
-                    return
-                }
-                // Retire file playback first (one active source), exactly as an NDI takeover does.
-                SyntheticLiveSource.shared.start(url: url, renderer: renderer,
-                                                 // Through the arbiter, not `engine.stop()`: the
-                                                 // deck the harness is taking the display FROM is
-                                                 // fully unloaded, every other deck merely yields
-                                                 // its transport and keeps its picture.
-                                                 retireCurrentSource: {
-                                                     DeckRegistry.shared.liveStreamWillActivate()
-                                                 })
-            }
-            .keyboardShortcut("l", modifiers: [.control, .option])
-            Button("") { SyntheticLiveSource.shared.stop() }
-                .keyboardShortcut("l", modifiers: [.control, .option, .shift])
-            // ⌃⌥P cycles the drift/jitter tuning preset — the injected sender-clock conditions the
-            // control loop is tuned against. Applies to a running harness immediately + to next start.
-            Button("") { SyntheticLiveSource.shared.cyclePreset() }
-                .keyboardShortcut("p", modifiers: [.control, .option])
-            // ⌃⌥U toggles the LiveClock control loop OFF (rate≡1.0) so [LIVECLOCK] reports the MEASURED
-            // depth at unity — the setpoint-reality check before tuning. Applies live + to next ⌃⌥L.
-            // ⚠️ BOTH CLOCKS, because there are two and only one of them is ever running. The
-            // synthetic harness owns its own LiveClock; a live SRT session owns a different one.
-            // This shortcut used to reach only the first, which made it inert during exactly the
-            // sessions worth pinning.
-            Button("") {
-                let on = SyntheticLiveSource.shared.toggleForceUnityRate()
-                SRTFrameRouter.shared.setForceUnityRate(on)
-            }
-                .keyboardShortcut("u", modifiers: [.control, .option])
-            // ⌃⌥S runs the automated (targetDepth × jitter) sweep from the loaded file: steps the grid,
-            // holds 15s/cell, logs a [SWEEP] verdict per cell + a [SWEEP-SUMMARY] table. Ensures the
-            // harness is up first (same start path as ⌃⌥L). Second ⌃⌥S (or ⌃⌥⇧L) aborts early.
-            Button("") {
-                guard let url = engine.currentURL, let renderer = metalRenderer else {
-                    NSLog("[SWEEP] load a file first — ⌃⌥S sweeps the loaded file through the live path")
-                    return
-                }
-                SyntheticLiveSource.shared.startSweep(url: url, renderer: renderer,
-                                                      // Through the arbiter, not `engine.stop()`: the
-                                                 // deck the harness is taking the display FROM is
-                                                 // fully unloaded, every other deck merely yields
-                                                 // its transport and keeps its picture.
-                                                 retireCurrentSource: {
-                                                     DeckRegistry.shared.liveStreamWillActivate()
-                                                 })
-            }
-            .keyboardShortcut("s", modifiers: [.control, .option])
-            #endif
-            // ── ⌃⌥A (NDI audio tone test) IS DELIBERATELY NOT HERE. IT IS A MENU ITEM. ────────
-            //
-            // It was here, as a hidden Button, and it did nothing at all: it sat INSIDE the
-            // `MANIFOLD_CONFIG_DEBUG` gate above, and Profile — the configuration every build is
-            // cut from — defines DEBUG but NOT that. The button was compiled out entirely, so the
-            // keystroke reached no handler and macOS just beeped. The gate's own header says
-            // exactly this, and it still did not stop a non-LiveClock trigger being put behind the
-            // LiveClock gate.
-            //
-            // Moving it out of the gate would have fixed that one bug and left the real weakness:
-            // a hidden Button fires only while this view is mounted and only if nothing upstream
-            // has already claimed the chord (⌃⌥T, two screens up, is the scope tray), and a chord
-            // that loses that race fails SILENTLY as a beep. `Debug ▸ NDI Audio Tone Test`
-            // (ManifoldApp) is bound to the application instead, cannot be shadowed, states its own
-            // current mode, and carries ⌃⌥A itself. A diagnostic that has to be reachable on demand
-            // during a live capture belongs in a menu.
-            // ⌃⌥W — libdatachannel LINK SMOKE TEST (WHEP step 1 of 4). Not a WHEP handshake and
-            // not networking: it only proves the vendored static libdatachannel is linked into
-            // this binary, initialized, and callable, alongside the DeckLink C++. Delete once a
-            // real WHEP session exists. Expect [WEBRTC] lines from the library's own logger too.
-            Button("") {
+        handlers.merge(debugShortcutHandlers(device: device)) { $1 }
+        #endif
+        deck.shortcutHandlers = handlers
+    }
+
+    #if DEBUG
+    /// The debug hooks' actions. `#if DEBUG` only because the symbols they reach are DEBUG-only; WHETHER a hook
+    /// answers is `ShortcutDebugGate`'s, the one predicate (Shortcuts/ShortcutCenter.swift). Its `.configDebug` tier —
+    /// ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S, ⌃⌥[ and ⌃⌥], every hook that reaches a LiveClock setpoint mutator — is on only in
+    /// the Debug configuration, never in Profile (docs/BUGS.md). The connects and retires carry the device-claim
+    /// gate, as their hidden buttons did.
+    private func debugShortcutHandlers(device: @escaping @MainActor () -> Bool) -> [ShortcutID: DeckShortcut] {
+        [
+            // M4 tuning: hide Metal to reveal the AVSampleBufferDisplayLayer reference (decision 7: DEBUG only).
+            .debugRenderLayer: DeckShortcut { showReferenceLayer.toggle() },
+            // libdatachannel link smoke test: logs the version and a PeerConnection create/delete. No networking.
+            .debugWebRTCSmoke: DeckShortcut(enabled: device) {
                 var message: NSString?
                 let ok = ManifoldWebRTCLinkSmokeTest(&message)
                 let version = String(cString: ManifoldWebRTCVersion())
                 NSLog("[WEBRTC-SMOKE] header version %@ | %@ | %@",
                       version, ok ? "PASS" : "FAIL", message ?? "no detail")
-            }
-            .keyboardShortcut("w", modifiers: [.control, .option])
-            // ⌃⌥H — WHEP HANDSHAKE (step 2 of 4). Builds a recvonly offer, waits for ICE
-            // gathering to complete, POSTs the offer SDP to the configured WHEP endpoint,
-            // applies the answer, and logs the transport coming up. A spec-compliant WHEP
-            // exchange — no server-specific behaviour. Success is "[WHEP] connected"; there is
-            // deliberately no picture yet. ⌃⌥⇧H tears the session down (and DELETEs it).
-            Button("") {
-                // Convenience shortcut over the shipping Stream Sources sheet: connect the first
-                // saved WEB bookmark. With the dotfile backdoor gone there is no ambient URL, so
-                // ⌃⌥H is a speed path over saved state — never a URL-entry path.
-                //
-                // `ofType: .web`, not `firstConnectable` — SRT bookmarks became connectable in 3e,
-                // so the general form can now return one, and ⌃⌥⇧H (which tears down WHEP and only
-                // WHEP) would then have no way to undo what ⌃⌥H did. ⌃⌥D is SRT's trigger.
-                //
-                // MANIFOLD_STREAM_DEBUG_URL (pre-ship removal, docs/BUGS.md): an unattended run dials
-                // this instead, through the same dispatch the Stream URL sheet uses (WHEP or HLS by
-                // the URL), so no bookmark is read and `streamBookmarks` is never touched. Unset,
-                // nothing changes. ⌃⌥D's `MANIFOLD_SRT_DEBUG_URL` is the same shape.
-                // MANIFOLD_STREAM_DEBUG_BOOKMARK (same removal) dials the saved stream of that NAME, of any
-                // type, as its row in the streaming menu would: the colour override's per-bookmark runs on
-                // HLS, which ⌃⌥H's web-only default cannot reach (§6.9 Stage E). A comma list dials the
-                // next name on each press, so an HLS→HLS swap can be driven.
+            },
+            // WHEP: `MANIFOLD_STREAM_DEBUG_URL`, else `MANIFOLD_STREAM_DEBUG_BOOKMARK` (a saved stream of that name,
+            // any type, cycling through a comma list), else the first saved web stream (docs/BUGS.md).
+            .debugWHEPConnect: DeckShortcut(enabled: device) {
                 if let override = ProcessInfo.processInfo.environment["MANIFOLD_STREAM_DEBUG_URL"]
                     .flatMap(URL.init(string:)) {
                     connectToStreamURL(override)   // unnamed: the title names its host
@@ -1912,105 +1684,62 @@ struct ContentView: View {
                     connectToStreamURL(url, name: bookmark.name, bookmark: bookmark)
                 } else if let bookmark = StreamBookmarkStore.shared.firstConnectable(ofType: .web),
                    let url = StreamBookmarkStore.connectURL(for: bookmark) {
-                    // Through the arbitration funnel, exactly like the shipping menu path. This
-                    // used to call WHEPClient.connect directly and so retired nothing — a live SRT
-                    // session stayed up and both pushed to the renderer.
                     DeckRegistry.shared.connectLive(.web, from: deck, label: bookmark.name, bookmark: bookmark) {
                         LiveSource.connectWeb(to: url)
                     }
                 } else {
                     NSLog("[WHEP] no saved stream — add one via the streaming menu ▸ Stream URL…")
                 }
-            }
-            .keyboardShortcut("h", modifiers: [.control, .option])
-            Button("") { DeckRegistry.shared.retireLiveIfOwned(by: deck) }
-                .keyboardShortcut("h", modifiers: [.control, .option, .shift])
-            // ⌃⌥⇧E — WHEP DECODED-FRAME STILL (step 3b). Writes the next decoded WHEP frame
-            // to a PNG in the export folder. Distinct from ⌃⌥E, which reads back the RENDERED
-            // frame: nothing is rendered from WHEP yet, so this goes straight from the
-            // decoder's CVPixelBuffer via VideoToolbox. A content/geometry check, not a
-            // colour-managed export — see LiveVideoDecoder.exportStill.
-            Button("") { WHEPClient.shared.exportNextDecodedFrame() }
-                .keyboardShortcut("e", modifiers: [.control, .option, .shift])
-            // ⚠️ GATED TO `MANIFOLD_CONFIG_DEBUG` — the same real Debug-only gate as the harness
-            // block above, and THIS is the pair that made it urgent rather than tidy.
-            // `stepLiveTargetDepth` routes to WHEPFrameRouter.shared / SRTFrameRouter.shared, so
-            // unlike everything else in this group these two mutate the setpoint of a REAL
-            // transport's LiveClock — re-anchoring it and jumping presentation time — on a live
-            // stream, in a shipped build. `[` sits two keys right of `P` on a US layout, next to
-            // the ⌃⌥P this group already binds, so it is reachable by a slip and not only on
-            // purpose. The FUNCTION stays ungated (it is a private no-op when nothing is live);
-            // only the trigger is removed.
-            //
-            // ⌃⌥[ / ⌃⌥] — step the live WHEP buffer target by ∓/± 0.05 s (clamped 0.10…1.00).
-            //
-            // WHY THIS EXISTS: the cushion is being SIZED against measured jitter, and one
-            // connection has to test several values or the comparison is confounded by whatever
-            // the network was doing on each separate connect. Each press logs
-            // `[LIVECLOCK] targetDepth A -> B (manual)` and the ongoing [LIVECLOCK] line carries
-            // the current target, so the log is self-documenting about which value each stretch of
-            // [WHEP-UNDERRUN] / [WHEP-JITTER] output was measured at.
-            //
-            // The clock re-anchors on the step, so the new depth is acquired immediately instead of
-            // over ~10 s at the ±0.5% rail — see LiveClock.adjustTargetDepth for the direction
-            // argument (deepening moves now() BACKWARD, which only holds the current frame longer).
-            //
-            // ROUTED TO WHICHEVER PUSH SOURCE IS LIVE, not hardwired to WHEP. SRT's 0.250 target
-            // is an ARGUED starting value rather than a measured one, so it needs this stepper
-            // more than WHEP does — a stepper that only moved WHEP's clock would have left the
-            // newer number the harder one to measure. The switch is exhaustive over LiveSource on
-            // purpose: a fourth push source cannot be added without deciding what this does.
-            #if MANIFOLD_CONFIG_DEBUG
-            Button("") { stepLiveTargetDepth(by: -0.05) }
-                .keyboardShortcut("[", modifiers: [.control, .option])
-            Button("") { stepLiveTargetDepth(by: 0.05) }
-                .keyboardShortcut("]", modifiers: [.control, .option])
-            #endif
-            // ⌃⌥D — SRT SESSION (stage 3d). D for Demux, kept from the stage-2 spike this
-            // replaces: S, R and T are all taken (⌃⌥S sweep, ⌃⌥R, ⌃⌥T), and D is free in both
-            // plain and shifted form and is not adjacent to ⌃⌥L or ⌃⌥H, the two other live-path
-            // triggers most likely to be pressed in the same session.
-            //
-            // ⚠️ THE SHORTCUT IS THE TEMPORARY PART, NOT WHAT IT DRIVES. Everything below the
-            // button — SRTClient, SRTFrameRouter, ManifoldSRTSession — ships in Release. Only
-            // this trigger is #if DEBUG.
-            //
-            // THE SHIPPING ENTRY POINT NOW EXISTS: stage 3e un-gated StreamType.srt, so a saved
-            // srt:// bookmark connects from the menu and the sheet like any other. This shortcut
-            // therefore prefers the first saved SRT bookmark — passphrase and all, through the same
-            // connectURL path the UI uses — and falls back to the loopback probe only when nothing
-            // is saved, which is what makes it still useful on a fresh machine.
-            //
-            // UNLIKE the spike, this DOES take the display: the file is retired and the screen
-            // blacked at connect, and the route is configured once the demuxer has reported the
-            // stream's colorimetry.
-            Button("") {
-                // MANIFOLD_SRT_DEBUG_URL (pre-ship removal, docs/BUGS.md): an unattended repro dials
-                // this instead of the first bookmark, so no stored passphrase is read and an unsigned
-                // build raises no keychain prompt. Unset, nothing changes.
+            },
+            .debugWHEPRetire: DeckShortcut(enabled: device) { DeckRegistry.shared.retireLiveIfOwned(by: deck) },
+            // The next decoded WHEP frame to a PNG: pre-render, the decoder-side check.
+            .debugWHEPExportFrame: DeckShortcut(enabled: device) { WHEPClient.shared.exportNextDecodedFrame() },
+            // SRT: `MANIFOLD_SRT_DEBUG_URL`, else the first saved SRT stream, else srt://127.0.0.1:9000.
+            .debugSRTConnect: DeckShortcut(enabled: device) {
                 let override = ProcessInfo.processInfo.environment["MANIFOLD_SRT_DEBUG_URL"]
                     .flatMap(URL.init(string:))
                 let bookmark = override == nil ? StreamBookmarkStore.shared.firstConnectable(ofType: .srt) : nil
                 let saved = bookmark.flatMap { StreamBookmarkStore.connectURL(for: $0) }
-                // One lookup, used for BOTH the URL and the name another window would be shown —
-                // two lookups could disagree if the store changed between them.
-                // The override has no bookmark, so its audio offset is a session value only (§19.8).
                 let target = override ?? saved ?? Self.srtDebugTarget
-                // A bookmark's name, else the target's host (unnamed, like a pasted URL).
                 DeckRegistry.shared.connectLive(.srt, from: deck, label: bookmark?.name ?? Self.hostLabel(target),
                                                 bookmark: bookmark) {
                     LiveSource.connectSRT(to: target)
                 }
-            }
-            .keyboardShortcut("d", modifiers: [.control, .option])
-            Button("") { DeckRegistry.shared.retireLiveIfOwned(by: deck) }
-                .keyboardShortcut("d", modifiers: [.control, .option, .shift])
-        }
-        .opacity(0)
-        #else
-        EmptyView()
-        #endif
+            },
+            .debugSRTRetire: DeckShortcut(enabled: device) { DeckRegistry.shared.retireLiveIfOwned(by: deck) },
+            // SyntheticLive (the live-clock harness): replays the LOADED file through the live path, with no
+            // networking. ⌃⌥⇧L also aborts a running sweep, with a partial table.
+            .debugSyntheticStart: DeckShortcut(enabled: device) {
+                guard let url = engine.currentURL, let renderer = metalRenderer else {
+                    NSLog("[SyntheticLive] load a file first — ⌃⌥L replays the loaded file through the live path")
+                    return
+                }
+                SyntheticLiveSource.shared.start(url: url, renderer: renderer,
+                                                 retireCurrentSource: { DeckRegistry.shared.liveStreamWillActivate() })
+            },
+            .debugSyntheticStop: DeckShortcut(enabled: device) { SyntheticLiveSource.shared.stop() },
+            // ⌃⌥P mutates no clock (only driftRate / jitterAmplitude), but configures a harness nothing can start
+            // outside the Debug configuration, so it is in that tier with the others.
+            .debugSyntheticPreset: DeckShortcut(enabled: device) { SyntheticLiveSource.shared.cyclePreset() },
+            .debugForceUnityRate: DeckShortcut(enabled: device) {
+                let on = SyntheticLiveSource.shared.toggleForceUnityRate()
+                SRTFrameRouter.shared.setForceUnityRate(on)
+            },
+            // The (targetDepth × jitter) grid, 24 cells × 15 s; a second ⌃⌥S aborts.
+            .debugSyntheticSweep: DeckShortcut(enabled: device) {
+                guard let url = engine.currentURL, let renderer = metalRenderer else {
+                    NSLog("[SWEEP] load a file first — ⌃⌥S sweeps the loaded file through the live path")
+                    return
+                }
+                SyntheticLiveSource.shared.startSweep(url: url, renderer: renderer,
+                                                      retireCurrentSource: { DeckRegistry.shared.liveStreamWillActivate() })
+            },
+            // Step a live WHEP or SRT LiveClock target: the reason the Debug-configuration tier exists.
+            .debugDepthDown: DeckShortcut(enabled: device) { stepLiveTargetDepth(by: -0.05) },
+            .debugDepthUp: DeckShortcut(enabled: device) { stepLiveTargetDepth(by: 0.05) },
+        ]
     }
+    #endif
 
     /// ⌃⌥D's target. HARDCODED ON PURPOSE for this stage, exactly as the stage-2 spike's was: a
     /// URL-entry path here would be a second, parallel way to name a stream that then has to be
@@ -2252,6 +1981,12 @@ struct ContentView: View {
         // so the refusal is visible before the click rather than a surprise after it.
         let arbitrated = !deck.gate.deviceControlsEnabled
         let blocked = (status.isDriverBlocked && !deckLink.isOutputting) || arbitrated
+        // Named first: inline, the `??` chain below no longer type-checks in reasonable time.
+        let stopHelp: String = keys.helpText("click to stop", .stopDeckLink)
+        let onOffHelp: String = deckLink.isOutputting ? "DeckLink output ON — " + stopHelp
+                                                      : "DeckLink output — " + keys.helpText("click to start", .startDeckLink)
+        let placedHelp: String? = deckLink.isOutputting
+            ? deckLink.placementLine.map { "DeckLink output ON — \($0) — " + stopHelp } : nil
         return HStack(spacing: 2) {
             Button { DeckRegistry.shared.toggleDeckLinkOutput(from: deck) } label: {
                 Image(systemName: deckLink.isOutputting ? "tv.fill" : "tv")
@@ -2269,9 +2004,8 @@ struct ContentView: View {
                   ?? (deckLink.isOutputting ? nil : deckLink.startRefusal)
                   // SDI scaling (D8): a placed or scaled picture is said here too, so the green icon is never
                   // taken for a native 1:1 output.
-                  ?? (deckLink.isOutputting ? deckLink.placementLine.map { "DeckLink output ON — \($0) — click to stop (⌃⌥⇧O)" } : nil)
-                  ?? (deckLink.isOutputting ? "DeckLink output ON — click to stop (⌃⌥⇧O)"
-                                            : "DeckLink output — click to start (⌃⌥O)"))
+                  ?? placedHelp
+                  ?? onOffHelp)
 
             Menu {
                 Section("Output device") {
@@ -2404,8 +2138,9 @@ struct ContentView: View {
             .foregroundStyle(mine ? Color.green : .white.opacity(arbitrated ? 0.35 : 0.9))
             .help(arbitrated ? (deck.gate.reason ?? "Streaming is in another window")
                   : mine
-                  ? "Streaming — \(ndi.connectedSourceName ?? "NDI") — click to stop (⌃⌥⇧N)"
-                  : "Streaming — local mode; click to connect the first NDI source, or use the menu to pick (⌃⌥N)")
+                  ? "Streaming — \(ndi.connectedSourceName ?? "NDI") — " + keys.helpText("click to stop", .disconnectLive)
+                  : keys.helpText("Streaming — local mode; click to connect the first NDI source, or use the menu to pick",
+                                  .connectFirstNDI))
 
             Menu {
                 streamingMenuContent
@@ -2543,7 +2278,7 @@ struct ContentView: View {
     /// NDI runtime installed put mDNS queries on the network — and, on macOS 15, raised the
     /// local-network prompt — before anyone had touched NDI. The signal is
     /// `NDIMenuOpenWatcher.ndiSubmenuWillOpen`, answered in `body`; NOT `.onAppear` here, which
-    /// SwiftUI fires when the parent menu opens (measured). Connecting to a source (⌃⌥N, the
+    /// SwiftUI fires when the parent menu opens (measured). Connecting to a source (File ▸ Connect to First NDI Source, the
     /// streaming button) still discovers on its own.
     @ViewBuilder private var ndiSourceListItems: some View {
         Group {
@@ -2822,7 +2557,7 @@ struct ContentView: View {
         }
     }
 
-    /// The streaming button's main-click action (and the ⌃⌥N/⌃⌥⇧N shortcuts funnel through the same
+    /// The streaming button's main-click action (and File ▸ Connect to First NDI Source / Disconnect Live Source funnel through the same
     /// NDIService calls): stop when streaming, quick-connect the first discovered source otherwise.
     private func toggleStreaming() {
         if activeLiveSource == .ndi {
@@ -2837,7 +2572,7 @@ struct ContentView: View {
     private func controls(showPin: Bool) -> some View {
         // ONE DECK PLAYS AT A TIME, so everything that moves the transport is gated on this deck
         // being the active one. The set is the scrubber, play/pause + Space, mute, the volume
-        // fader and loop; J/K/L and the arrow jog are gated at their hidden buttons in `body`.
+        // fader and loop; J/K/L and the arrow jog are gated in their shortcut handlers (`installShortcutHandlers`).
         //
         // MUTE AND VOLUME ARE DISABLED, NOT HIDDEN, and for two reasons. A paused engine is silent
         // by construction, so the fader has nothing to act on; and leaving it live lets a window
@@ -3000,16 +2735,16 @@ struct ContentView: View {
                 Button { DeckRegistry.shared.presentOpenPanel(from: deck) } label: {
                     Image(systemName: "folder")
                 }
-                .help("Open… (⌘O)")
+                .help(keys.helpText("Open…", .fileOpen))
 
                 Button { engine.togglePlayPause() } label: {
                     Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
                 }
-                .keyboardShortcut(.space, modifiers: [])
+                // Space is the shortcut registry's (`.playPause`), dispatched with this button's gate.
                 .disabled(!position)
                 // See the `dim` note above: `.disabled` does not grey a control in this row.
                 .foregroundStyle(position ? live : dim)
-                .help(position ? (engine.isPlaying ? "Pause (Space)" : "Play (Space)")
+                .help(position ? keys.helpText(engine.isPlaying ? "Pause" : "Play", .playPause)
                                : (positionWhy ?? "Playback is in another window"))
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
@@ -3091,7 +2826,7 @@ struct ContentView: View {
                 Button { showInspector.toggle() } label: {
                     Image(systemName: "info.circle")
                 }
-                .help("Inspector (I)")
+                .help(keys.helpText("Inspector", .inspector))
 
                 Button(action: editInFlip) {
                     // AN F IN A ROUNDED SQUARE — the silhouette of an app icon, so it reads as
@@ -3152,7 +2887,7 @@ struct ContentView: View {
                 Button(action: { metalRenderer?.exportCurrentFrame() }) {
                     Image(systemName: "square.and.arrow.down")
                 }
-                .help("Export frame (⌃⌥E)")
+                .help(keys.helpText("Export frame", .exportFrame))
                 .disabled(engine.currentURL == nil)
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
@@ -3170,7 +2905,7 @@ struct ContentView: View {
                     Image(systemName: "chart.bar.xaxis")
                 }
                 .foregroundStyle(chrome.showTray ? Color.green : .white.opacity(0.9))
-                .help("Scopes tray (⌃⌥T)")
+                .help(keys.helpText("Scopes tray", .scopesTray))
 
                 // DeckLink output: split-button — main toggles output, chevron picks device + status.
                 deckLinkOutputControl
@@ -3217,7 +2952,7 @@ struct ContentView: View {
                     Button { togglePin() } label: {
                         Image(systemName: pinned ? "pin.fill" : "pin")
                     }
-                    .help(pinned ? "Unpin controls (Tab)" : "Pin controls (Tab)")
+                    .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
                 }
             }
             .buttonStyle(.plain)

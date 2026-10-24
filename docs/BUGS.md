@@ -67,8 +67,11 @@ held back until after release, and the numbered defect entries follow.
      - **S2** — hold-to-compare: the other of macOS and Reference; Shift-hold compares against Bypass. The key
        is chosen in the shortcut registry. **Built and run unattended 2026-10-12 with a TEMPORARY key, backslash;
        every prediction passed (on-glass timing measured on live playback only; Core Animation reports none
-       for a paused re-present); not committed** (§6.11, *S2 — results*). ⚠️ **Pre-ship: the temporary key
-       must be replaced by the registry's choice** (`HoldToCompare.keyCode`).
+       for a paused re-present); not committed** (§6.11, *S2 — results*). ✅ **Final key: hold D, hold ⇧D for
+       Bypass** (Robbie, 2026-10-23, `SHORTCUTS_AUDIT.md` §4.6 decision 2), replacing the temporary backslash; built in
+       the shortcut registry, which matches exact modifiers (⌘D, ⌥D and any other modified D pass through) and steps
+       aside while a text field is typed into. Built and run unattended 2026-10-23, committed (`<commit — to be filled
+       in>`) (`SHORTCUTS_AUDIT.md` §5).
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
        four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below). **Built and run
        unattended 2026-10-12; committed (`94961b9`)** (§6.11, *S3 — results*). The table is in
@@ -109,7 +112,8 @@ held back until after release, and the numbered defect entries follow.
          - 16 files on Auto, and SRT, WHEP, HLS and NDI presets: 0 codes against HEAD.
          - A Custom bookmark restores, and HEAD reads it as Auto.
          - `streamBookmarks` restored to `4466c076…`.
-       - ⚠️ **Pre-ship:** Reset's keyboard shortcut is the shortcut registry's to decide. It has none yet.
+       - ✅ Reset's keyboard shortcut: **none by default** (Robbie, 2026-10-23, `SHORTCUTS_AUDIT.md` §4.6 decision 1).
+         It is Color ▸ Reset Color Interpretation to Auto, and can be bound in Help ▸ Keyboard Shortcuts….
        - **Open:** SDI on a running output; by eye on the LG.
        - **Minor, from before S5:** the Color menu shows the heading "Colorimetry" twice: the section
          title, then the inline preset picker's own label. The code predates S5 and S5 left it as it
@@ -235,7 +239,11 @@ held back until after release, and the numbered defect entries follow.
      deinterlace). SD interlaced (480i/576i) is out of scope.
    - **Open, read-only, later:** whether XDCAM HD422 and AVC-Intra MXF already play through AVFoundation
      with the Pro Video Formats registered. Adding libav decoders is decided after that.
-3. **The shortcut registry and its window**, first of what remains.
+3. ✅ **The shortcut registry and its window.** Built and run unattended 2026-10-23, committed (`<commit — to be
+   filled in>`). One registry (`Packages/ManifoldCore/Sources/ShortcutRegistry`, unit-tested) is the source of
+   truth for every non-stock shortcut; one `NSEvent` monitor (`App/Shortcuts/ShortcutCenter.swift`) and the menus
+   dispatch through it; Help ▸ Keyboard Shortcuts… rebinds. The scheme, the results and Robbie's by-hand checklist:
+   `SHORTCUTS_AUDIT.md` §4.2, §5, §6.
 4. **The release gate:**
    - the sync leftovers;
    - the user guide, including a note that an interlaced NDI source is deinterlaced by the NDI SDK before
@@ -260,6 +268,12 @@ held back until after release, and the numbered defect entries follow.
      hardware decoder the H.264 file is refused with a banner instead of falling back. That counts as
      an answer, not a failure of the check.
    - the pre-ship cleanup (the pre-ship checklist below, including every temporary probe it lists).
+   - **the debug hooks' predicate** (`ShortcutDebugGate`, `App/Shortcuts/ShortcutCenter.swift`). Its `.profile` tier
+     is `#if DEBUG`, and **the shipped Profile configuration defines `DEBUG`**, so every ⌃⌥ debug hook (⌃⌥R, ⌃⌥W,
+     ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, and the Debug menu's ⌃⌥A and ⌃⌥⇧B) answers in every tester build. Before a public
+     build, switch that one predicate to a flag only a developer build carries. It is the one place to change: the
+     hooks are registry actions behind it, not hidden buttons. The build configuration was deliberately not
+     changed when the registry was built (2026-10-23).
 
 ---
 
@@ -765,6 +779,18 @@ the same kind that justified gating the menu — they are just harder to trigger
 was then overtaken by a surface that did not exist when it was written. **A dev-path audit is not a
 list, it is a recurring check** — the same conclusion the American English entry above reached
 independently, and for the same reason. Both want a preflight, not a memory.
+
+### 2026-10-23 — the hooks are now registry actions behind one predicate
+
+The shortcut registry (`SHORTCUTS_AUDIT.md` §4.4) made every hook above a `debug` action in
+`ShortcutCatalog`: not rebindable, and listed in Help ▸ Keyboard Shortcuts… only when the Debug menu's opt-in is
+on. Whether one answers is `ShortcutDebugGate` (`App/Shortcuts/ShortcutCenter.swift`):
+- the `.profile` tier (`#if DEBUG`, so ON IN PROFILE): ⌃⌥W, ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, the Debug menu's ⌃⌥A and
+  ⌃⌥⇧B, and **⌃⌥R, which moved here from the shipping set** (decision 7: the render-layer A/B);
+- the `.configDebug` tier (`MANIFOLD_CONFIG_DEBUG`, the Debug configuration only): ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S,
+  ⌃⌥[ and ⌃⌥].
+
+The decision this entry asks for is unchanged. It is now one switch, listed under the release gate above.
 
 ---
 

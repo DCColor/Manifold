@@ -43,6 +43,7 @@
 //
 
 import SwiftUI
+import ShortcutRegistry
 import AppKit
 
 // MARK: - The state
@@ -104,24 +105,6 @@ enum RasterSize: String, CaseIterable, Identifiable, Hashable {
         case .percent25:   return "25%"
         case .fitToScreen: return "Fit to Screen"
         case .custom:      return "Custom"
-        }
-    }
-
-    /// The View menu's accelerators. ⌘1–⌘4 descend through the presets; ⌘0 is Fit, which is where
-    /// media apps have put "make it fit" for long enough that it is muscle memory.
-    ///
-    /// Checked against every shortcut this app already claims: the bare keys (I, N, Tab, J/K/L, the
-    /// arrows, Space), the ⌃⌥ block (T, X, G, B, R, E, O, N, D and ⌃⌥1/2/3 for the CIE triangles)
-    /// and the standard ⌘ items. ⌘1–⌘4 and ⌘0 were unclaimed; ⌃⌥1/2/3 carry two extra modifiers and
-    /// do not collide.
-    var shortcut: KeyEquivalent? {
-        switch self {
-        case .percent100:  return "1"
-        case .percent75:   return "2"
-        case .percent50:   return "3"
-        case .percent25:   return "4"
-        case .fitToScreen: return "0"
-        case .automatic, .custom: return nil
         }
     }
 
@@ -319,9 +302,9 @@ final class RasterMenuState: ObservableObject {
 /// ── WHY A MENU, AND WHY NOT A CONTROL-BAR ITEM ─────────────────────────────────────────
 ///
 /// A menu is where a windowing app puts a window-geometry command, it is where a user looks for
-/// one, and it is the only surface in this app that can carry an accelerator that is visible before
-/// you press it. Every other shortcut here (⌃⌥T, ⌃⌥O, ⌃⌥X …) is a hidden `Button` in a `.background`
-/// and is discoverable only by reading the release notes.
+/// one, and it is the surface that shows an accelerator before you press it. The accelerators are the
+/// shortcut registry's (⌘1–⌘4 descend through the presets; ⌘0 is Fit, which is where media apps have put "make
+/// it fit" for long enough that it is muscle memory), and Help ▸ Keyboard Shortcuts… lists every other key.
 ///
 /// The control bar was considered and REFUSED. It is already carrying the transport, the scrubber,
 /// two readouts, volume, scopes, guides, captions, output and the inspector affordances, and it is
@@ -333,6 +316,8 @@ final class RasterMenuState: ObservableObject {
 struct RasterSizeCommands: Commands {
 
     @ObservedObject private var state = RasterMenuState.shared
+    // Observed so the menu shows a rebound key at once (docs/SHORTCUTS_AUDIT.md §4.4).
+    @ObservedObject private var shortcuts = ShortcutCenter.shared.registry
 
     var body: some Commands {
         // ⚠️ `CommandGroup(after: .toolbar)` AND NOT `CommandMenu("View")`, AND THE DIFFERENCE IS
@@ -350,12 +335,22 @@ struct RasterSizeCommands: Commands {
                 // checkmark. A Button would need a checkmark glyph faked into its label, which
                 // indents wrongly next to the shortcut column.
                 Toggle(size.menuTitle, isOn: binding(for: size))
-                    .modifier(OptionalShortcut(key: size.shortcut))
+                    .keyboardShortcut(size.shortcutID.flatMap { shortcuts.menuChord(for: $0) }?.menuShortcut())
                     // PER ITEM, because `Commands` has no `.disabled` — the modifier exists on
                     // View, and a menu's contents are views. Same predicate on all five, so the
                     // menu greys out as a unit.
                     .disabled(!state.enabled)
             }
+            // The window's view toggles (docs/SHORTCUTS_AUDIT.md §4.2): ⌘I was bare I, ⌥⌘T was Tab, ⌘7 was ⌃⌥T. The
+            // file-name overlay keeps bare N, which a menu item cannot carry, so its key shows only in Help ▸
+            // Keyboard Shortcuts…. A window that cannot do one now beeps, as a disabled shortcut did.
+            Divider()
+            ShortcutMenuItem(id: .inspector, registry: shortcuts)
+            ShortcutMenuItem(id: .scopesTray, registry: shortcuts)
+            ShortcutMenuItem(id: .fileName, registry: shortcuts)
+            ShortcutMenuItem(id: .alwaysShowControls, registry: shortcuts)
+            Divider()
+            ShortcutMenuItem(id: .loop, registry: shortcuts)
         }
     }
 
@@ -372,17 +367,3 @@ struct RasterSizeCommands: Commands {
     }
 }
 
-/// `.keyboardShortcut` takes a non-optional `KeyEquivalent`, and a `ViewBuilder` `if` around the
-/// modifier would give the two branches different types inside a `ForEach` in a menu. This applies
-/// it only where there is one, without branching the view's type.
-private struct OptionalShortcut: ViewModifier {
-    let key: KeyEquivalent?
-
-    func body(content: Content) -> some View {
-        if let key {
-            content.keyboardShortcut(key, modifiers: .command)
-        } else {
-            content
-        }
-    }
-}

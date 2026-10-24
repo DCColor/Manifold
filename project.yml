@@ -193,6 +193,10 @@ targets:
       # can pin that only the measured busy code is mapped. Used by App/DeckLink/DeckLinkService.swift only.
       - package: ManifoldCore
         product: DeckLinkRefusal
+      # Every shortcut's default, the user's overrides and the one key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4) — a leaf
+      # target so `swift test` can drive the dispatcher with synthesized NSEvents. Used by App/Shortcuts and the menus.
+      - package: ManifoldCore
+        product: ShortcutRegistry
       # Log and diagnostics redaction (docs/PRIVACY_AUDIT.md, stage P1) — a leaf target so `swift test`
       # can run every rule against real log lines. Used by DiagnosticsExport, WHEPClient, SRTClient, NDI.
       - package: ManifoldCore

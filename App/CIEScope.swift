@@ -1,4 +1,5 @@
 import SwiftUI
+import ShortcutRegistry
 import CoreGraphics
 import Metal
 import Combine
@@ -321,9 +322,9 @@ struct CIEScopeView: View {
     /// CIE-specific options menu (gear): mode picker (drives the kernel) + per-triangle visibility
     /// toggles (overlay-only). Distinct from the leading slot-picker menu. Shortcut hints teach the
     /// accelerators. Same @AppStorage underneath — a click and the shortcut do the same thing.
-    /// The ⌃⌥X hint stays in its section heading and the ⌃⌥1/2/3 hints stay in their row labels —
-    /// both are exactly where the menu had them, since a caption heading replaces a `Section` title
-    /// and a checkbox row replaces a menu `Toggle` one-for-one.
+    /// The mode's key hint stays in its section heading and the triangles' in their row labels. The keys are the
+    /// shortcut registry's and have no default since 2026-10-23 (they were ⌃⌥X and ⌃⌥1/2/3), so a hint shows only
+    /// when the user has bound one (`ShortcutCenter.hint`).
     ///
     /// ⚠️ THE MODE ROWS WRITE THROUGH `modeBinding`, NOT `$useUV`, and that is the same requirement
     /// the `Picker` had: the binding routes through `CIEScopeModel.applyMode`, which drives the
@@ -331,13 +332,13 @@ struct CIEScopeView: View {
     /// leave the scatter plotting in the old mode.
     private var cieOptions: some View {
         ScopeGear(title: "CIE options", help: "CIE options") {
-            ScopeGearSectionHeader("Mode · ⌃⌥X", isFirst: true)
+            ScopeGearSectionHeader(ShortcutCenter.hint("Mode", .cieSpace), isFirst: true)
             ScopeGearRadioRow(label: "u′v′ (1976)", selected: useUV) { modeBinding.wrappedValue = true }
             ScopeGearRadioRow(label: "xy (1931)", selected: !useUV) { modeBinding.wrappedValue = false }
             ScopeGearSectionHeader("Gamut triangles")
-            Toggle("709 · ⌃⌥1", isOn: $show709).font(.caption)
-            Toggle("P3 · ⌃⌥2", isOn: $showP3).font(.caption)
-            Toggle("2020 · ⌃⌥3", isOn: $show2020).font(.caption)
+            Toggle(ShortcutCenter.hint("709", .cie709), isOn: $show709).font(.caption)
+            Toggle(ShortcutCenter.hint("P3", .cieP3), isOn: $showP3).font(.caption)
+            Toggle(ShortcutCenter.hint("2020", .cie2020), isOn: $show2020).font(.caption)
         }
     }
 

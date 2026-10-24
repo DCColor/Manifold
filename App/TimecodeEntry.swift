@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ManifoldCore
+import ShortcutRegistry
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
 // TIMECODE ENTRY — type a position, land on it.
@@ -239,76 +240,27 @@ extension TimecodeEntry {
     }
 }
 
-// MARK: - 2. The transport key monitor
+// MARK: - 2. The transport keys
 
-/// PER-WINDOW KEYBOARD TRANSPORT: the app's only `NSEvent` monitor, and everything that has to read
-/// a keystroke rather than declare one.
+/// PER-WINDOW KEYBOARD TRANSPORT: timecode entry's modal state, and the frame and edge seeks the transport
+/// shortcuts ask for.
 ///
-/// Two responsibilities, and they are here together because they need the SAME capability for two
-/// different reasons — see the two sections below:
-///
-///   * **Timecode entry.** The modal state (what has been typed, the file's frame of reference, the
-///     clamp notice) plus the type-to-enter capture that opens it.
-///   * **Frame stepping.** ← / → (one frame) and ⇧← / ⇧→ (one second).
-///
-/// ⚠️ IT WAS CALLED `TimecodeEntryModel` and the name went stale the moment the arrow keys moved in.
-/// Both jobs are "interpret a keystroke as a transport action", which is what the name says now; the
-/// actual transport is still `FrameEngine`'s, and nothing here moves a playhead except by asking it.
+/// ⚠️ IT NO LONGER READS KEYSTROKES ITSELF. Until the shortcut registry (docs/SHORTCUTS_AUDIT.md §4.4) this class
+/// ran its own `NSEvent` monitor, for two reasons that still hold and now apply to every key: a monitor can
+/// DECLINE a keystroke (a digit typed into a text field must reach the field; a hidden `.keyboardShortcut` button
+/// would have swallowed it, because key equivalents are dispatched before the first responder sees the key), and
+/// it can read EXACT modifier flags (AppKit's key-equivalent matcher cannot tell ⇧← from ←, audit C7). Both are
+/// now `ShortcutCenter`'s one monitor and the registry's `KeyDispatcher`, which hands this class the keys that are
+/// entry's (`entryKey`, `openKey`) and calls its seeks through the window's shortcut handlers. The name is kept:
+/// it is still the window's keyboard transport, and ContentView names it in a dozen places.
 ///
 /// Owned by `ContentView` as a `@StateObject`, like `WindowChrome` and for the same reason — two
 /// windows are two decks, and an entry in one must not appear in or seek the other.
-///
-/// ── WHY AN NSEvent MONITOR AND NOT A HIDDEN `.keyboardShortcut` BUTTON — REASON 1, ENTRY ──
-///
-/// Every other shortcut in this app is a zero-opacity `Button` with a `.keyboardShortcut`, and that
-/// construct CANNOT do what type-to-enter requires. A SwiftUI keyboard shortcut becomes an AppKit
-/// KEY EQUIVALENT, and key equivalents are dispatched in `NSWindow.sendEvent` BEFORE the first
-/// responder is offered the keystroke. Ten hidden buttons bound to bare `0`–`9` would therefore
-/// swallow digits from every text field in the window, and the swallow is not recoverable: by the
-/// time the button's action runs, the character has already been consumed and there is no way to
-/// hand it back to the field. "Check the first responder and return early" would leave the user
-/// typing into a field that silently drops digits, which is worse than seeking.
-///
-/// A local `.keyDown` monitor is the construct that can DECLINE. It sees the event before dispatch
-/// and returns either the event (continue, unmodified — the field types normally) or nil (consume).
-///
-/// ── REASON 2, THE ARROWS: A KEY EQUIVALENT CANNOT TELL ⇧← FROM ← ──────────────────────────
-///
-/// ⚠️ MEASURED, AND THE GOTCHA WORTH KNOWING: **AppKit's key-equivalent matcher does not
-/// discriminate `.shift` on the arrow keys.** ← / → / ⇧← / ⇧→ were four hidden buttons like
-/// everything else, and each arrow therefore had TWO claimants differing only by a modifier the
-/// matcher ignored — so one of each pair won for BOTH presses. On the built app: ← and ⇧← both
-/// stepped one second, → and ⇧→ both stepped one frame. The declarations were correct and the
-/// dispatch was not.
-///
-/// `event.modifierFlags` off the event is exact, so the monitor can tell them apart. That is why the
-/// arrows live here rather than with their siblings in `ContentView`, and it is the same capability
-/// entry needs, arrived at from the opposite direction: entry needs to DECLINE a keystroke, the
-/// arrows need to INSPECT one.
-///
-/// (What was measured is the two-claimant collapse. Whether a lone `modifiers: .shift` arrow binding
-/// with no unshifted sibling would fire correctly was not tested — it does not matter here, because
-/// the pair is what the design needs and the pair cannot be expressed.)
-///
-/// ── HOW "IS A TEXT FIELD FOCUSED" IS ACTUALLY DECIDED ─────────────────────────────────────
-///
-/// Two independent gates, because a focused field can be in either of two places:
-///
-///   1. `NSApp.keyWindow === deck.window`. A sheet, the Settings window, the About window, or a
-///      popover that took key (AppKit gives an NSPopover its own window) is not this deck's window,
-///      so the event is passed through untouched and never reaches the entry state at all.
-///   2. The key window's `firstResponder` is a text view. An `NSTextField` being edited installs the
-///      window's FIELD EDITOR — an `NSTextView` — as first responder, so testing for `NSTextView`
-///      catches SwiftUI's `TextField` and `TextEditor` both. This is the gate that covers a field
-///      hosted inside this window rather than in a popover of its own.
-///
-/// Between them: a digit typed with a caret blinking anywhere is a digit, everywhere else it opens
-/// entry.
 @MainActor
 final class TransportKeyMonitor: ObservableObject {
 
-    /// Entry is open and the overlay is up. While true, the deck's own transport keys are held (see
-    /// `handle`) so nothing moves behind the overlay.
+    /// Entry is open and the overlay is up. While true, the dispatcher gives every bare key to `entryKey`, so
+    /// nothing moves behind the overlay.
     @Published private(set) var isActive = false
 
     /// What has been typed so far. Rendered by the overlay every keystroke.
@@ -330,7 +282,6 @@ final class TransportKeyMonitor: ObservableObject {
 
     private weak var deck: WindowDeck?
     private weak var engine: FrameEngine?
-    private var monitor: Any?
     private var noticeTask: Task<Void, Never>?
 
     /// How long a clamp notice stays up. Long enough to read six words, short enough that it is gone
@@ -339,152 +290,44 @@ final class TransportKeyMonitor: ObservableObject {
 
     // MARK: Wiring
 
-    /// Called once from `ContentView.onAppear`. Idempotent: SwiftUI may run `onAppear` again if the
-    /// view is re-added, and a second monitor would double-consume every keystroke.
+    /// Called from `ContentView.onAppear`. Idempotent.
     func attach(deck: WindowDeck, engine: FrameEngine) {
         self.deck = deck
         self.engine = engine
-        guard monitor == nil else { return }
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
-            // Local monitors are delivered on the main thread during event dispatch, so the actor
-            // assertion holds — the same reasoning WindowChrome's defaults observer documents.
-            //
-            // `handle` answers Bool rather than returning the event because `assumeIsolated`
-            // requires a Sendable result and NSEvent is not one. Returning nil is what CONSUMES the
-            // keystroke; returning the event unchanged is what lets a text field have it.
-            let consumed = MainActor.assumeIsolated { self.handle(event) }
-            return consumed ? nil : event
-        }
+        deck.transportKeys = self
     }
 
-    /// Called from `ContentView.onDisappear` — a closed window must stop inspecting keystrokes for a
-    /// deck that no longer exists. `deinit` alone would be too late and too vague about the thread.
+    /// Called from `ContentView.onDisappear`: a closed window's entry must not stay open.
     func detach() {
-        if let monitor { NSEvent.removeMonitor(monitor) }
-        monitor = nil
         noticeTask?.cancel()
         cancel()
     }
 
-    deinit {
-        // Belt and braces for a teardown path that never ran `detach()`. Removing a monitor twice is
-        // safe; leaving one installed against a dead deck is not.
-        if let monitor { NSEvent.removeMonitor(monitor) }
-    }
+    // MARK: Keys the dispatcher hands over
 
-    // MARK: The gate
-
-    /// True when the keystroke was consumed and must not be dispatched any further.
-    private func handle(_ event: NSEvent) -> Bool {
-        guard let window = deck?.window, NSApp.keyWindow === window else { return false }
-        guard !Self.isEditingText(in: window) else { return false }
-
-        // ⌘/⌃/⌥ combinations belong to the menu bar and to the existing ⌃⌥ shortcut blocks, and they
-        // keep working THROUGHOUT entry — ⌘W still closes the window with the overlay up, ⌃⌥T still
-        // toggles the tray. Only bare and shifted keys are ours to consider.
-        // ── THE AUDIO OFFSET NUDGE (docs/AUDIO_RESAMPLER_DESIGN.md §19.8) — BEFORE THE ⌥ PASS-THROUGH ──
-        // ⌥] / ⌥[ = sound later / earlier by 1 ms, ⇧ for 10 ms, while this window has a live
-        // source. HERE, on the exact modifier flags and the physical key, and NOT as key equivalents:
-        // this file records AppKit's matcher not discriminating ⇧ on the arrows, and ⇧] / ⇧[ are
-        // the same hazard; and ⌥[ is a typing key (“) in a text field, which `isEditingText` above
-        // leaves alone. Consumed only while live: otherwise the chord falls through as before.
-        if let step = Self.audioOffsetNudge(event), let deck, DeckRegistry.shared.liveLabel(for: deck) != nil {
-            deck.audioOffset.nudge(byMs: step)
-            return true
-        }
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard mods.isDisjoint(with: [.command, .control, .option]) else { return false }
-
-        let characters = event.charactersIgnoringModifiers ?? event.characters ?? ""
-
-        if isActive {
-            switch event.keyCode {
-            case 36, 76:  commit();    return true     // Return, keypad Enter
-            case 53:      cancel();    return true     // Escape
-            case 51, 117: backspace(); return true     // Delete, forward-delete
-            default: break
-            }
-            if let digit = Self.digit(in: characters) { append(digit); return true }
-            if Self.isPlus(characters)  { setSign(.plus);  return true }
-            if Self.isMinus(characters) { setSign(.minus); return true }
-            // ⚠️ EVERYTHING ELSE BARE IS SWALLOWED WHILE ENTRY IS OPEN, and that is deliberate: with
-            // the overlay up, Space, J/K/L, I, N and the arrows would all act on the picture behind
-            // it. An entry field that lets the playhead move while you are typing where to send it
-            // is not an entry field. ⎋ and ⏎ are the two ways out and both are handled above.
-            return true
-        }
-
-        // ── ARROW TRANSPORT — HERE BECAUSE THIS IS THE ONLY PLACE ⇧← IS DISTINGUISHABLE FROM ← ──
-        // Full account in this type's doc comment, under "REASON 2". Short version: a key
-        // equivalent cannot see the shift on an arrow key; `event.modifierFlags` can.
-        if let step = arrowStep(for: event) {
-            engine?.stepFrame(by: step)
-            return true
-        }
-
-        // Not active: only the three opening gestures are consumed, and only when this deck can
-        // actually accept one (`begin` answers false for an empty window). Every other key falls
-        // through to the shortcuts that have always had it.
-        if let digit = Self.digit(in: characters), begin(sign: .absolute) { append(digit); return true }
-        if Self.isPlus(characters),  begin(sign: .plus)  { return true }
-        if Self.isMinus(characters), begin(sign: .minus) { return true }
-        return false
-    }
-
-    /// The audio offset nudge for this key, ms, or nil: ⌥] +1, ⌥[ −1, ⇧⌥] +10, ⇧⌥[ −10 (§19.8).
-    /// Physical keys (ANSI 30 = ], 33 = [), with exactly ⌥ or ⇧⌥ held; Caps Lock is ignored.
-    static func audioOffsetNudge(_ event: NSEvent) -> Int? {
-        let mods = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        let size: Int
-        switch mods {
-        case [.option]: size = 1
-        case [.option, .shift]: size = 10
-        default: return nil
-        }
+    /// Entry is open: Return / Enter commit, Esc cancels, Delete removes a digit, digits and signs type.
+    /// ⚠️ EVERYTHING ELSE BARE IS SWALLOWED, and that is deliberate: with the overlay up, Space, J/K/L, D, N and the
+    /// arrows would all act on the picture behind it. ⎋ and ⏎ are the two ways out.
+    func entryKey(_ event: KeyEvent) -> Bool {
         switch event.keyCode {
-        case 30: return size
-        case 33: return -size
-        default: return nil
+        case KeyCode.returnKey, KeyCode.keypadEnter: commit(); return true
+        case KeyCode.escape: cancel(); return true
+        case KeyCode.delete, KeyCode.forwardDelete: backspace(); return true
+        default: break
         }
+        if let digit = Self.digit(in: event.characters) { append(digit); return true }
+        if Self.isPlus(event.characters) { setSign(.plus); return true }
+        if Self.isMinus(event.characters) { setSign(.minus); return true }
+        return true
     }
 
-    /// How many frames this arrow press should move, or nil if it is not an arrow step.
-    ///
-    /// ⇧ IS ONE SECOND, COMPUTED FROM THE FILE'S RATE, not a fixed frame count: a second is a unit a
-    /// colourist thinks in and it is the same distance at 24 and at 60, whereas "ten frames" is two
-    /// different durations at those two rates and the muscle memory would have to be relearned per
-    /// format.
-    ///
-    /// `round(rate)` — the INTEGER rate — and not the exact one, deliberately: at 23.976 that is 24
-    /// frames, which advances the TIMECODE READOUT by exactly one second and the wall clock by
-    /// 1.001 s. The readout is what the user is watching, so the digits are what should come out
-    /// round. Same nfr-vs-exact split this file states in full at the top.
-    private func arrowStep(for event: NSEvent) -> Int? {
-        // 123 = ←, 124 = →. Key CODES, not characters: the arrows have no printable character and
-        // `charactersIgnoringModifiers` gives a private-use scalar that is not worth matching on.
-        guard event.keyCode == 123 || event.keyCode == 124 else { return nil }
-        // The same gate the hidden buttons carried via `.disabled`, in both its halves: a deck that
-        // does not hold the transport may not jog it, and a deck showing a LIVE SOURCE has no
-        // playhead to jog — NDI/WHEP/SRT push straight at the renderer and never load the engine.
-        //
-        // Still not gated on `hasMedia`: the buttons were not either, and `stepFrame` is a safe
-        // no-op with no duration, so an arrow in an empty window stays as silent as it has always
-        // been rather than falling through to a system beep.
-        guard deck?.gate.transportEnabled == true,
-              deck?.gate.positionControlsEnabled == true else { return nil }
-        let shifted = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift)
-        let rate = engine?.metadata?.frameRate ?? 0
-        let magnitude = shifted ? max(Int((rate > 0 ? rate : 24).rounded()), 1) : 1
-        return event.keyCode == 123 ? -magnitude : magnitude
-    }
-
-    /// A focused text view anywhere in this window means the keystroke is text. See the type comment
-    /// for why the field editor is what this actually finds.
-    private static func isEditingText(in window: NSWindow) -> Bool {
-        guard let responder = window.firstResponder else { return false }
-        if let textView = responder as? NSTextView { return textView.isFieldEditor || textView.isEditable }
-        return responder is NSTextField
+    /// Entry is closed: a digit, + or − opens it, when this deck can accept one (`begin` answers false for an empty
+    /// or gated window, and the key then falls through as it always has).
+    func openKey(_ event: KeyEvent) -> Bool {
+        if let digit = Self.digit(in: event.characters), begin(sign: .absolute) { append(digit); return true }
+        if Self.isPlus(event.characters), begin(sign: .plus) { return true }
+        if Self.isMinus(event.characters), begin(sign: .minus) { return true }
+        return false
     }
 
     private static func digit(in characters: String) -> Int? {
@@ -497,6 +340,36 @@ final class TransportKeyMonitor: ObservableObject {
     /// had timecode entry accepts the unshifted key for it. `_` likewise for `−`.
     private static func isPlus(_ characters: String) -> Bool { characters == "+" || characters == "=" }
     private static func isMinus(_ characters: String) -> Bool { characters == "-" || characters == "_" }
+
+    // MARK: Seeks the transport shortcuts ask for
+
+    /// The same gate every position control carries: a deck that does not hold the transport may not move a
+    /// playhead, and a deck showing a LIVE SOURCE has none (NDI/WHEP/SRT push straight at the renderer and never
+    /// load the engine). Not gated on `hasMedia`: `stepFrame` is a safe no-op with no duration, so an arrow in an
+    /// empty window stays silent rather than beeping, as it always has.
+    var canMovePlayhead: Bool {
+        deck?.gate.transportEnabled == true && deck?.gate.positionControlsEnabled == true
+    }
+
+    /// ⇧← / ⇧→: ONE SECOND, COMPUTED FROM THE FILE'S RATE, not a fixed frame count (decision 5, 2026-10-23,
+    /// matching DaVinci Resolve R20 p728). A second is a unit a colourist thinks in and it is the same distance at
+    /// 24 and at 60.
+    ///
+    /// `round(rate)` — the INTEGER rate — and not the exact one, deliberately: at 23.976 that is 24
+    /// frames, which advances the TIMECODE READOUT by exactly one second and the wall clock by
+    /// 1.001 s. The readout is what the user is watching, so the digits are what should come out
+    /// round. Same nfr-vs-exact split this file states in full at the top.
+    var framesPerSecondStep: Int {
+        let rate = engine?.metadata?.frameRate ?? 0
+        return max(Int((rate > 0 ? rate : 24).rounded()), 1)
+    }
+
+    /// Home / End: the first or the last frame, by the same quarter-frame landing `commit` uses (see there).
+    func goToEdge(end: Bool) {
+        guard let engine, let ctx = TimecodeContext(engine: engine) else { return }
+        let frame = end ? ctx.lastFrame : 0
+        engine.exactSeek(to: min(max((Double(frame) + 0.25) / ctx.rate, 0), engine.duration))
+    }
 
     // MARK: State transitions
 

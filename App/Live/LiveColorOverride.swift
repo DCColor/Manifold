@@ -35,6 +35,7 @@
 //
 
 import SwiftUI
+import ShortcutRegistry
 import ColorimetryModel
 import StreamBookmarkModel
 import LUTCube   // colour S6: CubeInterpolation, for the LUT section
@@ -158,7 +159,7 @@ final class LiveColorOverrideModel: ObservableObject {
         }
     }
 
-    /// ⌃⌥C: the next preset on this transport, wrapping to Auto.
+    /// Color ▸ Next Color Interpretation: the next preset on this transport, wrapping to Auto.
     func cycle(on source: LiveSource?) {
         guard let source, Self.offersOverride(source) else { return }
         let all = ColorimetryOverride.available(on: Self.transport(source))
@@ -325,9 +326,11 @@ struct ColorInterpretationControl: View {
             .menuIndicator(.hidden)
             .fixedSize()
         }
-        .help(subject == .file
-              ? "Color interpretation — Auto trusts the file’s tags; a preset or Custom asserts them (⌃⌥C cycles the presets)"
-              : "Color interpretation — Auto trusts the stream; a preset or Custom asserts it (⌃⌥C cycles the presets)")
+        // The cycle's key is the registry's, with no default since 2026-10-23 (it was ⌃⌥C): named only when bound.
+        .help((subject == .file
+               ? "Color interpretation — Auto trusts the file’s tags; a preset or Custom asserts them"
+               : "Color interpretation — Auto trusts the stream; a preset or Custom asserts it")
+              + (ShortcutCenter.shared.registry.label(for: .cycleInterpretation).map { " (\($0) cycles the presets)" } ?? ""))
     }
 
     /// " + LUT bypassed" while the window's LUT is bypassed, struck through and dimmed: neither the amber of an applied

@@ -436,3 +436,162 @@ It should not offer import, export, or multiple presets in 1.0: no user need for
 5. ⇧-arrow step: fixed at 1 s (Resolve, today), or a setting.
 6. Whether K+J/L hold gestures are in 1.0.
 7. ⌃⌥R moves to DEBUG.
+
+**Decided (Robbie, 2026-10-23):**
+1. §4.2 as proposed.
+2. Hold D; hold ⇧D compares against Bypass. Never while a text field has focus; never swallows ⌘D, ⌥D or any
+   other modified D.
+3. Raster keys stay ⌘1–⌘4 and ⌘0 = Fit.
+4. ⌘F is a full-screen alias of ⌃⌘F.
+5. The ⇧-arrow step stays fixed at 1 s.
+6. K+J/L hold gestures are in 1.0.
+7. ⌃⌥R moves to DEBUG.
+
+---
+
+## 5. The registry build: predictions (written 2026-10-23 20:48, before any build)
+
+**Estimated run time:** 6 h, band 4–8 h, from these predictions to the results record.
+
+**How it is measured.**
+- No keystroke is ever sent to the app. Dispatch is tested in-process: `swift test` feeds synthesized `NSEvent`s
+  through the same adapter and dispatcher the app's one monitor uses.
+- In the running app (Profile, HEAD and tree), the measurements are:
+  - Accessibility reads of the menu bar: each item's `AXMenuItemCmdChar` and `AXMenuItemCmdModifiers`.
+  - Accessibility clicks on named elements.
+  - The control set's exports.
+- Apps are quit only by a Quit event to the bundle path. No screenshots.
+- Defaults are read before any write, and every write sequence stops at its first failure. The snapshot leaves
+  out licence keys, which are compared by presence only and never restored.
+
+| # | Prediction | Pass band | Fail |
+|---|---|---|---|
+| P1 | **Unmoved keys dispatch HEAD's action.** In-process, each key is fed and must reach the same action as at HEAD: Space, J, K, L, N, ← → ⇧← ⇧→, ⌥[ ⌥] ⇧⌥[ ⇧⌥] (live only), 0–9 + − = _ (entry opens), and Return, Esc and Delete in entry. Debug hooks are checked with the debug predicate on: ⌃⌥W, ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, plus the Debug-configuration set ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S, ⌃⌥[ and ⌃⌥]. In the app, the menus show ⌘O, ⌘1–⌘4, ⌘0, ⌃⌥A and ⌃⌥⇧B exactly as HEAD does | every key | any key mapped differently, or any menu key changed |
+| P2 | **Moved keys work, and the old ones do nothing.** In-process: ⌘I, ⌥⌘T, ⌘7, ⌥⌘E, ⌥⌘1/2/3, ⌘F, ⌘L, Home/End and ⌥←/⌥→ reach their actions. I, Tab, ⌃⌥T, ⌃⌥E, \ and ⇧\ reach nothing, and the event passes through unconsumed. ⌃⌥X, G, B, 1, 2, 3, O, ⇧O, N, ⇧N, C and ⌃⌥R reach nothing with the debug predicate off; with it on, ⌃⌥R reaches the render-layer A/B. In the app, the menu items show ⌘I, ⌥⌘T, ⌘7, ⌥⌘E and ⌥⌘1/2/3. Export Frame, clicked by Accessibility, writes the export set | every key | any |
+| P3 | **Hold to compare.** In-process: D down starts a hold on the other of macOS and Reference, and D up releases it. ⇧D compares against Bypass. Auto-repeats are consumed without restarting. ⌘D, ⌥D, ⌃D and ⇧⌘D are not consumed and start no hold. ⌃⌥D starts no hold, and is consumed only as the debug SRT hook. With a text view first responder, D passes through. A hold ends when the window resigns key | all cases | any |
+| P4 | **K+J/L** (matching Resolve R20 p729 and FCP *Play media*). Holding K and pressing J or L steps −1 or +1 frame per press. Holding the J or L key past 300 ms with K down plays at −½× or +½×. Releasing J or L, or K, pauses. J, K and L alone keep HEAD's behaviour | all cases | any |
+| P5 | **Rebinding.** An override (inspector → ⌥⌘I) is written through the registry's store in-process, and through defaults for the app run: read first, then written. The menu shows ⌥⌘I at launch and again after a relaunch. Reset All, clicked by Accessibility in the Keyboard Shortcuts window, puts the menu back to ⌘I without a relaunch and removes the key. Unknown IDs survive a round trip, and the JSON has sorted keys | exact | any |
+| P6 | **Defaults.** A launch with no overrides writes no `manifold.shortcuts` key. After the runs, with each added `NSWindow Frame …` key read and then deleted, the domain is dictionary-equal to the snapshot, and the `streamBookmarks` hash is unchanged | equal | any difference |
+| P7 | **Pictures.** The 20-file control set (I1's `control.txt`), exported through Export Frame, tree against HEAD: `.rgba16f`, `.v210` and `.v210.json` byte-identical, and PNG pixels and ICC equal. SDI is measured through the `.v210` export, which is the same convert the DeckLink path uses; no output run. The window is not measured (no screenshots), and `git diff` shows no renderer, shader, export or DeckLink file changed | 20 / 20 | any byte |
+| P8 | **`swift test`.** All pass: HEAD's count plus the new registry and dispatch tests | all | any failure |
+| P9 | **Warnings.** The Profile build's warning set (sorted, paths normalised) is a subset of HEAD's | ⊆ HEAD | any new warning |
+| P10 | **The window.** Help ▸ Keyboard Shortcuts… opens it by Accessibility click. It lists every non-debug action in its categories, with key labels. With the debug gate off there is no debug section. Recording, conflicts and warnings are covered in-process (P1–P5) and by Robbie's checklist (§6) | as stated | any |
+
+---
+
+## 6. By-hand checklist for Robbie
+
+These steps can't be done unattended: they need real key presses, and no keystroke was sent to the app in this
+run. Use the Profile build, a file in one window, and the LG for anything you judge by eye. Tick each one and
+note anything odd.
+
+**Moved keys.** Each old key should now do nothing (or beep).
+- [ ] ⌘I shows and hides the Inspector. Bare I does nothing.
+- [ ] ⌥⌘T pins and unpins the overlay controls. Tab does nothing to them, and with Keyboard navigation on, Tab
+      moves focus.
+- [ ] ⌘7 opens and closes the scopes tray. ⌃⌥T does nothing.
+- [ ] ⌥⌘E exports the frame to the Desktop. ⌃⌥E does nothing.
+- [ ] ⌥⌘1 / ⌥⌘2 / ⌥⌘3 choose As macOS Shows It / Reference / Bypass, and the Color menu's checkmark follows.
+- [ ] ⌃⌥R does nothing unless this is a debug build. In Profile it still toggles the AVFoundation layer
+      (it's a debug hook, and Profile is a debug build).
+
+**Hold to compare.**
+- [ ] Hold D: the window shows the other of macOS and Reference, with the amber badge. Release: it goes back.
+- [ ] Hold ⇧D: the window shows Bypass. Release: it goes back.
+- [ ] ⌘D, ⌥D and ⌃D start no comparison.
+- [ ] With the cursor in a text field (for example the stream bookmark sheet's name), D types a "d".
+- [ ] Hold D, then click another app: the window goes back.
+- [ ] \ and ⇧\ do nothing. ⇧⌘\ opens Show All Tabs.
+
+**Transport.**
+- [ ] Space, J, K and L work as before. Pressing L again speeds up.
+- [ ] Hold K, then tap J or L: one frame back or forward per tap.
+- [ ] Hold K and hold L: plays forward at half speed until you let go of L or K. The same with J, in reverse.
+- [ ] ← / → step one frame; ⇧← / ⇧→ step one second.
+- [ ] Home / End, and ⌥← / ⌥→, go to the first and last frame. On the MacBook Air, also try Fn-← and Fn-→.
+- [ ] ⌘L turns looping on and off; the loop button turns green.
+- [ ] Typing digits opens timecode entry. While it's open, Space, J/K/L, D and the arrows do nothing behind it.
+      Esc cancels and Return goes.
+- [ ] ⌘F enters and leaves full screen, like ⌃⌘F and fn-F.
+
+**Live.**
+- [ ] On a live stream, ⌥] / ⌥[ move the audio by 1 ms, and ⇧ with them by 10 ms.
+- [ ] File ▸ Connect to First NDI Source and File ▸ Disconnect Live Source work.
+- [ ] File ▸ Start / Stop DeckLink Output work. In a second window that doesn't own the devices, they beep.
+- [ ] Color ▸ Next Color Interpretation and Reset Color Interpretation to Auto work on a file and on a stream.
+
+**The Keyboard Shortcuts window** (Help ▸ Keyboard Shortcuts…).
+- [ ] Search "scope": only the scope rows remain.
+- [ ] Find by Key, then press ⌘7: only Show/Hide Scopes remains.
+- [ ] Click Show/Hide Inspector's key and press ⌥⌘I. The row is marked customised, and View ▸ Show/Hide
+      Inspector shows ⌥⌘I at once.
+- [ ] Quit and relaunch: still ⌥⌘I.
+- [ ] Record ⌘7 on Show/Hide Inspector. It asks "⌘7 is used by Show/Hide Scopes. Replace it there?". Cancel
+      keeps both. Replace moves the key, and Scopes then has none.
+- [ ] Record ⌘Q: refused ("used by macOS").
+- [ ] Record ⌃⌥Y on Mute: accepted, with the VoiceOver / Rectangle warning.
+- [ ] Record Page Up on Volume Up: accepted, with the Fn warning.
+- [ ] Record bare Y on Show/Hide Inspector: accepted, with "Not shown in the menu". The View menu item then shows
+      no key, and Y toggles the Inspector except while you type in a text field.
+- [ ] Esc while recording cancels. Delete while recording removes the key (the row shows None).
+- [ ] The row reset button, a category's Reset, and Reset All… (with its confirmation) all work. After Reset All,
+      `defaults read com.graviton.manifold manifold.shortcuts` says the key does not exist.
+- [ ] On a second keyboard layout (German), the audio offset rows read ⌥+ / ⌥Ü, matching the keys you press.
+- [ ] With `defaults write com.graviton.manifold manifold.debugMenu -bool YES` (read it first), a read-only
+      "Debug hooks" section appears. Remove the key afterwards.
+
+---
+
+## 7. Results (built and run unattended 2026-10-23, base `9e7c9fc`, not committed)
+
+**Estimated** 6 h (band 4–8). **Actual** about 1 h, from the predictions (20:48) to this record (21:40): outside the
+band, on the short side. The estimate assumed the window and the dispatcher would need several build rounds; they
+needed four, all small.
+
+**How it ran.**
+- No keystroke was sent to the app, and no screenshots were taken.
+- Every quit was a Quit event to the bundle path. One run that left a confirmation sheet open timed out after
+  30 s, and the driver ended it by PID.
+- HEAD was built from a worktree in the scratchpad.
+- The driver (adapted from I1's), menu dumps, logs and exports are in the session scratchpad, under `run/`.
+
+| # | Measured | Verdict |
+|---|---|---|
+| P1 | **In-process:** every unmoved key reaches HEAD's action. Those are Space, J, K, L, N, ← → ⇧← ⇧→, ⌥[ ⌥] ⇧⌥[ ⇧⌥], digits, + − = _ opening entry, and Return / Enter / Esc / Delete / ⌦ in entry. With the predicate on, all 14 debug hooks also reach their actions (`KeyDispatchTests`). **In the app:** an Accessibility read of every menu item's key equivalent shows all 48 of HEAD's keyed items unchanged, including ⌘O, ⌘1–⌘4 and ⌘0 | **PASS** |
+| P2 | **In-process:** ⌘F, Home, End, ⌥← and ⌥→ reach their actions. I, Tab, ⌃⌥T, ⌃⌥E, ⌃⌥X/G/B/1/2/3, ⌃⌥O, ⌃⌥⇧O, ⌃⌥N, ⌃⌥⇧N, ⌃⌥C, \ and ⇧\ reach nothing and pass through unconsumed, as does ⌃⌥R with the predicate off. ⌘I, ⌥⌘T, ⌘7, ⌥⌘E, ⌥⌘1/2/3, ⌘1, ⌘0, ⌘L and ⌘O fire their items through a real `NSMenu`'s own key matching (`testMenuKeysFireThroughAnNSMenu`). **In the app:** the menus carry 8 new keyed items: File ▸ Export Frame ⌥⌘E; View ▸ Show/Hide Inspector ⌘I, Show/Hide Scopes ⌘7, Always Show Controls ⌥⌘T, Loop Playback ⌘L; Color ▸ the three transforms ⌥⌘1/2/3. File ▸ Export Frame, clicked by Accessibility, wrote `.png`, `.rgba16f`, `.v210` and `.v210.json`, byte-identical to the button's export of the same file | **PASS** |
+| P3 | In-process: D holds and releases; ⇧D compares against Bypass; repeats are swallowed. ⌘D, ⌥D, ⌃D, ⇧⌘D, ⌥⇧D, ⌃⌥D, ⌃⇧D and ⌥⌘D are neither consumed nor held (⌃⌥D reaches only the SRT hook, and only with the predicate on). With a text view first responder everything passes through. A missed key-up and a reset (window not key) both end the hold. "Nothing to compare" lets the key go on | **PASS** (in-process; by hand in §6) |
+| P4 | In-process: K held + J/L steps −1 / +1 per press, with no shuttle. K held + L held past 300 ms plays at +½×, and releasing L stops it; the same with J at −½×; releasing K stops it too. J, K and L alone keep HEAD's behaviour, including a held L ramping | **PASS** (in-process; by hand in §6) |
+| P5 | `manifold.shortcuts` written once (read first) with inspector → ⌥⌘I. Two launches both show View ▸ Show/Hide Inspector ⌥⌘I, and the log says "some customised". In the Keyboard Shortcuts window, Reset All… then the sheet's Reset All (Accessibility clicks) changed the menu to ⌘I in the same run, with no relaunch, and removed the key. In-process: sorted-key JSON is byte-exact, unknown IDs and top-level keys survive, an unreadable value is never overwritten, and an override equal to the default is not stored | **PASS** |
+| P6 | No launch without overrides wrote `manifold.shortcuts`. After the runs, the only added keys were `NSWindow Frame …` (19 in all, one of them `keyboard-shortcuts`), with none changed or removed. Each was read, then deleted, stopping at the first failure. The domain is dictionary-equal to the snapshot (1525 keys, plus the 3 licence keys, checked for presence only and never restored), and `streamBookmarks` is still `4466c076` | **PASS** |
+| P7 | The 20-file control set (I1's `control.txt`), exported through the Export frame button: `.rgba16f`, `.v210` and `.v210.json` are byte-identical, and PNG pixels and ICC are equal, **20 / 20**. The window was not measured (no screenshots). No renderer, shader, export or DeckLink file is in the diff (`git diff --stat`). The tagged log lines are identical except HEAD's `[COMPARE] … monitor installed` replaced by `[SHORTCUTS] key monitor installed`, and one more `[CHAIN] Source: no source` at startup, a launch-timing line I1 also saw between HEAD runs | **PASS** |
+| P8 | `swift test`: **588 / 588** (HEAD 540, plus 48 in `ShortcutRegistryTests`: 26 registry, 22 dispatch) | **PASS** |
+| P9 | Profile warnings (paths and line numbers normalised, from a clean rebuild of the app target): HEAD 12 distinct, tree 11, every one in HEAD's set. The one that went is HEAD's `HoldToCompare.swift` "`NSEvent` to `Sendable`", because its monitor was removed | **PASS** |
+| P10 | Help ▸ Keyboard Shortcuts… opens the window. Its outline has 62 rows: 8 categories and 54 actions, each with its key as this layout prints it (for example "D (hold)", "⇧D (hold)", "⌥⇧]", "None"). There is no debug section with the gate off | **PASS** |
+
+### Findings
+
+1. **⇧⌘\ is Show All Tabs, measured** in the menu bar (an Accessibility read of HEAD). HEAD's backslash monitor would
+   have swallowed it with a source loaded (audit C3). The dispatcher matches exact modifiers, so this cannot happen
+   with D.
+2. **Enter Full Screen shows fn-F in the View menu**, not ⌃⌘F. Both are the system's; ⌘F is the alias Robbie asked
+   for.
+3. **A SwiftUI `Button` in a List row exposes no title to Accessibility** (measured: only `AXHelp`). VoiceOver would
+   not have said the key. The window's key buttons now carry an accessibility label and value. The same is true of
+   the window's other buttons, which is why Reset All… also carries a tooltip.
+4. **After a run ended by PID, the next launch restored only the Keyboard Shortcuts window**, with no Manifold
+   window. That is window restoration, not defaults. The next launch that opened a file was normal.
+5. **Behaviour that is deliberately not HEAD's:**
+   - Toggles (Space, N, the view toggles) ignore auto-repeat. Whether HEAD's hidden buttons repeated was never
+     measured (**UNKNOWN**).
+   - A hold now needs the deck's window to be key.
+   - Device and interpretation menu items are always enabled, and beep when the window cannot act. A disabled key
+     beeped too.
+   - Timecode entry swallows D, as it swallows every bare key.
+6. **Old key names are left in comments of files kept out of the diff on purpose**, so that P7's "no renderer,
+   shader or DeckLink file changed" holds: `MetalVideoRenderer.swift`, `PassthroughShader.metal`, and
+   `DeckLink/DeckLinkService.swift`. Comment-only names also remain in `NDI/NDIService.swift`, `NDI/NDIBridge.h`,
+   `Live/LiveSource.swift`, `Live/SyntheticLiveSource.swift`, `Live/LiveVideoDecoder.swift` and `HLS/HLSClient.swift`.
+   Every user-visible string that named a removed key now follows the registry: the CIE and vectorscope gear
+   headings, the Color control's tooltip, and the control bar's tooltips.
+7. **Not measured, and left to §6:** any real key press, K+J/L in the app, recording, conflict and warning lines,
+   Find by Key, layout labels on a second layout, and the debug section.

@@ -75,6 +75,7 @@ import UniformTypeIdentifiers
 import ManifoldCore
 import StreamBookmarkModel
 import ColorimetryModel   // SourceChroma — the file's chroma to the renderer (Stage 3b S2)
+import ShortcutRegistry   // ShortcutID — the window's shortcut handlers (docs/SHORTCUTS_AUDIT.md §4.4)
 
 // MARK: - Exclusive devices
 
@@ -139,8 +140,8 @@ struct DeckGate: Equatable {
     /// loop, mute and the volume fader? True for exactly one deck at a time.
     var transportEnabled = true
 
-    /// May this deck CLAIM OR RELEASE an exclusive device — ⌃⌥O / ⌃⌥N, the DeckLink and streaming
-    /// controls, Disconnect? False in every deck while another deck owns one.
+    /// May this deck CLAIM OR RELEASE an exclusive device — File ▸ Start DeckLink Output / Connect to First NDI
+    /// Source, the DeckLink and streaming controls, Disconnect? False in every deck while another deck owns one.
     var deviceControlsEnabled = true
 
     /// Does this deck hold the device hook bundle — i.e. do the four singleton routers' renderers,
@@ -252,6 +253,16 @@ final class WindowDeck: ObservableObject {
     /// written from `updateNSView`, which can land inside a SwiftUI update pass.
     fileprivate(set) weak var chrome: WindowChrome?
 
+    /// What this window does for each shortcut it answers (docs/SHORTCUTS_AUDIT.md §4.4). The registry says which
+    /// key; this says what happens and whether it can happen now. Registered by this window's `ContentView` on
+    /// appear, because the actions read that view's state, and emptied on disappear so the closures cannot keep a
+    /// closed window's objects alive. Menu items and the key dispatcher both arrive here through `ShortcutCenter`.
+    var shortcutHandlers: [ShortcutID: DeckShortcut] = [:]
+
+    /// This window's timecode entry, which the dispatcher hands bare keys to while it is open. Set by
+    /// `TransportKeyMonitor.attach`.
+    weak var transportKeys: TransportKeyMonitor?
+
     /// THIS WINDOW'S SIZE CONSTRAINT — the forwarding `NSWindowDelegate` that replaced the static
     /// `contentAspectRatio`. Owned here, and not by a view, because it must be exactly as long-lived
     /// as the window: it holds SwiftUI's own delegate for the duration and has to hand it back at
@@ -269,7 +280,7 @@ final class WindowDeck: ObservableObject {
 
     /// This window's colorimetry override for its live connect (docs/COLOR_MANAGEMENT_FINDINGS.md
     /// §6.9, Stage B): held here for SRT, forwarded to NDIService for NDI. Set up by
-    /// `DeckRegistry.connectLive`, edited by the Color control and ⌃⌥C.
+    /// `DeckRegistry.connectLive`, edited by the Color control and Color ▸ Next Color Interpretation.
     private(set) lazy var colorOverride = LiveColorOverrideModel(deck: self)
 
     /// This window's colour override for its FILE (colour S5, §6.11): per window, Auto again when a new
@@ -287,7 +298,7 @@ final class WindowDeck: ObservableObject {
         return o == .auto ? nil : o.shortLabel
     }
 
-    /// ⌃⌥C: the live stream's override when this window shows one, else the file's (colour S5).
+    /// Color ▸ Next Color Interpretation: the live stream's override when this window shows one, else the file's (colour S5).
     func cycleColorOverride(live: LiveSource?) {
         if let live { colorOverride.cycle(on: live) } else { fileColor.cycle() }
     }
@@ -332,7 +343,7 @@ final class WindowDeck: ObservableObject {
     ///   1. A file        → its name, e.g. "shot_042_v3.mov".
     ///   2. A live stream OWNED BY THIS DECK → what the user called it: the NDI source name, or
     ///      the bookmark name they picked. Falls back to the transport ("NDI stream") when the
-    ///      connect came from a path that had no name to give — ⌃⌥N's quick-connect, say.
+    ///      connect came from a path that had no name to give — File ▸ Connect to First NDI Source, say.
     ///   3. Neither       → "Manifold". Deliberately the app name and not "Untitled": this is not
     ///      a document app, an empty window is not an unsaved document, and two empty windows
     ///      reading the same thing is exactly as informative as it should be — there is nothing
@@ -1089,7 +1100,7 @@ final class DeckRegistry {
         // last-left mode even if a source loaded before the CIE scope is shown. Set BEFORE
         // start(), so the first rendered frame already plots in the right mode. (The CIE view's
         // header/graticule read the same @AppStorage directly, so they are already correct; this
-        // keeps the kernel-side plot in agreement.) ⌃⌥X and the header menu push their own
+        // keeps the kernel-side plot in agreement.) The CIE mode shortcut and the header menu push their own
         // updates afterwards via CIEScopeModel.applyMode.
         renderer.cieUseUV = UserDefaults.standard.object(forKey: Self.cieUseUVKey) as? Bool ?? true
 
@@ -1411,7 +1422,7 @@ final class DeckRegistry {
         guard let deck, let engine = deck.engine else { return }
         let renderer = deck.renderer   // weak on every service below; nil is tolerated everywhere
 
-        // DeckLink output sources real video from this renderer (⌃⌥O / toolbar control).
+        // DeckLink output sources real video from this renderer (File ▸ Start DeckLink Output / toolbar control).
         DeckLinkService.shared.renderer = renderer
         // D4b-2: SDI audio from the engine's PTS-keyed PCM ring, gated by the transport. The card's
         // audio callback pulls from the ring at the SOURCE TIME of the frame the renderer currently
@@ -1696,7 +1707,7 @@ final class DeckRegistry {
     // MARK: - Convenience funnels for the view layer
 
     /// Start or stop DeckLink output from `deck`, recording (or dropping) the claim around it.
-    /// One entry point so the toolbar button, ⌃⌥O and ⌃⌥⇧O can never disagree about ownership.
+    /// One entry point so the toolbar button and File ▸ Start / Stop DeckLink Output can never disagree about ownership.
     func toggleDeckLinkOutput(from deck: WindowDeck) {
         if DeckLinkService.shared.isOutputting {
             release(.deckLink, from: deck) { DeckLinkService.shared.stopScheduledOutput() }
