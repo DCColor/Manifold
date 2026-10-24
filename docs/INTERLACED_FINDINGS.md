@@ -176,3 +176,155 @@ I1 → I2 → I3 → I4, then the shortcut registry.
 | P6 | HEVC 3b + I3 | Red/blue field fixture through ⌃⌥E export (same texture as SDI). Today every row's chroma sits near the two-field mix; after, each row matches its own field | ≥ 99.9 % of rows within ±2 codes of their own field | otherwise |
 | P7 | I4 | Waveform histogram byte-identical across Weave / Field 1 / Field 2 / deinterlace | identical | any difference |
 | P8 | I1–I4 | Progressive regression set picks the same modes as today | unchanged | any change |
+
+---
+
+## 10. I1 — detection (files): scope, predictions, results
+
+**Written 2026-10-23, before any build, against `57e7569`.** Results follow the predictions; nothing above
+this section was changed by I1.
+
+### 10.1 Scope: where the I1 brief and this document differ (the document wins)
+
+| Brief asked | This document says | I1 does |
+|---|---|---|
+| Streams detected from the same bitstream fields | Streams are **I6** (§8) | Files only. The `.ts` fixtures are made (I6 needs them) and checked by FFmpeg and the parser outside the app; no live path changes. `.ts` is not a file source in Manifold (AVFoundation cannot open it; only MXF routes to libav, `FrameEngine.swift:1713-1718`). |
+| When sources disagree, container wins per axis | **The bitstream wins**, disagreements logged (§8, I1) | Bitstream wins per axis; the container fills only an axis the bitstream leaves unstated. |
+| NTSC 525i BFF and PAL 625i fixtures | **SD interlaced is out of scope** (decision 8) | Not made. |
+| Chain readout row ("Scan: interlaced, top field first (fiel)") | I1 adds the **Inspector Scan row**; the chain readout's rows belong to I4 (§4, §8) | Inspector Scan row, plus a `[SCAN]` log line (which is what a diagnostics export carries). The chain readout is untouched. |
+| — | libav: `field_order`, confirmed by the first decoded frame's flags | The container is read directly (the `fiel` atom through CoreMedia's FieldCount / FieldDetail, and the MXF descriptor's FrameLayout / FieldDominance), because libav's `.mov` `field_order` is the §6 trap. The bitstream is read from the first video packet's own header at load, on both paths, before any decode: the same bits libav's decoder turns into its frame flags. FFmpeg's decoder flags (`showinfo`, same 8.1.1) confirm the reader per fixture, outside the app. |
+| Frame rate | Rate halving is **I2** (decision 3) | The Frame Rate row is unchanged. |
+
+### 10.2 What is read, per source
+
+- **Container.** `.mov`: `fiel` as CoreMedia exposes it (`FieldCount` 1 → progressive; 2 with `FieldDetail`
+  1 or 9 → TFF, 6 or 14 → BFF, per §6). MXF: the picture descriptor's FrameLayout (0 full frame → progressive,
+  1 separate fields / 3 mixed fields → interlaced, 4 segmented frame → progressive, PsF) and FieldDominance
+  (1, the default, → field 1 first; field 1 is the top field in 1080i).
+- **Bitstream** (the first video packet, plus `avcC` / `hvcC`):
+  - ProRes: the frame header's `interlace_mode` (0 progressive, 1 TFF, 2 BFF).
+  - DNxHD / DNxHR: header byte 5 (bit 1 interlaced; bit 0 the first coded field, 0 = top).
+  - H.264: SPS `frame_mbs_only_flag` = 1 → progressive. Otherwise the first slice: a field slice
+    (`field_pic_flag`) → interlaced, first field from `bottom_field_flag`; a frame slice → `pic_struct` from
+    the picture timing SEI when the SPS says it is present (3 / 5 TFF, 4 / 6 BFF, 0 / 7 / 8 progressive),
+    else the sign of `delta_pic_order_cnt_bottom` (> 0 TFF, < 0 BFF) for MBAFF frames.
+  - HEVC: `field_seq_flag` = 1 → interlaced, field order from the first `pic_struct` (1, 10 or 11 top first;
+    2, 9 or 12 bottom first: 9 / 10 pair with the previous field, 11 / 12 with the next); otherwise `general_progressive_source_flag` / `general_interlaced_source_flag`
+    (1 / 0 progressive, 0 / 1 interlaced).
+- **One place in the model:** `VideoMetadata.scan` (scan type, field order, the source that decided each,
+  both readings, disagreements). Both metadata producers fill it. Nothing reads it except the Inspector row.
+
+### 10.3 Estimated run time
+
+**About 5 hours** (band 3½–6½): reader, resolver and tests ~2½ h; fixtures and their checks ~30 min; HEAD
+and tree Profile builds ~20 min; unattended app runs ~30 min (20 control files on each build, ~15 interlaced
+fixtures on the tree); this record ~30 min. No attended steps.
+
+### 10.4 Fixtures (`scripts/interlaced/generate.sh` → `build/interlaced-fixtures/`, gitignored)
+
+§6's recipe: `testsrc2` at 60000/1001 (or 50) with a `%{n}` counter, then `interlace=scan=tff|bff:lowpass=0`.
+ProRes 422 HQ 1080i59.94 TFF and BFF; ProRes HQ 1080i50 TFF; DNxHD 1080i59.94 TFF and BFF in MXF; DNxHD 1080i50
+TFF in `.mov` (the libav route with a `fiel`); H.264 MBAFF 1080i59.94 TFF and BFF in `.mov` and `.ts`; H.264
+PAFF if any tool can make it (§6 says none can); HEVC field-coded (x265 `interlace`) if FFmpeg can make it, `.mov`
+and `.ts`; a progressive ProRes control; a PsF-style ProRes (progressive picture, coded and tagged TFF); two
+disagreeing ProRes files made from the TFF one by rewriting only its `fiel` (to BFF, and to progressive).
+
+### 10.5 Predictions
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| Q1 | ProRes TFF / BFF / 1080i50: interlaced TFF / BFF / TFF, source **ProRes frame header**; container `fiel` agrees | all three exactly | any miss or wrong source |
+| Q2 | DNxHD MXF TFF and BFF: interlaced TFF / BFF, **DNx frame header**; MXF FrameLayout agrees (if FFmpeg's muxer writes FieldDominance 2 for BFF; if it writes no dominance, the BFF file's container reads TFF and a disagreement is logged, which also passes as long as the bitstream decides) | both exactly | any miss |
+| Q3 | DNxHD `.mov` 1080i50 TFF: TFF, DNx frame header, `fiel` agrees | exact | miss |
+| Q4 | H.264 MBAFF `.mov` TFF / BFF: interlaced TFF / BFF; scan from the first slice (MBAFF frame), order from `pic_struct` SEI if x264 writes one, else from the slice POC. The named source must be the one `trace_headers` shows the stream carrying | both exactly | any miss |
+| Q5 | `.ts` twins (H.264, HEVC): the stand-alone reader agrees with `trace_headers` and `showinfo` | exact | miss |
+| Q6 | HEVC field-coded `.mov`: interlaced, order from `pic_struct`, source **HEVC field_seq_flag + pic_struct SEI**. Whether AVFoundation plays it is recorded, not judged | exact (if made) | miss |
+| Q7 | Progressive ProRes control: progressive, ProRes frame header; `fiel` 1 field agrees | exact | miss |
+| Q8 | PsF-style ProRes: **interlaced TFF** (it is coded and tagged so; tags are the truth). Recorded as a finding: tags alone cannot tell PsF content | exact | progressive |
+| Q9 | Disagreement files: order and scan from the ProRes header (TFF), and one `⚠️ DISAGREE` in the `[SCAN]` line naming the axis (field order for the BFF `fiel`; scan for the progressive `fiel`). The Inspector row shows the bitstream's answer and the container's dissent | both exactly | container used, or no log |
+| Q10 | The 20 control files (S7's set): all progressive, each with its codec's source (ProRes frame header; H.264 SPS; HEVC SPS, or the `fiel` when the HEVC SPS sets neither source flag; DNx frame header with MXF FrameLayout) | 20 / 20 | any interlaced or unknown |
+| Q11 | Every fixture: the reader matches `showinfo`'s decoder flags (`i:T` / `i:B` / `i:P`) on the first frame, and `ffmpeg -i` / `mediainfo` on the container (reading `fiel` 09 as TFF despite "(swapped)") | all | any difference not explained by §6's trap |
+| E | Control set exports (⌃⌥E through the Export frame button): `.rgba16f`, `.v210`, `.v210.json` byte-identical to HEAD; PNG pixels and ICC equal. The window is not measured (no screenshots this session); no file in the display, export or SDI path changes, which `git diff --stat` shows | 20 / 20 | any byte |
+| L | Log lines: every existing tag's lines identical to HEAD's on the control set; the only addition is one `[SCAN]` line per file, plus its probe time ≤ 20 ms | as stated | any other change |
+| G | `swift test`: all pass, HEAD's count plus the new tests. Profile build with HEAD's warning set (sorted, paths normalised) | as stated | any failure or new warning |
+| D | `com.graviton.manifold` defaults dictionary-equal to the snapshot after the runs (restored first if a run wrote window state), `streamBookmarks` hash unchanged | equal | any difference |
+
+### 10.6 Results (built and run unattended 2026-10-23, not committed)
+
+**Estimated** 5 h (band 3½–6½). **Actual** about 1 h 20 min, from the predictions to this record. No attended
+steps, no screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Runs, logs, exports and
+the driver: `build/interlaced-i1/`. Fixture check: `build/interlaced-fixtures/verify.out`.
+
+Four tree builds were made. Build 1 was the first; build 2 and 3 fixed the MXF header read (below); build 4 fixed
+the wording of a field-order dissent (it named the container's scan field, "MXF FrameLayout", instead of its order
+field, "MXF FieldDominance"). E and L were measured on build 3. Build 4 differs from it only in
+`SourceScan.readout`'s disagreement suffix, re-checked on build 4 with the three disagreeing files.
+
+| # | Measured | Verdict |
+|---|---|---|
+| Q1 | ProRes TFF / BFF / 1080i50: interlaced TFF / BFF / TFF, **ProRes frame header** (`interlace_mode` 1 / 2 / 1); `fiel` 2 / SpatialFirstLineEarly, Late, Early: agree | **PASS** |
+| Q2 | DNxHD MXF TFF: TFF, **DNx frame header** (byte 5 = `02`), MXF agrees. BFF: BFF (byte 5 = `03`); the MXF says TFF, because FFmpeg's muxer writes **no FieldDominance** and the standard's default is 1. One `⚠️ DISAGREE on field order`, the bitstream used; Inspector: "Interlaced, bottom field first (DNx frame header) · ⚠️ MXF FieldDominance says top field first" | **PASS** (the band's second case) |
+| Q3 | DNxHD `.mov` 1080i50: TFF, DNx frame header. ⚠️ The prediction's "`fiel` agrees" was wrong: FFmpeg writes **no `fiel`** in a DNxHD `.mov` (nor in an H.264 one; CoreMedia then reports no FieldCount), so the container states nothing and the line says "one source" | detection **PASS**; the "`fiel` agrees" clause **FAIL** (prediction wrong, not the reader) |
+| Q4 | H.264 MBAFF `.mov` TFF / BFF: TFF / BFF, **H.264 pic_struct SEI** (`pic_struct` 3 / 4); `trace_headers` shows x264 carrying exactly those, with `delta_pic_order_cnt_bottom` +1 / −1 (which the slice-POC fallback reads, unit-tested on these slices) | **PASS** |
+| Q5 | `.ts` twins: the stand-alone reader gives H.264 TFF / BFF (`pic_struct` 3 / 4) and HEVC TFF (`field_seq_flag` 1, `pic_struct` 1); `showinfo` `i:T…` / `i:B…` / `i:T i:B i:T` | **PASS** |
+| Q6 | HEVC field sequence `.mov` (1920×540 pictures at 59.94): interlaced (**HEVC field_seq_flag**), top field first (**HEVC pic_struct SEI**). Not predicted: FFmpeg writes `fiel` 1 for the 540-line pictures, so the container says progressive and a scan disagreement is logged (the bitstream used). AVFoundation opens it as 1920×540 at 59.94; playback not judged | **PASS** |
+| Q7 | Progressive control: Progressive (ProRes frame header), `fiel` 1 agrees | **PASS** |
+| Q8 | PsF-style ProRes: Interlaced, top field first (ProRes frame header), `fiel` agrees. Tags alone cannot tell PsF content (finding 4) | **PASS** |
+| Q9 | `fiel` rewritten to BFF: TFF from the header, `⚠️ DISAGREE on field order`; Inspector "… · ⚠️ fiel says bottom field first". `fiel` rewritten to progressive: TFF, `⚠️ DISAGREE on scan`; Inspector "… · ⚠️ fiel says progressive" | **PASS** |
+| Q10 | The 20 control files: all progressive. ProRes frame header ×15 (`interlace_mode` 0), H.264 SPS ×2 (`frame_mbs_only_flag` 1), HEVC SPS ×1 (progressive_source 1, interlaced_source 0), DNx frame header ×2 (byte 5 = `01`, with MXF FrameLayout 0). Every one "agree" | **PASS** 20 / 20 |
+| Q11 | All 16 fixtures: the reader equals `showinfo`'s first-frame flag. Container labels differ from FFmpeg / mediainfo only where explained: the §6 "(swapped)" label on `fiel` 9 / 14; the BFF MXF (no FieldDominance; both tools say TFF, the decoder `i:B`); the HEVC fields (both tools say progressive from `fiel` 1, the decoder alternates T / B); the two rewritten `fiel` files (mediainfo follows the container) | **PASS** |
+| E | Control set on build 3 against HEAD (two HEAD runs, three tree runs in all): `.rgba16f`, `.v210`, `.v210.json` byte-identical, PNG pixels and ICC equal, **20 / 20 every time**. Window not measured (no screenshots); `git diff` touches no renderer, shader, export or DeckLink file | **PASS** |
+| L | The only added lines: one `[SCAN]` per file (20), probe **0.1–0.4 ms**. Every other difference also occurs between HEAD's two runs, or is launch or quit timing: the startup `[CHAIN] Source: no source` / headroom pair landing before or after the first file (seen between HEAD runs); one `[RENDER-PERF]` more or less (periodic); and the quit-time late frame (finding 7), seen once in HEAD's first run and once on tree build 3 | **PASS** |
+| G | `swift test` **540 / 540** (HEAD 525, plus 15 in `FileScanTests`), on the final source. Profile warnings: HEAD 15, build 3 15, the same 15; build 4 recompiled only `SourceScan.swift`, with none | **PASS** |
+| D | After the runs: `streamBookmarks` hash unchanged; 12 keys added, all `NSWindow Frame …` (one per launch); no key removed or changed. Each was read, then deleted, stopping at the first failure. Final export dictionary-equal to the snapshot (1528 keys) | **PASS** |
+
+**Real files (read-only, `/Volumes/DCCOLOR/TEST FLIP`), beyond the predictions.** Of 122 MXF there, 6 declare
+FrameLayout 1. Five are DNxHD 1080i29.97 (`MXF TEST/10152502.999*.mxf`, `10152507.999*.mxf`): all read interlaced
+TFF from the DNx frame header with the MXF agreeing (FieldDominance 1 on four, absent on one; one has
+VideoLineMap 0 / 0), matching `showinfo` `i:T`. The sixth (`New Corpus/Premiere Pro /MONO_STEREO_51_PrPro_AS11_16Channel.mxf`,
+H.264 High 4:2:2 Intra) does not open: `libav open failed … noDecoder`, the known gap of decision 7. No row, no
+`[SCAN]` line.
+
+**Findings.**
+
+1. **`MXFDeclaredRange.headerBytes` stops short of the header metadata** (pre-existing; `MXFDeclaredRange.swift:67-83`).
+   It reads to the partition pack's value offset plus `HeaderByteCount`, but SMPTE 377-1 counts `HeaderByteCount`
+   from the primer pack, after the partition pack and any KLV fill padding it to the KAG. On every FFmpeg-made MXF
+   here (8 files; FFmpeg pads to 512 and writes the picture descriptor last) the descriptor runs past the cut, so
+   that reader returns `.untagged`. On all 110 real MXF with a descriptor on TEST FLIP (14 of them RGBA, the case it
+   exists for) the descriptor is inside the cut. It only runs when libav reports no range, and FFmpeg writes CDCI
+   descriptors, whose range libav does report, so no wrong picture is known. Left unchanged here: I1 changes no
+   picture. I1's own read (`FileScanProbe.mxfHeader`) skips the fill and covers 118 / 118. BUGS.md, new entry.
+2. **FFmpeg's MXF muxer writes no FieldDominance.** A BFF DNxHD MXF made by FFmpeg therefore declares, by the
+   standard's default, top field first. A fixture caveat, not a Manifold defect: Manifold uses the bitstream and
+   says the container disagrees.
+3. **FFmpeg's `.mov` muxer writes `fiel` for ProRes only** of the codecs here: none for H.264 or DNxHD, and `fiel` 1
+   for a 540-line HEVC field sequence. ⚠️ And without `separatefields`, libx265's `interlace=tff` codes each woven
+   1080-line frame as one "field" (`field_seq_flag` 1, `pic_struct` alternating 1 / 2): the flags of a field
+   sequence on pictures that are not fields. Not used as a fixture.
+4. **PsF content is invisible to tags.** A progressive picture coded and tagged TFF reads TFF, as it should: tags are
+   the truth. Telling PsF from true interlace needs picture analysis, which no stage plans.
+5. **PAFF is still unmeasured on real bytes.** No free encoder makes it (§6). The field-slice branch is unit-tested
+   on hand-written SPS / PPS / slices only.
+6. **HEVC field sequences reach AVFoundation as half-height pictures** (CoreMedia 1920×540, 59.94). How they should
+   be shown and sent is for I4 / I2 (and I6 for streams); I1 only says what they are.
+7. **A frame of the previous file is presented after the source is cleared at quit** (pre-existing; HEAD shows it
+   too): `[EDR] colour state installed … AFTER a frame was already on screen`, then a `[MATRIX]` line describing that
+   frame against the cleared state (`⚠️ DISAGREE` when the last file was not 709). Seen in 2 of 5 runs, at quit
+   only. The late-colour-state diagnostic is already described in BUGS.md (*two producers, one destination*); this
+   quit-time case is recorded in the I1 entry there.
+8. **Two misses of mine, fixed before the final build:** I1's MXF header read first copied the short span (finding 1),
+   then omitted the fill, so build 1 and 2 read no container on FFmpeg MXF (the real ones were fine); and the
+   disagreement wording of build 1–3 (above). §10.2's HEVC `pic_struct` 9 / 10 text was also corrected after
+   writing; the code had it right.
+
+**What changed.** `Packages/ManifoldCore/Sources/FileScan/` (new leaf target: `SourceScan.swift`, the model and
+rule; `ScanReaders.swift`, `fiel`, MXF, ProRes, DNx, H.264, HEVC); `SPSColor/SPSScan.swift` (H.264 SPS-to-VUI-HRD,
+PPS, slice header and picture-timing SEI readers; the HEVC SEI reader); `H264SPSColor.swift` (the walk records the
+fields a slice header needs; colour results unchanged); `HEVCSPSColor.swift` (the PTL source flags; `scan(nal:)`);
+`ManifoldCore/FileScanProbe.swift` (the CoreMedia / MXF / libav glue); `VideoMetadata.scan`, filled by
+`MediaInspector.metadata` and `FrameEngine.applyLibavMetadata`; the Inspector's Scan row; `SCAN` in the
+diagnostics tag list; `Package.swift`; `Tests/FileScanTests/` (15 tests). Scripts: `scripts/interlaced/generate.sh`,
+`verify.sh`, `scanprobe.swift`.
+
+**Not in I1, as §10.1 says:** the chain readout (I4), the rate halving and 1080i modes (I2), streams (I6), SD.

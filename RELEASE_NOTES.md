@@ -48,6 +48,7 @@ bullet.
 - Settings ▸ DeckLink Output ▸ SDI scaling: Fit to mode (the default) scales a picture that isn't an output mode's size up or down to fill the mode, keeping its shape, with black around it. 1:1 pixels sends it at its own size instead, scaling only a picture larger than every mode.
 - Settings ▸ DeckLink Output ▸ SDI output modes: HD/UHD only (the default), or Include DCI to let the output follow a source into 2K DCI (2048×1080) and 4K DCI (4096×2160). With Include DCI, the DeckLink menu's output mode list offers them too.
 - SDI and HDMI output follow sources at 47.95, 48, 95.90, 96, 100, 119.88 and 120 fps, in 1080p, 2160p and DCI. Before, those rates went out at the nearest of the standard eight (a 48 fps file at 50). The DeckLink menu's output mode list offers every rate, and 720p50, 59.94 and 60.
+- The Inspector has a Scan row: whether a file is progressive or interlaced, which field comes first, and where that came from (the file's own picture data, or its container). If the container says something different from the picture data, the row says so. This only reports: interlaced files still play, export and go out over SDI as before.
 
 ### Improved
 
@@ -243,6 +244,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Saved streams written with sorted JSON keys, so an unchanged list saves back byte for byte (each list is re-ordered once at its first save; content unchanged) | `f926f47` |
 | Soak, replay and DeckLink test tooling; MediaMTX `useAbsoluteTimestamp` mode | `8389dd9` `5041fb8` `54750ad` `9b10b68` `73ef624` `b35a810` |
 | Build hygiene: concurrency annotations, vendored-header warnings, ignore build folders | `f0969e4` `aa79682` `d055d07` |
+| Interlaced I1: a file's scan and field order detected from its container and bitstream, shown in the Inspector and logged as `[SCAN]` (`INTERLACED_FINDINGS.md` §10) | uncommitted |
 | Documentation only (findings, plans, BUGS.md, roadmap, user guide drafts) | the remaining 49 commits |
 
 ## 0.8.4

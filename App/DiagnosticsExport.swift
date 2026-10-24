@@ -420,7 +420,7 @@ enum LogPartitioner {
         "ABOUT", "ARBITER", "BUILD", "CAPTIONS", "CLAP", "CSPROBE", "DIAG", "EDR",
         "EXPORT", "LICENSE", "LIVE-ROUTE",
         "LIVECLOCK", "NDI", "NDI-AUDIO", "OPEN", "Play", "RASTER", "RENDER-PERF",
-        "SCRUB", "SCRUB-GEOM", "SETTLE",
+        "SCAN", "SCRUB", "SCRUB-GEOM", "SETTLE",
         "SRT", "SRT-AU", "SRT-AUDIO", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
         "PLAYBACK", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE",

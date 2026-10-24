@@ -46,6 +46,7 @@ public enum MediaInspector {
                 meta.colorMatrix = c.matrixName
                 meta.colorMatrixCode = c.matrixCode
                 meta.colorRange = sourceColorRange(for: fmt).displayName
+                meta.scan = FileScanProbe.resolve(url: url, formatDescription: fmt, mxf: false)
             }
             if let rate = try? await track.load(.estimatedDataRate), rate > 0 {
                 meta.videoDataRate = Double(rate)

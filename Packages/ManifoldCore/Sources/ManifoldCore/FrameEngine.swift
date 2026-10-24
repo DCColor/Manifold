@@ -2051,6 +2051,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         meta.width = info.width
         meta.height = info.height
         meta.frameRate = info.frameRate
+        // MXF: the picture descriptor is the container. A routed `.mov` has no format description to read
+        // `fiel` from, so its container reading is empty and the bitstream decides (I1).
+        meta.scan = FileScanProbe.resolve(url: url, formatDescription: nil,
+                                          mxf: url.pathExtension.lowercased() == "mxf")
         meta.colorPrimariesCode = info.primariesCode
         meta.transferFunctionCode = info.transferCode
         meta.colorMatrixCode = info.matrixCode

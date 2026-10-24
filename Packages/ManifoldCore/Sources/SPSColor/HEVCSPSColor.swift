@@ -121,6 +121,38 @@ public enum HEVCSPSColor {
         return SPSTiming.read(&r, source: .sps, fieldSequence: fieldSequence)
     }
 
+    // MARK: - Scan (interlaced I1)
+
+    /// What the SPS says about scan: the profile's two source flags and the VUI's `field_seq_flag` and
+    /// `frame_field_info_present_flag` (which says whether a picture timing SEI carries `pic_struct`). nil when
+    /// the SPS cannot be read as far as the VUI it declares. No VUI: both VUI flags are false (§E.2.1 inference).
+    public static func scan<Bytes: Collection>(nal: Bytes) -> HEVCScanSPS? where Bytes.Element == UInt8 {
+        guard nal.count >= 4, nal.count <= SPSColor.maximumSPSBytes else { return nil }
+        let b0 = nal[nal.startIndex], b1 = nal[nal.index(after: nal.startIndex)]
+        guard b0 & 0x80 == 0, (b0 >> 1) & 0x3F == 33, ((b0 & 1) << 5) | (b1 >> 3) == 0, b1 & 0x07 != 0
+        else { return nil }
+        var r = BitReader(rbsp: SPSColor.unescape(nal.dropFirst(2)))
+        var w = Walk(), shape = Shape()
+        var fieldSequence = false, frameFieldInfo = false
+        switch readSPS(&r, &w, &shape, nil).reach {
+        case .noVUI:
+            break
+        case .noVideoSignalType, .noColourDescription, .colourDescription:
+            // vui_parameters(), §E.2.1, from chroma_loc_info_present_flag, as `timing` reads it.
+            if r.bit() == 1 {                           // chroma_loc_info_present_flag
+                guard r.ue() <= 5, r.ue() <= 5 else { return nil }
+            }
+            _ = r.bit()                                 // neutral_chroma_indication_flag
+            fieldSequence = r.bit() == 1                // field_seq_flag
+            frameFieldInfo = r.bit() == 1               // frame_field_info_present_flag
+            guard !r.overrun else { return nil }
+        default:
+            return nil
+        }
+        return HEVCScanSPS(progressiveSource: shape.progressiveSource, interlacedSource: shape.interlacedSource,
+                           fieldSequence: fieldSequence, frameFieldInfoPresent: frameFieldInfo)
+    }
+
     /// A VPS's `vps_timing_info`, or nil when it declares none or cannot be read that far. ONE VPS NAL,
     /// 2-byte header, no start code or length prefix. §7.3.2.1.
     public static func vpsTiming<Bytes: Collection>(nal: Bytes) -> SPSTiming? where Bytes.Element == UInt8 {
@@ -163,6 +195,8 @@ public enum HEVCSPSColor {
         var generalProfileIdc = 0
         var generalProfileCompatibility: UInt32 = 0
         var bitDepthsRead = false
+        var progressiveSource = false                   // general_progressive_source_flag (interlaced I1)
+        var interlacedSource = false                    // general_interlaced_source_flag
     }
 
     private static func walkAll<Bytes: Collection>(nal: Bytes, mutant: Mutant?)
@@ -312,7 +346,9 @@ public enum HEVCSPSColor {
         _ = r.bit()                                     // general_tier_flag
         shape.generalProfileIdc = r.bits(5)             // general_profile_idc
         shape.generalProfileCompatibility = UInt32(truncatingIfNeeded: r.bits(32)) // ..._compatibility_flag[0…31]
-        _ = r.bits(48)                                  // progressive_source_flag … general_inbld_flag
+        shape.progressiveSource = r.bit() == 1          // general_progressive_source_flag
+        shape.interlacedSource = r.bit() == 1           // general_interlaced_source_flag
+        _ = r.bits(46)                                  // non_packed_constraint_flag … general_inbld_flag
         _ = r.bits(8)                                   // general_level_idc
         var profilePresent: [Bool] = [], levelPresent: [Bool] = []
         for _ in 0..<maxSubLayersMinus1 {

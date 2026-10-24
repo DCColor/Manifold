@@ -97,6 +97,9 @@ struct InspectorPanel: View {
                     MetadataRow(label: "Display Aspect", value: dar)
                 }
                 MetadataRow(label: "Frame Rate", value: m.frameRateString)
+                // Progressive or interlaced, the field order, and the source that said so; a container that
+                // disagrees with the bitstream is named after it (docs/INTERLACED_FINDINGS.md §10, I1).
+                MetadataRow(label: "Scan", value: m.scanString, isFact: m.scanIsStated)
                 if let tc = m.startTimecode {
                     MetadataRow(label: "Start TC", value: tc)
                 }

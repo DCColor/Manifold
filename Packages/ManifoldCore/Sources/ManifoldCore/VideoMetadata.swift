@@ -1,5 +1,6 @@
 import Foundation
 import CoreMedia
+import FileScan
 
 public struct ChapterMarker: Equatable, Sendable {
     public var time: Double
@@ -358,6 +359,9 @@ public struct VideoMetadata: Equatable, Sendable {
     /// is quietly both.
     public var displaySize: CGSize?
     public var frameRate: Double = 0
+    /// Progressive or interlaced, the field order, and which source said so (docs/INTERLACED_FINDINGS.md §10,
+    /// I1). THE place later stages read it from. `.notRead` until a producer reads the file.
+    public var scan: SourceScan = .notRead
     public var fileName: String = "—"
     public var container: String = "—"
     public var videoDataRate: Double = 0    // bits/sec (estimated)
@@ -459,6 +463,10 @@ public struct VideoMetadata: Equatable, Sendable {
     public var frameRateString: String {
         frameRate > 0 ? String(format: "%.3f fps", frameRate) : "—"
     }
+    /// The Inspector's Scan row, so the app reads words and not `FileScan`'s types.
+    public var scanString: String { scan.readout }
+    /// False when no source stated the scan ("Unknown", "Not read"): the row is then a statement about an absence.
+    public var scanIsStated: Bool { scan.scan != .unknown }
     public var videoDataRateString: String {
         videoDataRate > 0 ? String(format: "%.1f Mb/s", videoDataRate / 1_000_000) : "—"
     }

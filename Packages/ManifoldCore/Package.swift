@@ -33,6 +33,8 @@ let package = Package(
         // ManifoldCore uses it (the file chroma resolver, §6.10 Stage 3b S2); a product so the tests
         // and anything else can name it.
         .library(name: "FileChroma", targets: ["FileChroma"]),
+        // ManifoldCore uses it (a file's scan and field order, interlaced I1); a product so the tests can name it.
+        .library(name: "FileScan", targets: ["FileScan"]),
         // Linked by the APP target directly (project.yml), for App/SRT's audio decoder.
         .library(name: "AACFraming", targets: ["AACFraming"]),
         // Linked by the APP target directly (project.yml), for calibration mode's sheet, the flash
@@ -254,6 +256,26 @@ let package = Package(
             name: "FileChromaTests",
             dependencies: ["FileChroma", "ColorimetryModel", "SPSColor"],
             path: "Tests/FileChromaTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // A file's scan (progressive or interlaced) and field order, from the container (`fiel`, the MXF
+        // descriptor) and the bitstream (ProRes and DNx frame headers, H.264 and HEVC parameter sets, slices and
+        // SEI), and the rule between them (docs/INTERLACED_FINDINGS.md §10, I1). A leaf target for the same
+        // linking reason as FileChroma: ManifoldCore does the CoreMedia and libav reads and calls in here.
+        .target(
+            name: "FileScan",
+            dependencies: ["SPSColor"],
+            path: "Sources/FileScan",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FileScanTests",
+            dependencies: ["FileScan", "SPSColor"],
+            path: "Tests/FileScanTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]
@@ -508,7 +530,7 @@ let package = Package(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
-                           "ContainerRepair", "FrameGrid", "AudioOutputLayout"],
+                           "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

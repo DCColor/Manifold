@@ -218,7 +218,13 @@ held back until after release, and the numbered defect entries follow.
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
-   - **I1 — detect** scan type and field order on both file paths.
+   - **I1 — detect** scan type and field order on both file paths. **Built and run unattended 2026-10-23, not
+     committed** (`INTERLACED_FINDINGS.md` §10): `VideoMetadata.scan` from the container (`fiel`, MXF FrameLayout /
+     FieldDominance) and the bitstream (ProRes and DNx headers, H.264 SPS / slice / `pic_struct`, HEVC
+     `field_seq_flag` / `pic_struct` / source flags), the bitstream winning per axis; the Inspector's Scan row and a
+     `[SCAN]` line. Q1–Q11, E (20 files byte-identical to HEAD), L, G (540 / 540, warnings as HEAD) and D pass; one
+     clause of Q3 was a wrong prediction (FFmpeg writes no `fiel` in a DNxHD `.mov`). New entry below: the MXF header
+     read.
    - **I2 — SDI 1080i:** 1080i50, 1080i59.94 and 1080i60 in the mode table, the picker and Follow source;
      fields sent untouched. An interlaced 50/59.94/60 frame rate is halved to 25/29.97/30, logged.
      Bottom-field-first HD files are sent untouched, with a warning.
@@ -2767,7 +2773,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed. Files: audited from the source 2026-10-09, not run.
+**Status:** OPEN. Live: measured, not fixed. Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, not committed; the mode decision (I2) not started.
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -2810,8 +2816,20 @@ Streams are I6, after 1.0. The decisions:
   file path if it has interlaced sources. Display in the window is a separate question (no deinterlace stage
   was looked at here).
 
+**I1 (detection), built and run unattended 2026-10-23, not committed** (`INTERLACED_FINDINGS.md` §10.6):
+- every interlaced fixture reads its scan and field order from its bitstream, with the source named; the container
+  fills only an axis the bitstream leaves unstated; a disagreement is logged (`[SCAN] … ⚠️ DISAGREE`) and shown on
+  the Inspector's Scan row. The 20 progressive control files read progressive, exports byte-identical to HEAD;
+- five real DNxHD 1080i MXF on TEST FLIP read TFF with the container agreeing; an AS-11 H.264 Intra MXF does not
+  open (`noDecoder`, decision 7);
+- nothing else reads `VideoMetadata.scan` yet: the mode decision is I2;
+- seen during the runs, pre-existing (HEAD too), at quit only: a frame of the previous file is presented after the
+  source is cleared, logging `[EDR] … AFTER a frame was already on screen` and a `[MATRIX]` line against the cleared
+  state (2 of 5 runs).
+
 **Done means (files, 1.0):**
-- scan type and field order reach the mode decision from the file's own bitstream and container;
+- scan type and field order reach the mode decision from the file's own bitstream and container (I1 detects them;
+  I2 makes the decision);
 - 1080i50, 1080i59.94 and 1080i60 exist and are chosen for such files;
 - the card is verified on the reference monitor with the TFF and BFF fixtures (`INTERLACED_FINDINGS.md`
   P3–P5), and colour is field-correct (P6).
@@ -2820,6 +2838,27 @@ Streams are I6, after 1.0. The decisions:
 - interlaced-ness reaches the mode decision from the stream's own signalling (SPS `frame_mbs_only_flag`,
   `field_seq_flag`, picture-timing SEI, NDI `frame_format_type`), never from a server;
 - the card is verified on an SDI analyser or monitor for MBAFF and PAFF fixtures.
+
+---
+
+## ☐ OPEN 2026-10-23 — LOW, PRE-EXISTING — `MXFDeclaredRange` reads the MXF header short and misses the picture descriptor on FFmpeg-made MXF
+
+**Status:** OPEN, not fixed (found in interlaced I1, which changes no picture). **No wrong picture is known.**
+
+- **What:** `MXFDeclaredRange.headerBytes` (`MXFDeclaredRange.swift:67-83`) reads from the file start to the partition
+  pack's value offset plus `HeaderByteCount`. SMPTE 377-1 counts `HeaderByteCount` from the primer pack, which comes
+  after the partition pack and after any KLV fill padding it to the KAG. So the read stops short by the pack and its
+  fill.
+- **Measured 2026-10-23:** on all 8 FFmpeg-made MXF in `build/` (FFmpeg pads to KAG 512 and writes the picture
+  descriptor last) the descriptor runs past the cut (e.g. it ends at byte 4856; the read stops at 4628; the header
+  metadata ends at 5120), so the reader returns `.untagged`. On all 110 real MXF with a descriptor on TEST FLIP,
+  14 of them RGBA, the descriptor is inside the cut.
+- **Why it is low:** the reader runs only when libav reports no range, which is the RGBA-descriptor case. FFmpeg
+  writes CDCI descriptors, whose range libav does report. An RGBA descriptor written last in a padded header would be
+  missed; none is known.
+- **Fix, when it is taken:** start counting after the partition pack and any fill, as I1's `FileScanProbe.mxfHeader`
+  does (118 / 118 descriptors inside). Check the range of the 14 RGBA files is unchanged (`[LIBAV-COLOR]` lines and
+  exports against HEAD), because the fix makes the reader see descriptors it misses today.
 
 ---
 

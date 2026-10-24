@@ -34,7 +34,8 @@ public enum H264SPSColor {
         guard nal.count <= SPSColor.maximumSPSBytes else { return SPSColor(reach: .malformed) }
 
         var reader = BitReader(rbsp: SPSColor.unescape(nal.dropFirst()))
-        return readSPS(&reader)
+        var shape = Shape()
+        return readSPS(&reader, &shape)
     }
 
     // MARK: - The chroma format (§6.10, Stage 3b S2)
@@ -60,20 +61,33 @@ public enum H264SPSColor {
 
     // MARK: - seq_parameter_set_data(), H.264 §7.3.2.1.1, up to the colour fields only
 
-    private static func readSPS(_ r: inout BitReader) -> SPSColor {
+    /// The structural fields the walk passes that a slice header needs to be read (`H264Scan`, interlaced
+    /// I1). Recorded as the walk goes; nothing about the colour result depends on them.
+    struct Shape {
+        var spsID = 0
+        var separateColourPlane = false
+        var log2MaxFrameNum = 4
+        var picOrderCntType = 0
+        var log2MaxPocLsb = 4
+        var frameMbsOnly = true
+        var mbAdaptiveFrameField = false
+    }
+
+    static func readSPS(_ r: inout BitReader, _ shape: inout Shape) -> SPSColor {
         let malformed = SPSColor(reach: .malformed)
 
         let profileIdc = r.bits(8)
         _ = r.bits(8)                                   // constraint_set0..5_flag + reserved_zero_2bits
         _ = r.bits(8)                                   // level_idc
-        guard r.ue() <= 31 else { return malformed }    // seq_parameter_set_id
+        shape.spsID = r.ue()
+        guard shape.spsID <= 31 else { return malformed }    // seq_parameter_set_id
 
         // The high-profile block, present ONLY for these profile_idc values. The most commonly
         // botched part of SPS parsing: getting the list wrong shifts everything after it.
         if highProfiles.contains(profileIdc) {
             let chromaFormatIdc = r.ue()
             guard chromaFormatIdc <= 3 else { return malformed }
-            if chromaFormatIdc == 3 { _ = r.bit() }     // separate_colour_plane_flag
+            if chromaFormatIdc == 3 { shape.separateColourPlane = r.bit() == 1 }   // separate_colour_plane_flag
             guard r.ue() <= 6, r.ue() <= 6 else { return malformed }   // bit_depth_luma/chroma_minus8
             _ = r.bit()                                 // qpprime_y_zero_transform_bypass_flag
             if r.bit() == 1 {                           // seq_scaling_matrix_present_flag
@@ -84,10 +98,13 @@ public enum H264SPSColor {
             }
         }
 
-        guard r.ue() <= 12 else { return malformed }    // log2_max_frame_num_minus4
-        switch r.ue() {                                 // pic_order_cnt_type
+        shape.log2MaxFrameNum = r.ue() + 4              // log2_max_frame_num_minus4
+        guard shape.log2MaxFrameNum <= 16 else { return malformed }
+        shape.picOrderCntType = r.ue()
+        switch shape.picOrderCntType {                  // pic_order_cnt_type
         case 0:
-            guard r.ue() <= 12 else { return malformed } // log2_max_pic_order_cnt_lsb_minus4
+            shape.log2MaxPocLsb = r.ue() + 4            // log2_max_pic_order_cnt_lsb_minus4
+            guard shape.log2MaxPocLsb <= 16 else { return malformed }
         case 1:
             _ = r.bit()                                 // delta_pic_order_always_zero_flag
             _ = r.se()                                  // offset_for_non_ref_pic
@@ -105,7 +122,8 @@ public enum H264SPSColor {
         _ = r.bit()                                     // gaps_in_frame_num_value_allowed_flag
         _ = r.ue()                                      // pic_width_in_mbs_minus1
         _ = r.ue()                                      // pic_height_in_map_units_minus1
-        if r.bit() == 0 { _ = r.bit() }                 // frame_mbs_only_flag → mb_adaptive_frame_field_flag
+        shape.frameMbsOnly = r.bit() == 1               // frame_mbs_only_flag
+        if !shape.frameMbsOnly { shape.mbAdaptiveFrameField = r.bit() == 1 }   // mb_adaptive_frame_field_flag
         _ = r.bit()                                     // direct_8x8_inference_flag
         if r.bit() == 1 {                               // frame_cropping_flag
             for _ in 0..<4 { _ = r.ue() }               // left, right, top, bottom offsets
