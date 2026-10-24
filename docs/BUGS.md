@@ -218,8 +218,8 @@ held back until after release, and the numbered defect entries follow.
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
-   - **I1 — detect** scan type and field order on both file paths. **Built and run unattended 2026-10-23, not
-     committed** (`INTERLACED_FINDINGS.md` §10): `VideoMetadata.scan` from the container (`fiel`, MXF FrameLayout /
+   - **I1 — detect** scan type and field order on both file paths. **Built and run unattended 2026-10-23, committed
+     (`c9f0c97`)** (`INTERLACED_FINDINGS.md` §10): `VideoMetadata.scan` from the container (`fiel`, MXF FrameLayout /
      FieldDominance) and the bitstream (ProRes and DNx headers, H.264 SPS / slice / `pic_struct`, HEVC
      `field_seq_flag` / `pic_struct` / source flags), the bitstream winning per axis; the Inspector's Scan row and a
      `[SCAN]` line. Q1–Q11, E (20 files byte-identical to HEAD), L, G (540 / 540, warnings as HEAD) and D pass; one
@@ -2773,7 +2773,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed. Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, not committed; the mode decision (I2) not started.
+**Status:** OPEN. Live: measured, not fixed. Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); the mode decision (I2) not started.
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -2816,7 +2816,7 @@ Streams are I6, after 1.0. The decisions:
   file path if it has interlaced sources. Display in the window is a separate question (no deinterlace stage
   was looked at here).
 
-**I1 (detection), built and run unattended 2026-10-23, not committed** (`INTERLACED_FINDINGS.md` §10.6):
+**I1 (detection), built and run unattended 2026-10-23, committed (`c9f0c97`)** (`INTERLACED_FINDINGS.md` §10.6):
 - every interlaced fixture reads its scan and field order from its bitstream, with the source named; the container
   fills only an axis the bitstream leaves unstated; a disagreement is logged (`[SCAN] … ⚠️ DISAGREE`) and shown on
   the Inspector's Scan row. The 20 progressive control files read progressive, exports byte-identical to HEAD;

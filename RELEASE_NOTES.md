@@ -244,7 +244,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Saved streams written with sorted JSON keys, so an unchanged list saves back byte for byte (each list is re-ordered once at its first save; content unchanged) | `f926f47` |
 | Soak, replay and DeckLink test tooling; MediaMTX `useAbsoluteTimestamp` mode | `8389dd9` `5041fb8` `54750ad` `9b10b68` `73ef624` `b35a810` |
 | Build hygiene: concurrency annotations, vendored-header warnings, ignore build folders | `f0969e4` `aa79682` `d055d07` |
-| Interlaced I1: a file's scan and field order detected from its container and bitstream, shown in the Inspector and logged as `[SCAN]` (`INTERLACED_FINDINGS.md` §10) | uncommitted |
+| Interlaced I1: a file's scan and field order detected from its container and bitstream, shown in the Inspector and logged as `[SCAN]` (`INTERLACED_FINDINGS.md` §10) | `c9f0c97` |
 | Documentation only (findings, plans, BUGS.md, roadmap, user guide drafts) | the remaining 49 commits |
 
 ## 0.8.4

@@ -249,7 +249,7 @@ disagreeing ProRes files made from the TFF one by rewriting only its `fiel` (to 
 | G | `swift test`: all pass, HEAD's count plus the new tests. Profile build with HEAD's warning set (sorted, paths normalised) | as stated | any failure or new warning |
 | D | `com.graviton.manifold` defaults dictionary-equal to the snapshot after the runs (restored first if a run wrote window state), `streamBookmarks` hash unchanged | equal | any difference |
 
-### 10.6 Results (built and run unattended 2026-10-23, not committed)
+### 10.6 Results (built and run unattended 2026-10-23, committed `c9f0c97`)
 
 **Estimated** 5 h (band 3½–6½). **Actual** about 1 h 20 min, from the predictions to this record. No attended
 steps, no screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Runs, logs, exports and
