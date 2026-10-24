@@ -70,8 +70,10 @@ held back until after release, and the numbered defect entries follow.
        for a paused re-present); not committed** (§6.11, *S2 — results*). ✅ **Final key: hold D, hold ⇧D for
        Bypass** (Robbie, 2026-10-23, `SHORTCUTS_AUDIT.md` §4.6 decision 2), replacing the temporary backslash; built in
        the shortcut registry, which matches exact modifiers (⌘D, ⌥D and any other modified D pass through) and steps
-       aside while a text field is typed into. Built and run unattended 2026-10-23, committed (`<commit — to be filled
-       in>`) (`SHORTCUTS_AUDIT.md` §5).
+       aside while a text field is typed into. Built and run unattended 2026-10-23, committed (`9bedbe6`) (`SHORTCUTS_AUDIT.md` §5).
+       ✅ **Moved to C 2026-10-24** (Robbie, from his checklist: "D doesn't mean compare"): hold C = the other of macOS
+       and Reference, ⇧C = Bypass, and a new ⌥C = the window's LUT off while held (nothing with no LUT applied). D is
+       free. Built and run unattended 2026-10-24, commit `<commit — to be filled in>` (`SHORTCUTS_AUDIT.md` §8–§9).
      - **S3** — Phase 4, primaries: one independent primaries / transfer / matrix table; Rec.2020 SDR on all
        four transports; case (g) (*a file's container tags vs its decoded frames' tags*, below). **Built and run
        unattended 2026-10-12; committed (`94961b9`)** (§6.11, *S3 — results*). The table is in
@@ -239,11 +241,25 @@ held back until after release, and the numbered defect entries follow.
      deinterlace). SD interlaced (480i/576i) is out of scope.
    - **Open, read-only, later:** whether XDCAM HD422 and AVC-Intra MXF already play through AVFoundation
      with the Pro Video Formats registered. Adding libav decoders is decided after that.
-3. ✅ **The shortcut registry and its window.** Built and run unattended 2026-10-23, committed (`<commit — to be
-   filled in>`). One registry (`Packages/ManifoldCore/Sources/ShortcutRegistry`, unit-tested) is the source of
+3. ✅ **The shortcut registry and its window.** Built and run unattended 2026-10-23, committed (`9bedbe6`). One registry (`Packages/ManifoldCore/Sources/ShortcutRegistry`, unit-tested) is the source of
    truth for every non-stock shortcut; one `NSEvent` monitor (`App/Shortcuts/ShortcutCenter.swift`) and the menus
    dispatch through it; Help ▸ Keyboard Shortcuts… rebinds. The scheme, the results and Robbie's by-hand checklist:
    `SHORTCUTS_AUDIT.md` §4.2, §5, §6.
+   ✅ **Follow-ups from Robbie's checklist (2026-10-24).** Built and run unattended 2026-10-24, commit
+   `<commit — to be filled in>` (`SHORTCUTS_AUDIT.md` §8 predictions, §9 results, §10 checklist):
+   - Export Frame writes the PNG only; the measurement set is File ▸ Export Frame (Diagnostic Set), a debug action.
+   - Show All Tabs: measured unchanged (⇧⌘\); the "diagonal arrow" is the backslash glyph. Guard test added.
+   - ⌃⌘F works again (a fixed alias of ⌘F); fn-F is left to the system.
+   - ⌃⌥R removed: the AVFoundation-layer A/B no longer served a purpose (§8 item 4).
+   - Every menu item shows its key (N on Show/Hide File Name); a bare menu key still types in a text field.
+   - Connect to First NDI Source: out of the File menu, a debug hook on ⌃⌥N.
+   - Keys: compare C / ⇧C / ⌥C, DeckLink ⇧⌘D (⌥⌘D is macOS's Dock key), Disconnect ⌥⌘⌫, Scopes ⌥⌘S, transform chain
+     ⌥⌘4, volume ⌘↑ / ⌘↓, mute ⌥⌘↓ (UNVERIFIED as any app's convention).
+   - Wording: Override, Next Tag Override, Reset Tags to Source; stored IDs unchanged.
+   - Keyboard Shortcuts… also in the app menu; the window's legend; the pin in the accent colour; the volume control
+     no longer shakes.
+   - **Not done, from the same notes, not in the brief:** scaling the control bar at small window sizes, and a
+     resizable Settings window like the shortcuts window.
 4. **The release gate:**
    - the sync leftovers;
    - the user guide, including a note that an interlaced NDI source is deinterlaced by the NDI SDK before
@@ -269,8 +285,9 @@ held back until after release, and the numbered defect entries follow.
      an answer, not a failure of the check.
    - the pre-ship cleanup (the pre-ship checklist below, including every temporary probe it lists).
    - **the debug hooks' predicate** (`ShortcutDebugGate`, `App/Shortcuts/ShortcutCenter.swift`). Its `.profile` tier
-     is `#if DEBUG`, and **the shipped Profile configuration defines `DEBUG`**, so every ⌃⌥ debug hook (⌃⌥R, ⌃⌥W,
-     ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, and the Debug menu's ⌃⌥A and ⌃⌥⇧B) answers in every tester build. Before a public
+     is `#if DEBUG`, and **the shipped Profile configuration defines `DEBUG`**, so every ⌃⌥ debug hook (⌃⌥N, ⌃⌥W,
+     ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, and the Debug menu's ⌃⌥A and ⌃⌥⇧B) answers, and File ▸ Export Frame
+     (Diagnostic Set) is shown, in every tester build (⌃⌥R was removed 2026-10-24). Before a public
      build, switch that one predicate to a flag only a developer build carries. It is the one place to change: the
      hooks are registry actions behind it, not hidden buttons. The build configuration was deliberately not
      changed when the registry was built (2026-10-23).
@@ -786,7 +803,10 @@ The shortcut registry (`SHORTCUTS_AUDIT.md` §4.4) made every hook above a `debu
 `ShortcutCatalog`: not rebindable, and listed in Help ▸ Keyboard Shortcuts… only when the Debug menu's opt-in is
 on. Whether one answers is `ShortcutDebugGate` (`App/Shortcuts/ShortcutCenter.swift`):
 - the `.profile` tier (`#if DEBUG`, so ON IN PROFILE): ⌃⌥W, ⌃⌥H, ⌃⌥⇧H, ⌃⌥⇧E, ⌃⌥D, ⌃⌥⇧D, the Debug menu's ⌃⌥A and
-  ⌃⌥⇧B, and **⌃⌥R, which moved here from the shipping set** (decision 7: the render-layer A/B);
+  ⌃⌥⇧B, and since 2026-10-24 ⌃⌥N (Connect to First NDI Source, out of the File menu) and File ▸ Export Frame
+  (Diagnostic Set) (the `.v210` / `.rgba16f` / `.v210.json` set Export Frame no longer writes). ⌃⌥R, which moved here
+  from the shipping set on 2026-10-23 (decision 7: the render-layer A/B), was **removed** on 2026-10-24
+  (`SHORTCUTS_AUDIT.md` §8 item 4);
 - the `.configDebug` tier (`MANIFOLD_CONFIG_DEBUG`, the Debug configuration only): ⌃⌥L, ⌃⌥⇧L, ⌃⌥P, ⌃⌥U, ⌃⌥S,
   ⌃⌥[ and ⌃⌥].
 
@@ -1251,7 +1271,7 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2 built and tested unattended 2026-10-23 (uncommitted), real install not yet migrated; the licensing port and Release builds to follow
+## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2 built and tested unattended 2026-10-23 (`3c5526d`), real install not yet migrated; the licensing port and Release builds to follow
 
 **The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy
 policy, and the policy may not describe behaviour that has not shipped. Robbie split the fixes into
@@ -1344,7 +1364,7 @@ Denied each time, so the real install only ever ran the read-failed path):
 - **Done 2026-10-19:** `manifold.captureLiveAudioWAV` deleted from the real prefs (read first; a
   re-read reports it absent; the other 1,498 keys are unchanged).
 
-### P2 — stream secrets into the Keychain: built and tested unattended 2026-10-23 (commit `________`)
+### P2 — stream secrets into the Keychain: built and tested unattended 2026-10-23 (commit `3c5526d`)
 
 **The brief** (Robbie, 2026-10-23, overnight) and how it was resolved against `docs/PRIVACY_AUDIT.md`
 and the code are in the audit, *Stage P2*. In short: the existing service
@@ -2095,6 +2115,61 @@ defect, and that title was never written into this file.
 the load. Fix: 0 plays after a close (scored from the log over each cycle, not only the 2.5 s sample), CoreAudio
 output 0 after every close and 5 s after the last; abandoned at the video track 20, duration 10, audio tracks 19, the
 start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 plays after a close in 36 cycles.
+
+---
+
+## ☐ OPEN 2026-10-24 — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
+
+**Found** by the shortcut follow-ups' unattended run (`SHORTCUTS_AUDIT.md` §9). The export driver opened each control
+file with `open -a`, which opens a new window each time, so one HEAD session piled windows up. **Not fixed in that
+session (Robbie: record it, don't fix it).**
+
+**Measured** (HEAD Profile build, sandboxed bookmarks, 2026-10-24). Every file opened paused, and no window played.
+Each step = `open -a`, pin the controls, then Export frame clicked by Accessibility:
+
+| Windows | Footprint | CPU (ps) | Open + pin | Export click | Export written |
+|---|---|---|---|---|---|
+| 1 (launch, empty) | 299 MB | 15 % | — | — | — |
+| 1 | 430 MB | 26 % | 13.7 s | 0.3 s | yes |
+| 2 | 517 MB | 40 % | 13.7 s | 0.3 s | yes |
+| 3 | 597 MB | 56 % | 13.7 s | 0.3 s | yes |
+| 6 | 846 MB | not taken | 14.9 s | 0.6 s | yes |
+| 7 | 933 MB | not taken | 33.2 s | 4.6 s, **error** | **no** |
+| 8 | 1127 MB | not taken | 63.5 s | 10.1 s, **error** | **no** |
+| 9 (first run) | 1043 MB | not taken | 94.4 s | **error** | **no** |
+
+- **The cliff is at 7 windows, and it is in Accessibility, not in Export Frame.** From the 7th window on, System
+  Events answers the Export frame button query with error −1719 ("Can't get button 1 of group 1 of window 1 … Invalid
+  index"), so the click never happens. The log has no `[EXPORT]` line at all for those steps: `exportCurrentFrame` was
+  never called, rather than called and failing. Counting windows took 0.2 s up to 6 windows, then 1.1, 2.7 and 4.0 s.
+  A close button clicked at 8 windows reported success and closed nothing (8 windows before and after, 7 tries).
+  Below the cliff, closes work at once.
+- **Per window: about +15 % CPU and +80–90 MB footprint, while paused.** Each window's renderer keeps ticking at
+  120 Hz (`[RENDER-PERF] tickMs=8.33`) with nothing to draw (2–3 frames per report). So at about 7 windows the paused
+  windows fill the main thread, and the app answers Accessibility (and so VoiceOver) too slowly. Whether keyboard and
+  pointer input slow down too was not measured: no keystroke was sent. **UNKNOWN.**
+- **Each window holds one of everything**, by `heap` at each step: FrameEngine, MetalVideoRenderer, WindowDeck,
+  AVSampleBufferRenderSynchronizer and AVSampleBufferAudioRenderer, 1 / 2 / 3 … 9 / 9 / 9.
+- **Closed windows ARE released: the 2026-10-21 fix below holds.** With 3 windows, two closed by their close buttons:
+  every count above went 3 → 1, footprint 597 → 465 MB, and CPU 56 → 24 %. It was the same 10 s later.
+- **Reproduce:** `open -a <the built app> <file>` seven times in one session, then click any control-bar button by
+  Accessibility. `patches-9-14-9-prores.mov`, the 7th file of the control set, exports normally on its own in a fresh
+  launch: the file is not the cause.
+
+- **The scopes tray was open in every window (likely the main cost, UNVERIFIED).** This session's preferences had
+  `showTray` true at 460 pt (set during Robbie's checklist, 2026-10-24). On 2026-10-23 the tray was off, and the same
+  `open -a` driver opened 20 files in one session with 20 / 20 exports (`SHORTCUTS_AUDIT.md` §7, P7). No run was made
+  with the tray off. A/B it first in the fix session: the same 9 files with the tray on and off.
+
+**Open questions (for the fix session):**
+- Should a paused window's display link and scopes stop, or drop their rate, when nothing changes?
+- Is ~85 MB per idle window expected (ring buffers, scopes, scrub decoder)?
+- Is the cliff the main thread, or Accessibility's own time limit? Answer with a main-thread sample (`sample <pid>`) at
+  7 windows.
+
+**Test tooling changed because of it:** the unattended drivers now close every window before opening the next file
+(`perfile` in the session's driver). `build/interlaced-i1/drv.py` and `build/sdi-paused-fix/drv.py` still use
+`open -a` per file, which is fine below 7 files and wrong above.
 
 ---
 

@@ -595,3 +595,198 @@ needed four, all small.
    headings, the Color control's tooltip, and the control bar's tooltips.
 7. **Not measured, and left to §6:** any real key press, K+J/L in the app, recording, conflict and warning lines,
    Find by Key, layout labels on a second layout, and the debug section.
+
+---
+
+## 8. Follow-ups from Robbie's checklist (2026-10-24): predictions (written 13:36, before any build of the changes)
+
+Robbie's checklist notes are in `docs/keybaordshortcuts_UI_audit_action.md` (untracked, his file). The brief has 17
+items, numbered as there. HEAD is `3c5526d`. It was built once, unchanged, as the baseline, and that run measured
+item 2 (below) before these predictions were written.
+
+**Estimated run time:** 3 h, band 2–4.5 h, from the brief to the results record.
+
+**Decided in this run.**
+- **DeckLink key.** ⇧⌘D, not ⌥⌘D (Robbie, 2026-10-24, asked during the run). ⌥⌘D is macOS's "Show or hide the
+  Dock" ([Apple, Mac keyboard shortcuts](https://support.apple.com/en-us/102650)), on by default and on this Mac, so
+  the system takes it before Manifold sees it. ⌥⌘D joins the reserved list.
+- **Volume keys.** ⌘↑ / ⌘↓ as decided, but they are **not QuickTime's**. Apple's QuickTime Player guide
+  ([Keyboard shortcuts and gestures](https://support.apple.com/guide/quicktime-player/qtpa4808515d/mac)) lists
+  ↑ / ↓ for volume and ⌥↑ / ⌥↓ for maximum and minimum, and gives no mute key. ⌘↑ / ⌘↓ are VLC for Mac's, from
+  secondary sources ([Beebom](https://beebom.com/22-handy-vlc-keyboard-shortcuts-for-windows-and-macos/amp),
+  [Make Tech Easier](https://maketecheasier.com/cheatsheet/vlc-keyboard-shortcuts/)). **Mute: ⌥⌘↓, UNVERIFIED**:
+  it is VLC for Mac's mute according to the same secondary sources
+  ([TekRevue](https://www.tekrevue.com/tip/the-most-useful-vlc-keyboard-shortcuts-for-os-x-and-windows/)), and no
+  Apple or VideoLAN page confirms it. The step is HEAD's: ±0.1 of the fader's linear 0–1 range, clamped.
+
+**Item 2, measured on HEAD before any change.** View ▸ Show All Tabs reads `AXMenuItemCmdChar` "\", modifiers
+⇧⌘, and no `AXMenuItemCmdGlyph`. This is the same at launch, after opening a file, after Color ▸ Reference and back,
+after View ▸ 50%, and with the Keyboard Shortcuts window open. It is also identical to the dump taken before the
+registry existed (base `9e7c9fc`). So no registry key reaches it. The "diagonal down arrow" is most likely the
+backslash itself: in the notes, every backslash of §6's checklist is gone ("⇧⌘: Show All Tabs"), so the glyph in the
+menu matched nothing on the page. **Robbie to confirm** by comparing it with Finder's View ▸ Show All Tabs. The guard
+test is added anyway.
+
+**How it is measured** (as in §5):
+- No keystroke is sent to the app, and no screenshots are taken.
+- Dispatch is tested in-process with synthesized `NSEvent`s.
+- In the app: Accessibility reads of every menu item's key, Accessibility clicks, pointer moves, and the control
+  set's exports.
+- Every app run sets `MANIFOLD_DEBUG_STREAMS_SANDBOX`, so a P2 build never reads or migrates the real
+  `streamBookmarks` (BUGS.md, P2: the real migration is attended).
+- Defaults are compared with a snapshot taken at 13:30 (1535 keys; the 3 licence keys by presence only, never
+  restored; `streamBookmarks` hash `ac81278e`).
+
+| # | Prediction | Pass band | Fail |
+|---|---|---|---|
+| Q1 | **Export Frame writes only the image.** The control-bar button and File ▸ Export Frame each write one `.png` and nothing else. Over the 20-file control set, each PNG is byte-identical to HEAD's whole file (pixels, ICC, `pHYs`, every chunk) | 20 / 20, one file each | any extra file, or any PNG byte |
+| Q2 | **The diagnostic set is today's export.** File ▸ Export Frame (Diagnostic Set), clicked by Accessibility, writes `.png`, `.rgba16f`, `.v210` and `.v210.json`, each byte-identical to HEAD's Export Frame for the same file | 20 / 20 × 4 files | any byte, or any file missing |
+| Q3 | **Show All Tabs shows ⇧⌘\\** in the app (Accessibility), unchanged from HEAD. A new unit test fails if any registry default or menu key equals a stock or system menu item's key | as stated | any |
+| Q4 | **Full screen.** In-process: ⌘F and ⌃⌘F both reach the full-screen action and are consumed. fn-F (the Function flag on a letter) is not consumed and goes on to AppKit's Enter Full Screen item, which still reads fn-F in the app | all three | any |
+| Q5 | **Every menu item shows its key.** In the app, each registry menu item's key matches the registry (View ▸ Show/Hide File Name reads N). A unit test asserts that every menu action's displayed key is its binding. Bare keys still go to a text field being typed into (in-process) | every item | any item blank or wrong |
+| Q6 | **Moved keys work, and old keys don't.** In-process: C, ⇧C and ⌥C holds begin and end. D, ⇧D and ⌘7 reach nothing. ⇧⌘D reaches the DeckLink toggle, ⌥⌘⌫ Disconnect, ⌥⌘S Scopes, ⌥⌘4 the chain readout, ⌘↑ / ⌘↓ / ⌥⌘↓ volume and mute, and ⌃⌥N (debug) the NDI connect, but only with the predicate on. ⌃⌥R reaches nothing. In the app the menus show ⇧⌘D, ⌥⌘⌫, ⌥⌘S, ⌥⌘4, ⌘↑, ⌘↓ and ⌥⌘↓, and File has no Connect to First NDI Source | every key | any |
+| Q7 | **Wording, with stored IDs unchanged.** The Color menu reads "Next Tag Override" and "Reset Tags to Source". A custom override reads "Override 9·1·6". `ColorimetryOverride.storageID` is unchanged for every case (`custom:9-1-6` included), and a bookmark and a shortcut-override JSON written by HEAD decode to the same values (unit tests). The old phrases appear in no user-facing string (`grep`) | as stated | any |
+| Q8 | **App menu.** Manifold ▸ Keyboard Shortcuts… sits directly below Settings…, and Help ▸ Keyboard Shortcuts… remains. The window's customised dot carries the "Customized" tooltip, and a one-line legend sits at the bottom (Accessibility read) | as stated | any |
+| Q9 | **Volume hover is stable.** Hovering the speaker (a pointer move) moves the play button by 0 pt in the tree. At HEAD it moves, which is the cause: the slider is inserted into the row, widening it | tree 0 pt, HEAD > 0 | tree > 0 |
+| Q10 | **Pictures.** No renderer change except the export's parameter. `.v210` and `.rgba16f` are byte-identical to HEAD (Q2, 20 / 20) | 20 / 20 | any byte |
+| Q11 | **Defaults.** No launch without overrides writes `manifold.shortcuts`. After the runs, with the added `NSWindow Frame …` keys and the sandbox domains removed (each read first), the domain is dictionary-equal to the 13:30 snapshot | equal | any difference |
+| Q12 | **`swift test`.** Everything passes: HEAD's count plus the new tests | all | any failure |
+| Q13 | **Warnings.** The tree's Profile warnings, normalised, are a subset of HEAD's | ⊆ HEAD | any new |
+
+**Not measurable unattended, and so left to the checklist:** the pin's colour, the look of the volume control,
+real key presses, and the chain popover appearing on ⌥⌘4.
+
+---
+
+## 9. Follow-ups: results (built and run unattended 2026-10-24, base `3c5526d`, not committed)
+
+**Estimated** 3 h (band 2–4.5). **Actual** about 2 h 15 min, from the brief (about 13:20) to this record (15:37):
+inside the band. About 40 min of it went to item 2's measurement and to the window-accumulation finding below.
+
+**How it ran.**
+- No keystroke was sent to the app, and no screenshots were taken. Every quit was a Quit event to the bundle path.
+- Every launch set `MANIFOLD_DEBUG_STREAMS_SANDBOX`, so the real `streamBookmarks` was never read or migrated.
+- HEAD was built in a scratch worktree, removed afterwards.
+- The driver, logs, menu dumps and exports are in the session scratchpad, under `r2/`.
+- Exports ran one window at a time: every window was closed before the next file. HEAD's first two attempts opened
+  every file in a new window and stopped working at the 7th (finding 6).
+
+| # | Measured | Verdict |
+|---|---|---|
+| Q1 | The control-bar button on the tree wrote one `.png` per file, nothing else. Each PNG is **byte-identical to HEAD's whole file, 20 / 20** | **PASS** |
+| Q2 | File ▸ Export Frame (Diagnostic Set), clicked by Accessibility, wrote `.png`, `.rgba16f`, `.v210` and `.v210.json`, **each byte-identical to HEAD's Export Frame, 20 / 20 × 4** | **PASS** |
+| Q3 | Show All Tabs, raw Accessibility read on both builds: `AXMenuItemCmdChar` = `\` (**U+005C**, REVERSE SOLIDUS), `AXMenuItemCmdModifiers` = 1 (⇧, with ⌘ implied), no virtual key, no glyph. **Identical before and after**, and identical at `9e7c9fc`, before the registry existed. The End key would be U+F72B (NSEndFunctionKey). New test `testNoRegistryKeyLandsOnAStockMenuItem` | **PASS**. Item 2 as reported was **not reproduced**: no registry key reaches the item. The glyph is the backslash (finding 3) |
+| Q4 | In-process: ⌘F and ⌃⌘F reach full screen and are consumed. fn-F makes no `KeyEvent` and passes to AppKit (`testFnWithALetterIsNotOurs`). In the app, View ▸ Enter Full Screen still reads fn-F. A real ⌃⌘F press is on the checklist | **PASS** (in-process) |
+| Q5 | In the app, every registry menu item shows its registry key, including View ▸ Show/Hide File Name `N`. `testEveryMenuActionShowsItsBinding` covers it. N and ⌘↑ go to a text field being typed into; ⌘I does not (`testTextFieldTakesTheMenuKeysItUses`) | **PASS** |
+| Q6 | In-process: C, ⇧C and ⌥C hold and release. D, ⇧D, ⌘7 and ⌃⌥R reach nothing and pass through. ⌃⌥N reaches the NDI connect with the predicate on. ⌥⌘S, ⌥⌘4, ⇧⌘D, ⌘↑, ⌘↓ and ⌥⌘↓ fire their items through a real `NSMenu`, with ⌘↓ and ⌥⌘↓ apart. ⌥⌘⌫ is checked as the item's character (U+0008, as Finder's ⌘⌫ Move to Trash), because AppKit's Delete mapping is not reachable with a synthesized event. **The app's menus against HEAD's:** every HEAD key unchanged except View ▸ Show/Hide Scopes ⌘7 → ⌥⌘S. Added: Color ▸ Show/Hide Transform Chain ⌥⌘4; File ▸ Disconnect Live Source ⌥⌘⌫; File ▸ Start/Stop DeckLink Output ⇧⌘D; View ▸ Volume Up ⌘↑, Volume Down ⌘↓, Mute / Unmute ⌥⌘↓, Show/Hide File Name N. File has no Connect to First NDI Source | **PASS** |
+| Q7 | The Color menu reads Next Tag Override and Reset Tags to Source, and the catalog's titles match. `ColorimetryOverride` labels read "Override 9·1·6", and `storageID` is still `custom:9-1-6` (`testLabel`, and S5's storage tests unchanged). A shortcut-override value written by `9bedbe6` loads unchanged, its retired DeckLink ID kept (`testHEADOverridesStillLoad`). `grep`: no user-facing string has the old phrases. The LUT Output Space keeps "Custom" on purpose (`PictureCodes.outputLabel`) | **PASS** (bookmarks by the unit tests; no real bookmark was loaded, by the sandbox rule) |
+| Q8 | Manifold ▸ Keyboard Shortcuts… opens the window; Help's remains. The legend reads back by Accessibility. **First build: the item sat above Settings…**, because a `CommandGroup(after: .appSettings)` lands there. Moved to `before: .systemServices`; it now follows Settings… and its separator. The "Customized" tooltip on the dot was not read: no row was customised in the app | **PASS** after one fix |
+| Q9 | Accessibility frames with the pointer over the speaker. **HEAD: the play button and the speaker move 38 pt left** (439 → 401, 489 → 451). **Tree: 0 pt**, also with the pointer 40 pt into the fader | **PASS**. The cause: the row is centred, and the inserted fader shifted it out from under the pointer |
+| Q10 | No renderer change except the export's `diagnosticSet` parameter. `.v210` and `.rgba16f` byte-identical (Q2) | **PASS** |
+| Q11 | No `manifold.shortcuts` written. **One key changed by this run: `manifold.raster.size`**, from `auto` to `50`, by item 2's measurement clicking View ▸ 50% on HEAD. It was read and restored to `auto`. The 14 `NSWindow Frame …` keys the launches added were each read, then deleted. The domain is then dictionary-equal to the 13:30 snapshot: 1535 keys, the 3 licence keys present (presence only), `streamBookmarks` `ac81278e`. No sandbox domain is left | **PASS** after restoring the one key |
+| Q12 | `swift test`: **611 / 611** (HEAD 602 / 602, plus 9 new) | **PASS** |
+| Q13 | Profile warnings from clean builds, paths and lines normalised: HEAD 12, tree 12, the same set | **PASS** |
+
+### Findings
+
+1. **⌥⌘D is macOS's Show or Hide the Dock**, on by default ([Apple](https://support.apple.com/en-us/102650)), and no
+   override is set in this Mac's `com.apple.symbolichotkeys`. The system takes it before any app. Robbie chose ⇧⌘D
+   when asked during the run, and ⌥⌘D is now reserved.
+2. **The volume keys are not QuickTime's.** Apple's QuickTime Player guide has ↑ / ↓ (⌥ for maximum and minimum) and
+   no mute key. ⌘↑ / ⌘↓ are VLC for Mac's, per secondary sources. Mute ⌥⌘↓ is **UNVERIFIED** as anyone's convention.
+3. **Show All Tabs was never changed** (Q3). §6's checklist lost its backslashes when rendered, so it read "⇧⌘:
+   Show All Tabs", and the menu's `\` matched nothing on the page. §10 writes keys in code spans for that reason.
+4. **A ⇧-letter key equivalent must be the uppercase letter.** MEASURED with `NSMenu.performKeyEquivalent`: "d" +
+   ⇧⌘ does not fire for a ⇧⌘D press (`charactersIgnoringModifiers` "D"); "D" + ⇧⌘ does. `menuShortcut` now
+   uppercases. This also applies to the Debug menu's ⌃⌥⇧B at `9bedbe6`, which was "b" + ⌃⌥⇧ (by the same
+   measurement, it would not have fired by key; not tried in the app).
+5. **⌃⌥R removed (item 4).** The hook toggled; nothing was broken. It hid the Metal view to show the
+   `AVSampleBufferDisplayLayer`. In As macOS Shows It, the default, the two draw the same picture by design, so it
+   looked like nothing happened. In every mode the AV layer ignores the LUT, the tag override, the raster size and
+   live sources. Its uses (M4 tuning, the 2026-08-28 HDR decision) are done, and hold-to-compare covers mode A/Bs. The
+   AV layer itself stays: it is the synchronizer's clock and the pump's pacing.
+6. **Window accumulation (new BUGS.md entry, open).** Each open window, even paused, costs about 15 % CPU and 80–90 MB.
+   From the 7th window, Accessibility queries fail with −1719, so clicks never land; the log shows no export was
+   attempted. Closed windows' engines **are** released (3 → 1). The scopes tray was open in this session's preferences
+   (set during Robbie's checklist) and closed on 2026-10-23, when 20 windows were fine; that is the likely difference,
+   UNVERIFIED. Not fixed in this session.
+7. **`CommandGroup(after: .appSettings)` lands above Settings…** (Q8), not below it.
+8. **Drivers.** `build/interlaced-i1/drv.py` and `build/sdi-paused-fix/drv.py` (local, gitignored) now click File ▸
+   Export Frame (Diagnostic Set), falling back to the button on a build without the item. The tracked findings docs
+   record past runs, which used the export as it was, and are unchanged.
+9. **Desktop.** `Manifold_frame_1792859586.*` (12:33) is from Robbie's checklist and was left alone. Three side files
+   of this run (`Manifold_frame_1792866451.*`, written after the driver had moved their PNG) were deleted after being
+   matched to this run's log.
+10. **Not done from Robbie's notes, as they were not in the brief:** scaling the control bar at small window sizes,
+    and a resizable Settings window like the shortcuts window.
+
+### Every default against macOS's system shortcuts (Robbie, during the run)
+
+Checked against every row of Apple's [Mac keyboard shortcuts](https://support.apple.com/en-us/102650) page (201 key
+rows, fetched 2026-10-24), and against this Mac's `com.apple.symbolichotkeys` (read only).
+
+- **System-wide, taken before the app: one clash, ⌥⌘D** (Dock). Fixed above.
+- **No other default is a system-wide shortcut.** Checked: ⌘O, ⌥⌘E, ⇧⌘D, ⌥⌘⌫, Space, J/K/L, the arrows and ⇧-arrows,
+  Home, End, ⌥← / ⌥→, ⌘L, ⌘1–⌘4, ⌘0, ⌘I, N, ⌥⌘T, ⌘F, ⌃⌘F, ⌥⌘S, ⌥⌘1–⌥⌘4, C / ⇧C / ⌥C, ⌥[ / ⌥], ⌘↑, ⌘↓, ⌥⌘↓, and
+  the ⌃⌥ debug hooks.
+- **Same keys, but app-level conventions (no clash, since the system does not take them):**
+  - ⇧⌘D (Finder: Desktop folder), ⌥⌘S (Finder: sidebar), ⌥⌘T ("show or hide a toolbar in the app", which is close
+    to what Manifold does with it), ⌘1–⌘4 (Finder views), ⌘I (Get Info), ⌘F (Find).
+  - ⌘↑ / ⌘↓ and ⌥← / ⌥→ move the insertion point in text. Manifold hands those to a text field being typed into
+    (Q5, and the dispatcher steps aside in fields).
+- **⌃⌥ is VoiceOver's modifier** (already a warning in the window). Only debug hooks use it.
+- **On this Mac**, the Accessibility Zoom hotkeys are switched on (`com.apple.symbolichotkeys` IDs 15, 17, 19 and 23;
+  the ID-to-key mapping is UNVERIFIED, commonly ⌥⌘8, ⌥⌘=, ⌥⌘- and ⌥⌘\). Manifold uses none of them.
+- fn with a letter (fn-F, fn-C Control Center, fn-E, fn-Q and the like) is never matched by Manifold
+  (`testFnWithALetterIsNotOurs`).
+
+---
+
+## 10. By-hand checklist for Robbie: the 2026-10-24 changes only
+
+These need real key presses or eyes, so they were not run unattended. Use the Profile build with a file in one
+window. Judge anything by eye on the LG. Keys are written in `code` here so that the backslash survives on the page:
+§6 lost every backslash, and that is why `⇧⌘\` read as "⇧⌘:".
+
+**Compare (moved from D to C).**
+- [ ] Hold `C`: the other of macOS and Reference, with the amber badge. Release: back.
+- [ ] Hold `⇧C`: Bypass. Release: back.
+- [ ] With a LUT loaded and applied, hold `⌥C`: the picture without the LUT, and the Color control reads
+      "+ LUT bypassed". Release: the LUT is back. With no LUT, `⌥C` does nothing.
+- [ ] `D` and `⇧D` do nothing. `⌘C` still copies in a text field.
+- [ ] In a text field, `C` types "c" and `⌥C` types "ç".
+
+**Moved and new keys.**
+- [ ] `⌥⌘S` opens and closes the scopes tray. `⌘7` does nothing.
+- [ ] `⌥⌘4` opens and closes the transform chain readout. The controls wake to show it, in overlay and in docked
+      mode.
+- [ ] `⇧⌘D` starts the DeckLink output, and `⇧⌘D` again stops it. In a second window that doesn't own the devices, it
+      beeps.
+- [ ] On a live stream, `⌥⌘⌫` disconnects it.
+- [ ] `⌘↑` / `⌘↓` change the volume (watch the fader); `⌥⌘↓` mutes and unmutes. View ▸ Audio shows all three.
+- [ ] `⌃⌘F`, `fn-F` and `⌘F` each enter and leave full screen.
+- [ ] `⌃⌥R` does nothing.
+
+**Menus.**
+- [ ] View ▸ Show/Hide File Name shows `N`. Pressing `N` toggles the name, but typing `n` in a bookmark name types
+      "n". Typing in Keyboard Shortcuts' search field works for `N` too, and `⌘↑` there moves the cursor to the start
+      rather than changing the volume.
+- [ ] View ▸ Show All Tabs: compare its glyph with Finder's View ▸ Show All Tabs (`⇧⌘\`). If the two look the same,
+      item 2 was the backslash glyph, as measured.
+- [ ] File has Export Frame and Export Frame (Diagnostic Set), and no Connect to First NDI Source.
+- [ ] Manifold ▸ Keyboard Shortcuts… (below Settings…) opens the window; Help ▸ Keyboard Shortcuts… still does.
+
+**Export.**
+- [ ] `⌥⌘E` (or the control-bar button): one `.png` on the Desktop, nothing else.
+- [ ] File ▸ Export Frame (Diagnostic Set): `.png`, `.rgba16f`, `.v210`, `.v210.json`.
+
+**Wording.**
+- [ ] Color ▸ Next Tag Override and Reset Tags to Source work on a file and on a stream.
+- [ ] The Color control's section reads "Override". An override reads "Override 9·1·6" in the control, the title and
+      the readout. A saved stream with a custom override still loads it.
+
+**The window and the bar.**
+- [ ] Customise one shortcut: the dot's tooltip says "Customized", and the line at the bottom explains the dot.
+- [ ] The pin is in the accent colour when pinned and white when not.
+- [ ] Hover the speaker, then drag the fader from 0 to full and back, slowly across the middle: nothing moves
+      sideways, and the play button never takes the pointer.

@@ -85,7 +85,7 @@ final class FileColorOverrideModel: ObservableObject {
     /// The Reset item: back to the file's own tags, at once.
     func reset() { set(.auto) }
 
-    /// Color ▸ Next Color Interpretation on a file: the next preset, wrapping to Auto. From Custom it goes to the first preset after Auto.
+    /// Color ▸ Next Tag Override on a file: the next preset, wrapping to Auto. From Custom it goes to the first preset after Auto.
     func cycle() {
         let all = ColorimetryOverride.allCases
         let i = all.firstIndex(of: override) ?? 0

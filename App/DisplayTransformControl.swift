@@ -37,7 +37,6 @@ struct DisplayTransformControl: View {
     @ObservedObject var chrome: WindowChrome
     /// Per window, owned here. Lifetime is this control's, which is the window's.
     @StateObject private var chainModel = DisplayChainModel()
-    @State private var showChain = false
 
     private var mode: DisplayTransformMode { chrome.displayTransform }
     private var isBypass: Bool { mode == .bypass }
@@ -84,7 +83,7 @@ struct DisplayTransformControl: View {
         .onChange(of: chrome.heldDisplayTransform) { _, _ in chainModel.refresh() }
         // ⚠️ TIER 3 IS PRESENTED FROM HERE, NOT FROM `ContentView`. The presentation modifier has
         // to live on a view in this file — see the header on why `ContentView` cannot take one.
-        .popover(isPresented: $showChain, arrowEdge: .bottom) {
+        .popover(isPresented: $chrome.showTransformChain, arrowEdge: .bottom) {
             DisplayChainReadout(model: chainModel)
                 // Recompute on OPEN as well as on the screen events: the window may have been
                 // dragged to another display while the popover was closed, and a readout that is
@@ -181,7 +180,7 @@ struct DisplayTransformControl: View {
         // mid-transition, and nothing is presented. Measured — the first version simply did
         // nothing when the item was clicked, with no error anywhere.
         Button("Show Transform Chain…") {
-            DispatchQueue.main.async { showChain = true }
+            DispatchQueue.main.async { chrome.showTransformChain = true }
         }
     }
 

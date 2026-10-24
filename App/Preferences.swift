@@ -85,9 +85,6 @@ final class Preferences: ObservableObject {
     // which seeds from and writes back to the same keys. The `showTray` property this class used to
     // expose had no readers; it is gone for the same reason `controlMode` is (see above).
     // Scope STYLING below (intensities, colours, scales) stays app-wide and stays here.
-    //
-    // NOTE: showReferenceLayer (⌃⌥R) is intentionally NOT persisted — it's a diagnostic
-    // toggle that must always default OFF on launch, so it stays transient @State.
 
     // Scope trace intensity — multiplies the brightness-curve gain. 1.0 = current look.
     // Per-scope values combine MULTIPLICATIVELY with the global master.

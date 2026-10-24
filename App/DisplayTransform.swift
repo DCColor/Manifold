@@ -183,8 +183,8 @@ final class DisplayTransformMenuState: ObservableObject {
 /// ⚠️ **WHEN §6.3's CONTROL-BAR PULLDOWN LANDS (Phase 2b), THIS MENU STAYS.** They are two surfaces
 /// onto one per-window value, exactly as View ▸ Show/Hide Scopes and the control-bar scopes button are onto
 /// `showTray`. The pulldown is the discoverable one; the menu is the one that appears in Help's
-/// menu search and carries the shortcuts: ⌥⌘1 / ⌥⌘2 / ⌥⌘3, the registry's (docs/SHORTCUTS_AUDIT.md §4.2). Hold D (⇧D
-/// for Bypass) compares without choosing; see HoldToCompare.swift.
+/// menu search and carries the shortcuts: ⌥⌘1 / ⌥⌘2 / ⌥⌘3, the registry's (docs/SHORTCUTS_AUDIT.md §4.2). Hold C (⇧C
+/// for Bypass, ⌥C for the LUT off) compares without choosing; see HoldToCompare.swift. ⌥⌘4 is the transform chain.
 struct DisplayTransformCommands: Commands {
     @ObservedObject private var state = DisplayTransformMenuState.shared
     @ObservedObject private var shortcuts = ShortcutCenter.shared.registry
@@ -201,6 +201,8 @@ struct DisplayTransformCommands: Commands {
             }
             // The interpretation override (the control bar's Color control), for files and every live transport.
             // No default key (decision 1, 2026-10-23); the cycle was the hidden ⌃⌥C.
+            Divider()
+            ShortcutMenuItem(id: .transformChain, registry: shortcuts)
             Divider()
             ShortcutMenuItem(id: .cycleInterpretation, registry: shortcuts)
             ShortcutMenuItem(id: .resetInterpretation, registry: shortcuts)

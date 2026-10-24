@@ -94,9 +94,18 @@ public struct KeyChord: Hashable, Sendable {
 
     /// No ⌘, ⌃ or ⌥.
     public var isBare: Bool { modifiers.isDisjoint(with: .commandLike) }
-    public var isShiftedArrow: Bool {
-        if case .code(let c) = key { return KeyCode.isArrow(c) && modifiers.contains(.shift) }
+    public var isShiftedArrow: Bool { isArrow && modifiers.contains(.shift) }
+    public var isArrow: Bool {
+        if case .code(let c) = key { return KeyCode.isArrow(c) }
         return false
+    }
+    /// A key a text field uses: anything without ⌘ or ⌃ (a character, ⌥ included), or an arrow, Home, End, Page Up,
+    /// Page Down or Delete with ⌘, ⌥ or ⇧ (moving and deleting by word, line and document).
+    public var isTextFieldKey: Bool {
+        if modifiers.isDisjoint(with: [.command, .control]) { return true }
+        guard !modifiers.contains(.control), case .code(let c) = key else { return false }
+        return KeyCode.isArrow(c) || [KeyCode.home, KeyCode.end, KeyCode.pageUp, KeyCode.pageDown, KeyCode.delete,
+                                      KeyCode.forwardDelete].contains(c)
     }
     public var needsFn: Bool {
         if case .code(let c) = key { return KeyCode.needsFn(c) }

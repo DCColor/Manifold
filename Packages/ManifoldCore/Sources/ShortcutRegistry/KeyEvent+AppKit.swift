@@ -15,6 +15,9 @@ public extension KeyEvent {
         default: return nil
         }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // fn (Globe) with a key that is not an arrow, Home, End, F-key or the like is the system's: fn-F is Enter Full
+        // Screen, fn-C Control Center, fn-E the Character Viewer. Not ours to match (they would read as bare F, C, E).
+        if flags.contains(.function), !KeyCode.isSpecial(event.keyCode) { return nil }
         var mods = KeyModifiers()
         if flags.contains(.command) { mods.insert(.command) }
         if flags.contains(.control) { mods.insert(.control) }
@@ -28,11 +31,13 @@ public extension KeyEvent {
 public extension KeyChord {
     /// The SwiftUI shortcut for a menu item, or nil when the chord cannot be one (see `ShortcutRegistry.menuChord`).
     func menuShortcut(layout: KeyLayout = CurrentKeyLayout()) -> KeyboardShortcut? {
-        guard !isBare else { return nil }
         let key: KeyEquivalent
         switch self.key {
         case .character(let c):
-            guard let ch = c.first else { return nil }
+            // ⇧ + a letter as the UPPER-case letter. MEASURED (NSMenu.performKeyEquivalent, 2026-10-24): an item
+            // "d" + ⇧⌘ does not fire for a ⇧⌘D press, whose charactersIgnoringModifiers is "D"; "D" + ⇧⌘ does.
+            let cased = modifiers.contains(.shift) ? c.uppercased() : c
+            guard let ch = cased.first else { return nil }
             key = KeyEquivalent(ch)
         case .code(let code):
             switch code {

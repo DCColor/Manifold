@@ -50,7 +50,7 @@ struct DisplayChain: Equatable {
     /// Colour S6, L3 (D7): the window's LUT — "name.cube — 3D 33³ · tetrahedral · out Rec.2020 PQ (HDR10)
     /// (stated)" — or nil with none. `InterpretationLUTModel.readoutLine`.
     var lut: String? = nil
-    /// The Source line's override words — "overridden (Custom 1·1·9)", its tail — or nil when the source is not
+    /// The Source line's override words — "overridden (Override 1·1·9)", its tail — or nil when the source is not
     /// overridden. The view draws them in the Color control's amber (LG session, 2026-10-22).
     var overriddenWords: String? = nil
     /// The LUT is changing the picture (loaded, not bypassed): the view draws the LUT line in amber, as the face is.
@@ -223,7 +223,7 @@ final class DisplayChainModel: ObservableObject {
             // here called an assumption and a user override alike "tagged". `SourceColorProvenance`
             // carries the answer from the site that actually knows it.
             let provenance = renderer?.sourceColorProvenance ?? .assumed
-            // Colour S5: an override says which — "overridden (Custom 9·1·6)", in the title's words.
+            // Colour S5: an override says which — "overridden (Override 9·1·6)", in the title's words.
             let tier = provenance.label
                 + (provenance == .overridden ? deck.interpretationLabel.map { " (\($0))" } ?? "" : "")
 

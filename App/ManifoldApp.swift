@@ -182,6 +182,12 @@ struct ManifoldApp: App {
                 Button("Check for Updates…") { UpdateChecker.shared.checkFromMenu() }
             }
             // Discoverable path to the License state — opens Settings (⌘,), where the License section lives.
+            // Keyboard Shortcuts… directly below Settings…, as well as in Help (Robbie, 2026-10-24). `before:
+            // .systemServices` and not `after: .appSettings`: MEASURED, an `after: .appSettings` group lands ABOVE
+            // Settings… (the License… group below does).
+            CommandGroup(before: .systemServices) {
+                Button("Keyboard Shortcuts…") { openWindow(id: KeyboardShortcutsScene.windowID) }
+            }
             CommandGroup(after: .appSettings) {
                 SettingsLink { Text("License…") }
                 // Downloads Vizrt's macOS NDI runtime installer. It is a DIRECT .pkg download,
@@ -262,16 +268,20 @@ struct ManifoldApp: App {
                 OpenRecentMenu(recents: recents)
                 Divider()
                 // ⌥⌘E, formerly the hidden ⌃⌥E (docs/SHORTCUTS_AUDIT.md §4.2). The control bar's button is the same
-                // action.
+                // action. The image only, since 2026-10-24 (§8 item 1).
                 ShortcutMenuItem(id: .exportFrame, registry: shortcuts)
+                // The measurement set Export Frame used to write (.rgba16f, .v210, .v210.json beside the PNG), for the
+                // scripts that compare exports. A debug action: shown only while `ShortcutDebugGate` is on, which in
+                // Profile is every build (the release-gate item in docs/BUGS.md).
+                if ShortcutDebugGate.isEnabled(.profile) {
+                    ShortcutMenuItem(id: .debugExportFrameDiagnostic, registry: shortcuts)
+                }
                 Divider()
-                // Device claims: no default key (§4.1 rule 4). They were the hidden ⌃⌥N / ⌃⌥⇧N / ⌃⌥O / ⌃⌥⇧O; one
-                // Disconnect replaces three retire keys (audit C1). A window that does not own the devices beeps.
-                ShortcutMenuItem(id: .connectFirstNDI, registry: shortcuts)
+                // Device claims (§8: ⌥⌘⌫ and ⇧⌘D since 2026-10-24). One Disconnect replaces three retire keys (audit
+                // C1); one item starts or stops the DeckLink output. A window that does not own the devices beeps.
+                // Connect to First NDI Source is a debug hook now (⌃⌥N), not a menu item.
                 ShortcutMenuItem(id: .disconnectLive, registry: shortcuts)
-                Divider()
-                ShortcutMenuItem(id: .startDeckLink, registry: shortcuts)
-                ShortcutMenuItem(id: .stopDeckLink, registry: shortcuts)
+                ShortcutMenuItem(id: .toggleDeckLink, registry: shortcuts)
             }
             // The View menu: raster size (⌘1–⌘4, ⌘0) — how large the picture is drawn, as a
             // percentage of the source raster. The app's first real menu of window commands; see
@@ -474,7 +484,7 @@ private enum ChromaScrubBench {
         print("[SCRUB-BENCH] begin \(engine.currentURL?.lastPathComponent ?? "?") at \(home)s")
         Task { @MainActor in
             print("[SCRUB-BENCH] export playback")
-            renderer.exportCurrentFrame()
+            renderer.exportCurrentFrame(diagnosticSet: true)
             // Export names carry whole seconds: two inside one second would share a name.
             try? await Task.sleep(for: .milliseconds(1500))
             // 60 positions at 20 Hz, spread over the file in a fixed scattered order (a golden-ratio
@@ -486,7 +496,7 @@ private enum ChromaScrubBench {
             engine.scrubSeek(to: home)
             try? await Task.sleep(for: .milliseconds(1500))
             print("[SCRUB-BENCH] export scrub")
-            renderer.exportCurrentFrame()
+            renderer.exportCurrentFrame(diagnosticSet: true)
             try? await Task.sleep(for: .milliseconds(1500))
             engine.exactSeek(to: home)
             print("[SCRUB-BENCH] end")

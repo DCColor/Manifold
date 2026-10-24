@@ -370,12 +370,6 @@ struct ContentView: View {
     // Diagnostics export prompt. Observed rather than @State because the menu item that raises it
     // lives in the App scene — see DiagnosticsExporter.
     @ObservedObject private var diagnostics = DiagnosticsExporter.shared
-    // M4 tuning: A/B Metal vs AVSampleBufferDisplayLayer, toggled by ⌃⌥R (a DEBUG hook since the shortcut
-    // registry, decision 7 of docs/SHORTCUTS_AUDIT.md §4.6). KEPT — this is the A/B
-    // switch itself (it selects the surface at the `metalRenderer` branch below), not the removed
-    // on-screen METAL/REFERENCE badge that used to read it. With the badge gone the switch is
-    // silent, which is correct for a shipped build: nothing announces the render path unasked.
-    @State private var showReferenceLayer = false
     /// The shortcut registry, for tooltips that name a key (`helpText`), so a rebound key is the one they name.
     private var keys: ShortcutRegistry { ShortcutCenter.shared.registry }
     // A droppable file is hovering over this window's picture — see the drop destination on
@@ -1113,13 +1107,18 @@ struct ContentView: View {
             Color.black
             ZStack {
                 // AV surface stays for pump + synchronizer clock, covered by Metal.
+                //
+                // ⚠️ THE ⌃⌥R A/B THAT HID METAL TO SHOW THIS LAYER IS GONE (2026-10-24, docs/SHORTCUTS_AUDIT.md §8
+                // item 4). It served M4's tuning and the 2026-08-28 HDR decision (BUGS.md). Since then As macOS Shows
+                // It is built to draw what this layer draws, so in the default mode the A/B showed no change ("does
+                // nothing"), and in every mode it ignored the LUT, the tag override, the raster size and live sources
+                // (this layer is fed by the file pump only): a comparison that could mislead. Hold C compares modes.
                 SampleBufferSurfaceView { nsView in
                     Task { @MainActor in
                         engine.attach(renderer: nsView.displayLayer.sampleBufferRenderer)
                     }
                 }
-                // Metal is the visible surface; hide to reveal the AV reference (⌃⌥R).
-                if let renderer = metalRenderer, !showReferenceLayer {
+                if let renderer = metalRenderer {
                     MetalSurfaceView(renderer: renderer)
                 }
             }
@@ -1604,6 +1603,11 @@ struct ContentView: View {
             .fileName: DeckShortcut { showFileNameOverlay.toggle() },
             .alwaysShowControls: DeckShortcut(enabled: { hasSource && !isDocked }) { togglePin() },
             .exportFrame: DeckShortcut(enabled: { metalRenderer != nil }) { metalRenderer?.exportCurrentFrame() },
+            // The readout hangs off the display-transform control, so the controls are woken to show it.
+            .transformChain: DeckShortcut(enabled: { hasSource }) {
+                if !chrome.showTransformChain { wakeHUD() }
+                chrome.showTransformChain.toggle()
+            },
             // Scopes. The CIE keys act on the CIE model wherever it sits (a no-op if it is in no slot).
             .scopesTray: DeckShortcut { chrome.showTray.toggle(); updateScopeSampling() },
             // u′v′ ↔ xy flips the renderer's kernel and the model's graticule together; setNeedsRefresh re-plots
@@ -1632,19 +1636,23 @@ struct ContentView: View {
             // Audio. The nudge acts only while this window shows a live source; otherwise ⌥[ / ⌥] go on (to a text
             // field, as “ and ‘), as they always have. Mute and volume are `transport`, as the fader is.
             .audioLater1: nudge(1), .audioEarlier1: nudge(-1), .audioLater10: nudge(10), .audioEarlier10: nudge(-10),
+            // ±0.1 of the fader's 0–1 range, clamped by the engine, and kept as the fader keeps it.
             .mute: DeckShortcut(enabled: transport) { engine.toggleMute() },
-            .volumeUp: DeckShortcut(enabled: transport) { engine.setVolume(engine.volume + 0.1) },
-            .volumeDown: DeckShortcut(enabled: transport) { engine.setVolume(engine.volume - 0.1) },
+            .volumeUp: DeckShortcut(enabled: transport) { stepVolume(0.1) },
+            .volumeDown: DeckShortcut(enabled: transport) { stepVolume(-0.1) },
             // Sources and output: the SAME funnels as the toolbar controls, so a menu pick and a button never
             // disagree.
-            .connectFirstNDI: DeckShortcut(enabled: device) {
-                DeckRegistry.shared.connectLive(.ndi, from: deck) { LiveSource.connectNDIFirstSource() }
-            },
             .disconnectLive: DeckShortcut(enabled: { device() && DeckRegistry.shared.liveLabel(for: deck) != nil }) {
                 DeckRegistry.shared.retireLiveIfOwned(by: deck)
             },
-            .startDeckLink: DeckShortcut(enabled: device) { DeckRegistry.shared.startDeckLinkOutput(from: deck) },
-            .stopDeckLink: DeckShortcut(enabled: device) { DeckRegistry.shared.stopDeckLinkOutput(from: deck) },
+            // One toggle (⇧⌘D): stop when the card is outputting, else start.
+            .toggleDeckLink: DeckShortcut(enabled: device) {
+                if DeckLinkService.shared.isOutputting {
+                    DeckRegistry.shared.stopDeckLinkOutput(from: deck)
+                } else {
+                    DeckRegistry.shared.startDeckLinkOutput(from: deck)
+                }
+            },
         ]
         #if DEBUG
         handlers.merge(debugShortcutHandlers(device: device)) { $1 }
@@ -1660,8 +1668,14 @@ struct ContentView: View {
     /// gate, as their hidden buttons did.
     private func debugShortcutHandlers(device: @escaping @MainActor () -> Bool) -> [ShortcutID: DeckShortcut] {
         [
-            // M4 tuning: hide Metal to reveal the AVSampleBufferDisplayLayer reference (decision 7: DEBUG only).
-            .debugRenderLayer: DeckShortcut { showReferenceLayer.toggle() },
+            // Export Frame's full measurement set: PNG, .rgba16f, .v210, .v210.json (§8 item 1).
+            .debugExportFrameDiagnostic: DeckShortcut(enabled: { metalRenderer != nil }) {
+                metalRenderer?.exportCurrentFrame(diagnosticSet: true)
+            },
+            // ⌃⌥N, its key before the registry; a File menu item 2026-10-23 → 10-24.
+            .debugNDIConnect: DeckShortcut(enabled: device) {
+                DeckRegistry.shared.connectLive(.ndi, from: deck) { LiveSource.connectNDIFirstSource() }
+            },
             // libdatachannel link smoke test: logs the version and a PeerConnection create/delete. No networking.
             .debugWebRTCSmoke: DeckShortcut(enabled: device) {
                 var message: NSString?
@@ -1982,9 +1996,9 @@ struct ContentView: View {
         let arbitrated = !deck.gate.deviceControlsEnabled
         let blocked = (status.isDriverBlocked && !deckLink.isOutputting) || arbitrated
         // Named first: inline, the `??` chain below no longer type-checks in reasonable time.
-        let stopHelp: String = keys.helpText("click to stop", .stopDeckLink)
+        let stopHelp: String = keys.helpText("click to stop", .toggleDeckLink)
         let onOffHelp: String = deckLink.isOutputting ? "DeckLink output ON — " + stopHelp
-                                                      : "DeckLink output — " + keys.helpText("click to start", .startDeckLink)
+                                                      : "DeckLink output — " + keys.helpText("click to start", .toggleDeckLink)
         let placedHelp: String? = deckLink.isOutputting
             ? deckLink.placementLine.map { "DeckLink output ON — \($0) — " + stopHelp } : nil
         return HStack(spacing: 2) {
@@ -2139,8 +2153,7 @@ struct ContentView: View {
             .help(arbitrated ? (deck.gate.reason ?? "Streaming is in another window")
                   : mine
                   ? "Streaming — \(ndi.connectedSourceName ?? "NDI") — " + keys.helpText("click to stop", .disconnectLive)
-                  : keys.helpText("Streaming — local mode; click to connect the first NDI source, or use the menu to pick",
-                                  .connectFirstNDI))
+                  : "Streaming — local mode; click to connect the first NDI source, or use the menu to pick")
 
             Menu {
                 streamingMenuContent
@@ -2749,27 +2762,38 @@ struct ContentView: View {
 
                 Divider().frame(height: 16).overlay(.white.opacity(0.25))
 
+                // ⚠️ FIXED GEOMETRY, AND THE JITTER WAS GEOMETRY (§8 item 17, MEASURED by Accessibility on HEAD
+                // `3c5526d`). This row is centred, and the fader used to be inserted on hover: hovering the speaker
+                // moved the play button and the speaker itself 38 pt left (half the fader and its spacing). The
+                // speaker slid out from under the pointer, the hover ended, the fader went, the speaker slid back
+                // under the pointer, and round again: the shake, with the play button passing under the pointer. The
+                // speaker glyph also changes width with the level (wave.1 / wave.2 / slash), which nudged the fader
+                // during a drag. Now the fader is always laid out (hidden and untouchable until hovered), the glyph
+                // has a fixed frame, and the whole group is the hover area: nothing in the row moves (measured, 0 pt).
                 HStack(spacing: 6) {
                     Button { engine.toggleMute() } label: {
                         Image(systemName: speakerSymbol)
+                            .frame(width: 26, alignment: .leading)
                     }
-                    .help(engine.isMuted ? "Unmute" : "Mute")
-                    if volumeHovering {
-                        Slider(
-                            value: Binding(
-                                get: { Double(engine.volume) },
-                                set: { newValue in
-                                    engine.setVolume(Float(newValue))
-                                    Preferences.shared.playbackVolume = newValue
-                                }
-                            ),
-                            in: 0...1
-                        )
-                        .controlSize(.mini)
-                        .frame(width: 70)
-                        .transition(.opacity.combined(with: .move(edge: .leading)))
-                    }
+                    .help(keys.helpText(engine.isMuted ? "Unmute" : "Mute", .mute))
+                    Slider(
+                        value: Binding(
+                            get: { Double(engine.volume) },
+                            set: { newValue in
+                                engine.setVolume(Float(newValue))
+                                Preferences.shared.playbackVolume = newValue
+                            }
+                        ),
+                        in: 0...1
+                    )
+                    .controlSize(.mini)
+                    .frame(width: 70)
+                    .opacity(volumeHovering ? 1 : 0)
+                    .allowsHitTesting(volumeHovering)
+                    .accessibilityHidden(!volumeHovering)
                 }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
                 .onHover { h in
                     withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
                 }
@@ -2952,6 +2976,8 @@ struct ContentView: View {
                     Button { togglePin() } label: {
                         Image(systemName: pinned ? "pin.fill" : "pin")
                     }
+                    // Pinned reads in the accent colour, as Loop reads green when on (§8 item 16).
+                    .foregroundStyle(pinned ? Color.accentColor : live)
                     .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
                 }
             }
@@ -3099,6 +3125,12 @@ struct ContentView: View {
     private var speakerSymbol: String {
         if engine.isMuted || engine.volume <= 0.0001 { return "speaker.slash.fill" }
         return engine.volume < 0.5 ? "speaker.wave.1.fill" : "speaker.wave.2.fill"
+    }
+
+    /// Volume Up / Down (⌘↑ / ⌘↓): the fader's step, saved as the fader saves it.
+    private func stepVolume(_ delta: Float) {
+        engine.setVolume(engine.volume + delta)
+        Preferences.shared.playbackVolume = Double(engine.volume)
     }
 
     private func togglePin() {

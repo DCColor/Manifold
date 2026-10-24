@@ -4,7 +4,7 @@ import AppKit
 
 /// Dispatch, in-process: synthesized `NSEvent`s through the app's adapter (`KeyEvent(_ : NSEvent)`) into the
 /// dispatcher, against a host that records what it was asked to do. No keystroke reaches any app.
-/// Predictions P1–P4, docs/SHORTCUTS_AUDIT.md §5.
+/// Predictions P1–P4, docs/SHORTCUTS_AUDIT.md §5, and Q3–Q6 of §8 (2026-10-24: compare on C, the new keys).
 @MainActor
 final class KeyDispatchTests: XCTestCase {
 
@@ -171,7 +171,7 @@ final class KeyDispatchTests: XCTestCase {
             (kH, "H", [.control, .option, .shift], .debugWHEPRetire),
             (kE, "E", [.control, .option, .shift], .debugWHEPExportFrame),
             (kD, "d", [.control, .option], .debugSRTConnect), (kD, "D", [.control, .option, .shift], .debugSRTRetire),
-            (kR, "r", [.control, .option], .debugRenderLayer),
+            (kN, "n", [.control, .option], .debugNDIConnect),
             (kL, "l", [.control, .option], .debugSyntheticStart), (kL, "L", [.control, .option, .shift], .debugSyntheticStop),
             (kP, "p", [.control, .option], .debugSyntheticPreset), (kU, "u", [.control, .option], .debugForceUnityRate),
             (kS, "s", [.control, .option], .debugSyntheticSweep),
@@ -182,6 +182,7 @@ final class KeyDispatchTests: XCTestCase {
             XCTAssertEqual(press(code, chars, flags).0, id, id.rawValue)
         }
         XCTAssertTrue(host.holds.isEmpty, "⌃⌥D is the SRT hook, never a hold")
+        XCTAssertEqual(press(kR, "r", [.control, .option]).1, false, "⌃⌥R is gone (§8 item 4)")
     }
 
     /// The menu-bar debug items (⌃⌥A, ⌃⌥⇧B) are the menu's; the dispatcher leaves them to AppKit.
@@ -199,6 +200,7 @@ final class KeyDispatchTests: XCTestCase {
 
     func testNewKeysReachTheirActions() {
         XCTAssertEqual(press(kF, "f", [.command]).0, .fullScreen)
+        XCTAssertEqual(press(kF, "f", [.control, .command]).0, .fullScreen, "⌃⌘F, the system's key, as an alias")
         XCTAssertEqual(press(KeyCode.home, "").0, .goToStart)
         XCTAssertEqual(press(KeyCode.end, "").0, .goToEnd)
         XCTAssertEqual(press(KeyCode.left, "", [.option]).0, .goToStartAlternate)
@@ -213,13 +215,51 @@ final class KeyDispatchTests: XCTestCase {
             (kO, "o", [.control, .option]), (kO, "O", [.control, .option, .shift]), (kN, "n", [.control, .option]),
             (kN, "N", [.control, .option, .shift]), (kC, "c", [.control, .option]), (kR, "r", [.control, .option]),
             (kBackslash, "\\", []), (kBackslash, "|", [.shift]),
+            // 2026-10-24: D and ⇧D no longer compare; ⌘7 is no longer Scopes.
+            (kD, "d", []), (kD, "D", [.shift]), (26, "7", [.command]),
         ]
         for (code, chars, flags) in old {
             let (reached, consumed) = press(code, chars, flags)
             XCTAssertNil(reached, "\(chars) \(flags)")
             XCTAssertFalse(consumed, "\(chars) \(flags)")
         }
-        XCTAssertTrue(host.holds.isEmpty, "\\ no longer holds")
+        XCTAssertTrue(host.holds.isEmpty, "\\ and D no longer hold")
+    }
+
+    /// fn (Globe) with a letter is the system's: fn-F is Enter Full Screen. The adapter makes no event of it, so the
+    /// monitor passes it to AppKit untouched; fn with an arrow is still an arrow (Home / End on a laptop).
+    func testFnWithALetterIsNotOurs() {
+        let fnF = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.function], timestamp: 0,
+                                   windowNumber: 0, context: nil, characters: "f", charactersIgnoringModifiers: "f",
+                                   isARepeat: false, keyCode: kF)!
+        XCTAssertNil(KeyEvent(fnF))
+        XCTAssertEqual(press(KeyCode.end, "").0, .goToEnd)
+    }
+
+    /// The menu keys of 2026-10-24 are the menus': the dispatcher leaves them to AppKit, outside text fields.
+    func testNewMenuKeysAreLeftToTheMenus() {
+        for (code, chars, flags) in [(kS, "s", NSEvent.ModifierFlags([.option, .command])), (21, "4", [.option, .command]),
+                                     (kD, "D", [.shift, .command]), (KeyCode.delete, "\u{7f}", [.option, .command]),
+                                     (KeyCode.up, "", [.command]), (KeyCode.down, "", [.command]),
+                                     (KeyCode.down, "", [.option, .command])] {
+            let (reached, consumed) = press(code, chars, flags)
+            XCTAssertNil(reached); XCTAssertFalse(consumed, "\(code) \(flags)")
+        }
+    }
+
+    /// §8 item 5: a menu item's key that a text field uses goes to the field while it is typed into (N types "n",
+    /// ⌘↑ moves the insertion point), never to the menu; and only then.
+    func testTextFieldTakesTheMenuKeysItUses() {
+        let n = event(.keyDown, kN, "n"), cmdUp = event(.keyDown, KeyCode.up, "", [.command])
+        let cmdI = event(.keyDown, kI, "i", [.command]), optCmdS = event(.keyDown, kS, "s", [.option, .command])
+        XCTAssertFalse(dispatcher.textFieldTakes(n, host: host), "not typing: N is the menu's action")
+        host.isEditingText = true
+        XCTAssertTrue(dispatcher.textFieldTakes(n, host: host))
+        XCTAssertTrue(dispatcher.textFieldTakes(cmdUp, host: host))
+        XCTAssertFalse(dispatcher.textFieldTakes(cmdI, host: host), "⌘I is the menu's even while typing")
+        XCTAssertFalse(dispatcher.textFieldTakes(optCmdS, host: host))
+        XCTAssertFalse(dispatcher.textFieldTakes(event(.keyDown, kJ, "j"), host: host), "J has no menu item")
+        XCTAssertFalse(dispatcher.textFieldTakes(event(.keyUp, kN, "n"), host: host))
     }
 
     /// Menu items AppKit dispatches: the registry's menu key goes into a real NSMenu, and a synthesized key event
@@ -235,9 +275,11 @@ final class KeyDispatchTests: XCTestCase {
         let target = Target()
         let menu = NSMenu()
         for id in [ShortcutID.inspector, .alwaysShowControls, .scopesTray, .exportFrame, .displayOS, .displayReference,
-                   .displayBypass, .raster100, .rasterFit, .loop, .fileOpen] {
+                   .displayBypass, .raster100, .rasterFit, .loop, .fileOpen, .transformChain, .toggleDeckLink,
+                   .disconnectLive, .volumeUp, .volumeDown, .mute] {
             let chord = registry.menuChord(for: id)!
-            guard case .character(let c) = chord.key else { return XCTFail(id.rawValue) }
+            // The key SwiftUI is handed (`menuShortcut`), so a wrong conversion fails here.
+            let c = String(chord.menuShortcut(layout: USKeyLayout())!.key.character)
             let item = NSMenuItem(title: id.rawValue, action: #selector(Target.fire(_:)), keyEquivalent: c)
             var mask = NSEvent.ModifierFlags()
             if chord.modifiers.contains(.command) { mask.insert(.command) }
@@ -256,7 +298,7 @@ final class KeyDispatchTests: XCTestCase {
         }
         XCTAssertTrue(send(kI, "i", [.command]))
         XCTAssertTrue(send(kT, "t", [.option, .command]))
-        XCTAssertTrue(send(26, "7", [.command]))
+        XCTAssertTrue(send(kS, "s", [.option, .command]))
         XCTAssertTrue(send(kE, "e", [.option, .command]))
         XCTAssertTrue(send(18, "1", [.option, .command]))
         XCTAssertTrue(send(19, "2", [.option, .command]))
@@ -265,34 +307,57 @@ final class KeyDispatchTests: XCTestCase {
         XCTAssertTrue(send(29, "0", [.command]))
         XCTAssertTrue(send(kL, "l", [.command]))
         XCTAssertTrue(send(kO, "o", [.command]))
+        XCTAssertTrue(send(21, "4", [.option, .command]))
+        XCTAssertTrue(send(kD, "D", [.shift, .command]))
+        // ⌥⌘⌫ is not sent: AppKit maps the Delete key's U+007F to an item's U+0008 (NSBackspaceCharacter, what SwiftUI's
+        // `.delete` is, and what Finder's ⌘⌫ Move to Trash carries) in its event path, which a synthesized event into
+        // `NSMenu.performKeyEquivalent` does not take. Checked as the item's character instead; by hand in §8's list.
+        XCTAssertEqual(menu.items.first { $0.title == "sources.disconnectLive" }?.keyEquivalent, "\u{8}")
+        let up = String(Character(UnicodeScalar(UInt32(NSUpArrowFunctionKey))!))
+        let dn = String(Character(UnicodeScalar(UInt32(NSDownArrowFunctionKey))!))
+        XCTAssertTrue(send(KeyCode.up, up, [.command, .function, .numericPad]))
+        XCTAssertTrue(send(KeyCode.down, dn, [.command, .function, .numericPad]))
+        XCTAssertTrue(send(KeyCode.down, dn, [.option, .command, .function, .numericPad]))
         XCTAssertEqual(target.fired, ["view.inspector", "view.alwaysShowControls", "scopes.tray", "file.exportFrame",
                                       "color.displayOS", "color.displayReference", "color.displayBypass",
-                                      "view.raster100", "view.rasterFit", "transport.loop", "file.open"])
+                                      "view.raster100", "view.rasterFit", "transport.loop", "file.open",
+                                      "color.transformChain", "output.toggleDeckLink",
+                                      "audio.volumeUp", "audio.volumeDown", "audio.mute"],
+                       "⌘↓ and ⌥⌘↓ fire different items")
+        XCTAssertFalse(send(26, "7", [.command]), "⌘7 fires nothing now")
         XCTAssertFalse(send(kI, "i", []), "bare I fires no menu item")
         XCTAssertFalse(send(kT, "t", [.control, .option]), "⌃⌥T fires no menu item")
     }
 
     // MARK: P3 — hold to compare
 
-    func testHoldDAndRelease() {
-        XCTAssertTrue(down(kD, "d"))
-        XCTAssertTrue(down(kD, "d", repeat: true))
-        XCTAssertTrue(down(kD, "d", repeat: true))
-        XCTAssertTrue(up(kD, "d"))
+    func testHoldCAndRelease() {
+        XCTAssertTrue(down(kC, "c"))
+        XCTAssertTrue(down(kC, "c", repeat: true))
+        XCTAssertTrue(down(kC, "c", repeat: true))
+        XCTAssertTrue(up(kC, "c"))
         XCTAssertEqual(host.holds, ["begin color.holdCompare", "end key up"])
     }
 
     func testShiftHoldIsBypass() {
-        XCTAssertTrue(down(kD, "D", [.shift]))
-        XCTAssertTrue(up(kD, "D", [.shift]))
+        XCTAssertTrue(down(kC, "C", [.shift]))
+        XCTAssertTrue(up(kC, "C", [.shift]))
         XCTAssertEqual(host.holds, ["begin color.holdCompareBypass", "end key up"])
     }
 
-    /// Decision 2: never swallows ⌘D, ⌥D or any other modified D.
-    func testModifiedDIsNotSwallowed() {
-        for flags: NSEvent.ModifierFlags in [[.command], [.option], [.control], [.shift, .command], [.option, .shift],
+    /// ⌥C: the LUT off while held. ⌥C types "ç" (`characters`), but `charactersIgnoringModifiers` is "c".
+    func testOptionHoldIsLUTOff() {
+        XCTAssertTrue(down(kC, "c", [.option]))
+        XCTAssertTrue(down(kC, "c", [.option], repeat: true))
+        XCTAssertTrue(up(kC, "c", [.option]))
+        XCTAssertEqual(host.holds, ["begin color.holdCompareLUTOff", "end key up"])
+    }
+
+    /// Never swallows ⌘C (Copy), ⌃C or any other unbound modified C.
+    func testModifiedCIsNotSwallowed() {
+        for flags: NSEvent.ModifierFlags in [[.command], [.control], [.shift, .command], [.option, .shift],
                                              [.control, .option], [.control, .shift], [.option, .command]] {
-            let (reached, consumed) = press(kD, flags.contains(.shift) ? "D" : "d", flags)
+            let (reached, consumed) = press(kC, flags.contains(.shift) ? "C" : "c", flags)
             XCTAssertNil(reached, "\(flags)")
             XCTAssertFalse(consumed, "\(flags)")
         }
@@ -301,7 +366,8 @@ final class KeyDispatchTests: XCTestCase {
 
     func testTextFieldFocusPassesEverythingThrough() {
         host.isEditingText = true
-        for (code, chars, flags) in [(kD, "d", NSEvent.ModifierFlags()), (kD, "D", [.shift]), (KeyCode.space, " ", []),
+        for (code, chars, flags) in [(kC, "c", NSEvent.ModifierFlags()), (kC, "C", [.shift]), (kC, "c", [.option]),
+                                     (KeyCode.space, " ", []),
                                      (kJ, "j", []), (KeyCode.left, "", []), (kL1, "1", []),
                                      (KeyCode.rightBracket, "]", [.option]), (kF, "f", [.command])] {
             XCTAssertFalse(down(code, chars, flags), "\(chars)")
@@ -313,17 +379,17 @@ final class KeyDispatchTests: XCTestCase {
 
     func testNothingToCompareLetsTheKeyGoOn() {
         host.holdsHaveSomethingToCompare = false
-        XCTAssertFalse(down(kD, "d"))
-        XCTAssertFalse(up(kD, "d"))
+        XCTAssertFalse(down(kC, "c"))
+        XCTAssertFalse(up(kC, "c"))
     }
 
     func testAMissedKeyUpNeverLeavesTheWindowStuck() {
-        XCTAssertTrue(down(kD, "d"))
-        XCTAssertTrue(down(kD, "D", [.shift]))      // fresh down, no up in between
+        XCTAssertTrue(down(kC, "c"))
+        XCTAssertTrue(down(kC, "C", [.shift]))      // fresh down, no up in between
         XCTAssertEqual(host.holds, ["begin color.holdCompare", "end missed key up", "begin color.holdCompareBypass"])
         dispatcher.reset(host: host, reason: "window not key")
         XCTAssertEqual(host.holds.last, "end window not key")
-        XCTAssertFalse(up(kD, "D"), "the key-up after a reset is not ours")
+        XCTAssertFalse(up(kC, "C"), "the key-up after a reset is not ours")
     }
 
     // MARK: P4 — K + J / L
@@ -390,7 +456,7 @@ final class KeyDispatchTests: XCTestCase {
 
     func testRecordingTakesNothing() {
         dispatcher.registry.isRecording = true
-        XCTAssertFalse(down(kD, "d"))
+        XCTAssertFalse(down(kC, "c"))
         XCTAssertFalse(down(KeyCode.space, " "))
         XCTAssertTrue(host.performed.isEmpty && host.holds.isEmpty)
     }
@@ -404,9 +470,9 @@ final class KeyDispatchTests: XCTestCase {
         XCTAssertEqual(press(kI, "i").0, .inspector)
     }
 
-    /// A Cyrillic layout types "в" on the D key: the ANSI letter stands in, as macOS does for ⌘ keys.
+    /// A Cyrillic layout types "с" on the C key: the ANSI letter stands in, as macOS does for ⌘ keys.
     func testNonLatinLayoutFallsBackToTheANSILetter() {
-        XCTAssertTrue(down(kD, "в"))
+        XCTAssertTrue(down(kC, "с"))
         XCTAssertEqual(host.holds, ["begin color.holdCompare"])
     }
 }

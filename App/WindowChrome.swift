@@ -108,6 +108,10 @@ final class WindowChrome: ObservableObject {
     /// Scopes tray open/close for THIS window. Toggled by View ▸ Show/Hide Scopes (⌘7) and the control-bar scopes button.
     @Published var showTray: Bool { didSet { defaults.set(showTray, forKey: Key.showTray) } }
 
+    /// The transform-chain popover on the display-transform control (Color ▸ Show/Hide Transform Chain, ⌥⌘4). Here
+    /// rather than in the control, so a menu command and the key reach it. Never persisted.
+    @Published var showTransformChain = false
+
     /// Height of the scopes tray in THIS window, in points — what the divider drags (Arc C).
     ///
     /// Seeded and written back exactly like `showTray` above: last writer wins, so the height a

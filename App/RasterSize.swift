@@ -341,9 +341,9 @@ struct RasterSizeCommands: Commands {
                     // menu greys out as a unit.
                     .disabled(!state.enabled)
             }
-            // The window's view toggles (docs/SHORTCUTS_AUDIT.md §4.2): ⌘I was bare I, ⌥⌘T was Tab, ⌘7 was ⌃⌥T. The
-            // file-name overlay keeps bare N, which a menu item cannot carry, so its key shows only in Help ▸
-            // Keyboard Shortcuts…. A window that cannot do one now beeps, as a disabled shortcut did.
+            // The window's view toggles (docs/SHORTCUTS_AUDIT.md §4.2, §8): ⌘I was bare I, ⌥⌘T was Tab, ⌥⌘S was ⌃⌥T.
+            // The file-name overlay keeps bare N and the menu shows it; typed into a text field N is still a letter
+            // (`KeyDispatcher.textFieldTakes`). A window that cannot do one now beeps, as a disabled shortcut did.
             Divider()
             ShortcutMenuItem(id: .inspector, registry: shortcuts)
             ShortcutMenuItem(id: .scopesTray, registry: shortcuts)
@@ -351,6 +351,12 @@ struct RasterSizeCommands: Commands {
             ShortcutMenuItem(id: .alwaysShowControls, registry: shortcuts)
             Divider()
             ShortcutMenuItem(id: .loop, registry: shortcuts)
+            // Audio: the menu bar had no audio items (the A/V menu is the control bar's), so they sit here (§8 item 12).
+            Section("Audio") {
+                ShortcutMenuItem(id: .volumeUp, registry: shortcuts)
+                ShortcutMenuItem(id: .volumeDown, registry: shortcuts)
+                ShortcutMenuItem(id: .mute, registry: shortcuts)
+            }
         }
     }
 

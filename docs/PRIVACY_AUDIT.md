@@ -2,7 +2,7 @@
 
 **Audit:** 2026-10-18, read-only, at `106e1d6`. **Stage P1 decided and built:** 2026-10-19. P1 is
 uncommitted as of this writing; results are in `docs/BUGS.md`, *PRE-SHIP: privacy hardening*.
-**Stage P2 (stream secrets) built and tested unattended:** 2026-10-23, on `9bedbe6`, uncommitted. The
+**Stage P2 (stream secrets) built and tested unattended:** 2026-10-23, on `9bedbe6`, committed `3c5526d`. The
 real install has NOT been migrated: that is an attended step (`docs/BUGS.md`, same entry, *P2*).
 
 This is the input to the privacy policy. **The policy may describe only behaviour that has

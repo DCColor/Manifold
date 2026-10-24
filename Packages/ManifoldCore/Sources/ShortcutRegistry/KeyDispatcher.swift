@@ -5,7 +5,8 @@
 //
 //  The order, and why:
 //    1. Recording in the Keyboard Shortcuts window: take nothing.
-//    2. A text field is being typed into: take nothing. Menus still get their ⌘ keys from AppKit.
+//    2. A text field is being typed into: take nothing. Menus still get their ⌘ keys from AppKit, except the ones a
+//       field uses itself, which the app hands to the field (`textFieldTakes`).
 //    3. Timecode entry is open: every bare or ⇧ key belongs to it (nothing moves behind the overlay); ⌘ / ⌃ / ⌥
 //       keys go on to the matcher, as they did before (the nudge, the debug hooks).
 //    4. The registry's bindings, exact modifiers. Several actions may share a key in scopes that never meet (a file
@@ -17,8 +18,8 @@
 //
 //  A SwiftUI `.keyboardShortcut` never sees a key-up, which is why hold-to-compare had its own monitor and why
 //  K+J/L could not be built before (audit C11). Here:
-//    • Hold (D, ⇧D): key-down begins, its key-up ends; auto-repeats are swallowed while holding. ⌘D, ⌥D and any
-//      other modified D match nothing and pass through: modifiers are exact.
+//    • Hold (C, ⇧C, ⌥C): key-down begins, its key-up ends; auto-repeats are swallowed while holding. ⌘C, ⌃C and
+//      any other modified C match nothing and pass through: modifiers are exact.
 //    • K held, then J or L (DaVinci Resolve R20 p729: "Hold K and tap J or L = 1 frame", "Hold K+J or K+L =
 //      slow-motion play"; Final Cut Pro, Play media: hold K and hold J or L = ½×): each press steps one frame;
 //      a press still held after `slowPlayDelay` plays at ½× in its direction until J/L or K is released.
@@ -72,6 +73,12 @@ public final class KeyDispatcher {
             MainActor.assumeIsolated { if !cancelled { work() } }
         }
         return { cancelled = true }
+    }
+
+    /// A key a menu item carries that the text field being typed into should have instead (N, ⌘↑): the app hands
+    /// it to the field directly, ahead of the menu's key matching. Asked before `handle`.
+    public func textFieldTakes(_ event: KeyEvent, host: KeyDispatchHost) -> Bool {
+        event.phase == .down && !registry.isRecording && host.isEditingText && registry.menuKeyATextFieldUses(event)
     }
 
     /// True when the event was consumed and must go no further.

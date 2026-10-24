@@ -81,7 +81,15 @@ final class ShortcutCenter: KeyDispatchHost {
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
             // `KeyEvent` is Sendable and `NSEvent` is not: convert first, so only a Bool crosses into the actor.
             guard let key = KeyEvent(event) else { return event }
-            let consumed = MainActor.assumeIsolated { ShortcutCenter.shared.dispatcher.handle(key, host: ShortcutCenter.shared) }
+            let center = ShortcutCenter.shared
+            // A menu item's key that the field being typed into uses itself (N, ⌘↑): straight to the field, ahead of
+            // AppKit's key-equivalent matching, which would otherwise give it to the menu (§8 item 5).
+            let toField = MainActor.assumeIsolated { center.dispatcher.textFieldTakes(key, host: center) }
+            if toField {
+                MainActor.assumeIsolated { NSApp.keyWindow?.firstResponder?.keyDown(with: event) }
+                return nil
+            }
+            let consumed = MainActor.assumeIsolated { center.dispatcher.handle(key, host: center) }
             return consumed ? nil : event
         }
         NSLog("[SHORTCUTS] key monitor %@ — %d actions, %@ customised, debug hooks: profile %@, debug-config %@",

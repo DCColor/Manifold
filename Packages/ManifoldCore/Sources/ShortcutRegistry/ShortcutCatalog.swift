@@ -12,10 +12,8 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case fileOpen = "file.open"
     case exportFrame = "file.exportFrame"
     // Sources and output
-    case connectFirstNDI = "sources.connectFirstNDI"
     case disconnectLive = "sources.disconnectLive"
-    case startDeckLink = "output.startDeckLink"
-    case stopDeckLink = "output.stopDeckLink"
+    case toggleDeckLink = "output.toggleDeckLink"
     // Transport
     case playPause = "transport.playPause"
     case shuttleReverse = "transport.shuttleReverse"
@@ -60,6 +58,8 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case displayBypass = "color.displayBypass"
     case holdCompare = "color.holdCompare"
     case holdCompareBypass = "color.holdCompareBypass"
+    case holdCompareLUTOff = "color.holdCompareLUTOff"
+    case transformChain = "color.transformChain"
     case cycleInterpretation = "color.cycleInterpretation"
     case resetInterpretation = "color.resetInterpretation"
     // Audio
@@ -73,7 +73,8 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     // Debug — the Profile tier
     case debugToneTest = "debug.ndiToneTest"
     case debugScrubBench = "debug.chromaScrubBench"
-    case debugRenderLayer = "debug.renderLayer"
+    case debugExportFrameDiagnostic = "debug.exportFrameDiagnosticSet"
+    case debugNDIConnect = "debug.ndiConnectFirst"
     case debugWebRTCSmoke = "debug.webrtcSmoke"
     case debugWHEPConnect = "debug.whepConnect"
     case debugWHEPRetire = "debug.whepRetire"
@@ -159,7 +160,8 @@ public struct ShortcutDefinition: Identifiable, Sendable {
     public let scope: ShortcutScope
     public let dispatch: ShortcutDispatch
     public let defaultChord: KeyChord?
-    /// Further keys a fixed row answers to, for display and for conflicts (timecode entry's digits).
+    /// Further keys a fixed row answers to, for display and for conflicts (timecode entry's digits). On a `.key` row,
+    /// aliases the dispatcher always matches and nobody can rebind (⌃⌘F for full screen).
     public let fixedChords: [KeyChord]
     /// What a fixed row shows instead of a key.
     public let fixedLabel: String?
@@ -193,6 +195,7 @@ public struct ShortcutDefinition: Identifiable, Sendable {
 public enum ShortcutCatalog {
     private static let cmd: KeyModifiers = [.command]
     private static let optCmd: KeyModifiers = [.option, .command]
+    private static let shiftCmd: KeyModifiers = [.shift, .command]
     private static let ctlOpt: KeyModifiers = [.control, .option]
     private static let ctlOptShift: KeyModifiers = [.control, .option, .shift]
 
@@ -202,11 +205,10 @@ public enum ShortcutCatalog {
               note: "The standard Mac key; not rebindable"),
         .init(.exportFrame, "Export Frame", .file, .window, .menu, .char("e", optCmd)),
 
-        // ── Sources and output: device claims, no default key (audit §4.1 rule 4) ─────────────
-        .init(.connectFirstNDI, "Connect to First NDI Source", .sources, .window, .menu, nil),
-        .init(.disconnectLive, "Disconnect Live Source", .sources, .window, .menu, nil),
-        .init(.startDeckLink, "Start DeckLink Output", .sources, .window, .menu, nil),
-        .init(.stopDeckLink, "Stop DeckLink Output", .sources, .window, .menu, nil),
+        // ── Sources and output: device claims (Robbie, 2026-10-24: keys after all, with ⌘; §8) ─────────────
+        .init(.disconnectLive, "Disconnect Live Source", .sources, .window, .menu, .code(KeyCode.delete, optCmd)),
+        // ⇧⌘D and not ⌥⌘D, which is macOS's Show or Hide the Dock and never reaches an app (§8).
+        .init(.toggleDeckLink, "Start/Stop DeckLink Output", .sources, .window, .menu, .char("d", shiftCmd)),
 
         // ── Transport (Resolve R20 p728-729, Premiere, Final Cut Pro; audit §3) ────────────────
         .init(.playPause, "Play / Pause", .transport, .fileTransport, .key, .code(KeyCode.space)),
@@ -253,13 +255,16 @@ public enum ShortcutCatalog {
         .init(.raster25, "25%", .view, .window, .menu, .char("4", cmd)),
         .init(.rasterFit, "Fit to Screen", .view, .window, .menu, .char("0", cmd)),
         .init(.inspector, "Show/Hide Inspector", .view, .window, .menu, .char("i", cmd)),
-        .init(.fileName, "Show/Hide File Name", .view, .window, .menu, .char("n")),
+        .init(.fileName, "Show/Hide File Name", .view, .window, .menu, .char("n"),
+              note: "Typed into a text field, N is a letter"),
         .init(.alwaysShowControls, "Always Show Controls", .view, .window, .menu, .char("t", optCmd)),
+        // ⌃⌘F rides along as a fixed alias: the system item reads fn-F now and no longer answers ⌃⌘F (§8, item 3).
         .init(.fullScreen, "Enter or Exit Full Screen", .view, .window, .key, .char("f", cmd),
-              note: "An alias of the system's Enter Full Screen (⌃⌘F, fn-F)"),
+              fixedChords: [.char("f", [.control, .command])],
+              note: "⌃⌘F works too, and fn-F is the system's own"),
 
         // ── Scopes ──────────────────────────────────────────────────────────────────────────────
-        .init(.scopesTray, "Show/Hide Scopes", .scopes, .window, .menu, .char("7", cmd)),
+        .init(.scopesTray, "Show/Hide Scopes", .scopes, .window, .menu, .char("s", optCmd)),
         .init(.cieSpace, "CIE: Switch xy / u′v′", .scopes, .window, .key, nil),
         .init(.vectorscopeGraticule, "Vectorscope: Rec. 709 / Source Primaries Graticule", .scopes, .window, .key, nil),
         .init(.vectorscopeBoxes, "Vectorscope: 75% / 100% / Both Boxes", .scopes, .window, .key, nil),
@@ -271,12 +276,16 @@ public enum ShortcutCatalog {
         .init(.displayOS, "As macOS Shows It", .color, .window, .menu, .char("1", optCmd)),
         .init(.displayReference, "Reference (BT.1886)", .color, .window, .menu, .char("2", optCmd)),
         .init(.displayBypass, "Bypass — No Colour Management", .color, .window, .menu, .char("3", optCmd)),
-        .init(.holdCompare, "Hold to Compare: macOS ↔ Reference", .color, .window, .hold, .char("d"),
+        .init(.transformChain, "Show/Hide Transform Chain", .color, .window, .menu, .char("4", optCmd)),
+        // C for Compare (Robbie, 2026-10-24); D is free.
+        .init(.holdCompare, "Hold to Compare: macOS ↔ Reference", .color, .window, .hold, .char("c"),
               note: "Release to go back"),
-        .init(.holdCompareBypass, "Hold to Compare with Bypass", .color, .window, .hold, .char("d", [.shift]),
-              note: "As DaVinci Resolve's ⇧D bypass (R20 p504), held"),
-        .init(.cycleInterpretation, "Next Color Interpretation", .color, .window, .menu, nil),
-        .init(.resetInterpretation, "Reset Color Interpretation to Auto", .color, .window, .menu, nil),
+        .init(.holdCompareBypass, "Hold to Compare with Bypass", .color, .window, .hold, .char("c", [.shift]),
+              note: "Release to go back"),
+        .init(.holdCompareLUTOff, "Hold to Compare with the LUT Off", .color, .window, .hold, .char("c", [.option]),
+              note: "Does nothing with no LUT applied"),
+        .init(.cycleInterpretation, "Next Tag Override", .color, .window, .menu, nil),
+        .init(.resetInterpretation, "Reset Tags to Source", .color, .window, .menu, nil),
 
         // ── Audio ───────────────────────────────────────────────────────────────────────────────
         .init(.audioLater1, "Audio Later by 1 ms", .audio, .live, .key, .code(KeyCode.rightBracket, [.option]),
@@ -287,15 +296,20 @@ public enum ShortcutCatalog {
               .code(KeyCode.rightBracket, [.option, .shift]), repeats: true),
         .init(.audioEarlier10, "Audio Earlier by 10 ms", .audio, .live, .key,
               .code(KeyCode.leftBracket, [.option, .shift]), repeats: true),
-        .init(.mute, "Mute / Unmute", .audio, .window, .key, nil),
-        .init(.volumeUp, "Volume Up", .audio, .window, .key, nil, repeats: true),
-        .init(.volumeDown, "Volume Down", .audio, .window, .key, nil, repeats: true),
+        // ⌘↑ / ⌘↓ as VLC for Mac has them (QuickTime Player's are the bare arrows, which step frames here); mute ⌥⌘↓,
+        // UNVERIFIED (§8). The step is ±0.1 of the fader.
+        .init(.volumeUp, "Volume Up", .audio, .window, .menu, .code(KeyCode.up, cmd), repeats: true),
+        .init(.volumeDown, "Volume Down", .audio, .window, .menu, .code(KeyCode.down, cmd), repeats: true),
+        .init(.mute, "Mute / Unmute", .audio, .window, .menu, .code(KeyCode.down, optCmd)),
 
         // ── Debug: ⌃⌥ is the debug namespace (audit §4.1 rule 3). Not rebindable. ────────────────
         .init(.debugToneTest, "NDI Audio Tone Test", .debug, .app, .menu, .char("a", ctlOpt), debug: .profile),
         .init(.debugScrubBench, "Chroma Scrub Bench", .debug, .app, .menu, .char("b", ctlOptShift), debug: .profile),
-        .init(.debugRenderLayer, "Show AVFoundation Layer Instead of Metal (A/B)", .debug, .window, .key,
-              .char("r", ctlOpt), debug: .profile),
+        // The full measurement set (PNG, .rgba16f, .v210, .v210.json) that Export Frame wrote until 2026-10-24.
+        .init(.debugExportFrameDiagnostic, "Export Frame (Diagnostic Set)", .debug, .window, .menu, nil,
+              debug: .profile),
+        .init(.debugNDIConnect, "Connect to First NDI Source", .debug, .window, .key, .char("n", ctlOpt),
+              debug: .profile),
         .init(.debugWebRTCSmoke, "libdatachannel Link Smoke Test", .debug, .window, .key, .char("w", ctlOpt),
               debug: .profile),
         .init(.debugWHEPConnect, "Connect WHEP (debug URL or first saved)", .debug, .window, .key,

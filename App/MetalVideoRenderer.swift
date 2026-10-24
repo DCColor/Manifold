@@ -4380,14 +4380,19 @@ final class MetalVideoRenderer {
     /// Read back the most-recently-rendered frame and write it to a PNG on the
     /// Desktop, tagged with the layer's source-derived colorspace so a
     /// non-color-managed app (e.g. Resolve) reads the raw code values. Manual only.
-    func exportCurrentFrame() {
+    ///
+    /// `diagnosticSet` (DEBUG only; File ▸ Export Frame (Diagnostic Set)): also write the v210 dump, the raw readback
+    /// and its JSON beside the PNG, as every export did until 2026-10-24. Export Frame itself writes the PNG alone
+    /// (docs/SHORTCUTS_AUDIT.md §8 item 1); the PNG is the same bytes either way.
+    func exportCurrentFrame(diagnosticSet: Bool = false) {
         // ONE SLOT, READ ONCE: the PNG and (DEBUG) the v210 dump below are the same frame.
         guard let readable = readableOffscreen(), let frame = readback(readable.texture) else {
             print("[EXPORT] no rendered frame yet"); return
         }
         let (bytes, width, height, bytesPerRow) = frame
         #if DEBUG
-        let v210Dump = makeV210Dump(of: readable.texture, chroma: readable.chroma, output: readable.output)
+        let v210Dump = diagnosticSet
+            ? makeV210Dump(of: readable.texture, chroma: readable.chroma, output: readable.output) : nil
         #endif
 
         // CRITICAL: tag with the SOURCE-derived colorspace (CoreMedia709), NOT deviceRGB/sRGB —
@@ -4513,7 +4518,9 @@ final class MetalVideoRenderer {
                     + " | pixel aspect \(pixelAspect.displayString)"
                     + " | pHYs \(properties == nil ? "omitted (nothing declared)" : "written")")
                 #if DEBUG
-                Self.writeV210Dump(v210Dump, readback: bytes, readbackBytesPerRow: bytesPerRow, besidePNG: url)
+                if diagnosticSet {
+                    Self.writeV210Dump(v210Dump, readback: bytes, readbackBytesPerRow: bytesPerRow, besidePNG: url)
+                }
                 #endif
             } else {
                 print("[EXPORT] PNG finalize failed")

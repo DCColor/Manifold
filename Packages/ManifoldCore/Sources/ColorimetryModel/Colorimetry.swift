@@ -179,7 +179,9 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         }
     }
 
-    /// Toolbar-width label — the picker button face, not the menu rows.
+    /// Toolbar-width label — the picker button face, not the menu rows. A Custom triple reads "Override 9·1·6"
+    /// (Robbie, 2026-10-24: "Custom" read as permanent; it is an override of the source's tags). The STORED word is
+    /// still `custom:` (`storageID`), so saved streams load unchanged.
     public var shortLabel: String {
         switch self {
         case .auto:       return "Auto"
@@ -188,7 +190,7 @@ public enum ColorimetryOverride: CaseIterable, Identifiable, Hashable, Sendable 
         case .rec2020HLG: return "2020 HLG"
         case .p3d65PQ:    return "P3 PQ"
         case .rec2020SDR: return "2020 SDR"
-        case let .custom(p, t, m): return "Custom \(p)·\(t)·\(m)"
+        case let .custom(p, t, m): return "Override \(p)·\(t)·\(m)"
         }
     }
 

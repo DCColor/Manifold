@@ -94,11 +94,14 @@ final class CustomColorimetryTests: XCTestCase {
         for p in ColorimetryOverride.allCases { XCTAssertEqual(headRead(p.storageID), p) }
     }
 
-    /// The label the title, readout and control face print: "Custom 9·1·6", primaries · transfer · matrix.
+    /// The label the title, readout and control face print: "Override 9·1·6", primaries · transfer · matrix
+    /// (2026-10-24; "Custom 9·1·6" before). The stored word stays `custom:`.
     func testLabel() {
         let o = ColorimetryOverride.customIfSupported((9, 1, 6))!
-        XCTAssertEqual(o.shortLabel, "Custom 9·1·6")
-        XCTAssertEqual(o.label, "Custom 9·1·6")
+        XCTAssertEqual(o.shortLabel, "Override 9·1·6")
+        XCTAssertEqual(o.label, "Override 9·1·6")
+        XCTAssertEqual(o.storageID, "custom:9-1-6")
+        XCTAssertEqual(ColorimetryOverride(storageID: "custom:9-1-6"), o)
         XCTAssertNotEqual(o.id, ColorimetryOverride.customIfSupported((9, 1, 9))!.id)
     }
 

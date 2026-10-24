@@ -33,8 +33,12 @@ public enum PictureCodes {
         return (t.primaries, t.transfer, t.matrix, true)
     }
 
-    /// The menu's and the log's words for an output space: "Same as Source" for `.auto`, else the preset's label.
+    /// The menu's and the log's words for an output space: "Same as Source" for `.auto`, a triple as "Custom 9·1·9",
+    /// else the preset's label. "Custom" and not the interpretation's "Override" (2026-10-24): a LUT's stated output
+    /// space is a statement about the LUT, not an override of the source's tags.
     public static func outputLabel(_ o: ColorimetryOverride) -> String {
-        o == .auto ? "Same as Source" : o.label
+        if o == .auto { return "Same as Source" }
+        guard o.isCustom, let t = o.preset else { return o.label }
+        return "Custom \(t.primaries)·\(t.transfer)·\(t.matrix)"
     }
 }

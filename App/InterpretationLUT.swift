@@ -54,6 +54,13 @@ final class LUTInterpolationSetting: ObservableObject {
     }
 }
 
+extension ColorimetryOverride {
+    /// A LUT's stated output space in words. A preset reads as its label; a triple reads "Custom 9·1·6", not the
+    /// interpretation's "Override 9·1·6" (2026-10-24): a LUT's output space is a statement about the LUT, not an
+    /// override of the source's tags.
+    var lutSpaceLabel: String { self == .auto ? label : PictureCodes.outputLabel(self) }
+}
+
 @MainActor
 final class InterpretationLUTModel: ObservableObject {
     /// The loaded LUT's file name, or nil.
@@ -145,7 +152,7 @@ final class InterpretationLUTModel: ObservableObject {
     var readoutLine: String? {
         guard let lut, let name else { return nil }
         return LUTReadout.line(name: name, lut: lut, interpolation: install?.interpolation ?? LUTInterpolationSetting.shared.interpolation,
-                               outputLabel: outputSpace == .auto ? nil : outputSpace.label,
+                               outputLabel: outputSpace == .auto ? nil : outputSpace.lutSpaceLabel,
                                bypassed: bypassed, sourcePresent: deck?.hasSource ?? false)
     }
 
@@ -258,7 +265,7 @@ final class RecentLUTStore: ObservableObject {
             let shown = url?.lastPathComponent ?? entry.fileName
             let folder = ((url?.path ?? entry.path) as NSString).deletingLastPathComponent
             return "\(shown) — " + (url == nil ? "missing" : (folder as NSString).lastPathComponent)
-                + (entry.outputSpace.map { " · out " + ColorimetryOverride(storageID: $0).shortLabel } ?? "")
+                + (entry.outputSpace.map { " · out " + ColorimetryOverride(storageID: $0).lutSpaceLabel } ?? "")
         }
     }
 

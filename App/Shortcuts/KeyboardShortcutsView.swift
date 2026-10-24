@@ -115,11 +115,26 @@ struct KeyboardShortcutsView: View {
         }
     }
 
+    /// The mark on a row whose key differs from Manifold's default, and in the legend that explains it.
+    private var customizedDot: some View {
+        Circle()
+            .fill(Color.accentColor)
+            .frame(width: 6, height: 6)
+    }
+
     private var footer: some View {
         HStack {
-            Text("Click a shortcut to change it. Esc cancels; Delete removes the key.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Click a shortcut to change it. Esc cancels; Delete removes the key.")
+                // The dot's legend (Robbie, 2026-10-24: the dot alone did not say "customized").
+                HStack(spacing: 5) {
+                    customizedDot
+                    Text("Customized: differs from Manifold’s default. The arrow resets it.")
+                }
+                .accessibilityElement(children: .combine)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
             Spacer()
             Button("Reset All…") { confirmResetAll = true }
                 .disabled(!registry.hasOverrides)
@@ -139,11 +154,9 @@ struct KeyboardShortcutsView: View {
                 }
                 Spacer()
                 if registry.isCustomised(def.id) {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 6, height: 6)
-                        .help("Customised")
-                        .accessibilityLabel("Customised")
+                    customizedDot
+                        .help("Customized")
+                        .accessibilityLabel("Customized")
                 }
                 keyChip(def)
                 if registry.isCustomised(def.id) {

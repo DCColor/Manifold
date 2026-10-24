@@ -14,7 +14,14 @@
 //  ⚠️ ⇧ + AN ARROW CANNOT BE A MENU KEY (audit C7). MEASURED on the built app before this file existed: AppKit's
 //  key-equivalent matcher does not tell ⇧← from ←, so of two key equivalents differing only by ⇧ on an arrow, one
 //  wins for both presses. The dispatcher reads exact modifier flags and has no such problem, so ⇧-arrows are
-//  `.key` actions, and `propose` refuses one on a `.menu` action.
+//  `.key` actions, and `propose` refuses an arrow on a `.menu` action unless it carries ⌘, ⌃ or ⌥.
+//
+//  ── A MENU ITEM SHOWS ITS KEY, BARE OR NOT (2026-10-24, §8 item 5) ─────────────────────────
+//
+//  Every menu action's key is its menu item's key equivalent, N included, so the menu always says what the key is.
+//  A bare key equivalent would take that letter from a text field, so while a text field is being typed into the
+//  dispatcher hands such a key straight to the field (`KeyDispatcher.textFieldTakes`): typing N in a bookmark name
+//  types "n", as it did when N had no menu key.
 //
 
 import Foundation
@@ -79,22 +86,34 @@ public final class ShortcutRegistry: ObservableObject {
     /// The actions the key dispatcher matches against, in catalog order: `.key` and `.hold` actions, and `.menu`
     /// actions whose key cannot be a menu key equivalent (bare or ⇧ only). Debug actions only when their tier is on.
     public func dispatcherBindings() -> [(ShortcutDefinition, KeyChord)] {
-        definitions.compactMap { def in
-            guard def.dispatch != .fixed, let chord = chord(for: def.id) else { return nil }
-            if let tier = def.debug, !debugTierEnabled(tier) { return nil }
+        definitions.flatMap { def -> [(ShortcutDefinition, KeyChord)] in
+            guard def.dispatch != .fixed else { return [] }
+            if let tier = def.debug, !debugTierEnabled(tier) { return [] }
+            let chord = chord(for: def.id)
             switch def.dispatch {
-            case .key, .hold: return (def, chord)
-            case .menu: return chord.isBare ? (def, chord) : nil
-            case .fixed: return nil
+            // A `.key` row's fixed chords are aliases it always answers to (⌃⌘F for full screen).
+            case .key, .hold: return (chord.map { [$0] } ?? []).map { (def, $0) } + def.fixedChords.map { (def, $0) }
+            case .menu: return chord.flatMap { $0.isBare ? [(def, $0)] : nil } ?? []
+            case .fixed: return []
             }
         }
     }
 
-    /// The key a menu item carries, or nil: no key, or a bare / ⇧ key, which a menu key equivalent would take from
-    /// text fields (the dispatcher handles those, and declines while a text field is being typed into).
+    /// The key a menu item carries: its binding, whatever it is (§8 item 5), or nil when it has none. A bare key is
+    /// shown too; the dispatcher performs it outside text fields and hands it to a field being typed into.
     public func menuChord(for id: ShortcutID) -> KeyChord? {
-        guard let chord = chord(for: id), !chord.isBare else { return nil }
-        return chord
+        guard definition(id).dispatch == .menu else { return nil }
+        return chord(for: id)
+    }
+
+    /// A menu item's key that a text field also uses (a typed character, or an arrow or Delete with ⌘ ⌥ ⇧) and that
+    /// `event` is. While a field is being typed into, the field gets it, not the menu.
+    public func menuKeyATextFieldUses(_ event: KeyEvent) -> Bool {
+        definitions.contains { def in
+            guard def.dispatch == .menu, let chord = chord(for: def.id), chord.isTextFieldKey else { return false }
+            if let tier = def.debug, !debugTierEnabled(tier) { return false }
+            return event.matches(chord)
+        }
     }
 
     // MARK: Judging a key
@@ -116,8 +135,8 @@ public final class ShortcutRegistry: ObservableObject {
         if let reason = Self.reserved[normalized(chord)] ?? Self.reserved[chord] {
             return .refused("\(label(chord)) is used by macOS (\(reason)).")
         }
-        if def.dispatch == .menu, chord.isShiftedArrow {
-            return .refused("A menu shortcut cannot tell ⇧ + an arrow from the arrow alone. Use another key.")
+        if def.dispatch == .menu, chord.isArrow, chord.isBare {
+            return .refused("A menu shortcut cannot tell ⇧ + an arrow from the arrow alone. Add ⌘, ⌃ or ⌥.")
         }
         if def.dispatch == .hold, chord.modifiers.contains(.command) {
             return .refused("macOS does not report releasing a ⌘ key, so a ⌘ shortcut cannot be held.")
@@ -151,8 +170,8 @@ public final class ShortcutRegistry: ObservableObject {
         if chord.needsFn {
             w.append("On a laptop keyboard this key is Fn with an arrow (or ⌫).")
         }
-        if def.dispatch == .menu, chord.isBare {
-            w.append("Not shown in the menu: a menu shortcut needs ⌘, ⌃ or ⌥. The key still works, except while you type in a text field.")
+        if chord.isBare, def.dispatch != .hold {
+            w.append("While you type in a text field this key types there instead.")
         }
         if case .code(KeyCode.tab) = chord.key, chord.isBare {
             w.append("Tab moves between controls when Keyboard navigation is on.")
@@ -254,6 +273,7 @@ public final class ShortcutRegistry: ObservableObject {
             .char("w", cmd): "Close", .char("w", oc): "Close All", .char("m", cmd): "Minimize",
             .char("m", oc): "Minimize All", .char("z", cmd): "Undo", .char("z", sc): "Redo", .char("x", cmd): "Cut",
             .char("c", cmd): "Copy", .char("v", cmd): "Paste", .char("a", cmd): "Select All",
+            .char("d", oc): "Show or Hide the Dock", .code(KeyCode.space, oc): "Finder search window",
             .char("\\", sc): "Show All Tabs", .char("|", sc): "Show All Tabs", .char("f", [.control, .command]): "Enter Full Screen",
             .code(KeyCode.space, cmd): "Spotlight", .code(KeyCode.space, [.control]): "previous input source",
             .code(KeyCode.space, [.control, .option]): "next input source",

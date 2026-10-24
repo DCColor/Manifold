@@ -280,7 +280,7 @@ final class WindowDeck: ObservableObject {
 
     /// This window's colorimetry override for its live connect (docs/COLOR_MANAGEMENT_FINDINGS.md
     /// §6.9, Stage B): held here for SRT, forwarded to NDIService for NDI. Set up by
-    /// `DeckRegistry.connectLive`, edited by the Color control and Color ▸ Next Color Interpretation.
+    /// `DeckRegistry.connectLive`, edited by the Color control and Color ▸ Next Tag Override.
     private(set) lazy var colorOverride = LiveColorOverrideModel(deck: self)
 
     /// This window's colour override for its FILE (colour S5, §6.11): per window, Auto again when a new
@@ -291,14 +291,14 @@ final class WindowDeck: ObservableObject {
     /// gone at quit (decision 5). `InterpretationLUT.swift`.
     private(set) lazy var lut = InterpretationLUTModel(deck: self)
 
-    /// The override in force on this window's source, in the title's words ("2020 SDR", "Custom 9·1·6"),
+    /// The override in force on this window's source, in the title's words ("2020 SDR", "Override 9·1·6"),
     /// or nil on Auto. The chain readout's Source line names it beside "overridden" (colour S5).
     var interpretationLabel: String? {
         let o = DeckRegistry.shared.liveSource(for: self).map { colorOverride.current(for: $0) } ?? fileColor.override
         return o == .auto ? nil : o.shortLabel
     }
 
-    /// Color ▸ Next Color Interpretation: the live stream's override when this window shows one, else the file's (colour S5).
+    /// Color ▸ Next Tag Override: the live stream's override when this window shows one, else the file's (colour S5).
     func cycleColorOverride(live: LiveSource?) {
         if let live { colorOverride.cycle(on: live) } else { fileColor.cycle() }
     }

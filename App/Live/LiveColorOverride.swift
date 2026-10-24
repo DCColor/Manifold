@@ -159,7 +159,7 @@ final class LiveColorOverrideModel: ObservableObject {
         }
     }
 
-    /// Color ▸ Next Color Interpretation: the next preset on this transport, wrapping to Auto.
+    /// Color ▸ Next Tag Override: the next preset on this transport, wrapping to Auto.
     func cycle(on source: LiveSource?) {
         guard let source, Self.offersOverride(source) else { return }
         let all = ColorimetryOverride.available(on: Self.transport(source))
@@ -328,8 +328,8 @@ struct ColorInterpretationControl: View {
         }
         // The cycle's key is the registry's, with no default since 2026-10-23 (it was ⌃⌥C): named only when bound.
         .help((subject == .file
-               ? "Color interpretation — Auto trusts the file’s tags; a preset or Custom asserts them"
-               : "Color interpretation — Auto trusts the stream; a preset or Custom asserts it")
+               ? "Color interpretation — Auto trusts the file’s tags; a preset or Override asserts them"
+               : "Color interpretation — Auto trusts the stream; a preset or Override asserts it")
               + (ShortcutCenter.shared.registry.label(for: .cycleInterpretation).map { " (\($0) cycles the presets)" } ?? ""))
     }
 
@@ -447,7 +447,7 @@ struct ColorInterpretationControl: View {
     /// is, so its words are readable by Accessibility.
     @ViewBuilder private var lutSection: some View {
         Section(lut.name.map { (lut.bypassed ? "LUT bypassed — " : "LUT — ") + "\($0) · \(lut.shape ?? "")"
-                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.shortLabel)") } ?? "LUT") {
+                               + (lut.outputSpace == .auto ? "" : " → \(lut.outputSpace.lutSpaceLabel)") } ?? "LUT") {
             Button("Load LUT…") { lut.chooseFile() }
             Menu("Recent LUTs") {
                 ForEach(recentLUTs.rows) { row in
@@ -497,7 +497,7 @@ struct ColorInterpretationControl: View {
                     .disabled(lut.name == nil)
             }
             Section(lut.outputSpace.isCustom
-                    ? "Custom — " + lut.outputSpace.shortLabel.replacingOccurrences(of: "Custom ", with: "") + " in use"
+                    ? "Custom — " + lut.outputSpace.lutSpaceLabel.replacingOccurrences(of: "Custom ", with: "") + " in use"
                     : "Custom") {
                 outputAxisMenu("Primaries", 0, CustomColorimetry.primaries)
                 outputAxisMenu("Transfer", 1, CustomColorimetry.transfers)
@@ -567,8 +567,8 @@ struct ColorInterpretationControl: View {
     /// menu button, found by index, and a value is pressed with
     /// `click menu item "Rec. 2020 — 9" of menu 1 of menu item "Primaries" of …`.
     @ViewBuilder private var customSection: some View {
-        Section(current.isCustom ? "Custom — " + current.shortLabel.replacingOccurrences(of: "Custom ", with: "") + " in use"
-                                 : "Custom") {
+        Section(current.isCustom ? "Override — " + current.shortLabel.replacingOccurrences(of: "Override ", with: "") + " in use"
+                                 : "Override") {
             axisMenu("Primaries", 0, CustomColorimetry.primaries)
             axisMenu("Transfer", 1, CustomColorimetry.transfers)
             axisMenu("Matrix", 2, CustomColorimetry.matrices)
@@ -658,7 +658,7 @@ struct ColorInterpretationControl: View {
         }
     }
 
-    /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "Custom 9·1·6 · Overridden".
+    /// Effective colorimetry + tier: "2020 PQ · Overridden", "709 · Assumed", "Override 9·1·6 · Overridden".
     private var faceLabel: String {
         let tier: String
         let p: Int, t: Int
