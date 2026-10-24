@@ -67,6 +67,8 @@ bullet.
 - SRT now accepts HEVC and H.264 4:2:2 and 4:4:4 at full color resolution. A stream this Mac can't decode is refused with a message saying so, never quietly converted.
 - ProRes MXF decodes through Apple's hardware-accelerated decoder: faster and identical to the same ProRes in .mov.
 - Your license email and machine ID are kept only in the macOS Keychain, no longer in Manifold's preferences file. They move there by themselves the first time this version opens.
+- Saved streams are now kept in the macOS Keychain in full: the address, with any stream key or token in it, and the passphrase. Manifold's preferences file keeps only each stream's name and server. Your saved streams move there by themselves the first time this version opens.
+- When you edit a saved stream, its address stays hidden unless you click Show saved URL. Leave the field blank to keep the saved address.
 - Manifold no longer saves its license, update-check and stream-connection requests in a disk cache, and removes the cache earlier versions left behind.
 - NDI only starts looking for sources on your network when you open the NDI source list or connect to a source, not when Manifold opens.
 - The display chain readout marks a color override, and a LUT that is on, in the same amber as the Color control.
@@ -237,6 +239,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Diagnostics export reports EDR headroom from potential, not current | `cf18894` | **Unsure**: only visible in Export Diagnostics output |
 | User-facing strings converted to American English ("Licenses" and others; BUGS.md, pre-ship checklist) | — | **Unsure**: verified 2026-09-21, but no commit or fix date is recorded |
 | Privacy stage P1 (`docs/PRIVACY_AUDIT.md`): license email and machine id out of the preferences plist; no disk cache for the app's own requests; NDI discovery only on opening the source list; log and diagnostics redaction, with an "Include file names" option | uncommitted (2026-10-19) | **Yes** |
+| Privacy stage P2 (`docs/PRIVACY_AUDIT.md`): each saved stream's full URL and passphrase in one Keychain item (`tools.graviton.manifold.streams`, per bookmark id); the plist keeps name, host and a reference; migrated at launch with read-back, resumable; edit form shows the URL only on "Show saved URL"; a "Saved streams" count line in diagnostics | `<commit — to be filled in>` | **Yes** |
 
 #### Keyboard shortcuts
 

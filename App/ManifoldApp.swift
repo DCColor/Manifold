@@ -37,6 +37,12 @@ struct ManifoldApp: App {
         // only worth doing if the tap is already listening when that banner is emitted. Installed
         // here rather than in a scene, because a scene body runs after startup logging has begun.
         LogTap.shared.install()
+        #if DEBUG
+        // Privacy P2's sandbox self-test (`MANIFOLD_DEBUG_STREAMS_SELFTEST`): runs on a scratch defaults suite and
+        // Keychain service and EXITS here — before licensing reads its Keychain items, before any window, before the
+        // cache and NDI installs below. Unset, it returns at once. Pre-ship removal (docs/BUGS.md).
+        MainActor.assumeIsolated { StreamSecretsSandbox.runIfRequested() }
+        #endif
         // Privacy P1: the URLSession.shared disk cache (licence replies, WHEP request URLs) goes,
         // before anything can make a request. Our own requests no longer write one.
         PrivateURLSession.removeLegacyDiskCache()
@@ -153,14 +159,14 @@ struct ManifoldApp: App {
                 // genuinely something newer — and silent on every failure, so a tester with no
                 // network sees nothing at all. Guarded to one check per process.
                 .task { await UpdateChecker.shared.checkAtLaunch() }
-                // One-shot migration of legacy inline SRT passphrases into the Keychain. A `.task`
+                // One-shot migration of stream secrets (URL and passphrase) into the Keychain, privacy P2. A `.task`
                 // for the same reason the update check is one — it must never delay startup — and
                 // MOVED OUT OF `StreamBookmarkStore.init` for a stronger reason than that: the
                 // store is built by `ContentView`'s stored property initialiser, which runs before
                 // these modifiers are even attached, so a Keychain WRITE sat ahead of the first
                 // frame in a place no restructuring of the licensing path could reach. Guarded to
                 // one attempt per process, because this closure runs once per window.
-                .task { StreamBookmarkStore.shared.migratePassphrasesAtLaunch() }
+                .task { StreamBookmarkStore.shared.migrateSecretsAtLaunch() }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

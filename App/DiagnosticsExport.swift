@@ -869,6 +869,9 @@ enum DiagnosticsReport {
         section("MACHINE")
         out += MachineContext.lines().joined(separator: "\n") + "\n"
         out += "\n" + LicenseContext.lines().joined(separator: "\n") + "\n"
+        // Privacy P2: where each saved stream's URL is, by count — "still in preferences" means the
+        // migration has not run or held an entry back (its log line says why). No URL, host or name.
+        out += "\nSaved streams    : \(StreamBookmarkStore.shared.secretPlacementSummary)\n"
 
         section("NETWORK PATH")
         // ⚠️ ITS OWN SECTION, ABOVE THE ERROR STATE AND THE LOG, ON PURPOSE. Every recovery,

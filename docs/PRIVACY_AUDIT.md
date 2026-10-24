@@ -2,10 +2,13 @@
 
 **Audit:** 2026-10-18, read-only, at `106e1d6`. **Stage P1 decided and built:** 2026-10-19. P1 is
 uncommitted as of this writing; results are in `docs/BUGS.md`, *PRE-SHIP: privacy hardening*.
+**Stage P2 (stream secrets) built and tested unattended:** 2026-10-23, on `9bedbe6`, uncommitted. The
+real install has NOT been migrated: that is an attended step (`docs/BUGS.md`, same entry, *P2*).
 
 This is the input to the privacy policy. **The policy may describe only behaviour that has
 shipped.** Each finding below is marked:
 - **P1** — changed in stage P1;
+- **P2** — changed in stage P2;
 - **later** — a decided later stage;
 - **open** — no decision yet;
 - no mark — unchanged and fine to describe as is.
@@ -35,7 +38,7 @@ Stage **P1**:
    source, not from the empty start screen. The list shows "Searching…" until sources appear.
 
 **Later stages, not in P1:**
-- audit item 2, stream secrets in `streamBookmarks`;
+- audit item 2, stream secrets in `streamBookmarks` — **built as P2, 2026-10-23** (below);
 - item 7, the licensing port to the shared client's rules;
 - item 8, shipping Release builds rather than Profile.
 
@@ -58,6 +61,39 @@ All four are done; results are in `docs/BUGS.md`.
 - **The disk cache** is removed at every launch, not only the first: it is idempotent, and it also
   catches the empty `Cache.db` AVFoundation creates (below).
 
+**Stage P2 (brief from Robbie, 2026-10-23; built unattended the same night):** every stream secret
+moves out of UserDefaults into the Keychain, by P1's pattern (copy, read back and compare, only then
+remove; a failure leaves that bookmark's plist entry alone and is logged without the secret;
+idempotent, resumable, safe on a machine that never had the secret). One Keychain service, one item
+per bookmark keyed by its stable id; deleting a bookmark deletes its item, renaming keeps it.
+
+**How P2 resolved the brief against this document and the code** (the document wins where they differ):
+- **This document did not define P2** beyond "audit item 2". The brief's definition was used.
+- **The service and item already existed.** Before P2, `tools.graviton.manifold.streams` held one SRT
+  passphrase per bookmark UUID. P2 keeps that service and that account and widens the item: it now
+  holds the bookmark's whole secret, `{"kind":"manifold.stream-secret","v":1,"url":…,"passphrase":…}`
+  (`StreamSecret`, Packages/ManifoldCore/Sources/StreamBookmarkModel/StreamSecrets.swift). A value
+  that is not that shape is read as a pre-P2 passphrase.
+- **"The Stage D IDs."** Stage D's `storageID` is the colour-override preset id
+  (`StreamBookmark.colorOverride`), not a bookmark id. The stable per-bookmark id is
+  `StreamBookmark.id` (a UUID), already the Keychain account. That is what P2 uses.
+- **What is secret.** The whole URL, not a chosen part: a WHEP or HLS path can be the stream key, an
+  SRT `streamid` can be one, a query can carry a token, the user part of a URL a password, and no
+  rule can tell which path segment is the key. The plist keeps `address` (`scheme://host[:port]`,
+  which the list shows and §2 already logs) and `secretRef` (the account). `urlString` is written
+  empty, so an older build cannot dial a migrated entry at all, rather than dialling the bare host,
+  which would be a different stream.
+- **WHEP/WHIP bearer tokens:** none exist. Manifold sends no Authorization header (§5) and does not
+  publish (no WHIP). **NDI:** nothing is saved; NDI sources are not bookmarks.
+- **Diagnostics, bookmark export/import, "copy URL"** (each path checked; `docs/BUGS.md`, *P2*):
+  the export carries no bookmark field, only the captured log (redacted) and a new count line; there is
+  no bookmark export or import, and no pasteboard write anywhere in `App/`.
+- **The edit form no longer shows the URL on Edit.** Since the URL is in the Keychain, showing it
+  means a Keychain read, and pressing the pencil must not do one (`StreamBookmarksSheet.swift`,
+  `passphraseRemovalControl`: a read can raise an authorization prompt). The field starts blank,
+  blank keeps the saved URL, and "Show saved URL" reads it on request. Chosen as the conservative
+  option overnight; Robbie to confirm.
+
 ---
 
 ## 1. Local storage
@@ -72,7 +108,7 @@ entitlement is `com.apple.security.cs.disable-library-validation` (`App/Manifold
 | `license.email` | The licensee's full email (`LicenseManager.swift:606`) | **P1**: no longer written; removed once the Keychain record reads back equal |
 | `license.machineId` | Random UUID sent to the licence server (`:610`, `:661`) | **P1**: as above |
 | `license.activated`, `license.validated`, `license.type` | Licence state flags and type | unchanged |
-| `streamBookmarks` | Saved streams: `id`, `name`, `urlString`, `type`, `audioOffsetMs`, `colorOverride` (`StreamBookmark.swift:87-110`). The SRT passphrase goes to the Keychain; **the rest of the URL is plaintext**, and a WHEP/HLS path or SRT `streamid` can be the stream key | **later** (item 2) |
+| `streamBookmarks` | Saved streams: `id`, `name`, `type`, `audioOffsetMs`, `colorOverride`, and since P2 `address` (`scheme://host[:port]`) and `secretRef` (the Keychain account), with `urlString` empty (`StreamBookmark.swift`). Before P2 `urlString` held the whole URL but the passphrase, and a WHEP/HLS path or SRT `streamid` can be the stream key | **P2**: the URL and passphrase are in the Keychain; existing entries move at launch, each only after its item reads back equal |
 | `recentLUTs` | Up to 10 entries: absolute `.cube` path, plain bookmark, output space (`InterpretationLUT.swift:286`, `:300`) | unchanged |
 | `exportFolderBookmark` | Security-scoped bookmark to the chosen export folder (`Preferences.swift:195`, `:204`) | unchanged |
 | `displayCalibrations` | Keyed by display vendor-model-**serial**, with the display name (`DisplayCalibrationStore.swift:35`, `:53`) | unchanged (P1 stopped *logging* the serial) |
@@ -91,7 +127,10 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
     re-activating reuses the machine slot.
   - `trial.firstLaunch`, `trial.lastSeen`, `trial.voided`: these deliberately outlive the app
     (`LicenseManager.swift:84-85`).
-- **Service `tools.graviton.manifold.streams`:** one SRT passphrase per bookmark UUID.
+- **Service `tools.graviton.manifold.streams`:** one item per bookmark UUID. **P2:** the item holds
+  the bookmark's full URL and SRT passphrase (`StreamSecret`); before P2 it held the passphrase only,
+  and only for bookmarks that had one. The list and the migration of an already-migrated list read no
+  item; an item is read to connect, to show the saved URL in the edit form, and to save an edit.
 
 ### Files and caches
 
@@ -146,6 +185,8 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   - libdatachannel's log callback: IPs.
 
   All of these go through `PrivacyRedaction.LogRedaction`.
+- **P2:** the stream-secrets migration logs counts, and a kept entry by its position in the list
+  ("entry 3 of 7: … left in the preferences plist"), never its URL, host or name.
 - **Still logged in full (not in P1's list):**
   - the SRT host and port (`SRTClient.swift:490`, `SRTSession.m:580`);
   - the WHEP endpoint host (path withheld);
@@ -256,7 +297,7 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 | Preferences | `~/Library/Preferences/com.graviton.manifold.plist` (`defaults delete com.graviton.manifold`) |
 | Caches | `~/Library/Caches/com.graviton.manifold/`, `~/Library/HTTPStorages/com.graviton.manifold/` |
 | Window state | `~/Library/Saved Application State/com.graviton.manifold.savedState/` |
-| Keychain | Services `tools.graviton.manifold.license` (key, record, **trial clock**) and `tools.graviton.manifold.streams` |
+| Keychain | Services `tools.graviton.manifold.license` (key, record, **trial clock**) and `tools.graviton.manifold.streams` (since P2, every saved stream's URL and passphrase) |
 | Recent files | `…/ApplicationRecentDocuments/com.graviton.manifold.sfl*` |
 | The user's exports | Export folder, Desktop, wherever diagnostics were saved |
 | Machine registration | On the licence server |
@@ -287,8 +328,9 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 > are third-party software with their own terms.
 >
 > **What stays on your Mac.** Settings, saved streams, recent files and recent LUTs are stored on
-> your Mac. Stream passwords and your license are kept in the macOS Keychain [stream keys inside
-> saved stream addresses — item 2]. Manifold's own network responses are not cached to disk.
+> your Mac. Saved stream addresses, stream keys and stream passwords, and your license, are kept in
+> the macOS Keychain; Manifold's preferences file keeps only each saved stream's name and server name
+> [true once P2 ships]. Manifold's own network responses are not cached to disk.
 > Diagnostics reports are created only when you choose Export Diagnostics, saved where you choose,
 > and never sent automatically. Network addresses, folder paths, machine names and display serial
 > numbers are removed, and file names unless you include them. Your trial start date is kept in the

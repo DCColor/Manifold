@@ -108,12 +108,25 @@ public struct StreamBookmark: Codable, Identifiable, Equatable, Sendable {
     /// shows Auto and writes the string back unchanged, so going back a version and returning loses
     /// nothing. Only a Save from the live menu replaces it.
     public var colorOverride: String?
+    /// Privacy P2 (docs/PRIVACY_AUDIT.md): the stream's NON-SECRET address, `scheme://host[:port]`
+    /// (`StreamSecrets.address(of:)`), stored once the full URL has moved to the Keychain. Display
+    /// only: the host for the list, never something to dial. nil on an entry not yet migrated, whose
+    /// `urlString` still holds the URL. Optional, absent until set, never fails the entry.
+    public var address: String?
+    /// Privacy P2: the Keychain account that holds this stream's secret (`StreamSecret`: the full URL
+    /// and the SRT passphrase), in the one stream service. Always `id.uuidString` when written here.
+    /// PRESENT means the plist holds no part of the URL beyond `address` and `urlString` is empty;
+    /// absent means a pre-P2 entry. Optional, absent until set, never fails the entry.
+    public var secretRef: String?
 
     public init(id: UUID = UUID(), name: String, urlString: String, type: StreamType,
-                audioOffsetMs: Int? = nil, colorOverride: String? = nil) {
+                audioOffsetMs: Int? = nil, colorOverride: String? = nil,
+                address: String? = nil, secretRef: String? = nil) {
         self.id = id; self.name = name; self.urlString = urlString; self.type = type
         self.audioOffsetMs = audioOffsetMs
         self.colorOverride = colorOverride
+        self.address = address
+        self.secretRef = secretRef
     }
 
     /// Synthesized, except that `colorOverride` NEVER FAILS THE ENTRY: a value that is not a string
@@ -128,13 +141,18 @@ public struct StreamBookmark: Codable, Identifiable, Equatable, Sendable {
         type = try c.decode(StreamType.self, forKey: .type)
         audioOffsetMs = try c.decodeIfPresent(Int.self, forKey: .audioOffsetMs)
         colorOverride = (try? c.decodeIfPresent(String.self, forKey: .colorOverride)) ?? nil
+        address = (try? c.decodeIfPresent(String.self, forKey: .address)) ?? nil
+        secretRef = (try? c.decodeIfPresent(String.self, forKey: .secretRef)) ?? nil
     }
 
-    /// The URL AS PERSISTED — no passphrase, by construction (see `StreamBookmarkStore.add`). This
-    /// is the right URL to display, to inspect, and to detect a type from; it is NOT the one to
-    /// dial. `StreamBookmarkStore.connectURL(for:)` is, and it is the only thing that reassembles
-    /// the secret.
-    public var url: URL? { URL(string: urlString) }
+    /// The URL TO DISPLAY: `address` once the secret is in the Keychain (privacy P2), else the
+    /// pre-P2 `urlString` (no passphrase, by construction). It is NOT the one to dial, and after P2
+    /// it has no path to detect a type from. `StreamBookmarkStore.connectURL(for:)` is the dial URL,
+    /// and it is the only thing that reassembles the secret.
+    public var url: URL? { URL(string: address ?? urlString) }
+
+    /// True once this entry's URL lives in the Keychain and the plist holds only `address`.
+    public var secretInKeychain: Bool { secretRef != nil }
 
     /// Host for secondary display. NEVER the path — it can carry the stream key.
     public var displayHost: String { url?.host ?? "—" }

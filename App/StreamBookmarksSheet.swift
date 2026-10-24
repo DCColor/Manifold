@@ -119,9 +119,9 @@ struct StreamBookmarksSheet: View {
     /// an add (Save also refuses, with `.storeUnreadable`, so the two agree).
     @ViewBuilder private var savedSection: some View {
         Section("Saved") {
-            if let fault = store.passphraseUnreadable {
+            if let fault = store.secretUnreadable {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("A saved passphrase couldn’t be read", systemImage: "exclamationmark.triangle.fill")
+                    Label("A saved stream couldn’t be read", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                     Text(fault)
                         .font(.caption)
@@ -219,7 +219,9 @@ struct StreamBookmarksSheet: View {
             // (it is gated on the URL) and a blank one falls back to the host in `add`/`update`.
             // Labelling it plainly "Name" implied a requirement that was never enforced.
             TextField("Name (optional — defaults to the host)", text: $newName)
-            TextField("Stream URL (https://… or srt://…)", text: $newURL)
+            TextField(editing == nil ? "Stream URL (https://… or srt://…)"
+                                     : "Stream URL — leave blank to keep the saved one", text: $newURL)
+            if editing != nil && isKeepingSavedURL { savedURLControl }
             // SHOWN ONLY FOR AN SRT URL, decided from what is typed as it is typed. A passphrase
             // field on an https bookmark would be a control that does nothing — WHEP has no such
             // concept — and an unexplained empty box invites someone to paste a stream key into it.
@@ -318,7 +320,38 @@ struct StreamBookmarksSheet: View {
 
     /// The one gate on Save, and the thing the disabled message describes. The name is deliberately
     /// absent: blank is legal and becomes the host.
-    private var canSave: Bool { !newURL.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var canSave: Bool { editing != nil || !newURL.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// Edit mode with the URL field blank: Save keeps the saved URL (privacy P2).
+    private var isKeepingSavedURL: Bool {
+        editing != nil && newURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// ── THE SAVED URL IS SHOWN ON REQUEST, NEVER ON EDIT (privacy P2) ─────────────────────────
+    ///
+    /// Since P2 the URL lives in the Keychain and the entry keeps only its address, so prefilling the
+    /// field means a Keychain READ. Pressing the pencil must not do one — the same reason as
+    /// `passphraseRemovalControl`: these items are in the ACL-guarded file keychain, where a read can
+    /// raise an authorization prompt nobody asked for. And the URL is the secret: a field that fills
+    /// itself on Edit puts a stream key on screen during a share. So the field starts blank, blank
+    /// keeps the saved URL (the passphrase field's rule), and this link reads it when pressed.
+    @ViewBuilder private var savedURLControl: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("Saved: \(editing?.displayHost ?? "—")")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Show saved URL") { loadSavedURL() }
+                .buttonStyle(.link).font(.caption)
+                .help("Read this stream’s URL from your keychain into the field, to change part of it")
+        }
+    }
+
+    private func loadSavedURL() {
+        guard let editing else { return }
+        switch store.editableURL(for: editing) {
+        case .success(let url): newURL = url; addError = nil
+        case .failure(let e):   addError = e.message
+        }
+    }
 
     /// Is there anything in the composer that pressing Done would throw away? Edit mode counts as
     /// dirty unconditionally — the fields are prefilled, so "empty" is not a state it has, and the
@@ -334,13 +367,14 @@ struct StreamBookmarksSheet: View {
     /// True once what has been typed parses as an srt:// URL. Uses the SAME `StreamType.detect` the
     /// save path uses, so the field cannot appear for a URL that would then be saved as `.web`.
     private var isEnteringSRT: Bool {
+        if isKeepingSavedURL { return editing?.type == .srt }
         let trimmed = newURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed), url.scheme != nil else { return false }
         return StreamType.detect(url) == .srt
     }
 
     /// Warn before an edit takes a passphrase away as a side effect of changing the address —
-    /// `update` deletes the Keychain item whenever the recomputed type is not `.srt`, and that is not
+    /// `update` drops the stored passphrase whenever the recomputed type is not `.srt`, and that is not
     /// a consequence anyone reads into typing "https".
     ///
     /// Gated on the typed URL being VALID and of another type, not merely on `!isEnteringSRT`, so the
@@ -381,6 +415,7 @@ struct StreamBookmarksSheet: View {
 
     /// True once what has been typed parses as an HLS URL (`StreamType.detect`, as the save path).
     private var isEnteringHLS: Bool {
+        if isKeepingSavedURL { return editing?.type == .hls }
         let trimmed = newURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed), url.scheme != nil else { return false }
         return StreamType.detect(url) == .hls
@@ -451,8 +486,8 @@ struct StreamBookmarksSheet: View {
     /// the ACL-guarded file keychain (verified: they are in login.keychain-db), where a read can
     /// raise an authorization prompt. A password dialog appearing because someone clicked a pencil
     /// would make the app feel like it was doing something it had not been asked to do. `update`'s
-    /// `.remove` path is a no-op when nothing is stored, so the cost of showing this to a bookmark
-    /// that has no passphrase is one harmless `SecItemDelete`.
+    /// `.remove` path stores the item with no passphrase (since P2 the item also holds the URL), so
+    /// the cost of showing this to a bookmark that has none is a rewrite of the same value.
     @ViewBuilder private var passphraseRemovalControl: some View {
         if removePassphrase {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -485,7 +520,7 @@ struct StreamBookmarksSheet: View {
         }
         audioOffsetError = nil
         if let editing {
-            switch store.update(editing, name: newName, urlString: newURL,
+            switch store.update(editing, name: newName, urlString: isKeepingSavedURL ? nil : newURL,
                                 passphrase: passphraseEdit(), audioOffsetMs: offset) {
             case .success(let b):
                 addError = nil
@@ -527,7 +562,7 @@ struct StreamBookmarksSheet: View {
     private func beginEditing(_ bookmark: StreamBookmark) {
         editing = bookmark
         newName = bookmark.name
-        newURL = bookmark.urlString      // the STORED URL, which by construction carries no secret
+        newURL = ""                      // blank keeps the saved URL — see `savedURLControl`
         newAudioOffset = bookmark.audioOffsetMs.map(String.init) ?? ""
         audioOffsetError = nil
         clearPassphraseEntry()           // never prefilled — see `passphraseField`

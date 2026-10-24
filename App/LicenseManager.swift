@@ -466,7 +466,7 @@ enum GateDecision {
 /// Making `KeychainStore` itself `async`, or an `actor`, WOULD relocate the work — and would turn
 /// roughly a dozen call sites in `Preferences.swift` and `StreamBookmarksSheet.swift` into
 /// suspension points, several of which cannot `await` without themselves becoming `async`:
-/// `StreamBookmarkStore.add`, `.update`, `.delete`, `migratePassphrasesToKeychain`, and
+/// `StreamBookmarkStore.add`, `.update`, `.delete`, `migrateSecretsToKeychain`, and
 /// `connectURL`, which is a plain `static func` on the dial path. A button handler that writes a
 /// passphrase has no reason to be `async`. So `KeychainStore` stays exactly as it is — synchronous,
 /// three-way, correct — and this wrapper carries the one path that has to leave the main actor.

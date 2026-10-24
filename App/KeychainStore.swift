@@ -9,6 +9,7 @@
 
 import Foundation
 import Security
+import StreamBookmarkModel // StreamSecretStore — privacy P2
 
 /// The outcome of a Keychain read. THREE CASES, NOT TWO, AND THAT IS THE ENTIRE POINT OF THIS TYPE.
 ///
@@ -146,8 +147,10 @@ struct KeychainStore {
     /// `LicenseManager.ActivationRecord` for why that mattered.
     static let license = KeychainStore(service: "tools.graviton.manifold.license")
 
-    /// Stream secrets: one SRT passphrase per saved bookmark, keyed by the bookmark's UUID. See
-    /// `StreamBookmarkStore`, which owns the write and the matching delete.
+    /// Stream secrets: one item per saved bookmark, keyed by the bookmark's UUID. Before privacy P2
+    /// the item held the SRT passphrase alone; since P2 it holds the whole secret, the URL and the
+    /// passphrase (`StreamSecret`). See `StreamBookmarkStore`, which owns the write and the matching
+    /// delete, and reaches this through `StreamBookmarkStore.keychain` (a DEBUG sandbox can redirect it).
     static let streams = KeychainStore(service: "tools.graviton.manifold.streams")
 
     // MARK: - Write
@@ -179,8 +182,8 @@ struct KeychainStore {
     }
 
     /// Upsert. Returns whether the value is now stored — CHECK IT when the caller is about to
-    /// discard its own copy: `StreamBookmarkStore.migratePassphrasesToKeychain` gates the removal
-    /// of the plaintext on exactly this result.
+    /// discard its own copy. (The stream migration goes further and reads the value back:
+    /// `StreamSecrets.store`.)
     @discardableResult
     func set(_ value: String, for account: String) -> Bool {
         write(value, for: account) == errSecSuccess
@@ -229,4 +232,26 @@ struct KeychainStore {
         ]
         SecItemDelete(query as CFDictionary)
     }
+}
+
+// MARK: - The stream store's view of it (privacy P2)
+
+/// The migration and the bookmark store work against `StreamSecretStore`, so `swift test` can run them
+/// on an in-memory store. This is the real one over a `KeychainStore`: the same three calls, with
+/// `KeychainRead` mapped across. An adapter rather than a conformance, because `read` overloaded on
+/// its return type would make every existing `switch store.read(…)` ambiguous.
+struct KeychainSecretStore: StreamSecretStore {
+    let keychain: KeychainStore
+
+    func read(_ account: String) -> StreamSecretRead {
+        switch keychain.read(account) {
+        case .found(let value):   return .found(value)
+        case .absent:             return .absent
+        case .failed(let status): return .failed(status)
+        }
+    }
+
+    func write(_ value: String, for account: String) -> Int32 { keychain.write(value, for: account) }
+
+    func delete(_ account: String) { keychain.delete(account) }
 }

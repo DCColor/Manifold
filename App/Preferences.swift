@@ -5,6 +5,9 @@ import StreamBookmarkModel
 import ManifoldCore
 import PlayheadSlider
 import ColorimetryModel   // SDIOutputModeSet — which modes Follow source may choose (SDI scaling)
+#if DEBUG
+import CryptoKit           // StreamSecretsSandbox's report hashes (privacy P2, pre-ship removal)
+#endif
 
 /// How the transport controls are presented.
 /// Where **Open…** puts a file: into the window you invoked it from, or into a new one.
@@ -250,20 +253,20 @@ final class Preferences: ObservableObject {
 // preferences plumbing rather than as a one-off; a Codable array does not fit @AppStorage, so it is
 // a small store over one JSON key.
 //
-// ── TWO STORES, BECAUSE THERE ARE TWO DIFFERENT RISKS ──────────────────────────────────────
+// ── THE PLIST KEEPS THE NAME AND THE ADDRESS; THE KEYCHAIN KEEPS EVERYTHING ELSE ────────────
 //
-// THE URL STAYS IN USERDEFAULTS. The risk it carries is a raw endpoint — whose PATH can be a
-// Cloudflare stream key — being read off a client's screen during a share. A user-supplied NAME is
-// what solves that, so the list shows the name and the HOST only, never the path. Encryption at
-// rest is the wrong tool for a screen-visible-URL problem, and it would not have helped: the app
-// must dial the URL, so it must be able to read it.
+// THE LIST SHOWS A NAME AND A HOST, NEVER A PATH. A raw endpoint's PATH can be a Cloudflare stream
+// key, and the risk it carries is being read off a client's screen during a share; a user-supplied
+// name is what solves that.
 //
-// THE SRT PASSPHRASE DOES NOT. It is a credential in its own right rather than an address — the
-// thing that decrypts the stream, typed once and reusable by anyone who reads it back out. Nothing
-// about it needs to be legible to a person, so nothing is served by leaving it in a plist that any
-// process running as the user can read with `defaults read`. It goes to the Keychain, keyed by the
-// bookmark's UUID (`KeychainStore.streams`), and the persisted `urlString` is stripped of it before
-// it is ever written — see `add` and `strippingPassphrase`.
+// AND SINCE PRIVACY P2 THE PLIST HOLDS NO PART OF THE URL BEYOND `scheme://host[:port]`. Before P2
+// only the SRT passphrase went to the Keychain, and the rest of the URL — a WHEP or HLS path that is
+// the stream key, an SRT `streamid`, a query token — sat in a plist any process running as the user
+// can read with `defaults read`. Now each bookmark's whole secret, the URL and the passphrase, is ONE
+// Keychain item (`StreamSecret`, service `KeychainStore.streams`, account = the bookmark's UUID), and
+// the entry keeps `address` and `secretRef` (docs/PRIVACY_AUDIT.md, P2). The secret is the whole URL
+// because no rule can tell which path segment is the key. Existing entries move at launch, each only
+// after its item reads back equal (`migrateSecretsAtLaunch`, `StreamSecrets.migrate`).
 
 // `StreamType` and `StreamBookmark` live in the `StreamBookmarkModel` leaf target
 // (Packages/ManifoldCore/Sources/StreamBookmarkModel), so `swift test` can decode a stored blob with
@@ -278,10 +281,14 @@ enum StreamValidationError: Error {
     /// SRT's own 10–79 rule, checked at save so the failure names the rule while the user is
     /// looking at the field — not three layers down as a libsrt errno at connect time.
     case passphraseLength
-    /// The Keychain refused the write. The bookmark is NOT saved when this happens: a saved entry
-    /// silently missing its passphrase would fail at connect with a wrong-secret rejection and no
-    /// hint as to why, which is worse than not saving at all.
-    case passphraseNotStored
+    /// The Keychain refused the write, or the read-back did not confirm it. The bookmark is NOT saved
+    /// (or not changed) when this happens: since privacy P2 the item holds the URL itself, so a saved
+    /// entry without it would have nothing to dial.
+    case secretNotStored
+    /// An edit needs the stored URL and passphrase, and the Keychain refused the read. Nothing changes.
+    case secretUnreadable
+    /// The entry says its URL is in the Keychain and the item is not there. Only retyping fixes it.
+    case secretMissing
     /// `update` was handed a bookmark that is no longer in the list — it was deleted while its edit
     /// form was open. Distinct from every other case because nothing the user can retype fixes it.
     case noLongerSaved
@@ -306,8 +313,15 @@ enum StreamValidationError: Error {
         // written out in full. Sourced from there rather than restated, so the two can never
         // drift into disagreeing about what SRT requires.
         case .passphraseLength:    return SRTClient.ParseError.passphraseLength.message
-        case .passphraseNotStored:
-            return "Couldn’t store the stream passphrase in your keychain, so this stream wasn’t saved."
+        case .secretNotStored:
+            return "Couldn’t store this stream’s address in your keychain, so it wasn’t saved."
+        case .secretUnreadable:
+            return """
+                   Manifold couldn’t read this stream’s saved address from your keychain, so it can’t \
+                   be edited right now. Nothing was changed — quitting and reopening usually clears this.
+                   """
+        case .secretMissing:
+            return "This stream’s saved address is missing from your keychain. Enter its full URL again to keep it."
         case .noLongerSaved:
             return "That stream was deleted, so there was nothing to update."
         case .audioOffsetNotANumber:
@@ -332,6 +346,34 @@ final class StreamBookmarkStore: ObservableObject {
     static let shared = StreamBookmarkStore()
 
     private static let key = "streamBookmarks"
+
+    /// Where the list lives: the app's preferences. A DEBUG launch with `MANIFOLD_DEBUG_STREAMS_SANDBOX`
+    /// set uses a scratch suite instead, so a test never reads or writes the user's real list
+    /// (`StreamSecretsSandbox`, pre-ship removal).
+    static let defaults: UserDefaults = {
+        #if DEBUG
+        if let suite = StreamSecretsSandbox.defaultsSuite { return StreamSecretsSandbox.suite(suite) }
+        #endif
+        return .standard
+    }()
+
+    /// The one Keychain service for stream secrets; the sandbox redirects it the same way.
+    static let keychain: KeychainStore = {
+        #if DEBUG
+        if let service = StreamSecretsSandbox.keychainService { return KeychainStore(service: service) }
+        #endif
+        return .streams
+    }()
+
+    /// `keychain` as the migration sees it. In DEBUG it can stop the process mid-migration
+    /// (`StreamSecretsSandbox.interrupting`, sandbox only).
+    static let secretStore: StreamSecretStore = {
+        #if DEBUG
+        return StreamSecretsSandbox.interrupting(KeychainSecretStore(keychain: keychain))
+        #else
+        return KeychainSecretStore(keychain: keychain)
+        #endif
+    }()
 
     @Published private(set) var bookmarks: [StreamBookmark]
 
@@ -360,17 +402,19 @@ final class StreamBookmarkStore: ObservableObject {
     /// — the fix is a build that can read the data — so the state is REPORTED, never worked around.
     @Published private(set) var storedDataUnreadable = false
 
-    /// Set when the Keychain REFUSED a stream-passphrase read (never when there simply is none).
+    /// Set when a connect could not get a stream's secret out of the Keychain: the read was REFUSED,
+    /// or (since P2) the item the entry points at is not there. Never set when there is simply no
+    /// passphrase.
     ///
     /// The sibling of `storedDataUnreadable`, one layer down: that one means "the bookmark list
     /// would not decode", this one means "a bookmark's secret would not come out of the Keychain".
     /// Same doctrine — say so, change nothing, and do not let the app act as though the value was
     /// never there. See `connectURL`, which is where treating a refusal as absence used to turn a
     /// readable secret into an unexplained SRT handshake failure.
-    @Published private(set) var passphraseUnreadable: String?
+    @Published private(set) var secretUnreadable: String?
 
     private init() {
-        let data = UserDefaults.standard.data(forKey: Self.key)
+        let data = Self.defaults.data(forKey: Self.key)
         if let data {
             do {
                 bookmarks = try JSONDecoder().decode([StreamBookmark].self, from: data)
@@ -389,8 +433,8 @@ final class StreamBookmarkStore: ObservableObject {
         } else {
             bookmarks = []   // fresh install: no key. Distinct from the case above.
         }
-        // ⚠️ `migratePassphrasesToKeychain()` USED TO BE CALLED HERE, AND THE PLACEMENT WAS THE BUG
-        // — not the migration, which is unchanged below. See `migratePassphrasesAtLaunch`.
+        // ⚠️ THE KEYCHAIN MIGRATION USED TO BE CALLED HERE, AND THE PLACEMENT WAS THE BUG — not the
+        // migration. See `migrateSecretsAtLaunch`.
         //
         // `ContentView` holds `@ObservedObject private var bookmarks = StreamBookmarkStore.shared`
         // as a STORED PROPERTY INITIALISER, so this `init` runs the first time `ContentView()` is
@@ -403,17 +447,17 @@ final class StreamBookmarkStore: ObservableObject {
         // the one `UserDefaults` read above, nothing that can block a paint or raise a dialog.
     }
 
-    /// Whether this process has already ATTEMPTED the passphrase migration.
-    /// See `migratePassphrasesAtLaunch`, which is the only thing that reads or writes it.
-    private var hasAttemptedPassphraseMigration = false
+    /// Whether this process has already ATTEMPTED the secrets migration.
+    /// See `migrateSecretsAtLaunch`, which is the only thing that reads or writes it.
+    private var hasAttemptedSecretsMigration = false
 
-    /// Runs the one-shot passphrase migration, once per process, from after the first frame.
+    /// Runs the one-shot secrets migration, once per process, from after the first frame.
     ///
     /// ── WHY THIS IS A DEFERRAL AND NOT AN `async` SPLIT ─────────────────────────────────────
     ///
     /// The alternative was to make the migration itself asynchronous — batch the Keychain writes
     /// off the main actor, then return to mutate `bookmarks`. That was REJECTED, and the reason is
-    /// worth keeping. `migratePassphrasesToKeychain` is NOT PURE I/O: it maps over `bookmarks`,
+    /// worth keeping. `migrateSecretsToKeychain` is NOT PURE I/O: it maps over `bookmarks`,
     /// which is `@Published` on an `ObservableObject`. An async version therefore has to carry the
     /// correlation between "which write succeeded" and "which entry may be stripped" across a
     /// suspension point — and getting that correlation wrong strips a passphrase whose write
@@ -421,15 +465,13 @@ final class StreamBookmarkStore: ObservableObject {
     /// is the one place in this line of work where a mistake loses user data, and it is not a risk
     /// worth taking inside a change about launch responsiveness.
     ///
-    /// Deferring buys the actual goal — the migration is off the launch path — without touching one
-    /// line of the migration's logic. Nothing needs it before the first frame: no stream passphrase
-    /// is read until connect, and `connectURL` is the only reader.
+    /// Deferring buys the actual goal — the migration is off the launch path. Nothing needs it before
+    /// the first frame: no stream secret is read until connect or edit.
     ///
-    /// ⚠️ IF THE APP IS QUIT BEFORE THIS RUNS, NOTHING IS LOST AND NOTHING CHANGES. An unmigrated
-    /// bookmark still carries its passphrase inline in `urlString`, exactly as it does today.
-    /// `connectURL` reads the Keychain, gets `.absent` — NOT `.failed`, so it does not refuse — and
-    /// returns the stored URL unchanged, which still has `?passphrase=` on it for `SRTClient.parse`
-    /// to lift back out. The stream dials and works. The migration simply runs at the next launch.
+    /// ⚠️ IF THE APP IS QUIT BEFORE THIS RUNS — OR DURING IT — NOTHING IS LOST. An unmigrated entry
+    /// still holds its URL in `urlString`, and `connectURL` resolves it exactly as the pre-P2 build
+    /// dialled it (`StreamSecrets.resolve`). An item written before the quit, with its entry not yet
+    /// stripped, is linked without a second write at the next launch.
     ///
     /// ── ONCE PER PROCESS, NOT ONCE PER WINDOW ──────────────────────────────────────────────
     ///
@@ -448,33 +490,29 @@ final class StreamBookmarkStore: ObservableObject {
     /// hands us a nonisolated closure — the annotation is what makes the hop explicit at the call
     /// site rather than accidental.
     @MainActor
-    func migratePassphrasesAtLaunch() {
-        guard !hasAttemptedPassphraseMigration else { return }
-        hasAttemptedPassphraseMigration = true
-        migratePassphrasesToKeychain()
+    func migrateSecretsAtLaunch() {
+        guard !hasAttemptedSecretsMigration else { return }
+        hasAttemptedSecretsMigration = true
+        migrateSecretsToKeychain()
     }
 
-    /// ── ONE-SHOT MIGRATION: PASSPHRASES OUT OF THE PLIST ────────────────────────────────────
+    /// ── ONE-SHOT MIGRATION: STREAM SECRETS OUT OF THE PLIST (privacy P2) ────────────────────
     ///
-    /// Before the passphrase moved to the Keychain, nothing stopped a user pasting
-    /// `srt://host:9000?passphrase=…` into the Add field: `validate` accepted the scheme, `add`
-    /// stored `absoluteString` verbatim, and the row sat greyed as an unsupported type with the
-    /// secret sitting in cleartext in the preferences plist. Those bookmarks exist in the wild —
-    /// SRT being unconnectable never stopped anyone SAVING one — and shipping the Keychain path
-    /// without this would leave them exactly where they are, forever, while the new code looks
-    /// correct.
+    /// Each entry's whole secret — its URL and its SRT passphrase — goes into its one Keychain item,
+    /// and the entry keeps only `address` and `secretRef`. The rules are P1's (`LicenseRecordSync`)
+    /// and live with the tests in `StreamSecrets.migrate`:
+    ///   - an entry changes ONLY after its item has been written AND READ BACK equal;
+    ///   - a failure keeps that entry byte-for-byte as it was, puts the item back as it was, and is
+    ///     logged by the entry's position — never its secret, URL, host or name;
+    ///   - an entry already migrated is not read (a migrated list costs launch no Keychain call);
+    ///   - an item that already holds the entry's secret (an interrupted run) is linked, not rewritten.
     ///
-    /// So: move the value, rewrite the entry without it, persist once. Idempotent — a second run
-    /// finds nothing to strip. It writes to the Keychain but never reads it, so it cannot
-    /// clobber a value already migrated: `strippingPassphrase` only yields one when the URL still
-    /// carries it, which is the case this exists for.
+    /// The pre-P2 passphrase migration is folded in: an inline `?passphrase=` (saved before the
+    /// Keychain existed) wins over the item, as that migration made it win, and leaves with the URL.
     ///
-    /// ⚠️ THE STRIP IS GATED ON A CONFIRMED WRITE. `KeychainStore.set` returns whether the value is
-    /// actually stored, and it can fail for reasons that have nothing to do with us — a locked
-    /// keychain, a denied ACL, a full disk. Stripping anyway would destroy the only copy of a
-    /// credential the user may not have written down, to fix an exposure. So a failed write leaves
-    /// the entry BYTE-FOR-BYTE ALONE, still carrying its passphrase, still working, and the next
-    /// launch tries again.
+    /// ⚠️ THE RETRY-FOREVER BEHAVIOUR IS CORRECT. A keychain that keeps refusing means this runs at
+    /// every launch and never converges. That is the price of the read-back gate, which exists so a
+    /// failed write can never destroy the only copy of a credential.
     ///
     /// ── WHAT THIS DOES NOT DO ───────────────────────────────────────────────────────────────
     ///
@@ -484,42 +522,18 @@ final class StreamBookmarkStore: ObservableObject {
     /// Library, and in unallocated disk blocks the old file occupied — none of which this code can
     /// reach, and none of which it should pretend to. What migration buys is that the exposure
     /// stops GROWING: no new plist write carries the value, and every future read comes from the
-    /// Keychain. A passphrase that was already sitting in a synced preferences file should still be
+    /// Keychain. A stream key that was already sitting in a synced preferences file should still be
     /// rotated at the sender; moving it here is not a substitute for that.
-    ///
-    /// ⚠️ Logs COUNTS and nothing else. Not the value, not its length, not the host it belongs to.
-    private func migratePassphrasesToKeychain() {
-        var migrated = 0
-        var failed = 0
-        bookmarks = bookmarks.map { bookmark in
-            guard let url = bookmark.url,
-                  let split = Self.strippingPassphrase(from: url),
-                  let passphrase = split.passphrase else { return bookmark }
-            let status = KeychainStore.streams.write(passphrase, for: bookmark.id.uuidString)
-            guard status == errSecSuccess else {
-                failed += 1
-                // ⚠️ Logs the OSStatus, never the value or the bookmark's host. The status is what
-                // tells a locked keychain apart from a denied one; the rest is not ours to send.
-                NSLog("[STREAMS] ⚠️ passphrase migration write failed (%@)",
-                      keychainStatusDescription(status))
-                return bookmark   // untouched — the URL keeps the only copy there is
-            }
-            migrated += 1
-            var moved = bookmark
-            moved.urlString = split.url.absoluteString
-            return moved
-        }
-        if failed > 0 {
-            NSLog("""
-                  [STREAMS] ⚠️ could not write %d stream passphrase(s) to the Keychain — those \
-                  bookmarks were left untouched and still carry the value in preferences. Will \
-                  retry on the next launch.
-                  """, failed)
-        }
-        guard migrated > 0 else { return }
-        NSLog("[STREAMS] moved %d saved stream passphrase(s) out of preferences and into the Keychain",
-              migrated)
+    @discardableResult
+    func migrateSecretsToKeychain() -> StreamSecrets.MigrationOutcome? {
+        // Nothing to migrate from, and nothing may be written over saved data this build cannot read.
+        guard !storedDataUnreadable, !bookmarks.isEmpty else { return nil }
+        let outcome = StreamSecrets.migrate(bookmarks, store: Self.secretStore)
+        for line in outcome.log { NSLog("[STREAMS] %@", line) }
+        guard outcome.changed else { return outcome }
+        bookmarks = outcome.bookmarks
         persist()
+        return outcome
     }
 
     /// The single write. Two things it will NOT do silently.
@@ -547,7 +561,7 @@ final class StreamBookmarkStore: ObservableObject {
             return
         }
         do {
-            UserDefaults.standard.set(try StreamBookmark.storeEncoding(bookmarks), forKey: Self.key)
+            Self.defaults.set(try StreamBookmark.storeEncoding(bookmarks), forKey: Self.key)
         } catch {
             NSLog("[STREAMS] ⚠️ could not encode %d stream bookmark(s) — NOTHING WAS SAVED: %@",
                   bookmarks.count, String(describing: error))
@@ -591,10 +605,10 @@ final class StreamBookmarkStore: ObservableObject {
             let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalName = trimmedName.isEmpty ? (url.host ?? "Stream") : trimmedName
 
-            // STRIP BEFORE THE STRING IS EVER BUILT, not after it is stored. `sanitized` is what
-            // becomes `urlString`, so there is no window — not even a transient plist write — in
-            // which the persisted entry carries the secret.
-            let split = Self.strippingPassphrase(from: url)
+            // STRIP BEFORE THE STRING IS EVER BUILT, not after it is stored. `sanitized` is the URL
+            // the item holds, and the plist entry holds only its address, so there is no window — not
+            // even a transient plist write — in which the persisted entry carries a secret.
+            let split = StreamSecrets.strippingPassphrase(from: url)
             let sanitized = split?.url ?? url
             let typed = passphrase?.trimmingCharacters(in: .whitespacesAndNewlines)
             let secret = (typed?.isEmpty == false ? typed : nil) ?? split?.passphrase
@@ -605,20 +619,24 @@ final class StreamBookmarkStore: ObservableObject {
                 return .failure(.passphraseLength)
             }
 
-            let bookmark = StreamBookmark(name: finalName, urlString: sanitized.absoluteString,
-                                          type: type, audioOffsetMs: Self.storedAudioOffset(audioOffsetMs))
-            if let secret {
-                // Keyed by the bookmark's own UUID, which is why the write happens here rather
-                // than in the sheet: this is where the id exists and where `delete` can match it.
-                //
-                // WRITE FIRST, APPEND SECOND, and fail the whole save if the write fails — same
-                // reasoning as the migration's gate. A listed bookmark whose secret silently went
-                // nowhere would fail at connect as a wrong-passphrase rejection from the server,
-                // which is the least debuggable outcome available.
-                guard KeychainStore.streams.set(secret, for: bookmark.id.uuidString) else {
-                    NSLog("[STREAMS] ⚠️ keychain write failed — stream not saved")
-                    return .failure(.passphraseNotStored)
-                }
+            // Keyed by the bookmark's own UUID, which is why the write happens here rather than in the
+            // sheet: this is where the id exists and where `delete` can match it.
+            //
+            // WRITE FIRST, READ BACK, APPEND LAST, and fail the whole save if the item is not
+            // confirmed. Since privacy P2 the item holds the URL itself, so a listed entry without it
+            // would have nothing to dial. The plist entry is built from the secret: name, type and
+            // `address` only.
+            let fresh = StreamBookmark(name: finalName, urlString: "", type: type,
+                                       audioOffsetMs: Self.storedAudioOffset(audioOffsetMs))
+            let account = fresh.id.uuidString
+            let streamSecret = StreamSecret(url: sanitized.absoluteString, passphrase: secret)
+            guard let bookmark = StreamSecrets.migrated(fresh, secret: streamSecret, account: account) else {
+                return .failure(.notAURL)
+            }
+            let stored = StreamSecrets.store(streamSecret, account: account, in: Self.secretStore, previous: .absent)
+            guard stored == .stored else {
+                NSLog("[STREAMS] ⚠️ stream not saved: %@", stored.reason)
+                return .failure(.secretNotStored)
             }
             bookmarks.append(bookmark)
             persist()
@@ -660,105 +678,138 @@ final class StreamBookmarkStore: ObservableObject {
     ///
     /// `type` is a STORED field derived from the URL at save time, so an edit that changes the scheme
     /// must re-derive it — `validate` does, through the same `StreamType.detect` the add path uses.
-    /// And when the result is not `.srt`, THE KEYCHAIN ITEM GOES, whatever `passphrase` asked for.
+    /// And when the result is not `.srt`, THE PASSPHRASE GOES, whatever `passphrase` asked for (the
+    /// item stays: since privacy P2 it holds the URL).
     /// A passphrase on a `.web` entry is not merely useless, it is unreachable: nothing in the UI
     /// would offer to edit or remove it (the field is SRT-only), and `connectURL` would splice a
     /// `passphrase=` query onto an https URL. srt:// → https:// is exactly the edit that would leave
     /// one behind, so it is the one case handled explicitly.
     ///
-    /// Ordering matches `add`'s: the Keychain WRITE happens first and aborts the whole update on
-    /// failure, leaving the bookmark byte-for-byte alone. The Keychain DELETE happens last, after the
-    /// list has been mutated and persisted, so no early return can destroy a secret whose bookmark
-    /// was never actually changed.
+    /// Ordering matches `add`'s: the item is READ first (an unchanged passphrase is kept from it, so a
+    /// refused read stops the edit), then WRITTEN AND READ BACK, and only then is the entry changed and
+    /// persisted. Any failure leaves the bookmark and its item as they were (`StreamSecrets.store`).
+    ///
+    /// `urlString` is a full URL typed (or loaded with `editableURL(for:)`) into the form, or nil to
+    /// KEEP THE SAVED URL — the form starts blank since P2, and blank means keep, as it does for the
+    /// passphrase (`StreamBookmarksSheet.savedURLControl`).
     @discardableResult
-    func update(_ bookmark: StreamBookmark, name: String, urlString: String,
+    func update(_ bookmark: StreamBookmark, name: String, urlString: String?,
                 passphrase: PassphraseEdit,
                 audioOffsetMs: Int?) -> Result<StreamBookmark, StreamValidationError> {
         guard let index = bookmarks.firstIndex(where: { $0.id == bookmark.id }) else {
             return .failure(.noLongerSaved)
         }
-        switch Self.validate(urlString) {
+
+        // What is stored now: the URL a blank field keeps and the passphrase an `.unchanged` edit
+        // keeps. A refused read stops the edit (nothing may be re-derived on `.failed`); an item that
+        // exists and is not ours is not written over; a missing one has nothing to keep.
+        let current = bookmarks[index]
+        let account = current.secretRef ?? current.id.uuidString
+        let previous = Self.secretStore.read(account)
+        var saved: StreamSecret?
+        switch StreamSecrets.resolve(current, read: previous) {
+        case .secret(let s): saved = s
+        case .failed(let status):
+            NSLog("[STREAMS] ⚠️ stream secret could not be read (%@) — stream not updated",
+                  keychainStatusDescription(status))
+            return .failure(.secretUnreadable)
+        case .missing: saved = nil
+        case .unusable:
+            if case .found = previous { return .failure(.secretUnreadable) }
+            saved = nil
+        }
+        guard let chosenURL = urlString ?? saved?.url else { return .failure(.secretMissing) }
+
+        switch Self.validate(chosenURL) {
         case .failure(let e): return .failure(e)
         case .success(let (url, type)):
             let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
             let finalName = trimmedName.isEmpty ? (url.host ?? "Stream") : trimmedName
 
-            // Same strip-before-the-string-is-built discipline as `add`: `sanitized` is what becomes
-            // `urlString`, so an edit that pastes a `?passphrase=` URL never persists it either.
-            let split = Self.strippingPassphrase(from: url)
+            // Same strip-before-the-string-is-built discipline as `add`: `sanitized` is what goes into
+            // the item, so an edit that pastes a `?passphrase=` URL never stores it in the URL either.
+            let split = StreamSecrets.strippingPassphrase(from: url)
             let sanitized = split?.url ?? url
+            let storedPassphrase = saved?.passphrase
 
-            // Resolve the three-way against the recomputed type. `write` and `clear` are mutually
-            // exclusive by construction — every branch below sets at most one of them.
-            var write: String?
-            var clear = false
+            // Resolve the three-way against the recomputed type. `supplied` is a value the user gave in
+            // this edit (typed, or in a pasted URL), held to the 10–79 rule; `kept` is what is stored.
+            var supplied: String?
+            var kept: String?
             if type != .srt {
-                // Non-SRT wins over the requested edit. See the note above.
-                clear = true
+                kept = nil   // non-SRT wins over the requested edit. See the note above.
             } else {
                 switch passphrase {
                 case .remove:
-                    clear = true
+                    kept = nil
                 case .set(let typed):
                     let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
                     // A `.set` that trims to nothing is not a removal — removal has its own case, and
                     // treating whitespace as one would be the two-way collapse this enum exists to
                     // avoid. It falls through to the same rule as `.unchanged`.
-                    write = trimmed.isEmpty ? split?.passphrase : trimmed
+                    supplied = trimmed.isEmpty ? split?.passphrase : trimmed
+                    kept = supplied ?? storedPassphrase
                 case .unchanged:
                     // "Unchanged" is about the FIELD, not the URL. A `?passphrase=` in a URL the user
                     // just pasted is a value they explicitly supplied, so it is adopted here for the
-                    // same reason `add` honours one — and stripped from the stored string either way.
-                    write = split?.passphrase
+                    // same reason `add` honours one — and stripped from the stored URL either way.
+                    supplied = split?.passphrase
+                    kept = supplied ?? storedPassphrase
                 }
             }
 
-            if let write, !SRTClient.Endpoint.passphraseLengthRange.contains(write.count) {
+            if let supplied, !SRTClient.Endpoint.passphraseLengthRange.contains(supplied.count) {
                 return .failure(.passphraseLength)
             }
 
-            let account = bookmark.id.uuidString
-            if let write {
-                let status = KeychainStore.streams.write(write, for: account)
-                guard status == errSecSuccess else {
-                    NSLog("[STREAMS] ⚠️ keychain write failed (%@) — stream not updated",
-                          keychainStatusDescription(status))
-                    return .failure(.passphraseNotStored)
-                }
-            }
+            let streamSecret = StreamSecret(url: sanitized.absoluteString, passphrase: kept)
 
             // MUTATE, never re-create. `bookmarks[index]` already carries the id, and `id` is `let`,
             // so the copy below cannot acquire a different one.
-            var updated = bookmarks[index]
-            updated.name = finalName
-            updated.urlString = sanitized.absoluteString
-            updated.type = type
-            updated.audioOffsetMs = Self.storedAudioOffset(audioOffsetMs)
+            var edited = current
+            edited.name = finalName
+            edited.type = type
+            edited.audioOffsetMs = Self.storedAudioOffset(audioOffsetMs)
+            guard let updated = StreamSecrets.migrated(edited, secret: streamSecret, account: account) else {
+                return .failure(.notAURL)
+            }
+            let stored = StreamSecrets.store(streamSecret, account: account, in: Self.secretStore, previous: previous)
+            guard stored == .stored else {
+                NSLog("[STREAMS] ⚠️ stream not updated: %@", stored.reason)
+                return .failure(.secretNotStored)
+            }
             bookmarks[index] = updated
             persist()
-
-            // Last, and only now. Harmless when there was never an item — `SecItemDelete` on a
-            // missing account is a no-op — which is the common case for a `.web` entry that has
-            // simply been renamed.
-            if clear { KeychainStore.streams.delete(account) }
             return .success(updated)
         }
     }
 
-    /// Record/clear the passphrase-read fault. `connectURL` is `static` and the flag is instance
-    /// state, so these exist to keep the hop through `shared` in one named place.
-    fileprivate func notePassphraseUnreadable(_ status: OSStatus) {
+    /// Record/clear the secret-read fault. `connectURL` is `static` and the flag is instance state,
+    /// so these exist to keep the hop through `shared` in one named place.
+    fileprivate func noteSecretUnreadable(_ status: OSStatus) {
         let text = """
-                   Manifold couldn’t read this stream’s saved passphrase from the Keychain                    (\(keychainStatusDescription(status))). The passphrase is still saved and hasn’t                    been changed. Manifold didn’t connect rather than connect without it — quitting                    and reopening usually clears this, and there’s no need to re-enter it.
+                   Manifold couldn’t read this stream’s saved address from the Keychain \
+                   (\(keychainStatusDescription(status))). It is still saved and hasn’t been changed. \
+                   Manifold didn’t connect rather than connect without it — quitting and reopening \
+                   usually clears this, and there’s no need to re-enter it.
                    """
-        if passphraseUnreadable != text { passphraseUnreadable = text }
+        if secretUnreadable != text { secretUnreadable = text }
     }
 
-    fileprivate func notePassphraseReadable() {
-        if passphraseUnreadable != nil { passphraseUnreadable = nil }
+    /// The entry points at an item that is not there (or not usable): only retyping fixes it.
+    fileprivate func noteSecretMissing() {
+        let text = """
+                   This stream’s saved address isn’t in the Keychain, so Manifold didn’t connect. \
+                   Edit the stream and enter its full URL again.
+                   """
+        if secretUnreadable != text { secretUnreadable = text }
     }
 
-    /// Delete the entry AND its passphrase. Both, always, in that order — a Keychain item whose
+    fileprivate func noteSecretReadable() {
+        if secretUnreadable != nil { secretUnreadable = nil }
+    }
+
+    /// Delete the entry AND its Keychain item. Both, always, in that order — a Keychain item whose
     /// bookmark is gone is unreachable by every code path in the app (the account name is the
     /// bookmark's UUID and nothing else can produce it), so it would be an orphaned secret that
     /// outlives the app, survives reinstalls, and is invisible in the UI that created it.
@@ -814,7 +865,10 @@ final class StreamBookmarkStore: ObservableObject {
 
     func delete(_ bookmark: StreamBookmark) {
         bookmarks.removeAll { $0.id == bookmark.id }
-        KeychainStore.streams.delete(bookmark.id.uuidString)
+        // The item is the secret: the URL and the passphrase (privacy P2). Its account is the
+        // entry's reference, which is always its UUID; both are named in case a hand edit split them.
+        Self.secretStore.delete(bookmark.id.uuidString)
+        if let ref = bookmark.secretRef, ref != bookmark.id.uuidString { Self.secretStore.delete(ref) }
         persist()
     }
 
@@ -831,46 +885,10 @@ final class StreamBookmarkStore: ObservableObject {
         bookmarks.first { $0.type == type && $0.type.isSupported }
     }
 
-    // MARK: - Passphrase: the split at save, the join at connect
+    // MARK: - The secret: the split at save, the join at connect
 
-    /// The query key, spelled once. SRT URLs use `passphrase`, matching libsrt's own option name and
-    /// what OBS/ffmpeg write, and the comparison below is case-insensitive because a hand-typed URL
-    /// is not reliably lowercase.
-    private static let passphraseQueryKey = "passphrase"
-
-    /// Split a URL into (URL without any passphrase, the passphrase). Returns nil only when the URL
-    /// cannot be decomposed at all — a caller treats that as "nothing to strip" and keeps the
-    /// original, which is correct: an un-parseable URL has no query items to leak through.
-    ///
-    /// An EMPTY value (`?passphrase=`) yields a nil secret but still strips the key, so a pointless
-    /// empty parameter never reaches the wire or the Keychain.
-    ///
-    /// ⚠️ RETURNS THE URL UNTOUCHED WHEN THERE IS NO PASSPHRASE KEY, and that early-out is
-    /// load-bearing rather than an optimisation. Rebuilding `queryItems` RE-ENCODES every remaining
-    /// parameter: `?streamid=live%2Fabc` comes back as `?streamid=live/abc`. Both decode to the
-    /// same value through any query parser — ours included, since `SRTClient.parse` reads
-    /// `queryItems` the same way — so it is safe where we must rebuild. But it is not something to
-    /// do to a URL we have no business rewriting. Every web bookmark falls in that category, and
-    /// their query strings can carry a token the server may compare literally; saving one must not
-    /// silently normalise it. So the rebuild happens only when a secret is actually being removed.
-    static func strippingPassphrase(from url: URL) -> (url: URL, passphrase: String?)? {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return nil
-        }
-        guard let items = components.queryItems, !items.isEmpty else { return (url, nil) }
-        guard items.contains(where: { $0.name.lowercased() == passphraseQueryKey }) else {
-            return (url, nil)   // nothing to remove — hand back the original bytes, not a rebuild
-        }
-        let found = items.first { $0.name.lowercased() == passphraseQueryKey }?.value
-        let kept = items.filter { $0.name.lowercased() != passphraseQueryKey }
-        // nil, not [], or `absoluteString` keeps a trailing "?" on a URL whose only parameter was
-        // the one we removed — which then round-trips into the stored string and looks like damage.
-        components.queryItems = kept.isEmpty ? nil : kept
-        guard let stripped = components.url else { return nil }
-        return (stripped, (found?.isEmpty == false) ? found : nil)
-    }
-
-    /// The URL TO DIAL — the stored one with its Keychain passphrase put back. The only place the
+    /// The URL TO DIAL — the entry's Keychain item, URL and passphrase rejoined; for an entry not yet
+    /// migrated, the target the pre-P2 build dialled (`StreamSecrets.resolve`). The only place the
     /// two halves are rejoined, and the reason `StreamBookmark.url` is documented as display-only.
     ///
     /// ⚠️ THE RETURN VALUE IS A SECRET-BEARING URL. It goes to `LiveSource.connect*` and no further:
@@ -879,41 +897,55 @@ final class StreamBookmarkStore: ObservableObject {
     /// about it (see the ⚠️ notes there) — this function's job is to keep the value in memory
     /// between the Keychain and that parse, and nowhere else.
     ///
-    /// Falls back to the stored URL unchanged when there is no stored passphrase, which is every
-    /// web bookmark and any SRT one that does not need encryption.
-    /// ⚠️ RETURNS NIL WHEN THE PASSPHRASE READ IS REFUSED, rather than the bare URL.
+    /// ⚠️ RETURNS NIL WHEN THE READ IS REFUSED, rather than a bare URL.
     ///
-    /// This used to be `get(...)` collapsing to nil, so a refused read and a stream that needs no
-    /// passphrase produced the SAME RESULT: dial without one. For an encrypted SRT stream that is
-    /// a rejected handshake several seconds later, reported as a connection failure — the user is
-    /// told the stream is unreachable when what actually happened is that their saved passphrase
-    /// was sitting right there and we were not allowed to read it. Refusing to dial is the honest
-    /// answer, and it is also the recoverable one: nothing is overwritten and the next attempt,
-    /// against an unlocked keychain, just works.
+    /// A refused read used to collapse to "no passphrase", so for an encrypted SRT stream the dial
+    /// went out without one and failed several seconds later as a rejected handshake — the user was
+    /// told the stream was unreachable when their saved secret was sitting right there and we were
+    /// not allowed to read it. Refusing to dial is the honest answer, and the recoverable one:
+    /// nothing is overwritten and the next attempt, against an unlocked keychain, just works. Since
+    /// P2 the same holds for a missing item: the plist has only the host, and dialling that would
+    /// reach a different stream.
     static func connectURL(for bookmark: StreamBookmark) -> URL? {
-        guard let url = bookmark.url else { return nil }
-        let read = KeychainStore.streams.read(bookmark.id.uuidString)
-        if let status = read.failureStatus {
-            NSLog("[STREAMS] ⚠️ stored passphrase could not be read (%@) — not dialling without it",
+        let account = bookmark.secretRef ?? bookmark.id.uuidString
+        switch StreamSecrets.resolve(bookmark, read: secretStore.read(account)) {
+        case .secret(let secret):
+            shared.noteSecretReadable()
+            return StreamSecrets.dialURL(secret)
+        case .failed(let status):
+            NSLog("[STREAMS] ⚠️ stored stream secret could not be read (%@) — not dialling without it",
                   keychainStatusDescription(status))
-            shared.notePassphraseUnreadable(status)
+            shared.noteSecretUnreadable(status)
+            return nil
+        case .missing, .unusable:
+            NSLog("[STREAMS] ⚠️ this stream's saved address is not in the Keychain — not dialling")
+            shared.noteSecretMissing()
             return nil
         }
-        shared.notePassphraseReadable()
-        guard let secret = read.value, !secret.isEmpty else {
-            return url
+    }
+
+    /// The stored URL WITHOUT the passphrase (the form never shows that), for the edit form's "Show
+    /// saved URL" — read from the item now that the plist has only the host. Read only when that link
+    /// is pressed: never on Edit, never to draw the list (`StreamBookmarksSheet.savedURLControl`).
+    func editableURL(for bookmark: StreamBookmark) -> Result<String, StreamValidationError> {
+        let account = bookmark.secretRef ?? bookmark.id.uuidString
+        switch StreamSecrets.resolve(bookmark, read: Self.secretStore.read(account)) {
+        case .secret(let secret):
+            return .success(secret.url)
+        case .failed(let status):
+            NSLog("[STREAMS] ⚠️ stream secret could not be read for editing (%@)", keychainStatusDescription(status))
+            return .failure(.secretUnreadable)
+        case .missing, .unusable:
+            return .failure(.secretMissing)
         }
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            return url
-        }
-        var items = components.queryItems ?? []
-        // Defensive: the stored URL should never carry one (add + the migration both strip it), so
-        // drop any duplicate rather than appending a second `passphrase=` the parser would have to
-        // choose between.
-        items.removeAll { $0.name.lowercased() == passphraseQueryKey }
-        items.append(URLQueryItem(name: passphraseQueryKey, value: secret))
-        components.queryItems = items
-        return components.url ?? url
+    }
+
+    /// Counts for the diagnostics report: where each entry's URL is. No URL, host or name.
+    var secretPlacementSummary: String {
+        let inKeychain = bookmarks.filter(\.secretInKeychain).count
+        return "\(bookmarks.count) saved, \(inKeychain) with the URL in the Keychain, "
+             + "\(bookmarks.count - inKeychain) with the URL still in preferences"
+             + (storedDataUnreadable ? " (saved list UNREADABLE by this build)" : "")
     }
 }
 
@@ -1664,3 +1696,267 @@ struct SettingsView: View {
         .frame(minHeight: 520)
     }
 }
+
+#if DEBUG
+// MARK: - DEBUG: the stream-secrets sandbox (privacy P2) — PRE-SHIP REMOVAL (docs/BUGS.md)
+
+/// Points `StreamBookmarkStore` at a scratch defaults suite and a scratch Keychain service, so the P2
+/// migration can be run, interrupted and re-run on SYNTHETIC bookmarks without reading or writing the
+/// user's real `streamBookmarks` or their real stream items.
+///
+///   `MANIFOLD_DEBUG_STREAMS_SANDBOX=<name>`   suite `com.graviton.manifold.p2sandbox.<name>`, service
+///                                             `tools.graviton.manifold.streams.sandbox.<name>`
+///   `MANIFOLD_DEBUG_STREAMS_SELFTEST=<a,b,…>` run these actions headless from `ManifoldApp.init` —
+///                                             before licensing, before any window — report, EXIT
+///   `MANIFOLD_DEBUG_STREAMS_REPORT=<path>`    the report (JSON; hashes and presence, no secret)
+///   `MANIFOLD_DEBUG_STREAMS_SEED=<path>`      the synthetic list and items, for `seed` and `add`
+///   `MANIFOLD_DEBUG_STREAMS_INTERRUPT_AFTER_WRITES=<n>`  exit(3) right after the n-th Keychain write
+///
+/// Headless because a launch that reaches licensing reads the licence Keychain items, which an
+/// unsigned build cannot do without an authorization prompt. Every switch but the first is ignored
+/// unless the sandbox is set; the sandbox set to anything malformed stops the process, so a typo can
+/// never fall back to the real store.
+enum StreamSecretsSandbox {
+    private static let env = ProcessInfo.processInfo.environment
+
+    static let name: String? = {
+        guard let raw = env["MANIFOLD_DEBUG_STREAMS_SANDBOX"] else { return nil }
+        guard (1...40).contains(raw.count),
+              raw.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else {
+            stop("MANIFOLD_DEBUG_STREAMS_SANDBOX must be 1–40 letters, digits or '-'")
+        }
+        return raw
+    }()
+
+    static var defaultsSuite: String? { name.map { "com.graviton.manifold.p2sandbox.\($0)" } }
+    static var keychainService: String? { name.map { "tools.graviton.manifold.streams.sandbox.\($0)" } }
+
+    static func suite(_ suiteName: String) -> UserDefaults {
+        guard let d = UserDefaults(suiteName: suiteName) else { stop("the sandbox suite could not be opened") }
+        return d
+    }
+
+    static func stop(_ why: String) -> Never {
+        NSLog("[STREAMS-SANDBOX] ⛔️ %@ — stopping before any stream data is touched", why)
+        exit(2)
+    }
+
+    // MARK: Interruption
+
+    /// What a crash or a force-quit mid-migration leaves: the process ends straight after the n-th
+    /// successful Keychain write, so that item is written and the plist is not.
+    static func interrupting(_ store: StreamSecretStore) -> StreamSecretStore {
+        guard name != nil,
+              let n = env["MANIFOLD_DEBUG_STREAMS_INTERRUPT_AFTER_WRITES"].flatMap(Int.init), n > 0 else { return store }
+        return Interrupting(base: store, after: n)
+    }
+
+    private final class Interrupting: StreamSecretStore {
+        let base: StreamSecretStore
+        let after: Int
+        var writes = 0
+        init(base: StreamSecretStore, after: Int) { self.base = base; self.after = after }
+        func read(_ account: String) -> StreamSecretRead { base.read(account) }
+        func delete(_ account: String) { base.delete(account) }
+        func write(_ value: String, for account: String) -> Int32 {
+            let status = base.write(value, for: account)
+            if status == 0 {
+                writes += 1
+                if writes == after {
+                    NSLog("[STREAMS-SANDBOX] interrupting after %d Keychain write(s)", writes)
+                    exit(3)
+                }
+            }
+            return status
+        }
+    }
+
+    // MARK: Self-test
+
+    /// Runs `MANIFOLD_DEBUG_STREAMS_SELFTEST` and exits; returns at once when it is unset.
+    ///
+    /// Actions: `seed` · `dials` (each entry's dial URL, hashed) · `migrate` · `rename:<i>` (blank URL,
+    /// passphrase unchanged) · `editurl:<i>` (Show saved URL, then save it unchanged) · `delete:<i>`
+    /// · `add` (the seed's `add` entry) · `purge` (every sandbox item and the suite). `<i>` is 1-based.
+    @MainActor
+    static func runIfRequested() {
+        guard let spec = env["MANIFOLD_DEBUG_STREAMS_SELFTEST"] else { return }
+        guard let name else { stop("MANIFOLD_DEBUG_STREAMS_SELFTEST needs MANIFOLD_DEBUG_STREAMS_SANDBOX") }
+        guard let reportPath = env["MANIFOLD_DEBUG_STREAMS_REPORT"], !reportPath.isEmpty else {
+            stop("MANIFOLD_DEBUG_STREAMS_SELFTEST needs MANIFOLD_DEBUG_STREAMS_REPORT")
+        }
+        NSLog("[STREAMS-SANDBOX] self-test in sandbox %@: %@", name, spec)
+        var steps: [[String: Any]] = []
+        for action in spec.split(separator: ",").map({ String($0) }) {
+            steps.append(run(action))
+        }
+        let report: [String: Any] = ["sandbox": name, "steps": steps, "state": state()]
+        StreamBookmarkStore.defaults.synchronize()
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
+            FileManager.default.createFile(atPath: reportPath, contents: data)
+        }
+        // The two forms a stream secret could reach a diagnostics export in: the captured log as it
+        // is, and as the export's redactor leaves it, with the export's saved-streams line.
+        let raw = LogTap.shared.snapshot()
+        FileManager.default.createFile(atPath: reportPath + ".log-raw.txt", contents: Data(raw.utf8))
+        let redacted = DiagnosticsRedactor.redact(raw, includeFileNames: false).0
+            + "\nSaved streams    : \(StreamBookmarkStore.shared.secretPlacementSummary)\n"
+        FileManager.default.createFile(atPath: reportPath + ".log-redacted.txt", contents: Data(redacted.utf8))
+        exit(0)
+    }
+
+    /// The sandbox items, read and written directly: no interruption switch, no migration.
+    private static var rawItems: KeychainSecretStore { KeychainSecretStore(keychain: StreamBookmarkStore.keychain) }
+
+    private static var seed: [String: Any] {
+        guard let path = env["MANIFOLD_DEBUG_STREAMS_SEED"], let data = FileManager.default.contents(atPath: path),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            stop("MANIFOLD_DEBUG_STREAMS_SEED is missing or unreadable")
+        }
+        return object
+    }
+
+    @MainActor
+    private static func run(_ action: String) -> [String: Any] {
+        // Computed, so `seed` never builds the store: it must load what `seed` writes.
+        var store: StreamBookmarkStore { .shared }
+        let parts = action.split(separator: ":", maxSplits: 1).map { String($0) }
+        let index = parts.count > 1 ? Int(parts[1]) : nil
+        func bookmark() -> StreamBookmark? {
+            guard let index, store.bookmarks.indices.contains(index - 1) else { return nil }
+            return store.bookmarks[index - 1]
+        }
+        var out: [String: Any] = ["action": action]
+        switch parts[0] {
+        case "seed":
+            // Before `shared` exists: the store must load what is seeded here.
+            guard let b64 = seed["streamBookmarks"] as? String, let blob = Data(base64Encoded: b64),
+                  let items = seed["items"] as? [String: String] else { stop("the seed has no list or items") }
+            let defaults = StreamBookmarkStore.defaults
+            guard defaults.object(forKey: "streamBookmarks") == nil,
+                  items.keys.allSatisfy({ rawItems.read($0) == .absent }) else {
+                out["result"] = "REFUSED: the sandbox is not empty"
+                return out
+            }
+            defaults.set(blob, forKey: "streamBookmarks")
+            let failed = items.filter { StreamBookmarkStore.keychain.write($0.value, for: $0.key) != errSecSuccess }
+            out["items"] = items.count
+            out["itemWriteFailures"] = failed.count
+        case "dials":
+            out["dials"] = store.bookmarks.map { dialRecord($0) }
+        case "migrate":
+            let outcome = store.migrateSecretsToKeychain()
+            out["moved"] = outcome?.moved ?? 0
+            out["relinked"] = outcome?.relinked ?? 0
+            out["already"] = outcome?.already ?? 0
+            out["kept"] = outcome?.kept ?? 0
+            out["keychainWrites"] = outcome?.keychainWrites ?? 0
+        case "rename", "editurl":
+            guard let b = bookmark() else { out["result"] = "no such entry"; return out }
+            let before = dialRecord(b)
+            var url: String?
+            if parts[0] == "editurl" {
+                switch store.editableURL(for: b) {
+                case .success(let u): url = u
+                case .failure(let e): out["result"] = "editableURL failed: \(e)"; return out
+                }
+            }
+            let newName = parts[0] == "rename" ? b.name + " (renamed)" : b.name
+            switch store.update(b, name: newName, urlString: url, passphrase: .unchanged, audioOffsetMs: b.audioOffsetMs) {
+            case .success(let u):
+                out["result"] = "ok"
+                out["sameAccount"] = u.secretRef == b.secretRef && u.secretRef == b.id.uuidString
+                out["sameDial"] = (dialRecord(u)["dial"] as? String) == (before["dial"] as? String)
+                out["renamed"] = u.name != b.name
+            case .failure(let e):
+                out["result"] = "update failed: \(e)"
+            }
+        case "delete":
+            guard let b = bookmark() else { out["result"] = "no such entry"; return out }
+            let account = b.secretRef ?? b.id.uuidString
+            out["itemBefore"] = presence(account)
+            store.delete(b)
+            out["itemAfter"] = presence(account)
+            out["deletedID"] = b.id.uuidString
+        case "add":
+            guard let add = seed["add"] as? [String: String], let url = add["url"] else { stop("the seed has no add entry") }
+            switch store.add(name: add["name"] ?? "", urlString: url, passphrase: add["passphrase"]) {
+            case .success(let b): out["result"] = "ok"; out["record"] = dialRecord(b)
+            case .failure(let e): out["result"] = "add failed: \(e)"
+            }
+        case "purge":
+            var accounts = Set((seed["items"] as? [String: String] ?? [:]).keys)
+            if let data = StreamBookmarkStore.defaults.data(forKey: "streamBookmarks"),
+               let list = try? JSONDecoder().decode([StreamBookmark].self, from: data) {
+                accounts.formUnion(list.map { $0.id.uuidString })
+            }
+            accounts.formUnion((seed["purgeAccounts"] as? [String]) ?? [])
+            for a in accounts { StreamBookmarkStore.keychain.delete(a) }
+            out["remaining"] = accounts.filter { rawItems.read($0) != .absent }.count
+            if let suite = defaultsSuite { StreamBookmarkStore.defaults.removePersistentDomain(forName: suite) }
+        default:
+            out["result"] = "unknown action"
+        }
+        return out
+    }
+
+    /// One entry, as hashes and flags.
+    private static func dialRecord(_ b: StreamBookmark) -> [String: Any] {
+        var r: [String: Any] = ["id": b.id.uuidString, "type": b.type.rawValue]
+        if let url = StreamBookmarkStore.connectURL(for: b) {
+            r["dial"] = sha(url.absoluteString)
+            r["params"] = sha(canonical(url))
+        } else {
+            r["dial"] = "NONE"
+        }
+        return r
+    }
+
+    /// What the plist and the items hold now. The list is read from the suite, not from `shared`.
+    private static func state() -> [String: Any] {
+        let data = StreamBookmarkStore.defaults.data(forKey: "streamBookmarks")
+        var s: [String: Any] = ["plistSHA": data.map { sha($0) } ?? "absent", "plistBytes": data?.count ?? 0]
+        let list = data.flatMap { try? JSONDecoder().decode([StreamBookmark].self, from: $0) } ?? []
+        s["bookmarks"] = list.enumerated().map { i, b -> [String: Any] in
+            let account = b.secretRef ?? b.id.uuidString
+            var e: [String: Any] = ["index": i + 1, "id": b.id.uuidString, "type": b.type.rawValue,
+                                    "secretRef": b.secretRef != nil, "urlStringEmpty": b.urlString.isEmpty,
+                                    "address": b.address != nil, "item": presence(account)]
+            if case .found(let v) = StreamBookmarkStore.keychain.read(account) {
+                e["itemFormat"] = StreamSecret.decode(v) == nil ? "pre-P2" : "secret"
+                e["itemSHA"] = sha(v)
+            }
+            return e
+        }
+        let accounts = Set((seed["items"] as? [String: String] ?? [:]).keys).union(list.map { $0.id.uuidString })
+            .union((seed["purgeAccounts"] as? [String]) ?? [])
+        s["items"] = Dictionary(uniqueKeysWithValues: accounts.map { ($0, presence($0)) })
+        return s
+    }
+
+    private static func presence(_ account: String) -> String {
+        switch StreamBookmarkStore.keychain.read(account) {
+        case .found: return "present"
+        case .absent: return "absent"
+        case .failed(let status): return "FAILED \(status)"
+        }
+    }
+
+    /// The URL's parts, decoded, in one string — the form `p2_oracle.py` builds from the seed.
+    static func canonical(_ url: URL) -> String {
+        guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "unparseable" }
+        var host = c.percentEncodedHost ?? ""
+        if host.hasPrefix("[") && host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        host = (host.removingPercentEncoding ?? host).lowercased()
+        let query = (c.queryItems ?? []).map { item in item.value.map { "\(item.name)=\($0)" } ?? item.name }
+            .joined(separator: "\u{1E}")
+        return [c.scheme?.lowercased() ?? "", host, c.port.map { String($0) } ?? "", c.path, query,
+                c.fragment ?? "", c.user ?? "", c.password ?? ""].joined(separator: "\u{1F}")
+    }
+
+    private static func sha(_ s: String) -> String { sha(Data(s.utf8)) }
+    private static func sha(_ d: Data) -> String {
+        SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+    }
+}
+#endif

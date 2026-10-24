@@ -838,6 +838,12 @@ indistinguishable from never having saved anything.**
 `migratePassphrasesToKeychain` moves SRT passphrases out of the plist and into the Keychain, keyed
 by `bookmark.id.uuidString`. That is right on its own terms and should not change. It does mean:
 
+> **Since privacy P2 (2026-10-23) this is the whole URL, not only the passphrase.** The plist entry
+> keeps the name and the host; the item keeps the URL and the passphrase (`migrateSecretsToKeychain`,
+> in the privacy entry above). So both points below now apply to every saved stream, and an export
+> must take each URL from the Keychain too. Exporting without secrets now means exporting names and
+> hosts only.
+
 - **Losing the defaults key strands the Keychain items.** They survive the erasure intact and are
   unreachable forever, because the only thing that knew their UUIDs was the list that is gone.
   Nothing collects them; they sit in the user's keychain as anonymous entries.
@@ -1033,6 +1039,16 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
     - It reads and writes no `streamBookmarks`, and logs the host only (`[DEBUG-DIAL]`).
     - `DebugDial` in `App/ContentView.swift`.
     - Not yet checked with `strings` on a Release build; the Profile binary carries it.
+  - `StreamSecretsSandbox` (App/Preferences.swift) reads `MANIFOLD_DEBUG_STREAMS_SANDBOX`,
+    `MANIFOLD_DEBUG_STREAMS_SELFTEST`, `…_REPORT`, `…_SEED` and `…_INTERRUPT_AFTER_WRITES` (added
+    2026-10-23, privacy P2).
+    - The sandbox points the stream bookmark store at the suite `com.graviton.manifold.p2sandbox.<name>`
+      and the Keychain service `tools.graviton.manifold.streams.sandbox.<name>`. A malformed name stops
+      the process (exit 2), never falling back to the real store.
+    - The self-test runs its actions from `ManifoldApp.init`, writes a hashes-only report and exits,
+      before licensing or any window.
+    - The interrupt switch exits (code 3) after the n-th Keychain write, sandbox only.
+    - Not yet checked with `strings` on a Release build.
 - **Gating:** all `#if DEBUG`, so absent from Release (checked with `strings` on both builds) and
   present in Profile.
 - **Cost when present:** one engine call, one presented-handler and one log line per second. The
@@ -1235,14 +1251,15 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2, the licensing port and Release builds to follow
+## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2 built and tested unattended 2026-10-23 (uncommitted), real install not yet migrated; the licensing port and Release builds to follow
 
 **The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy
 policy, and the policy may not describe behaviour that has not shipped. Robbie split the fixes into
 stages on 2026-10-19:
 - **P1**, this entry: the licence data, the network disk cache, logs, diagnostics and NDI discovery.
-- **Later stages:** stream secrets in `streamBookmarks` (audit item 2), the licensing port to the
-  shared client's rules (item 7), and shipping Release rather than Profile (item 8).
+- **P2**, stream secrets in `streamBookmarks` (audit item 2): built 2026-10-23, below.
+- **Later stages:** the licensing port to the shared client's rules (item 7), and shipping Release
+  rather than Profile (item 8).
 
 **What P1 changed:**
 - **Licence data.** `license.email` and `license.machineId` are no longer written to the
@@ -1326,6 +1343,195 @@ Denied each time, so the real install only ever ran the read-failed path):
   for the NDI runtime's.
 - **Done 2026-10-19:** `manifold.captureLiveAudioWAV` deleted from the real prefs (read first; a
   re-read reports it absent; the other 1,498 keys are unchanged).
+
+### P2 — stream secrets into the Keychain: built and tested unattended 2026-10-23 (commit `________`)
+
+**The brief** (Robbie, 2026-10-23, overnight) and how it was resolved against `docs/PRIVACY_AUDIT.md`
+and the code are in the audit, *Stage P2*. In short: the existing service
+`tools.graviton.manifold.streams` and its account (the bookmark's UUID) are kept, and the item now
+holds the whole secret (the URL and the SRT passphrase). "Stage D IDs" was read as the bookmark id,
+because Stage D's `storageID` is a colour preset. There are no WHEP bearer tokens and NDI saves
+nothing.
+
+**What P2 changed:**
+- **The plist entry** keeps `id`, `name`, `type`, `audioOffsetMs` and `colorOverride`, plus two new
+  optional fields. `address` (`scheme://host[:port]`) is for the list's host. `secretRef` is the
+  Keychain account. `urlString` is written empty.
+- **Older builds and a migrated entry.** An older build reading a migrated entry has no URL and cannot
+  dial it. It never dials the bare host, which would be a different stream.
+- **The item** is `StreamSecret`: JSON with a marker and a version. A value without the marker is a
+  pre-P2 passphrase.
+- **The logic is in the package**, `StreamSecrets` (StreamBookmarkModel), so `swift test` runs it
+  against an in-memory store:
+  - `resolve`: the plist entry plus the item's read gives one secret. For a pre-P2 entry it gives
+    the target the pre-P2 build dialled, byte for byte. That build's launch migration let an inline
+    `?passphrase=` win, and its `connectURL` appended the item's passphrase last.
+  - `store`: write, read back, compare. When the write went through but the read-back did not confirm
+    it, the item is put back as it was.
+  - `migrate`: one pass, with each entry independent.
+- **The app:**
+  - `migrateSecretsAtLaunch` replaces `migratePassphrasesAtLaunch`, with the same deferral and the
+    same once-per-process guard.
+  - `add`, `update` and `delete` go through the same item. `add` and `update` read it back before
+    the entry changes.
+  - `connectURL` refuses to dial when the read is refused, as before, and now also when the item is
+    missing.
+  - `KeychainSecretStore` adapts `KeychainStore`.
+- **Edit form.**
+  - The URL field starts blank, and blank keeps the saved URL, the same rule as the passphrase field.
+  - "Show saved URL" reads the item when pressed.
+  - Pressing Edit reads nothing, because a Keychain read can raise a prompt
+    (`passphraseRemovalControl`'s rule). An edit form that fills itself would also put the stream key
+    on screen.
+  - **Robbie to confirm.** The alternative was to prefill the field from the Keychain on Edit.
+- **Diagnostics:** one new line, `Saved streams : N saved, M with the URL in the Keychain, K with the
+  URL still in preferences`. Counts only.
+- **New DEBUG hooks** (pre-ship removal, listed in the removal entry above):
+  - `MANIFOLD_DEBUG_STREAMS_SANDBOX`
+  - `…_SELFTEST`, `…_REPORT`, `…_SEED`
+  - `…_INTERRUPT_AFTER_WRITES`
+  - `StreamSecretsSandbox` at the end of App/Preferences.swift
+
+**Paths checked for leaks:**
+
+| Path | Finding |
+|---|---|
+| Diagnostics export | `DiagnosticsReport.build` (App/DiagnosticsExport.swift) has no bookmark field. Stream data could reach it only through the captured log (redacted) or `SRTClient/WHEPClient.lastError`. The migration logs counts and entry positions only. The new line is counts. |
+| Bookmark export / import | None exists (the durability item below). Nothing to check. |
+| "Copy URL" | No pasteboard write anywhere in `App/` (`grep NSPasteboard`: 0). Nothing to check. |
+| The list and menus | Name and host only, as before. `displayHost` now reads `address`. |
+| The edit form | Shows the URL only on "Show saved URL", without the passphrase (never shown). |
+| Window titles | The bookmark's name or the host (`connectToStreamURL`), unchanged. |
+
+**Test isolation.** Nothing read, migrated or changed Robbie's real `streamBookmarks` or real stream
+items.
+- Every in-app run used the sandbox: suite `com.graviton.manifold.p2sandbox.<run>` and service
+  `tools.graviton.manifold.streams.sandbox.<run>`.
+- **The runs were headless.** `MANIFOLD_DEBUG_STREAMS_SELFTEST` runs in `ManifoldApp.init`, straight
+  after `LogTap.install`, and exits. That is before licensing, before any window, and before the cache
+  and NDI installs.
+- **Why headless:** an unsigned build that reaches licensing reads the licence Keychain items and
+  raises an authorization prompt, which the brief said to stop on. A signed build would instead run
+  P1's licence migration on the real install.
+- **The seed** is 11 synthetic pre-P2 bookmarks and 4 pre-P2 items:
+  - SRT with the passphrase in the item; inline (pre-Keychain); both (stale item); none, with an IPv6
+    host; an empty item.
+  - WHEP with the key in the path; WHEP with a query token and a fragment.
+  - HLS signed; HLS with a password in the user part; HLS public.
+  - A web entry with an item.
+  - Every secret carries `P2SEED`; hosts are `example.invalid`.
+- **The real data**, read-only:
+  - The defaults domain was snapshotted before any build, licence keys removed (presence only) and
+    `streamBookmarks` as a hash only.
+  - The real Keychain items were recorded by attributes only (`security dump-keychain` without `-d`,
+    filtered to Manifold's services, digested).
+- **Builds:** into `./.build-p2`, not `.build-cc`, because a `.build-cc` Manifold (PID 10944) was
+  running. It was launched at 22:57 from a VS Code terminal, not by this session.
+- **No Keychain prompt** appeared at any point. SecurityAgent was checked after every run.
+
+**Predictions** (stated before the first build of the change) **and results:**
+
+| # | Prediction | Result |
+|---|---|---|
+| A | Control: the seeded list holds the inline secrets | **PASS**: 15 of the 15 inline tokens found in the decoded list and in the plist file on disk (the XML export carries the list as base64, so it shows 0) |
+| B | After migration: 0 hits for every seeded secret and for `P2SEED` | **PASS**: 0 of 21 tokens in the decoded list, the XML export and the plist file. Also after a rename, an edit, an add and a delete |
+| C | Every entry dials the same target (SHA-256 of the dial URL, before vs after) | **PASS**: 11 of 11 byte-identical |
+| C′ | Dial parameters equal an independent Python oracle of the pre-P2 build, built from the seed | **PASS**: 11 of 11 before and after; the added stream too |
+| D | Killed after 3 Keychain writes: plist untouched; the rerun converges on the uninterrupted result | **PASS**: exit 3; plist byte-identical to the seed (`597e61f0…`); entries 1–3 in the new format. Rerun: 8 moved, 3 linked, 0 kept. Plist (`fe804470…`), item values and dials equal a fresh uninterrupted run's |
+| E | A second run changes nothing | **PASS**: 0 Keychain writes, 0 reads, plist and item hashes unchanged, no log line |
+| F | Delete removes the item; rename keeps it | **PASS**: delete, item present → absent, 11 others present. Rename (twice) and edit-via-Show-saved-URL: same account, same dial hash |
+| G | No seeded secret in the captured log, raw or redacted | **PASS**: 0 in all 8 runs' logs; 0 hosts either. The full report was not built headless: `LicenseContext` reads the licence Keychain |
+| H | Real defaults dictionary-equal to the snapshot; `streamBookmarks` hash unchanged | **PASS** for everything this session ran. `streamBookmarks` `4466c076…` unchanged; licence keys absent before and after; 1,532 keys. **One key changed, not by this session:** the `.build-cc` build's `NSWindow Frame …-AppWindow-1` moved by (20, 8) pt — the window state of PID 10944, which exited during the run. The self-test exits before any window exists. Left as Robbie's app wrote it. |
+| I | Real Keychain items unchanged (presence only) | **PASS**: license 4, streams 3, attribute digest `a8b38b88…` before and after. 0 sandbox items remain |
+| J | `swift test` | **PASS**: 602 / 602 (588 + 14 new), 0 warnings |
+| K | Warnings unchanged | **PASS**: the Profile build's 11 compiler warnings are identical to HEAD's, built from a `git archive` of `9bedbe6`. The one in a changed file (`LicenseManager.swift`, `Outcome: Sendable`) is pre-existing; P2 changed a comment there |
+| L | No Keychain prompt | **PASS**: none |
+
+**Unit tests** (StreamSecretsTests, 14):
+- every entry dials the pre-P2 target byte for byte, against a verbatim port of the pre-P2 code;
+- no secret in the stored list;
+- a second run reads and writes nothing;
+- interrupted after each k of 1–10 writes, every resume converges;
+- a refused read, a failed write and an unconfirmed write (differs, missing, refused) each leave the
+  entry and the item as they were;
+- entries are independent; a machine that never had a secret;
+- an older build's re-save is linked back with no write, and its edited URL wins and keeps the
+  passphrase;
+- a migrated entry with no item is "missing", never dialled bare;
+- the item format, the address and the join.
+
+**Not tested here:**
+- a real connect (the hosts are fake);
+- the GUI edit form;
+- a migration by a signed build;
+- the real install. These are for the attended plan below.
+
+**Open:**
+- **Downgrade hazard, by design.** A pre-P2 build cannot dial a migrated entry. With a restored
+  pre-P2 list, it would append each new-format item to that stream's URL as `passphrase=`, WHEP and
+  HLS included, because pre-P2 `connectURL` appended the item for every type. So going back to a
+  pre-P2 build means rollback B below: delete the items first.
+- **Signed versus unsigned items.** Not measured: whether an item that an unsigned build creates can be
+  read by the signed build without a prompt. The existing items carry `teamid:8UQ7MDM87B`
+  (`KeychainStore.swift`). By the same mechanism an unsigned build's items would not. So the real
+  migration should be done by a team-signed build.
+- **The edit-form decision** above.
+
+#### Attended: migrating the real install (for Robbie, morning) — about 20 minutes
+
+1. **Back up first, outside the Nextcloud tree** (and outside iCloud Desktop & Documents). An encrypted
+   disk image in your home folder:
+   ```
+   hdiutil create -size 20m -fs APFS -encryption AES-256 -volname ManifoldP2Backup ~/ManifoldP2Backup.dmg
+   hdiutil attach ~/ManifoldP2Backup.dmg &&
+   defaults export com.graviton.manifold /Volumes/ManifoldP2Backup/manifold-before-P2.plist &&
+   python3 -c 'import plistlib,hashlib; d=plistlib.load(open("/Volumes/ManifoldP2Backup/manifold-before-P2.plist","rb")); print(hashlib.sha256(d["streamBookmarks"]).hexdigest()[:8], "license.email" in d, "license.machineId" in d)'
+   ```
+   - Expect `4466c076 False False`. (The licence keys have been absent since P1. Never restore them.)
+   - The three existing stream items hold your SRT passphrases. The migration rewrites them only
+     after it can read the new value back. They cannot be exported without exposing them, so for
+     rollback B have each sender's passphrase to hand (the OBS profiles).
+2. **Launch a team-signed Profile build of this change**, normally (Finder or `open`), with no
+   `MANIFOLD_DEBUG_*` variables. A signed build is needed because an unsigned one prompts for each
+   existing item and creates items a signed build may later prompt for.
+   - **It also runs P1's licence migration success path on this Mac**, still open in P1's list.
+   - If a "wants to use your confidential information stored in tools.graviton.manifold.streams"
+     prompt appears anyway, press **Allow** (not Always Allow), and note how many appeared.
+3. **Check:**
+   - Help ▸ Export Diagnostics should show `Saved streams : N saved, N with the URL in the Keychain,
+     0 with the URL still in preferences`. The log should show `[STREAMS] stream secrets: N moved …,
+     0 left in the preferences plist`. An `entry k of N: …` line names a held-back entry and why.
+   - The plist, counts only:
+     ```
+     defaults export com.graviton.manifold - | python3 -c 'import plistlib,sys,json; l=json.loads(plistlib.loads(sys.stdin.buffer.read())["streamBookmarks"]); print(len(l), sum(1 for b in l if b.get("secretRef") and b["urlString"]==""))'
+     ```
+     Expect `N N`.
+   - Connect each saved stream once: Cloudflare WHEP, an SRT with a passphrase, HLS. Check it is the
+     same picture as before. For WHEP or SRT, also one non-Cloudflare target (local OBS SRT or
+     MediaMTX), per CLAUDE.md.
+   - Edit one stream: the URL field is blank, and "Show saved URL" fills it. Rename it, Save, and it
+     still connects.
+   - Quit with a Quit event (`osascript -e 'tell application "<path>/Manifold.app" to quit'`) and
+     relaunch. No `stream secrets:` line should appear.
+4. **Roll back**, if needed. Quit Manifold first, with a Quit event.
+   - **A — stay on the P2 build.** Restore the list, then relaunch (it migrates again from the
+     restored list):
+     ```
+     defaults export com.graviton.manifold /Volumes/ManifoldP2Backup/manifold-after-P2.plist &&
+     HEX=$(python3 -c 'import plistlib; print(plistlib.load(open("/Volumes/ManifoldP2Backup/manifold-before-P2.plist","rb"))["streamBookmarks"].hex())') &&
+     defaults write com.graviton.manifold streamBookmarks -data "$HEX" &&
+     defaults export com.graviton.manifold - | python3 -c 'import plistlib,sys,hashlib; print(hashlib.sha256(plistlib.loads(sys.stdin.buffer.read())["streamBookmarks"]).hexdigest()[:8])'
+     ```
+     The last line should print `4466c076`. The first line is the stash (read before write). The value
+     is on a local command line for a moment while it is written.
+   - **B — back to a pre-P2 build.** Do A, then delete every stream item, so the old build does not
+     append one as a passphrase:
+     ```
+     while security delete-generic-password -s tools.graviton.manifold.streams >/dev/null 2>&1; do :; done
+     ```
+     Then, in the old build, Edit each SRT stream that had a passphrase, type it, and Save.
+   - Afterwards: eject the image, and delete it once you're happy (it holds the keys in the list).
+
 
 ---
 
