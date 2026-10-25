@@ -2151,6 +2151,61 @@ start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 pla
 
 ---
 
+## ✅ FIXED 2026-10-24 (commit `________`) — PRE-EXISTING, ALL BUILDS — File ▸ Close and Window ▸ Minimize are disabled whenever the controls have hidden; ⌘W closes only with the pointer over the window; an Accessibility press on the close button does nothing
+
+**Found** by Robbie (2026-10-24): File ▸ Close is always disabled, yet ⌘W closes a window. The performance session
+(`b418161`, the entry below) found the Accessibility half: the close button's press reported success and closed
+nothing.
+
+- **Cause (measured on HEAD `207d374`, in-process with lldb; no keystroke sent):**
+  - File ▸ Close is SwiftUI's stock item, `performClose:` to the first responder. The key window answers it, and its
+    validation follows the window's close button: `-[NSWindow validateMenuItem:]` returned NO while
+    `[closeButton isEnabled]` was NO. Window ▸ Minimize is the same, through the minimise button. Zoom and Enter Full
+    Screen validate another way and were enabled throughout.
+  - `-[_NSThemeWidgetCell isEnabled]` is `super && !temporarilyDisabled && canBeEnabled && controlView.alphaValue != 0`
+    (disassembled, macOS 26). So **a traffic light at alpha 0 is a disabled one.** Setting the close button's alpha
+    back to 1 made it enabled again, with nothing else changed.
+  - `WindowConfigurator.updateNSView` faded the three buttons themselves to alpha 0 when the controls hide (2 s after
+    the pointer stops, with a source). By the time the pointer reaches the menu bar they have always hidden, so the
+    menu always showed Close disabled. An empty window keeps its buttons, and Close was enabled there.
+  - **⌘W already had one path:** File ▸ Close. Nothing else claims it (the registry reserves ⌘W and binds nothing to
+    it; no key monitor, delegate or other responder handles it). With the buttons showing, an in-process ⌘W went
+    `routeKeyEquivalent` → `NSMenu performKeyEquivalent:` → `NSMenuItem` → `-[NSWindow performClose:]` → `close`. With
+    them hidden, the same ⌘W reached the menu and the window's `performKeyEquivalent:` and closed nothing. So ⌘W worked
+    for Robbie because it was pressed with the pointer over the window.
+  - Accessibility pressed a disabled button: success reported, nothing done. So the "close button clicked at 8 windows
+    … closed nothing" line in the entry below was this, not the cliff.
+- **Fix (`App/PlayerWindow.swift`, `TrafficLights`):**
+  1. The view that holds the three buttons (their superview, `NSTitlebarView`) is faded instead of the buttons. They look
+     the same, keep alpha 1 and stay enabled, so Close, Minimize, ⌘W and an Accessibility press all reach AppKit's own
+     `performClose:` / `performMiniaturize:`. The close path is unchanged: `performClose:` → `close` →
+     `willCloseNotification` → `DeckRegistry.deregister`.
+  2. A click on a faded button is swallowed (one local `leftMouseDown` monitor). AppKit disables an invisible button for
+     a reason: a click in the top-left corner after the controls hide would otherwise close a window with no button
+     showing, perhaps the one holding DeckLink output. An Accessibility press is not an event and still works.
+- **Results (tree Profile build, unattended; Accessibility and in-process only, no keystrokes, no screenshots):**
+
+  | # | Prediction | Result |
+  |---|---|---|
+  | P1 | File ▸ Close enabled with a key window (menu opened by Accessibility, read, AXCancel): empty, loaded with controls hidden, loaded with controls pinned | **3 / 3** (HEAD: loaded and hidden, disabled) |
+  | P2 | Disabled with no key window (Manifold inactive, `keyWindow` nil) | **disabled** |
+  | P3 | In-process ⌘W, controls hidden: one `performClose:` through `NSMenuItem`, windows −1 | **1, 3 → 2** |
+  | P4 | File ▸ Close clicked by Accessibility, controls hidden: windows −1 | **2 → 1** |
+  | P5 | Close button pressed by Accessibility, controls hidden, 12 windows: the front window, then the backmost (the first opened) | **12 → 11 → 10**, 0.17 s each; every window's container alpha 0, button alpha 1, enabled |
+  | P6 | FrameEngine, MetalVideoRenderer, WindowDeck and the synchronizer drop by one per close (after the next event, as the 2026-10-21 entry says) | **3 → 2 → 1; 12 → 11 → 10** |
+  | P7 | Closing the window that owns DeckLink output, by an Accessibility press with controls hidden: the same lines as HEAD (HEAD closed with the controls showing, the only way it can) | **identical:** `owning window closed while holding DeckLink output — releasing it`, D3 stopped late = 0 dropped = 0, `exclusive device released — every deck paused`, arbitration over the rest |
+  | P8 | Minimize enabled with controls hidden; Zoom and Enter Full Screen enabled | **all enabled**; Minimize by Accessibility minimised the window and it restored; Full Screen entered and left; in full screen the container stayed faded and Close stayed enabled |
+  | P9 | In-process click on the close button: hidden, nothing closes; showing, it closes | **0 / 1** (hidden: the hit test lands on the close widget and the mouse-down never reaches it) |
+  | P10 | Container alpha 0 hidden, 1 shown; button alpha 1 always | **as predicted** |
+  | P11 | Control set (`build/interlaced-i1/control.txt`), Help ▸ Export Frame for Support… one launch per file, default display transform: `.png`, `.rgba16f`, `.v210`, `.v210.json` byte-identical to HEAD | **20 / 20 files, 80 / 80 outputs byte-identical** |
+  | P12 | `swift test` passes; Profile clean-build warnings no more than HEAD's | **612 / 612; 14 unique, the same 14 as HEAD** |
+
+- **Not measured:** the fade by eye (no screenshots). The alphas above are what is drawn. Pictures in one display
+  transform only: no file in the display, export or DeckLink path changed (`git diff --stat`). A real mouse click on a
+  hidden button (in-process event only), and VoiceOver itself (Accessibility presses only).
+
+---
+
 ## ✅ FIXED 2026-10-24 (commit `b418161`) — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
 
 **Fixed 2026-10-24** (idle-window session, measured against HEAD `72bb925`, Profile builds, sandboxed bookmarks).
@@ -2215,8 +2270,9 @@ start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 pla
     updates (`sample`), not an Accessibility time limit.
 - **Close by Accessibility does nothing, at HEAD, even with 3 windows** (this session): File ▸ Close is disabled and the
   window's close button reports success and closes nothing, with the window main and focused and no sheet. So "a close
-  button clicked at 8 windows … closed nothing" below is probably this, not the cliff. Cause UNKNOWN. The drivers
-  relaunch per file instead.
+  button clicked at 8 windows … closed nothing" below is probably this, not the cliff. The drivers relaunch per file
+  instead. **Explained and fixed 2026-10-24**, the entry above: a traffic light at alpha 0 is disabled, and the
+  controls' fade set the buttons to alpha 0.
 
 **Found** by the shortcut follow-ups' unattended run (`SHORTCUTS_AUDIT.md` §9). The export driver opened each control
 file with `open -a`, which opens a new window each time, so one HEAD session piled windows up. **Not fixed in that

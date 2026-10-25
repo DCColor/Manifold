@@ -84,6 +84,7 @@ bullet.
 
 ### Fixed
 
+- Fixed: File ▸ Close and Window ▸ Minimize were greyed out whenever the controls had faded, so ⌘W and ⌘M closed or minimized a window only while the pointer was over it, and VoiceOver couldn't press the close button. They now work whenever a window is in front. A click where the hidden buttons sit still does nothing until the controls appear.
 - Fixed: SDI and HDMI output were black for any source whose size isn't an output mode, such as 720p at 23.976, vertical and square video, scope and DCI sizes. The picture now fills the output mode at its frame rate whose size is closest to it, keeping its shape, with black around it. Set SDI scaling to 1:1 pixels to send it at its own size instead. The DeckLink menu says when the picture is placed or scaled, for example "SDI 1920×1080p23.98 · source 1280×720 scaled ×1.5 to 1920×1080". 720p50, 59.94 and 60 sources go out as 720p.
 - Fixed: a live stream that changed size mid-session, such as an HLS stream stepping between renditions, could restart the SDI output at a new mode. The output mode is now chosen once when the stream starts (for HLS, from its largest rendition) and kept; later changes are fitted into it.
 - Fixed: SRT sound played about 200 ms behind the picture.

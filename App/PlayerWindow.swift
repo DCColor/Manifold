@@ -53,16 +53,7 @@ struct WindowConfigurator: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         guard let window = nsView.window else { return }
 
-        let buttons: [NSButton?] = [
-            window.standardWindowButton(.closeButton),
-            window.standardWindowButton(.miniaturizeButton),
-            window.standardWindowButton(.zoomButton)
-        ]
-        let target: CGFloat = buttonsVisible ? 1 : 0
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.30
-            for button in buttons { button?.animator().alphaValue = target }
-        }
+        TrafficLights.setVisible(buttonsVisible, in: window)
 
         // ⚠️ BOUND HERE AND NOT ONLY IN `DeckRegistry.register`, BECAUSE THE ORDER IS NOT GUARANTEED
         // AND THE WRONG ORDER LOSES THE CHROME HEIGHT SILENTLY. This representable and
@@ -84,5 +75,60 @@ struct WindowConfigurator: NSViewRepresentable {
         // THE ONLY WRITER OF THE CONSTRAINT'S INPUTS. A no-op when neither the picture's shape nor
         // the chrome height moved, which is the overwhelming majority of update passes.
         deck.sizer.setGeometry(sourceSize: displaySize, chromeHeight: chromeHeight, raster: raster)
+    }
+}
+
+/// ── THE TRAFFIC LIGHTS FADE WITH THE CONTROLS: THEIR CONTAINER FADES, NOT THE BUTTONS ─────────────────────────
+///
+/// ⚠️ A STANDARD WINDOW BUTTON AT ALPHA 0 IS A DISABLED BUTTON. `-[_NSThemeWidgetCell isEnabled]` is `super &&
+/// !temporarilyDisabled && canBeEnabled && controlView.alphaValue != 0` (disassembled, macOS 26), and NSWindow
+/// validates Close and Minimize against those buttons. Fading the buttons themselves, as this file did until
+/// 2026-10-24, disabled File ▸ Close and Window ▸ Minimize whenever the controls had hidden, which they always have
+/// by the time the pointer reaches the menu bar. ⌘W worked only with the pointer over the window, and an
+/// Accessibility press on the close button reported success and closed nothing (docs/BUGS.md).
+///
+/// So the view that holds the three buttons is faded instead. They look the same and stay enabled, and File ▸ Close
+/// (and with it ⌘W), Minimize and an Accessibility press all reach AppKit's own `performClose:` and
+/// `performMiniaturize:`, the one close path. The buttons' own alpha is never written.
+///
+/// ⚠️ AND A CLICK ON A FADED BUTTON IS SWALLOWED. AppKit disables an invisible button for a reason: the controls hide
+/// 2 s after the pointer stops, and a click in the top-left corner would otherwise close a window that shows no
+/// button there (perhaps the one holding DeckLink output). One local monitor keeps that: a mouse-down on a button in a
+/// faded container goes nowhere, as it did at alpha 0. An Accessibility press is not an event and is not affected.
+@MainActor
+enum TrafficLights {
+    /// The containers faded out. Weak: a closed window's goes with it.
+    private static let faded = NSHashTable<NSView>.weakObjects()
+    private static var monitor: Any?
+
+    static func setVisible(_ visible: Bool, in window: NSWindow) {
+        // All three buttons share one superview (`NSTitlebarView`). Its other contents, the title bar's background and
+        // title, are already drawn as nothing under `.hiddenTitleBar`.
+        guard let container = window.standardWindowButton(.closeButton)?.superview else { return }
+        installMonitor()
+        if visible { faded.remove(container) } else { faded.add(container) }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.30
+            container.animator().alphaValue = visible ? 1 : 0
+        }
+    }
+
+    private static func installMonitor() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+            let swallow = MainActor.assumeIsolated { TrafficLights.isOnFadedButton(event) }
+            return swallow ? nil : event
+        }
+    }
+
+    private static func isOnFadedButton(_ event: NSEvent) -> Bool {
+        guard faded.count > 0, let frame = event.window?.contentView?.superview,
+              let hit = frame.hitTest(event.locationInWindow) else { return false }
+        var view: NSView? = hit
+        while let v = view, v !== frame {
+            if v is NSButton, let container = v.superview, faded.contains(container) { return true }
+            view = v.superview
+        }
+        return false
     }
 }
