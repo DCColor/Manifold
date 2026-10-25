@@ -222,7 +222,9 @@ held back until after release, and the numbered defect entries follow.
        S7-0 to S7-4 built and run unattended 2026-10-22, committed (`aec418e`); follow-ups 1–3 built and run
        unattended the same day, committed (`982a73e`). S7-5 (the reference monitor over SDI and HDMI) is attended and still
        to do. Its SDI-wire half was measured by loopback on 2026-10-23: the wire matches what Manifold sends, ST
-       2108-1 included, apart from the two open loopback entries below. The monitor and HDMI remain.**
+       2108-1 included, apart from the two open loopback entries below. Its HDMI-wire half was measured on 2026-10-25:
+       pictures and PQ match; HLG is not signalled, SDR after PQ sends no InfoFrame, and a same-mode colorimetry change
+       drops the link for a frame (entries below). The reference monitor remains.**
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -1941,6 +1943,81 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
+## ☐ OPEN — NEW 2026-10-25 (S7-5 HDMI loopback) — DeckLink output stays on the neutral frame after a re-establish (intermittent; suspect `b418161`, not established)
+
+**Found by the HDMI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback — HDMI*, found while running).
+- **What:** paused, output on, File ▸ Open Recent from a 2160p23.98 file to a 1080p25 one. The output re-established
+  and logged `DeckLink: primed — no frame within 250 ms (nothing on screen yet); neutral until one renders`. **No
+  picture followed** for the rest of the run. Two further loads at the same mode never reached the output, and the
+  re-establish back to 2160p23.98 primed neutral again. On the wire: Manifold's neutral frame for ~1000 frames.
+- **How often:** 2 of 14 re-establishes, both in one launch of four; 0 of 8 in a run made to repeat it.
+- **What the log shows:** no `[IDLE] display link stopped` line after the first load. In every clean run each load is
+  followed by one (33–68 ticks). So the display link was either never restarted or ran without rendering. No converted
+  frame reached the DeckLink.
+- **Suspect:** `b418161` (a paused window stops its display link; `wakeDisplayLink`, `MetalVideoRenderer.swift:570`).
+  It is the only display-link change since the SDI loopback, where the same transition worked. **Not established.**
+- **UNKNOWN:** whether the window on screen updated (no screenshots were taken).
+- **Severity:** the output shows black for a file the window has loaded, until something renders. Output `late=0
+  dropped=0` throughout, so the counters do not show it.
+- **To find out:** repeat the 1 → 4 → 5 → 7 → 1 Open Recent sequence on `b418161` and on `b418161^`, counting
+  `primed — no frame` and the `[IDLE]` lines.
+
+---
+
+## ☐ OPEN — NEW 2026-10-25 (S7-5 HDMI loopback) — DeckLink: HLG is never signalled on HDMI
+
+**Found by the HDMI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback — HDMI*, file 4 and the
+controls).
+- **What:** the driver sends an HDMI DRM InfoFrame only when `bmdFrameContainsHDRMetadata` is set and the EOTF is PQ
+  (2) or SDR (0). With EOTF 3 it sends none: flag clear (what Manifold sends, D3), flag set, or flag set with static
+  values (controls c2, c3, c8).
+  - So an HLG source reaches HDMI as Rec.2020 with no transfer signalled. A monitor gets nothing that would make it
+    switch to HLG.
+  - **SDI does carry HLG** (VPID; EOTF 3 received, control c2s).
+- **Cause UNKNOWN:** the sink's EDID (the card's own HDMI input) lists SDR, traditional HDR and PQ but **not HLG**, so
+  the driver may be withholding it from this sink only. A monitor whose EDID lists HLG would tell. So would writing HLG
+  into the input EDID (`IDeckLinkHDMIInputEDID`), which is a setting change and was not made.
+- **Nothing in Manifold can fix it if it is the EDID;** if the driver never sends HLG, it is a driver limit to state.
+  To decide after the reference monitor over HDMI (S7-5, attended).
+
+---
+
+## ☐ OPEN — NEW 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, leaving PQ for SDR or HLG at the same mode sends no SDR InfoFrame, so a sink can stay in PQ
+
+**Found by the HDMI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback — HDMI*, files 4, 5 and 7 and
+the controls).
+- **What:** Manifold sends SDR (and HLG) with the HDR flag clear. On HDMI the driver then sends **no** DRM InfoFrame.
+  The loop's input goes on reporting the **last PQ InfoFrame**: EOTF 2, flag set and the previous file's values. This
+  held across separate output sessions for as long as the HDMI link stayed up (f3 → f4 → f5, f6 → f7, all at 1080p25),
+  and cleared only when a mode change relocked the link.
+  - With the flag **set** and EOTF 0, the driver does send an SDR InfoFrame, and the input resets to EOTF 0, flag
+    clear, no values (control c6).
+- **Whether a real monitor stays in PQ** without an InfoFrame, or times out to SDR, is **UNKNOWN**. This input does
+  stay.
+- **SDI is not affected:** the VPID says SDR on the frame.
+- **To decide (Robbie):** whether HDMI should get an SDR InfoFrame (flag set, EOTF 0) on SDR frames. The flag is per
+  frame and shared by SDI and HDMI, so on SDI it would need checking that the driver adds no ST 2108-1 packet for EOTF
+  0 (none arrived on HDMI in c6; SDI was not captured). After the reference monitor over HDMI.
+
+---
+
+## ☐ OPEN — NEW 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, a colorimetry change at an unchanged mode drops the link for one frame, then two frames arrive partly written
+
+**Found by the HDMI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback — HDMI*, transitions).
+- **What:** 9-1-9 → 1-1-1 (Rec.2020 → Rec.709, both 1080p25), 2 of 2 runs. The HDMI input reports **one no-input
+  frame**, then two frames that hold the new picture in some row ranges and, elsewhere, video black or out-of-range
+  codes (Y 3, Cb 0). The third frame is the new picture, complete. Manifold scheduled only the old picture, then the
+  new one (with the accepted transitional frame in one run).
+- **The colorimetry arrives with the first frame after the dropout.** No early colorimetry frame is seen on HDMI. The
+  dropout sits where SDI showed colorimetry **one frame early** (entry below), so the same lead, forcing an HDMI
+  resync, would explain both. **Not established.**
+- **UNKNOWN:** whether the transmitter or this receiver makes the dropout and the partial frames, and whether a monitor
+  blanks for it.
+- **Severity:** one frame of signal loss and two damaged frames at a file change that changes colorimetry, on HDMI
+  only. The reference monitor over HDMI would show whether it is visible.
+
+---
+
 ## ☐ OPEN — NEW 2026-10-23 (S7-5 loopback) — DeckLink: on SDI, a colorimetry change arrives one frame before the frame it was tagged on (cause UNKNOWN)
 
 **Found by the SDI loopback** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback*, transitions).
@@ -1955,6 +2032,9 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 - **Cause UNKNOWN.** The driver or hardware may apply the colorimetry one frame ahead, or the input may report it one
   frame ahead. One card on both ends cannot separate the two.
 - **To find out:** an SDI analyser on the output, or the reference monitor's behaviour (S7-5's other half).
+- **HDMI, 2026-10-25** (§6.11, *S7-5 by loopback — HDMI*): no early colorimetry frame is seen on HDMI. In that frame's
+  place there is a one-frame dropout, then two partly written frames (entry above). Consistent with the same lead,
+  not established.
 - **Severity:** one frame, at a file change, beside the accepted transitional frame (*at a file change, one frame of
   the outgoing picture goes out under the incoming signal*). A monitor that switches gamut on the VPID would switch
   one frame before the picture does.
@@ -1973,6 +2053,9 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   report of an HDR transfer in the VPID, not something Manifold sent. Not established.
 - **No change to Manifold indicated.** Recorded because it differs from what was handed, and because a capture tool
   that reads the flag as "static metadata present" would be misled on HLG.
+- **Reproduced 2026-10-25** with a control frame (HLG, flag clear) on the SDI input: EOTF 3, flag set, no values,
+  dynamic range HLG. **HDMI differs:** nothing is sent for HLG there, and the HDMI input repeats the last PQ InfoFrame,
+  flag set (entries above, *HLG is never signalled on HDMI*).
 
 ---
 
@@ -3771,8 +3854,22 @@ is measured.
 - **Two mismatches,** each its own entry below:
   - a colorimetry change reaches the wire one frame before its frame;
   - the input reports HLG with the HDR flag set.
-- **Still to do:** HDMI, and the reference monitor on either connection. A loopback cannot show what a monitor does
-  with the signal.
+- **Still to do:** the reference monitor on either connection. A loopback cannot show what a monitor does with the
+  signal.
+
+**S7-5, HDMI half, by loopback (2026-10-25; §6.11, *S7-5 by loopback — HDMI*). NOT closed: mismatches, below.**
+- **What matched:**
+  - The picture, on all 7 files: 941 / 941 received frames byte-identical, 10-bit, 2160p included.
+  - Colorspace on all 7 files.
+  - On PQ, EOTF, flag and all 12 static values exact (the file's, or the defaults). The InfoFrame reaches the input
+    with the same 36 bytes as SDI's ST 2108-1.
+  - A mode change carries the new picture and its signal on the first locked frame.
+  - Output `late=0 dropped=0`.
+- **Mismatches,** each its own entry above:
+  - HLG is never signalled on HDMI;
+  - leaving PQ for SDR or HLG at the same mode sends no SDR InfoFrame, so the sink keeps PQ;
+  - a colorimetry change at the same mode drops the HDMI link for a frame, then two frames arrive partly written;
+  - found while running: the output intermittently stays on the neutral frame after a re-establish.
 
 **What was wrong.** The DeckLink output tagged each frame with `bmdDeckLinkFrameMetadataColorspace` only. No EOTF,
 no static HDR metadata, no `bmdFrameContainsHDRMetadata` flag. A PQ or HLG source reached SDI tagged Rec.2020 with

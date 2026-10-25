@@ -3,6 +3,7 @@
 //   zsh scripts/decklink-loopback/build.sh && build/decklink-loopback/probe
 #include <CoreFoundation/CoreFoundation.h>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include "DeckLinkAPI.h"
 
@@ -22,6 +23,51 @@ static std::string conns(int64_t m) {
         {bmdVideoConnectionComposite, "Composite"}, {bmdVideoConnectionSVideo, "SVideo"}, {bmdVideoConnectionEthernet, "Ethernet"}};
     for (auto &e : t) if (m & e.b) { if (!s.empty()) s += "+"; s += e.n; }
     return s.empty() ? "none" : s;
+}
+
+static std::string fmtFlags(int64_t f) {   // BMDFormatFlags (DeckLinkAPI.h)
+    std::string s;
+    struct { int64_t b; const char *n; } t[] = {{bmdFormatRGB444, "RGB444"}, {bmdFormatYUV444, "YUV444"}, {bmdFormatYUV422, "YUV422"},
+        {bmdFormatYUV420, "YUV420"}, {bmdFormat8BitDepth, "8-bit"}, {bmdFormat10BitDepth, "10-bit"}, {bmdFormat12BitDepth, "12-bit"}};
+    for (auto &e : t) if (f & e.b) { if (!s.empty()) s += " "; s += e.n; }
+    return std::to_string(f) + " (" + (s.empty() ? "none" : s) + ")";
+}
+// What the HDMI sink advertises in its EDID's CTA-861 extension: HDR static metadata (EOTFs), colorimetry, and the
+// HDMI VSDB / HF-VSDB deep-colour bits. On the loop the sink is the card's own HDMI input.
+static void ctaDecode(const uint8_t *e, uint32_t sz) {
+    if (sz < 256 || e[128] != 0x02) { printf("    %-26s no CTA-861 extension\n", "EDID CTA"); return; }
+    const uint8_t *c = e + 128; const int d = c[2] ? c[2] : 127;
+    printf("    %-26s rev %u · underscan %s basic-audio %s YCbCr444 %s YCbCr422 %s\n", "EDID CTA", c[1], c[3] & 0x80 ? "y" : "n",
+           c[3] & 0x40 ? "y" : "n", c[3] & 0x20 ? "y" : "n", c[3] & 0x10 ? "y" : "n");
+    for (int i = 4; i < d && i < 127;) {
+        const int tag = c[i] >> 5, len = c[i] & 31; const uint8_t *b = c + i + 1;
+        if (tag == 7 && len >= 1) {
+            const int x = b[0];
+            if (x == 6 && len >= 3)
+                printf("    %-26s EOTFs:%s%s%s%s · static metadata type 1 %s%s\n", "EDID HDR static block", b[1] & 1 ? " SDR" : "",
+                       b[1] & 2 ? " trad-HDR" : "", b[1] & 4 ? " PQ" : "", b[1] & 8 ? " HLG" : "", b[2] & 1 ? "yes" : "no",
+                       len >= 4 ? (" · desired max " + std::to_string(b[3]) + (len >= 5 ? " maxFALL " + std::to_string(b[4]) : "") + (len >= 6 ? " min " + std::to_string(b[5]) : "") + " (coded)").c_str() : "");
+            else if (x == 5 && len >= 3)
+                printf("    %-26s%s%s%s%s%s%s%s%s%s\n", "EDID colorimetry block", b[1] & 1 ? " xvYCC601" : "", b[1] & 2 ? " xvYCC709" : "",
+                       b[1] & 4 ? " sYCC601" : "", b[1] & 8 ? " opYCC601" : "", b[1] & 16 ? " opRGB" : "", b[1] & 32 ? " BT2020cYCC" : "",
+                       b[1] & 64 ? " BT2020YCC" : "", b[1] & 128 ? " BT2020RGB" : "", b[2] & 128 ? " DCI-P3" : "");
+            else if (x == 0 && len >= 2) printf("    %-26s 0x%02x (QY %d QS %d)\n", "EDID video capability", b[1], (b[1] >> 7) & 1, (b[1] >> 6) & 1);
+            else printf("    %-26s extended tag %d, %d B\n", "EDID block", x, len);
+        } else if (tag == 3 && len >= 3) {
+            const uint32_t oui = b[0] | b[1] << 8 | b[2] << 16;
+            if (oui == 0x000C03 && len >= 6)
+                printf("    %-26s deep colour: 30-bit %s 36-bit %s 48-bit %s Y444 %s · max TMDS %u MHz\n", "EDID HDMI VSDB", b[5] & 0x10 ? "y" : "n",
+                       b[5] & 0x20 ? "y" : "n", b[5] & 0x40 ? "y" : "n", b[5] & 0x08 ? "y" : "n", len >= 7 ? b[6] * 5u : 0u);
+            else if (oui == 0xC45DD8 && len >= 7)
+                printf("    %-26s max TMDS %u MHz · DC_420 30 %s 36 %s 48 %s · max FRL code %u\n", "EDID HF-VSDB", b[4] * 5u, b[6] & 1 ? "y" : "n",
+                       b[6] & 2 ? "y" : "n", b[6] & 4 ? "y" : "n", len >= 8 ? (unsigned)(b[7] >> 4) : 0u);
+            else printf("    %-26s OUI %06x, %d B\n", "EDID vendor block", oui, len);
+        } else printf("    %-26s tag %d, %d B\n", "EDID block", tag, len);
+        i += len + 1;
+    }
+    printf("    %-26s", "EDID CTA bytes");
+    for (int i = 0; i < 128; i++) printf("%s%02x", i % 32 ? " " : (i ? "\n                               " : " "), c[i]);
+    printf("\n");
 }
 
 int main() {
@@ -97,6 +143,25 @@ int main() {
             si(bmdDeckLinkStatusDetectedSDILinkConfiguration, "st DetectedSDILink", true);
             si(bmdDeckLinkStatusCurrentVideoOutputMode, "st CurrentOutputMode", true);
             si(bmdDeckLinkStatusBusy, "st Busy", false);
+            // HDMI (S7-5 HDMI half): what the HDMI output actually sends, and the EDID it received from its sink.
+            si(bmdDeckLinkStatusHDMIOutputActualMode, "st HDMIOutputActualMode", true);
+            if (st->GetInt(bmdDeckLinkStatusHDMIOutputActualFormatFlags, &v) == S_OK) printf("    %-26s %s\n", "st HDMIOutputActualFlags", fmtFlags(v).c_str());
+            si(bmdDeckLinkStatusHDMIOutputTMDSLineRate, "st HDMIOutputTMDSLineRate", false);
+            si(bmdDeckLinkStatusHDMIOutputFRLRate, "st HDMIOutputFRLRate", false);
+            si(bmdDeckLinkStatusHDMIInputFRLRate, "st HDMIInputFRLRate", false);
+            if (st->GetFlag(bmdDeckLinkStatusSinkSupportsDolbyVision, &f) == S_OK) printf("    %-26s %s\n", "st SinkSupportsDolbyVision", f ? "yes" : "no");
+            {
+                uint8_t edid[1024]; uint32_t sz = sizeof edid;
+                if (st->GetBytes(bmdDeckLinkStatusReceivedEDID, edid, &sz) == S_OK && sz >= 128) {
+                    const uint16_t mfg = (uint16_t)(edid[8] << 8 | edid[9]);
+                    char name[14] = "";
+                    for (int d = 54; d + 18 <= 126; d += 18)
+                        if (edid[d] == 0 && edid[d + 1] == 0 && edid[d + 3] == 0xFC) { memcpy(name, edid + d + 5, 13); for (char &ch : name) if (ch == '\n') ch = 0; }
+                    printf("    %-26s %u B · manufacturer %c%c%c product 0x%04x · name \"%s\" · %u extension block(s)\n", "st ReceivedEDID", sz,
+                           '@' + ((mfg >> 10) & 31), '@' + ((mfg >> 5) & 31), '@' + (mfg & 31), (unsigned)(edid[10] | edid[11] << 8), name, (unsigned)edid[126]);
+                    ctaDecode(edid, sz);
+                } else printf("    %-26s none\n", "st ReceivedEDID");
+            }
             si(bmdDeckLinkStatusPCIExpressLinkWidth, "st PCIeLinkWidth", false);
             si(bmdDeckLinkStatusPCIExpressLinkSpeed, "st PCIeLinkSpeed", false);
             st->Release();

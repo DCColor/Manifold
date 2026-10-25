@@ -3,12 +3,17 @@
 // reports them, every ancillary packet (DID/SDID, line, data space, payload; ST 2108-1 is DID 0x41 SDID 0x0C), a scan of
 // the raw VANC lines for ANC packet headers, and the v210 bytes (full FNV-1a, the sampled FNV Manifold's
 // [SIGNAL-TRACE] prints, and a byte compare against a reference v210, e.g. Manifold's [SDI-DUMP] of the same frame).
-// Prints a line only when something changes, then a summary. Enables input only; sets no configuration. Not in the app.
-//   build/decklink-loopback/capture --device 0 --seconds 6 [--ref f.v210] [--dumpdir d --dumpmax 8] [--label x]
+// Prints a line only when something changes, then a summary. Enables input only. Not in the app.
+// --input hdmi (S7-5 HDMI half, approved by Robbie 2026-10-25) is the one configuration write: it reads and logs the
+// device's bmdDeckLinkConfigVideoInputConnection, refuses unless it is SDI, sets HDMI for the run, and on exit (or
+// SIGINT / SIGTERM) sets the prior value back and releases the configuration object. It never calls
+// WriteConfigurationToPreferences, so per the SDK (2.5.15) the change cannot outlive the process. Run the probe after.
+//   build/decklink-loopback/capture --device 0 --seconds 6 [--input hdmi] [--ref f.v210] [--dumpdir d --dumpmax 8] [--label x]
 #include <CoreFoundation/CoreFoundation.h>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <csignal>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -37,7 +42,15 @@ static std::string flagsStr(int64_t f) {
     return s.empty() ? "none" : s;
 }
 
-struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture"; int dumpmax = 0; } A;
+struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input; int dumpmax = 0; } A;
+static volatile sig_atomic_t stopRequested = 0;
+static void onSignal(int) { stopRequested = 1; }
+static std::string conns(int64_t m) {
+    std::string s;
+    if (m & bmdVideoConnectionSDI) s += "SDI"; if (m & bmdVideoConnectionHDMI) s += s.empty() ? "HDMI" : "+HDMI";
+    if (m & ~(int64_t)(bmdVideoConnectionSDI | bmdVideoConnectionHDMI)) { char b[32]; snprintf(b, sizeof b, "%s0x%llx", s.empty() ? "" : "+", (long long)(m & ~(int64_t)(bmdVideoConnectionSDI | bmdVideoConnectionHDMI))); s += b; }
+    return s.empty() ? "none" : s;
+}
 
 class Cap : public IDeckLinkInputCallback {
 public:
@@ -166,7 +179,20 @@ public:
             }
             vb->EndAccess(bmdBufferAccessRead); vb->Release();
         }
-        char fmt[96]; snprintf(fmt, sizeof fmt, "%ldx%ld rowBytes %ld pix %s%s", w, h, rb, fcc(fr->GetPixelFormat()).c_str(), (ff & bmdFrameHasNoInputSource) ? " NO INPUT" : "");
+        // The input's detection status as the driver reports it now (not per frame), and on HDMI what the output sends.
+        int64_t dff = -1, dcs = 0, ddr = 0, hof = -1; std::string dv;
+        if (st) { st->GetInt(bmdDeckLinkStatusDetectedVideoInputFormatFlags, &dff); st->GetInt(bmdDeckLinkStatusDetectedVideoInputColorspace, &dcs);
+                  st->GetInt(bmdDeckLinkStatusDetectedVideoInputDynamicRange, &ddr); st->GetInt(bmdDeckLinkStatusHDMIOutputActualFormatFlags, &hof); }
+        {
+            IDeckLinkVideoFrameMetadataExtensions *m = nullptr;
+            if (fr->QueryInterface(IID_IDeckLinkVideoFrameMetadataExtensions, (void **)&m) == S_OK && m) {
+                uint32_t dvsz = 0; if (m->GetBytes(bmdDeckLinkFrameMetadataDolbyVision, nullptr, &dvsz) == S_OK && dvsz) dv = " DolbyVision " + std::to_string(dvsz) + " B";
+                m->Release();
+            }
+        }
+        char fmt[256]; snprintf(fmt, sizeof fmt, "%ldx%ld rowBytes %ld pix %s%s · status detected %s colorspace %s dynamicRange %s · HDMI out flags %lld%s", w, h, rb,
+                                fcc(fr->GetPixelFormat()).c_str(), (ff & bmdFrameHasNoInputSource) ? " NO INPUT" : "", flagsStr(dff).c_str(), fcc(dcs).c_str(), fcc(ddr).c_str(),
+                                (long long)hof, dv.c_str());
         const bool picCh = full != lastPic, sigCh = sig != lastSig, ancCh = anc != lastAnc, fmtCh = fmt != lastFmt;
         if (i == 0 || picCh || sigCh || ancCh || fmtCh) {
             printf("[%s] rx #%ld t=%.4fs%s%s%s%s · %s · picture FNV %016llx sampled %016llx%s · %s · ANC %d packet(s) %s\n", A.label.c_str(), i, (double)t / 240000,
@@ -184,7 +210,7 @@ int main(int argc, char **argv) {
         std::string a = argv[i]; auto nx = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
         if (a == "--device") A.device = std::stoi(nx()); else if (a == "--seconds") A.seconds = std::stod(nx());
         else if (a == "--ref") A.ref = nx(); else if (a == "--dumpdir") A.dumpdir = nx(); else if (a == "--dumpmax") A.dumpmax = std::stoi(nx());
-        else if (a == "--label") A.label = nx();
+        else if (a == "--label") A.label = nx(); else if (a == "--input") A.input = nx();
     }
     IDeckLinkIterator *it = CreateDeckLinkIteratorInstance(); if (!it) { printf("no driver\n"); return 2; }
     IDeckLink *dl = nullptr; for (int k = 0; k <= A.device; k++) { if (dl) dl->Release(); if (it->Next(&dl) != S_OK) { printf("no device %d\n", A.device); return 2; } }
@@ -193,20 +219,44 @@ int main(int argc, char **argv) {
         fseek(f, 0, SEEK_END); c.ref.resize(ftell(f)); fseek(f, 0, SEEK_SET); fread(c.ref.data(), 1, c.ref.size(), f); fclose(f); }
     dl->QueryInterface(IID_IDeckLinkStatus, (void **)&c.st);
     if (dl->QueryInterface(IID_IDeckLinkInput, (void **)&c.in) != S_OK) { printf("no input interface\n"); return 2; }
+    // --input hdmi: the run's one configuration write (see the header). Held for the run, restored and released after.
+    IDeckLinkConfiguration *cfg = nullptr; int64_t priorConn = -1;
+    if (!A.input.empty()) {
+        if (A.input != "hdmi") { printf("--input takes hdmi\n"); return 2; }
+        if (dl->QueryInterface(IID_IDeckLinkConfiguration, (void **)&cfg) != S_OK || !cfg) { printf("no configuration interface\n"); return 2; }
+        if (cfg->GetInt(bmdDeckLinkConfigVideoInputConnection, &priorConn) != S_OK) { printf("cannot read VideoInputConnection\n"); cfg->Release(); return 2; }
+        printf("[%s] CONFIG VideoInputConnection before: %s\n", A.label.c_str(), conns(priorConn).c_str());
+        if (priorConn != bmdVideoConnectionSDI) { printf("[%s] REFUSED: prior input connection is not SDI; nothing set\n", A.label.c_str()); cfg->Release(); return 4; }
+        signal(SIGINT, onSignal); signal(SIGTERM, onSignal);
+        HRESULT sr = cfg->SetInt(bmdDeckLinkConfigVideoInputConnection, bmdVideoConnectionHDMI);
+        int64_t now = -1; cfg->GetInt(bmdDeckLinkConfigVideoInputConnection, &now);
+        printf("[%s] CONFIG SetInt(VideoInputConnection, HDMI) → 0x%08X; now %s (not written to preferences)\n", A.label.c_str(), (unsigned)sr, conns(now).c_str());
+        if (sr != S_OK || now != bmdVideoConnectionHDMI) { cfg->SetInt(bmdDeckLinkConfigVideoInputConnection, priorConn); cfg->Release(); return 4; }
+        usleep(1500000);   // let the input lock to the HDMI signal before reading its detected mode
+    }
+    auto restore = [&]() {
+        if (!cfg) return;
+        HRESULT rr = cfg->SetInt(bmdDeckLinkConfigVideoInputConnection, priorConn);
+        int64_t now = -1; cfg->GetInt(bmdDeckLinkConfigVideoInputConnection, &now);
+        printf("[%s] CONFIG restored VideoInputConnection → 0x%08X; now %s; releasing\n", A.label.c_str(), (unsigned)rr, conns(now).c_str());
+        cfg->Release(); cfg = nullptr; fflush(stdout);
+    };
     int64_t mode = bmdModeHD1080p25; if (c.st) c.st->GetInt(bmdDeckLinkStatusDetectedVideoInputMode, &mode);
     if (mode == 0 || mode == bmdModeUnknown) mode = bmdModeHD1080p25;
     c.in->SetCallback(&c);
     HRESULT hr = c.in->EnableVideoInput((BMDDisplayMode)mode, bmdFormat10BitYUV, bmdVideoInputEnableFormatDetection);
     printf("[%s] EnableVideoInput(%s, v210, format detection) → 0x%08X\n", A.label.c_str(), fcc(mode).c_str(), (unsigned)hr);
-    if (hr != S_OK) return 3;
+    if (hr != S_OK) { restore(); return 3; }
     c.in->StartStreams();
-    usleep((useconds_t)(A.seconds * 1e6));
+    for (double waited = 0; waited < A.seconds && !stopRequested; waited += 0.05) usleep(50000);
+    if (stopRequested) printf("[%s] stopped early by signal\n", A.label.c_str());
     c.in->StopStreams(); c.in->SetCallback(nullptr); c.in->DisableVideoInput();
     std::lock_guard<std::mutex> g(c.mu);
     printf("[%s] SUMMARY frames=%ld dropped(input, by stream-time gaps)=%ld noInputSource=%ld · ref identical=%ld different=%ld sizeMismatch=%ld · "
            "frames with ANC packets=%ld · ST 2108-1 packets=%ld · raw VANC lines returned on %ld frames, refused on %ld; frames with a raw-VANC ANC header=%ld · dumps=%ld\n",
            A.label.c_str(), c.n, c.dropped, c.noInput, c.refSame, c.refDiff, c.refSizeMismatch, c.anyPacketFrames, c.s2108, c.rawVancOK, c.rawVancFail,
            c.rawAncFrames, c.dumps);
+    restore();
     c.in->Release(); if (c.st) c.st->Release(); dl->Release(); it->Release();
     return 0;
 }

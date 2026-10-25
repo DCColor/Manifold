@@ -7863,6 +7863,156 @@ driver inserts by itself from the frame's HDR metadata whenever `bmdFrameContain
 it on PQ frames only, so the packet follows PQ exactly. Nothing in Manifold changes. *SDI carries colorimetry and
 transfer only* is retired.
 
+#### S7-5 by loopback — HDMI, 2026-10-25 17:53–18:14 (attended session, not committed)
+
+**Scope:** S7-5's HDMI half. Robbie looped the DeckLink 8K Pro's HDMI output into its HDMI input. The capture measures
+what arrives on the HDMI input against what Manifold's bridge handed the card, as the SDI half did. **The reference
+monitor is not covered by this.** Settings: Follow source, Fit to mode, HD/UHD only (all defaults: no
+`manifold.decklink.*` key in the domain). Build: the working tree at `1999c15`, Profile, `.build-cc`.
+
+**Setup** (`scripts/decklink-loopback/probe`, read-only; extended this session with the HDMI status items and an EDID
+decoder):
+
+| Item | Read |
+|---|---|
+| Profile | `1dfd`, unchanged; device 0 the one full-duplex sub-device, and **the only one with an HDMI input** (devices 1–3 SDI only, inactive) |
+| `cfg VideoInputConnection` (device 0) | **SDI** before the session and after every capture. The SDI loop was still cabled (input locked on SDI) |
+| `cfg VideoOutputConnection` | SDI + HDMI + Component: Manifold's output reaches HDMI with no setting changed |
+| HDMI output, status | actual mode = the output's mode; **format flags 20 = YUV 4:2:2 + "8-bit"** (`BMDFormatFlags`, `DeckLinkAPI.h:800-806`); FRL rate 5 |
+| Received EDID (what the HDMI output sees) | 256 B, maker `BMD`, name "BMD HDMI": **the card's own HDMI input, so the loop is confirmed.** CTA-861: YCbCr 4:4:4 and 4:2:2; deep colour 30 / 36-bit; colorimetry BT2020YCC, BT2020RGB; HDR static metadata **EOTFs SDR, traditional HDR, PQ — not HLG** (the SDK's default input EDID, `DeckLinkAPI.h:466`) |
+
+- **The one setting changed, approved by Robbie for this session:** reading the HDMI input needs device 0's
+  `bmdDeckLinkConfigVideoInputConnection` set to HDMI. `capture --input hdmi` reads and logs the prior value (SDI
+  every time), refuses unless it is SDI, sets HDMI for the run, never calls `WriteConfigurationToPreferences`, and
+  sets SDI back and releases on exit. The SDK manual says these settings are global while held and revert when the
+  object is released (§2.5.15). **The probe read SDI after all 19 captures.** No profile, EDID or other setting was
+  touched.
+- **Which connector is read** was checked, not assumed: for the same output (HLG, flag clear, from `hdrout`), the SDI
+  input reports EOTF 3 and dynamic range HLG (`0x40000000`); the HDMI input reports EOTF 2 and stale PQ values
+  (controls, below). Switching the input also costs 12 no-input frames before it locks, which a switch to an
+  already-locked SDI input would not.
+- DaVinci Resolve was checked before every output start and was never running. (The driver's first check used
+  `pgrep -f`, which matched its own shell's command line and aborted one run falsely; it now looks for the executable
+  inside the Resolve bundle.)
+
+**Predictions** (`build/s7-5-hdmi/predictions.md`, written 17:53:05, before any run):
+
+| # | Prediction | Band |
+|---|---|---|
+| H0 | The probe reads `VideoInputConnection` SDI after every capture | Exact; otherwise stop |
+| H1 | At "8-bit" on HDMI the bytes are not identical: every component is the handed 10-bit value quantised to 8 bits by one rule; at 10-bit, byte-identical | One rule for 100 %, \|Δ\| ≤ 3; or 0 bytes differ |
+| H2a | Received colorspace and EOTF = handed, per file. Risk named: the sink EDID has no HLG | Exact |
+| H2b | PQ: flag set, the 12 values = the file's (Meta, HEVC) or the defaults (NoMeta, p3pq) | Within the InfoFrame's precision |
+| H2c | HLG and SDR carry no static values; SDR flag clear; HLG flag as on SDI (set) | As stated |
+| H3 | Transitions: signal and picture change on the same received frame, apart from the accepted transitional frame; a mode change's first locked frame carries both | Same frame |
+| H4 | Output `late=0 dropped=0`; capture 0 dropped outside re-establishes | Exact |
+
+**Per file** (paused, output on, 5 s each, about 130 received frames; tags re-read with mediainfo first and matching
+the names):
+
+| File | Output mode | Handed to the card (bridge read-back) | Received on HDMI | Bytes | Match |
+|---|---|---|---|---|---|
+| HDR10 … `Meta.mov` (MDCV 2020, 4000 / 0.0001, 5500 / 800) | 2160p23.98 | Rec.2020 · EOTF 2 · flag set · R .708,.292 G .170,.797 B .131,.046 W .3127,.329 · 4000 / 0.0001 · 5500 / 800 | **identical**, and the 0x41 / 0x0C packet with the same 36 bytes as on SDI | 131 / 131 | ✅ |
+| HDR10 … `NoMeta.mov` | 2160p23.98 | Rec.2020 · EOTF 2 · flag set · defaults P3-D65, 1000 / 0.005, 0 / 0 | **identical**, packet the defaults | 130 / 130 | ✅ |
+| `hdr10-9-16-9-p3mastering-hevc.mov` (MDCV P3, 1000 / 0.005, 800 / 400) | 1080p25 | Rec.2020 · EOTF 2 · flag set · P3 · 1000 / 0.005 · 800 / 400 | **identical**, packet the same | 135 / 135 | ✅ |
+| `hlg-9-18-9-prores.mov` | 1080p25 | Rec.2020 · EOTF 3 · flag clear | Rec.2020 · **EOTF 2 · flag set · the HEVC run's values (P3, 1000 / 0.005, 800 / 400)** · no packet | 136 / 136 | ❌ signal |
+| `patches-9-1-9-prores.mov` | 1080p25 | Rec.2020 · EOTF 0 · flag clear | Rec.2020 · **EOTF 2 · flag set · the same stale values** · no packet | 136 / 136 | ❌ signal |
+| `p3pq-12-16-1-prores.mov` (P3 → 2020 primaries and matrix) | 1080p25 | Rec.2020 · EOTF 2 · flag set · defaults | **identical**, packet the defaults | 136 / 136 | ✅ |
+| `patches-1-1-1-prores.mov` | 1080p25 | Rec.709 · EOTF 0 · flag clear | Rec.709 · **EOTF 2 · flag set · the p3pq run's defaults** · no packet | 137 / 137 | ❌ signal |
+
+- **Bytes:** 941 / 941 received frames byte-identical to Manifold's frame #0 dump. All four values of the low two
+  bits occur in every handed frame, so the compare would have seen an 8-bit path. **HDMI carried the 10-bit v210
+  losslessly**, 2160p included; the output's "8-bit" format flag does not describe the wire's depth.
+- **Format detection:** every input locked YCbCr 4:2:2 10-bit at the output's mode.
+- **The packet:** on HDMI the input exposes the DRM InfoFrame as an ancillary packet, DID 0x41 SDID 0x0C, "VANC line
+  9", with **the same 36 bytes as SDI's ST 2108-1** for the same file. It is present on every PQ frame and on no HLG or
+  SDR frame.
+- **The stale values:** colorspace follows the file every time. EOTF, flag and the 12 values do not: on HLG and SDR
+  the input repeats the last InfoFrame it received, even from an earlier capture process, as long as the HDMI link
+  stays up (f3 → f4 → f5 and f6 → f7 kept 1080p25). After a relock (a mode change) with no InfoFrame, it reports EOTF
+  0, flag clear, no values (transitions).
+
+**Controls** (`scripts/decklink-loopback/hdrout`, Manifold closed): a grey 1080p25 frame with a known signal, then a
+2 s HDMI capture. The MaxCLL values are ones no fixture uses, so a stale value is recognisable.
+
+| # | Sent | HDMI input reports | Packet |
+|---|---|---|---|
+| c1 | PQ · 2020 · flag set · MaxCLL 1234 | EOTF 2 · flag set · MaxCLL 1234 | yes |
+| c2 | HLG · 2020 · flag clear (what Manifold sends) | EOTF 2 · flag set · MaxCLL **1234** (stale) | no |
+| c2s | the same, **SDI** input | EOTF 3 · flag set · no values · dynamic range HLG | no |
+| c3 | HLG · flag set, no values | EOTF 2 · MaxCLL 1234 (stale) | no |
+| c4 | SDR · 709 · flag clear (what Manifold sends) | 709 · EOTF 2 · MaxCLL 1234 (stale) | no |
+| c5 | PQ · flag set · MaxCLL 2345 | EOTF 2 · MaxCLL 2345 | yes |
+| c6 | **SDR · 709 · flag set** | **EOTF 0 · flag clear · no values** (reset) | no |
+| c7 | PQ · flag set · MaxCLL 3456 | EOTF 2 · MaxCLL 3456 | yes |
+| c8 | HLG · flag set · values, MaxCLL 4567 | EOTF 2 · MaxCLL **3456** (stale) | no |
+
+- **The driver sends a DRM InfoFrame only when the HDR flag is set and the EOTF is PQ or SDR.** With HLG it sends
+  none, flag set or not, values or not. With the flag clear it sends none.
+- Whether HLG is withheld because this sink's EDID lists no HLG, or never sent on HDMI, is **UNKNOWN**. Finding out
+  would mean writing the input's EDID (`IDeckLinkHDMIInputEDID`), a setting change not approved; or the reference
+  monitor over HDMI, if its EDID lists HLG.
+
+**Transitions** (output running, paused, File ▸ Open Recent into the output window; three runs):
+
+| Run | Change (scheduled #, Manifold) | Picture on HDMI | Signal on HDMI |
+|---|---|---|---|
+| tr | Meta → HLG, 2160p23.98 → 1080p25 | **neutral frame for the rest of the run (~1000 frames)**: Manifold's output stalled (below) | after the relock: 2020 · EOTF 0 · clear · none |
+| tr | HLG → 9-1-9 → 1-1-1 → Meta | **neutral throughout**; Manifold's trace shows no pixel change | 1-1-1: nothing changes on HDMI; Meta: relock, PQ on the first locked frame |
+| tr2 | (start HLG) HLG → 9-1-9 (#445; identical pixels) | — | **nothing changes** (stale PQ before, stale PQ after: neither HLG nor SDR is signalled) |
+| tr2 | 9-1-9 → 1-1-1 (#784 transitional, #785 new) | rx #497 **no input**, #498 and #499 **partly written**, #500 the new picture | Rec.709 from #498, the first frame after the dropout; EOTF 2 / stale values throughout |
+| tr2 | 1-1-1 → Meta, 1080p25 → 2160p23.98 | 18 no-input frames, then rx #851 the Meta picture | rx #851: PQ, flag, Meta's values and the packet, together |
+| tr2 | Meta → HLG, → 1080p25 | 14 no-input frames, then rx #1169 the HLG picture | rx #1169: 2020 · EOTF 0 · clear · none |
+| tr3 | Meta → HLG, → 1080p25 | rx #149 no input (13 frames), rx #162 the HLG picture | rx #162: 2020 · EOTF 0 · clear · none. One frame before the stop (rx #148) read PQ with **all twelve values 0** |
+| tr3 | HLG → 9-1-9 (#340; identical pixels) | — | **nothing changes** |
+| tr3 | 9-1-9 → 1-1-1 (#679, new picture and tag together) | rx #826 **no input**, #827 and #828 **partly written**, #829 the new picture | Rec.709 from #827, the first frame after the dropout |
+| tr3 | 1-1-1 → Meta, → 2160p23.98 | 15 no-input frames, then rx #1176 the Meta picture | rx #1176: PQ, flag, values and packet, together |
+
+- **A colorimetry change at an unchanged mode drops the HDMI input for one frame** (2 of 2), then two frames arrive
+  partly written. Row by row against the handed pictures, they hold the new picture in some row ranges and, elsewhere,
+  video black (Y 64, C 512) or out-of-range codes (Y 3, Cb 0) where both pictures have patches. Neither is a frame
+  Manifold sent. The third frame is the new picture, complete.
+  - The dropout sits where SDI showed colorimetry one frame early: the frame before the first new picture. It is
+    consistent with the same early colorimetry change forcing an HDMI resync. **Not established.**
+  - Whether the transmitter or this receiver produces the dropout and the partial frames is **UNKNOWN**; a monitor
+    would show whether it blanks.
+- **Mode changes:** the first locked frame carries the new picture and its signal together, 4 of 4 with a picture
+  (PQ's InfoFrame arrives with it; HLG arrives as plain 2020 SDR).
+- **EOTF-only changes** (HLG ↔ SDR on the same pixels) do not appear on HDMI at all, since neither is signalled.
+
+**Found while running — Manifold's output stalled on the neutral frame** (run tr only):
+- After Open Recent re-established the output at 1080p25, the start logged `primed — no frame within 250 ms (nothing on
+  screen yet); neutral until one renders`. No picture followed. Two further loads with no re-establish (9-1-9, 1-1-1)
+  never reached the output either, and the re-establish back to 2160p23.98 primed neutral again.
+- The log shows no `[IDLE] display link stopped` line after the first load. In the clean runs, every load is followed
+  by one, after 33–68 ticks. So the display link either never restarted, or ran without rendering.
+- **2 of 14 re-establishes** (all in one launch of four), not reproduced in 8 more (a dedicated run, 0 / 8).
+- `b418161` (paused windows stop their display link) is the only display-link change since the SDI session, where the
+  same transition worked. It is the suspect, **not established**. Output `late=0 dropped=0` throughout. Whether the
+  window on screen updated is UNKNOWN (no screenshots). Logged in `BUGS.md`.
+
+| # | Result | Verdict |
+|---|---|---|
+| H0 | SDI after all 19 captures (7 files, 3 transitions, 8 controls, 1 tool check) | **PASS** |
+| H1 | **941 / 941 byte-identical.** The 10-bit branch held; the "8-bit" flag is not the wire's depth | **PASS** |
+| H2a | Colorspace equal on all 7. EOTF equal on the 4 PQ files; **HLG and SDR received as EOTF 2** (stale), and as EOTF 0 after a relock. HLG never arrives as EOTF 3 | **FAIL** on HLG and SDR, `BUGS.md` |
+| H2b | PQ: flag and all 12 values exact, field by field, on Meta, NoMeta, HEVC and p3pq; the packet's bytes equal SDI's ST 2108-1 | **PASS** |
+| H2c | No InfoFrame (no packet) on any HLG or SDR frame, as handed. **But** the input goes on reporting the previous PQ InfoFrame, flag set, because the driver sends no SDR InfoFrame when the flag is clear | **Mismatch** in what a sink keeps, `BUGS.md` |
+| H3 | Mode changes: same frame (4 / 4). Colorimetry at an unchanged mode: **a one-frame dropout and two partly written frames** (2 / 2). EOTF-only changes: invisible. Manifold's stall made run tr unusable | **FAIL**, `BUGS.md` |
+| H4 | Output `late=0 dropped=0` on every run. Capture: 0 dropped on every file; one stream-time gap each in tr and tr2 (where in the run was not recorded), 0 in tr3 | **PASS** (files); transitions reported |
+
+**Compared with the SDI half:**
+- *Bytes, PQ colorimetry and PQ static metadata:* the same. Both wires are lossless, and the PQ metadata is carried in
+  the same 36 bytes (ST 2108-1 on SDI, the DRM InfoFrame on HDMI, as the input exposes it).
+- *Open SDI item 1, colorimetry one frame early:* HDMI never shows an early colorimetry frame. In that frame's place
+  there is a **one-frame dropout**, then two partly written frames. The same lead, made visible as a resync, would
+  explain both; it is not established.
+- *Open SDI item 2, HLG read with the flag set:* on HDMI the input also reads HLG with the flag set, but for a
+  different reason: **nothing arrives for HLG**, and the input repeats the last PQ InfoFrame. On SDI the VPID carries
+  HLG (EOTF 3 received, dynamic range HLG, control c2s). **HDMI does not signal HLG at all**, which SDI does.
+- *SDR after PQ:* SDI's VPID says SDR at once. HDMI sends no SDR InfoFrame unless the flag is set (control c6), so a
+  sink that keeps the last InfoFrame, as this input does, stays in PQ until the link relocks.
+
 ---
 
 ## 7. Open and unverified
