@@ -318,22 +318,22 @@ final class AudioMeterModel: ObservableObject {
             // Nothing loaded, or audio not reached yet. If the tap already has a format, trust
             // the tap — it is the one source that is right on every path.
             if tap?.format == nil {
-                if status != .noSource && status != .waiting { status = .noSource }
-                else { status = tap?.hasAudio == true ? .waiting : status }
-                if channels.isEmpty { status = .noSource }
+                if status != .noSource && status != .waiting { setStatus(.noSource) }
+                else if tap?.hasAudio == true { setStatus(.waiting) }
+                if channels.isEmpty { setStatus(.noSource) }
                 decayAll(dt: dt)
                 return
             }
         case .absent:
-            status = .noAudio
-            channels = []
+            setStatus(.noAudio)
+            if !channels.isEmpty { channels = [] }
             return
         case .unreadable:
             // A track exists and the reader failed on it. Its own state, never "no audio track": that
             // sentence sends a user to check a file that is fine (TCMOP, 2026-10-21). No bars — nothing
             // is being decoded, so there is nothing to measure.
-            status = .audioNotRead
-            channels = []
+            setStatus(.audioNotRead)
+            if !channels.isEmpty { channels = [] }
             return
         case .present(let n):
             // Size the bars from the DECODER's channel count immediately, so the meter shows the
@@ -370,14 +370,23 @@ final class AudioMeterModel: ObservableObject {
         if let peaks = scanned, peaks.framesScanned > 0 {
             if channels.count != peaks.magnitudes.count { resize(to: peaks.magnitudes.count) }
             clipRun = peaks.clipRun
-            status = .metering
+            setStatus(.metering)
             apply(magnitudes: peaks.magnitudes, dt: dt, now: now)
         } else {
             // No data for this tick. Either paused, or the playhead is outside the retained
             // window (a scrub that outran the ring). Decay rather than snap to silence.
-            if !channels.isEmpty { status = isPlaying() || isLive() ? .metering : .paused }
+            if !channels.isEmpty { setStatus(isPlaying() || isLive() ? .metering : .paused) }
             decayAll(dt: dt)
         }
+    }
+
+    /// ⚠️ EVERY TICK'S STATUS GOES THROUGH HERE, AND THE GUARD IS THE POINT. A `@Published` set publishes
+    /// whether or not the value changed, and this model is a `@StateObject` of `ContentView`, so an
+    /// unguarded `status = .paused` at 30 Hz re-ran the whole window's body, layout and SwiftUI's drawing
+    /// while nothing on screen changed: ~25 % of a core per paused window with the tray open, and the
+    /// main thread full at 7 windows (docs/BUGS.md, 2026-10-24). Same rule as `roles` above.
+    private func setStatus(_ next: Status) {
+        if status != next { status = next }
     }
 
     private func resize(to n: Int) {

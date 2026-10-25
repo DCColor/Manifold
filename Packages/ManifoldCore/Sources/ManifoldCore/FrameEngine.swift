@@ -578,7 +578,21 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     public init() {
         synchronizer.addRenderer(audioRenderer)
+        // Every rate change, from whichever of the many `rate` / `setRate` sites made it: the app's display
+        // renderer stops its link while paused, and Play must restart it even when no new frame is enqueued
+        // (the queue may already hold the frames Play needs). Weak: the observer must not keep the engine.
+        rateObserver = NotificationCenter.default.addObserver(
+            forName: AVSampleBufferRenderSynchronizer.rateDidChangeNotification, object: synchronizer, queue: nil
+        ) { [weak self] _ in self?.onClockRateChange?() }
     }
+
+    deinit {
+        if let rateObserver { NotificationCenter.default.removeObserver(rateObserver) }
+    }
+
+    /// Called on the synchronizer's notification thread whenever its rate changes. Set once, at window setup.
+    public nonisolated(unsafe) var onClockRateChange: (() -> Void)?
+    nonisolated(unsafe) private var rateObserver: NSObjectProtocol?
 
     /// Adopt a display renderer as this engine's video output.
     ///

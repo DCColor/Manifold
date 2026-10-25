@@ -122,6 +122,7 @@ bullet.
 - Fixed: when a file's audio track can't be read, the meters said "No audio track" and the warning disappeared after a few seconds. The meters now say "Audio not read", and the inspector says why for as long as the file is open.
 - Fixed: closing a window while its file was still opening could leave the sound playing with no window.
 - Fixed: closed windows kept their memory and playback resources until Manifold quit. They are now released when the window closes.
+- Fixed: a paused window with the scopes open kept using about a quarter of the processor, so with several windows open Manifold became slow to respond, and with seven or more VoiceOver and other accessibility tools could stop getting answers. A paused window now uses almost none.
 
 ### Known limitations
 
@@ -236,7 +237,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Custom interpretation (primaries · transfer · matrix from the S3 table) on files and every transport; saved per bookmark as `custom:p-t-m`, read as Auto by older builds; Reset to File's / Stream's Tags (colour S5) | `6be1938` | Yes |
 | One primaries / transfer / matrix table for the layer colorspace and the CIE scope: Rec.2020 SDR, DCI-P3, SMPTE-C and EBU get their own primaries; Rec.2020 SDR override on SRT, WHEP and HLS; container/bitstream colour disagreement in the readout (colour S3) | `94961b9` | Yes |
 | LUT bypass reads "+ LUT bypassed" (struck through, dimmed) on the Color control, "LUT bypassed — name" in the menu and "BYPASSED — name … — not applied" in the readout; the readout draws an override's words and an applied LUT's line in the Color control's amber (darker in light appearance); `[EDR] headroom` names its window (LG session polish, §6.11) | `2343c1a` | Yes |
-| Wording (Robbie, 2026-10-24): LUT Output Space → LUT Outputs, "Same as Source (no change)" first, two disabled rows on when to change it; the LUT readout names an output space only when one is stated; the chain readout's per-display calibration section enabled only in Reference ("Applies in Reference mode only."). Stored values and IDs unchanged | `<commit — to be filled in>` | Yes |
+| Wording (Robbie, 2026-10-24): LUT Output Space → LUT Outputs, "Same as Source (no change)" first, two disabled rows on when to change it; the LUT readout names an output space only when one is stated; the chain readout's per-display calibration section enabled only in Reference ("Applies in Reference mode only."). Stored values and IDs unchanged | `72bb925` | Yes |
 | L4: Manifold's LUT output matches DaVinci Resolve (vendor 33³, Resolve-generated 33³ and 65³, tetrahedral): max 1.20 code at 10-bit, P9 met; SDI and LG sanity looks done (§6.11) | — (test only) | No |
 
 #### App, menus and diagnostics
@@ -247,8 +248,9 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Diagnostics export reports EDR headroom from potential, not current | `cf18894` | **Unsure**: only visible in Export Diagnostics output |
 | User-facing strings converted to American English ("Licenses" and others; BUGS.md, pre-ship checklist) | — | **Unsure**: verified 2026-09-21, but no commit or fix date is recorded |
 | Privacy stage P1 (`docs/PRIVACY_AUDIT.md`): license email and machine id out of the preferences plist; no disk cache for the app's own requests; NDI discovery only on opening the source list; log and diagnostics redaction, with an "Include file names" option | uncommitted (2026-10-19) | **Yes** |
-| Help ▸ Export Frame for Support… (Robbie, 2026-10-24): the frame's diagnostic set (`.png`, `.v210`, `.rgba16f`, `.v210.json`, byte-identical to File ▸ Export Frame (Diagnostic Set)) through a save panel, with a dated name and a note that it holds the picture; public, no longer `#if DEBUG` or behind `ShortcutDebugGate`; never in Export Diagnostics. DEBUG `MANIFOLD_FRAME_EXPORT_DIR` skips the panel for unattended runs (pre-ship removal) | `<commit — to be filled in>` | Yes |
+| Help ▸ Export Frame for Support… (Robbie, 2026-10-24): the frame's diagnostic set (`.png`, `.v210`, `.rgba16f`, `.v210.json`, byte-identical to File ▸ Export Frame (Diagnostic Set)) through a save panel, with a dated name and a note that it holds the picture; public, no longer `#if DEBUG` or behind `ShortcutDebugGate`; never in Export Diagnostics. DEBUG `MANIFOLD_FRAME_EXPORT_DIR` skips the panel for unattended runs (pre-ship removal) | `72bb925` | Yes |
 | Privacy stage P2 (`docs/PRIVACY_AUDIT.md`): each saved stream's full URL and passphrase in one Keychain item (`tools.graviton.manifold.streams`, per bookmark id); the plist keeps name, host and a reference; migrated at launch with read-back, resumable; edit form shows the URL only on "Show saved URL"; a "Saved streams" count line in diagnostics | `3c5526d` | **Yes** |
+| Idle windows (BUGS.md 2026-10-24): the audio meter publishes only on change, so a paused window with the scopes open no longer re-runs its whole view 30 times a second (26–30 % → 0.7 % of a core); a paused window stops its display link after 0.5 s with nothing to draw and any render input, or Play, wakes it. 12 paused windows 103 % → 3.5 %; Accessibility at 12 windows 0.2 s; pictures byte-identical, playback unchanged | `<commit — to be filled in>` | Yes |
 
 #### Keyboard shortcuts
 

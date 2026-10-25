@@ -1053,6 +1053,8 @@ final class DeckRegistry {
         // …and the engine feeds this window's renderer, and only this one.
         engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
         engine.onFlush = { [weak renderer] in renderer?.flush() }
+        // Play, pause, shuttle: a paused renderer has stopped its display link, and Play may need no new frame.
+        engine.onClockRateChange = { [weak renderer] in renderer?.wakeDisplayLink() }
         // THE SOURCE'S COLOUR TAGS, ON THE LOAD PATH RATHER THAN BEHIND THE INSPECTION TASK.
         // Same per-window wiring as the two above, and per-window for the same reason: this
         // deck's engine describes this deck's file to this deck's layer. The engine calls it on

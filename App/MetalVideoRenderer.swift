@@ -228,14 +228,14 @@ final class MetalVideoRenderer {
     let metalLayer = CAMetalLayer()
 
     /// Returns the current playback time in seconds. Set by the owner before start().
-    var clock: (() -> Double)?
+    var clock: (() -> Double)? { didSet { wakeDisplayLink() } }
 
     /// Returns true when transport is PAUSED (synchronizer rate 0). Read per-refresh on
     /// the render thread (thread-safe accessor). Gates the post-seek one-shot render (see
     /// displayTick) to the paused state ONLY — normal playback keeps the strict pts<=now
     /// selection untouched. When nil, defaults to paused (safe: the relaxation is a
     /// one-shot and only fires right after a flush anyway).
-    var isPausedProvider: (() -> Bool)?
+    var isPausedProvider: (() -> Bool)? { didSet { wakeDisplayLink() } }
 
     /// Called on the CVDisplayLink render thread at the END of every renderPixelBuffer —
     /// i.e. every time the offscreen texture is updated to a new displayed frame (normal
@@ -259,7 +259,7 @@ final class MetalVideoRenderer {
     /// is current when we ask.) Runs on the CVDisplayLink thread, so it must not block: an
     /// implementation may only do the cheap capture + enqueue, never wait on the network.
     /// Nil for push sources (file playback), which are unaffected by this.
-    var onDisplayTick: (() -> Void)?
+    var onDisplayTick: (() -> Void)? { didSet { wakeDisplayLink() } }
 
     #if DEBUG
     /// Measurement only, DEBUG only (pre-ship review: docs/BUGS.md). Called on the CVDisplayLink
@@ -307,7 +307,7 @@ final class MetalVideoRenderer {
     /// Set on main by calibration's start and stop; read once per display tick.
     var calibrationFlash: CalibrationFlashTap? {
         get { calibrationLock.lock(); defer { calibrationLock.unlock() }; return calibrationFlashStorage }
-        set { calibrationLock.lock(); calibrationFlashStorage = newValue; calibrationLock.unlock() }
+        set { calibrationLock.lock(); calibrationFlashStorage = newValue; calibrationLock.unlock(); wakeDisplayLink() }
     }
 
     /// The source's frame interval as the queue measures it (median of recent PTS deltas), seconds; 0
@@ -359,7 +359,7 @@ final class MetalVideoRenderer {
     /// the picture is HELD — the tick selects and presents nothing, discards queued frames at or below
     /// that PTS unseen, and still pushes its depth sample. nil (the closure, or its value) = select as
     /// usual. Installed with `onDepthSample` by `LiveDisplayRoute`, removed with it.
-    var presentationHoldFloor: (() -> Double?)?
+    var presentationHoldFloor: (() -> Double?)? { didSet { wakeDisplayLink() } }
 
     /// Returns the engine's full-range chroma convention rawValue (0 = full-swing,
     /// 1 = Resolve). Read per-frame on the render thread (thread-safe accessor).
@@ -531,7 +531,98 @@ final class MetalVideoRenderer {
     var maxQueuedOverride: Int?
     private var maxQueued: Int { maxQueuedOverride ?? defaultMaxQueued }
 
+    /// Created and released on `linkQueue` only (see the idle note below).
     private var displayLink: CVDisplayLink?
+
+    // ── A PAUSED WINDOW STOPS ITS DISPLAY LINK ────────────────────────────────────────────────
+    //
+    // While paused with nothing to do, every tick finds no frame due and no one-shot armed, so the link
+    // only burns wakeups: 120 a second per window, for nothing (docs/BUGS.md, 2026-10-24). After
+    // `idleAfter` of such ticks the link stops; ANY input that could need a render wakes it, and nothing
+    // else changes — the tick is the same code, the one-shots are the same one-shots.
+    //
+    // WHAT WAKES IT: every setter that arms a one-shot (refresh, immediate, colour state, drawable size,
+    // geometry, flush/seek, clear), every `enqueue`, installing or removing a clock / pause provider / pull
+    // hook / hold floor / calibration tap, and the engine's clock rate changing (Play, shuttle — wired in
+    // `DeckRegistry.configure`). A NEW REASON TO RENDER WHILE PAUSED MUST COME THROUGH ONE OF THOSE, which
+    // it already had to: a paused tick never rendered without a one-shot.
+    //
+    // WHAT NEVER IDLES: anything not paused (`isPausedProvider` must say true — every live route says
+    // false), a pull source, a held live clock and a calibration tap.
+    //
+    // ⚠️ START AND STOP RUN ON `linkQueue`, NEVER MAIN. `primeDeckLinkFrame` arms a refresh from the
+    // DeckLink queue and waits for its convert; if waking needed main, a start that main waits on would
+    // time out to neutral. `CVDisplayLinkStop` waits for an in-flight callback, and the callback never
+    // waits on `linkQueue` or holds `idleLock` across anything, so neither can deadlock the other. A stale
+    // stop is dropped by the generation check: a wake after the decision bumps it.
+    private let linkQueue = DispatchQueue(label: "com.graviton.manifold.displaylink")
+    private let idleLock = NSLock()
+    private var idleStopped = false          // idleLock
+    private var wakeGeneration: UInt64 = 0   // idleLock
+    private var lastActiveTick: CFTimeInterval = 0          // CVDisplayLink thread only
+    private var lastSeenWakeGeneration: UInt64 = .max      // CVDisplayLink thread only
+    private static let idleAfter: CFTimeInterval = 0.5
+    #if DEBUG
+    private var idleTicksSinceStart = 0      // CVDisplayLink thread; read on linkQueue only while stopped
+    #endif
+
+    /// Any thread. Something may need a render: count it, and restart the link if idle stopped it.
+    func wakeDisplayLink() {
+        idleLock.lock()
+        wakeGeneration &+= 1
+        let resume = idleStopped
+        idleStopped = false
+        idleLock.unlock()
+        guard resume else { return }
+        linkQueue.async { [weak self] in
+            guard let self, let link = self.displayLink else { return }
+            #if DEBUG
+            self.rpLastTickWall = 0          // the stopped interval is not a tick interval
+            self.idleTicksSinceStart = 0
+            #endif
+            Self.setRunning(link, true)
+        }
+    }
+
+    /// `linkQueue`. The one place the link is started or stopped.
+    private static func setRunning(_ link: CVDisplayLink, _ running: Bool) {
+        if running { CVDisplayLinkStart(link) } else { CVDisplayLinkStop(link) }
+    }
+
+    /// CVDisplayLink thread, after every tick. Quiet for `idleAfter` → queue a stop.
+    private func noteIdleTick() {
+        let now = CACurrentMediaTime()
+        #if DEBUG
+        idleTicksSinceStart += 1
+        #endif
+        idleLock.lock(); let generation = wakeGeneration; idleLock.unlock()
+        refreshLock.lock()
+        let armed = pendingRefresh || pendingSeekRender || pendingClear || pendingImmediate != nil
+            || pendingColorState != nil || pendingDrawableSize != nil || pendingGeometry != nil
+        refreshLock.unlock()
+        let canIdle = !armed && onDisplayTick == nil && presentationHoldFloor == nil && calibrationFlash == nil
+            && isPausedProvider?() == true
+        if generation != lastSeenWakeGeneration || !canIdle {
+            lastSeenWakeGeneration = generation
+            lastActiveTick = now
+            return
+        }
+        guard now - lastActiveTick >= Self.idleAfter else { return }
+        lastActiveTick = now   // one stop request per quiet interval, not one per tick
+        linkQueue.async { [weak self] in self?.stopForIdle(generation: generation) }
+    }
+
+    /// `linkQueue`. Stop only if nothing woke the link since the tick that asked.
+    private func stopForIdle(generation: UInt64) {
+        idleLock.lock()
+        guard wakeGeneration == generation, !idleStopped, let link = displayLink else { idleLock.unlock(); return }
+        idleStopped = true
+        idleLock.unlock()
+        Self.setRunning(link, false)
+        #if DEBUG
+        FileHandle.standardError.write(Data("[IDLE] display link stopped (paused, nothing to draw) after \(idleTicksSinceStart) ticks\n".utf8))
+        #endif
+    }
 
     // Last rendered frame + a refresh request, so a range-override change while
     // PAUSED (no new frame arriving) still re-renders with the new shader flag.
@@ -598,6 +689,7 @@ final class MetalVideoRenderer {
     /// override change while paused). Picked up on the next display refresh.
     func setNeedsRefresh() {
         refreshLock.lock(); pendingRefresh = true; refreshLock.unlock()
+        wakeDisplayLink()
     }
 
     /// Present `pixelBuffer` on the NEXT display tick, bypassing BOTH `frameQueue` and the
@@ -679,6 +771,7 @@ final class MetalVideoRenderer {
         debugCheckScrubGeometry(pixelBuffer)
         #endif
         refreshLock.lock(); pendingImmediate = (pixelBuffer, pts); refreshLock.unlock()
+        wakeDisplayLink()
     }
 
     #if DEBUG
@@ -1124,6 +1217,7 @@ final class MetalVideoRenderer {
         // one-shot and is exactly the right signal — the same one a colour-state change uses.
         pendingRefresh = true
         refreshLock.unlock()
+        wakeDisplayLink()
     }
 
     // MARK: - Source colorspace (set once per source)
@@ -1677,6 +1771,7 @@ final class MetalVideoRenderer {
                                                                        v210MatrixCode: signal.sdiMatrixCode(pictureMatrix: pictureMatrixCode)))
         pendingRefresh = true
         refreshLock.unlock()
+        wakeDisplayLink()
         deckLinkLock.lock(); deckLinkCurrentSignal = signal; deckLinkLock.unlock()
         if signal != pictureOutputSignal {
             pictureOutputSignal = signal
@@ -1999,6 +2094,7 @@ final class MetalVideoRenderer {
         pendingGeometry = state
         pendingRefresh = true
         refreshLock.unlock()
+        wakeDisplayLink()
     }
 
     /// Fires `logEDRHeadroom` exactly once per process (lazy static = dispatch_once).
@@ -2601,6 +2697,7 @@ final class MetalVideoRenderer {
         // Outside the lock: the sink takes LiveClock's lock, and holding two is how deadlocks are
         // built. Same discipline as onDepthSample below.
         if let overflow { onQueueOverflow?(overflow.newestPTS, overflow.count) }
+        wakeDisplayLink()
     }
 
     /// Clear all queued frames (call on seek).
@@ -2626,6 +2723,7 @@ final class MetalVideoRenderer {
         settleArmed = true
         #endif
         refreshLock.unlock()
+        wakeDisplayLink()
     }
 
     /// Wipe the screen to BLACK on the next display tick. Called when a source is torn down (NDI
@@ -2654,25 +2752,31 @@ final class MetalVideoRenderer {
     // MARK: - Display link lifecycle
 
     func start() {
-        guard displayLink == nil else { return }
-        var link: CVDisplayLink?
-        CVDisplayLinkCreateWithActiveCGDisplays(&link)
-        guard let link else { print("MetalVideoRenderer: CVDisplayLink create failed"); return }
+        linkQueue.sync {
+            guard displayLink == nil else { return }
+            var link: CVDisplayLink?
+            CVDisplayLinkCreateWithActiveCGDisplays(&link)
+            guard let link else { print("MetalVideoRenderer: CVDisplayLink create failed"); return }
 
-        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
-            let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
-            renderer.displayTick()
-            return kCVReturnSuccess
+            let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
+                let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
+                renderer.displayTick()
+                return kCVReturnSuccess
+            }
+            CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+            idleLock.lock(); idleStopped = false; idleLock.unlock()
+            Self.setRunning(link, true)
+            displayLink = link
         }
-        CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
-        CVDisplayLinkStart(link)
-        displayLink = link
     }
 
     func stop() {
-        if let link = displayLink {
-            CVDisplayLinkStop(link)
-            displayLink = nil
+        linkQueue.sync {
+            if let link = displayLink {
+                Self.setRunning(link, false)
+                displayLink = nil
+            }
+            idleLock.lock(); idleStopped = false; idleLock.unlock()
         }
         flush()
     }
@@ -2706,6 +2810,7 @@ final class MetalVideoRenderer {
         // the display-link interval stays flat). Draining a pool every tick returns each drawable
         // promptly, so the pool never starves under sustained 24fps.
         autoreleasepool { performDisplayTick() }
+        noteIdleTick()
     }
 
     /// The body of one display-link tick, run inside `displayTick`'s per-tick autorelease pool.

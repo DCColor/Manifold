@@ -264,7 +264,7 @@ held back until after release, and the numbered defect entries follow.
    - **Not done, from the same notes, not in the brief:** scaling the control bar at small window sizes, and a
      resizable Settings window like the shortcuts window.
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
-   `<commit — to be filled in>` (results in the session report; base `0a938f7`):
+   `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row
      reads "Same as Source (no change)", and two disabled rows at the foot say when to change it ("Only change this
      for LUTs that convert to another color space (e.g. Rec.709 → PQ)." / "Display or calibration LUTs aren't
@@ -2151,7 +2151,72 @@ start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 pla
 
 ---
 
-## ☐ OPEN 2026-10-24 — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
+## ✅ FIXED 2026-10-24 (commit `<commit — to be filled in>`) — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
+
+**Fixed 2026-10-24** (idle-window session, measured against HEAD `72bb925`, Profile builds, sandboxed bookmarks).
+- **Cause: the audio meter, not the renderer.** With the scopes tray open, `AudioMeterScope.tick()` (30 Hz) assigned
+  `status` and `channels` on every tick, equal or not. Each `@Published` set re-ran the window's whole `ContentView`
+  body, and the layout pass that follows, so a paused window drew about 64 Core Animation command buffers a second on
+  the main thread (Metal System Trace). The renderer and the scopes were already doing nothing: 0 renderer and 0
+  scope-compute command buffers a second, GPU about 0. The `[RENDER-PERF] tickMs=8.33` reading above was the 120 Hz
+  display link ticking with nothing to draw, which costs 0.2–0.5 % of a core. With the tray **off**, a paused window
+  cost 0.6 % at HEAD, with or without the inspector and chain readout. So the tray was the cost, as guessed below.
+- **Ranked, HEAD, 1 window paused, 30 s:**
+  1. The meter's publishes: 26–30 % (tray off 0.6 %, tray on 26.0–30.3 %; footprint 111 → 380 MB).
+  2. The chain readout's popover, which re-lays out on each of those body runs: +9 % (35.6 % with inspector and chain).
+  3. The display link: 0.2–0.5 %.
+- **Fix, smallest first:**
+  1. `AudioMeterScope.swift:388`: `setStatus(_:)` writes `status` only when it changes, and `channels = []` only when it
+     is not already empty. Alone this took a paused window with the tray from 26 % to 1.0 %.
+  2. `MetalVideoRenderer.swift:537-630`: a paused window **stops its display link** after 0.5 s with nothing to draw.
+     It may stop only when the source is paused and no one-shot render, tick consumer, hold floor or calibration flash
+     is armed. Every input that can need a render wakes it (`wakeDisplayLink()`, line 570): refresh, present, layout
+     size, colour state, source geometry, flush, enqueue, and setting the clock or its consumers. The clock's rate
+     change wakes it too, through the synchronizer's `rateDidChangeNotification` (`FrameEngine.swift:585-594`,
+     `WindowDeck.swift:1057`), so Play from idle starts at once. Start, stop and wake are serialised on one queue with a
+     generation count, so a wake that races a stop wins.
+- **Measured, tree, paused, tray open, 30 s:**
+
+  | Windows | CPU, tree | CPU, HEAD | Footprint, tree | Footprint, HEAD | Accessibility, tree | Accessibility, HEAD |
+  |---|---|---|---|---|---|---|
+  | 1 | 0.7 % | 26–30 % | 139 MB | 380 MB | 0.19–0.23 s | — |
+  | 3 | 1.1 % | 54 % | 350 MB | 627 MB | 0.19–0.23 s | — |
+  | 7 | 1.8 % | 102 % | 672 MB | 968 MB | 0.19–0.23 s | buttons query 5.2 s |
+  | 12 | 3.5 % | 103 % | 1368 MB | 1607 MB | 0.19–0.23 s, export from window 12 written | buttons query 21.7 s |
+
+  - About **0.25 % of a core per added paused window**, and no display-link thread while paused. Metal System Trace at
+    12 windows shows 0 encoders a second.
+  - **Memory per window is unchanged: about 112 MB** (HEAD about 110). At 12 windows it is mostly graphics (404 MB),
+    MALLOC_SMALL (396 MB) and IOSurface (367 MB). The fix does not reduce it, and nothing here says it should be less.
+- **A change while paused still updates at once**, event by event the same as HEAD:
+  - A colour toggle, an override or a reset gives one render, one scope sample and one DeckLink convert.
+  - A resize gives one render and two scope samples.
+  - A move between displays matches HEAD in both modes: macOS mode gives no render and two scope samples, Reference
+    mode renders.
+  - SDI: the override changed the v210 output and the reset returned it to FNV `5a0db98fa38b4d6f`. DeckLink primed
+    the paused frame with the link stopped, at late = 0 and dropped = 0.
+  - Frame step could not be driven without a keystroke (the scrubber's Accessibility value cannot be set). It goes
+    through seek → flush/enqueue, both of which wake the link.
+- **Unchanged:**
+  - **Playback**, `manifold-sync-24p.mov` for 30 s: 1 window 68.9 % (HEAD 68.6 %), late = 0 and dropped = 0. With 11
+    paused windows behind it: 72.6 % (HEAD 111.5 %), late = 0 and dropped = 0.
+  - **Live SRT**, 1 window, 24 fps: tray on 59.3 % (HEAD 59.2 %), tray off 7.6 % (HEAD 7.7 %). A live source is
+    always playing, so the rule does not apply to it.
+  - **Pictures:** the export set (`.png`, `.v210`, `.rgba16f`, `.v210.json`), 20 control files × 3 modes, one window
+    per launch: 240 / 240 files byte-identical to HEAD.
+  - `swift test`: 612 / 612. Profile warnings, clean build: the same 12 as HEAD.
+- **Not changed, noted:** while **playing** with the tray open, every scope publish still re-runs the whole
+  `ContentView` body (the live SRT row above: 59 % tray on against 7.6 % off, nearly all on the main thread). The
+  same mechanism as this entry, while playing. Not in this fix's scope.
+- **Answers to the open questions below:**
+  - A paused window's display link now stops. The scopes were not recomputing while paused, at HEAD or now.
+  - About 110 MB per window is the window's own buffers, not idle work, and is unchanged.
+  - The cliff was the main thread: at 12 windows HEAD's main thread was in `layoutSubtreeIfNeeded` and SwiftUI body
+    updates (`sample`), not an Accessibility time limit.
+- **Close by Accessibility does nothing, at HEAD, even with 3 windows** (this session): File ▸ Close is disabled and the
+  window's close button reports success and closes nothing, with the window main and focused and no sheet. So "a close
+  button clicked at 8 windows … closed nothing" below is probably this, not the cliff. Cause UNKNOWN. The drivers
+  relaunch per file instead.
 
 **Found** by the shortcut follow-ups' unattended run (`SHORTCUTS_AUDIT.md` §9). The export driver opened each control
 file with `open -a`, which opens a new window each time, so one HEAD session piled windows up. **Not fixed in that
@@ -2178,7 +2243,8 @@ Each step = `open -a`, pin the controls, then Export frame clicked by Accessibil
   A close button clicked at 8 windows reported success and closed nothing (8 windows before and after, 7 tries).
   Below the cliff, closes work at once.
 - **Per window: about +15 % CPU and +80–90 MB footprint, while paused.** Each window's renderer keeps ticking at
-  120 Hz (`[RENDER-PERF] tickMs=8.33`) with nothing to draw (2–3 frames per report). So at about 7 windows the paused
+  120 Hz (`[RENDER-PERF] tickMs=8.33`) with nothing to draw (2–3 frames per report). (2026-10-24 fix session: the tick
+  was 0.2–0.5 % of it; the meter's publishes were the rest. See **Fixed** above.) So at about 7 windows the paused
   windows fill the main thread, and the app answers Accessibility (and so VoiceOver) too slowly. Whether keyboard and
   pointer input slow down too was not measured: no keystroke was sent. **UNKNOWN.**
 - **Each window holds one of everything**, by `heap` at each step: FrameEngine, MetalVideoRenderer, WindowDeck,
@@ -2194,7 +2260,7 @@ Each step = `open -a`, pin the controls, then Export frame clicked by Accessibil
   `open -a` driver opened 20 files in one session with 20 / 20 exports (`SHORTCUTS_AUDIT.md` §7, P7). No run was made
   with the tray off. A/B it first in the fix session: the same 9 files with the tray on and off.
 
-**Open questions (for the fix session):**
+**Open questions (for the fix session; answered in Fixed above):**
 - Should a paused window's display link and scopes stop, or drop their rate, when nothing changes?
 - Is ~85 MB per idle window expected (ring buffers, scopes, scrub decoder)?
 - Is the cliff the main thread, or Accessibility's own time limit? Answer with a main-thread sample (`sample <pid>`) at
