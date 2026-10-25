@@ -2151,7 +2151,7 @@ start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 pla
 
 ---
 
-## ✅ FIXED 2026-10-24 (commit `________`) — PRE-EXISTING, ALL BUILDS — File ▸ Close and Window ▸ Minimize are disabled whenever the controls have hidden; ⌘W closes only with the pointer over the window; an Accessibility press on the close button does nothing
+## ✅ FIXED 2026-10-24 (commit `036b048`) — PRE-EXISTING, ALL BUILDS — File ▸ Close and Window ▸ Minimize are disabled whenever the controls have hidden; ⌘W closes only with the pointer over the window; an Accessibility press on the close button does nothing
 
 **Found** by Robbie (2026-10-24): File ▸ Close is always disabled, yet ⌘W closes a window. The performance session
 (`b418161`, the entry below) found the Accessibility half: the close button's press reported success and closed

@@ -2979,6 +2979,8 @@ struct ContentView: View {
                     // Pinned reads in the accent colour, as Loop reads green when on (§8 item 16).
                     .foregroundStyle(pinned ? Color.accentColor : live)
                     .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
+                    // Test drivers find the button by this, not by its help text, which names the shortcut.
+                    .accessibilityIdentifier("pinControls")
                 }
             }
             .buttonStyle(.plain)
