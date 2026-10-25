@@ -2151,7 +2151,7 @@ start 1. HEAD on the same run: output still running after 50 / 50 closes, 38 pla
 
 ---
 
-## ✅ FIXED 2026-10-24 (commit `<commit — to be filled in>`) — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
+## ✅ FIXED 2026-10-24 (commit `b418161`) — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
 
 **Fixed 2026-10-24** (idle-window session, measured against HEAD `72bb925`, Profile builds, sandboxed bookmarks).
 - **Cause: the audio meter, not the renderer.** With the scopes tray open, `AudioMeterScope.tick()` (30 Hz) assigned
