@@ -119,8 +119,9 @@ struct DisplayTransformControl: View {
         .accessibilityAddTraits(.isStaticText)
     }
 
-    /// Colour S2 — the hold-to-compare marker, amber like the Bypass badge and a sibling of the menu
-    /// for the same measured reason (inside the menu label it would be stripped to white).
+    /// Colour S2 — the hold-to-compare marker, a sibling of the menu for the Bypass badge's measured reason
+    /// (inside the menu label it would be stripped to white). The app's yellow since 2026-10-25: the user is
+    /// holding it, an assertion like an override; amber stays the Bypass badge's, a warning.
     private func compareBadge(_ held: DisplayTransformMode) -> some View {
         HStack(spacing: 3) {
             Image(systemName: "hand.raised.fill")
@@ -131,7 +132,7 @@ struct DisplayTransformControl: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(Capsule().fill(Color.orange))
+        .background(Capsule().fill(Color.appYellow))
         .foregroundStyle(.black)
         .accessibilityLabel("Comparing against \(held.compareLabel) while the key is held")
         .accessibilityAddTraits(.isStaticText)
@@ -260,7 +261,7 @@ struct DisplayChainReadout: View {
             }
             row("Chroma",    model.chain.chroma)
             if let lut = model.chain.lut {
-                row("LUT", Text(lut).foregroundColor(model.chain.lutApplied ? Self.amber : .secondary))
+                row("LUT", Text(lut).foregroundColor(model.chain.lutApplied ? Self.assertion : .secondary))
             }
             row("Transform", model.chain.transform)
             row("Display",   model.chain.display)
@@ -300,21 +301,17 @@ struct DisplayChainReadout: View {
         .frame(width: 430, alignment: .leading)
     }
 
-    /// The Color control's amber, for the readout's text (LG session, 2026-10-22): an override's words on the Source
-    /// line and an applied LUT's line, so the readout marks what the face marks. `systemOrange` — the face's own
-    /// colour — in dark appearance. In light, a darker amber: systemOrange on the light popover is about 2:1, too faint
-    /// for caption text, and (0.58, 0.30, 0) keeps ≥ 4.5:1 on white (6.4:1) and on a popover grey as dark as #E0E0E0
-    /// (4.8:1).
-    static let amber = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? .systemOrange : NSColor(srgbRed: 0.58, green: 0.30, blue: 0, alpha: 1)
-    })
+    /// The Color control's colour, for the readout's text (LG session, 2026-10-22): an override's words on the Source
+    /// line and an applied LUT's line, so the readout marks what the face marks. The app's yellow since 2026-10-25;
+    /// the popover follows the appearance, so in light it is the yellow's darker text variant (`AppYellow.textOnLightHex`,
+    /// ≥ 4.5:1), as the amber it replaced had a darker light variant.
+    static let assertion = Color.appYellowText
 
-    /// The Source line, its override words (when overridden) in amber.
+    /// The Source line, its override words (when overridden) in the app's yellow.
     private var sourceText: Text {
         let source = model.chain.source
         guard let words = model.chain.overriddenWords, source.hasSuffix(words) else { return Text(source) }
-        return Text(source.dropLast(words.count)) + Text(words).foregroundColor(Self.amber)
+        return Text(source.dropLast(words.count)) + Text(words).foregroundColor(Self.assertion)
     }
 
     private func row(_ label: String, _ value: String) -> some View {

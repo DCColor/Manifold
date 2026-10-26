@@ -509,7 +509,7 @@ note anything odd.
 - [ ] Hold K and hold L: plays forward at half speed until you let go of L or K. The same with J, in reverse.
 - [ ] ← / → step one frame; ⇧← / ⇧→ step one second.
 - [ ] Home / End, and ⌥← / ⌥→, go to the first and last frame. On the MacBook Air, also try Fn-← and Fn-→.
-- [ ] ⌘L turns looping on and off; the loop button turns green.
+- [ ] ⌘L turns looping on and off; the loop button turns yellow (green until 2026-10-26; green is now for live only).
 - [ ] Typing digits opens timecode entry. While it's open, Space, J/K/L, D and the arrows do nothing behind it.
       Esc cancels and Return goes.
 - [ ] ⌘F enters and leaves full screen, like ⌃⌘F and fn-F.
@@ -789,6 +789,6 @@ window. Judge anything by eye on the LG. Keys are written in `code` here so that
 
 **The window and the bar.**
 - [ ] Customise one shortcut: the dot's tooltip says "Customized", and the line at the bottom explains the dot.
-- [ ] The pin is in the accent colour when pinned and white when not.
+- [ ] The pin is yellow (#FFE600, the app's one yellow; was the accent colour until 2026-10-26) when pinned and white when not.
 - [ ] Hover the speaker, then drag the fader from 0 to full and back, slowly across the middle: nothing moves
       sideways, and the play button never takes the pointer.

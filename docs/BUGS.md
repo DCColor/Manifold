@@ -239,7 +239,7 @@ held back until after release, and the numbered defect entries follow.
    - **I2 — SDI 1080i:** 1080i50, 1080i59.94 and 1080i60 in the mode table, the picker and Follow source;
      fields sent untouched. An interlaced 50/59.94/60 frame rate is halved to 25/29.97/30, logged.
      Bottom-field-first HD files are sent untouched, with a warning. **Built and run unattended on the SDI and HDMI
-     loops 2026-10-25 (commit `<commit — to be filled in>`)** (`INTERLACED_FINDINGS.md` §11): every interlaced fixture
+     loops 2026-10-25 (commit `ca4d868`)** (`INTERLACED_FINDINGS.md` §11): every interlaced fixture
      locks 1080i at its rate, upper field first, on both inputs; received frames byte-identical to the read-back;
      fields in temporal order over 374–456 fields per run (0 swapped); pictures byte-identical to HEAD; no vertical
      scaling of an interlaced picture. The reference-monitor half of §9 P5 is still to do (attended).
@@ -291,6 +291,51 @@ held back until after release, and the numbered defect entries follow.
    - **User guide:** three entries for Robbie's flagged priority in `USER_GUIDE_SYNC.md`, *Notes for the editor ▸
      Sections still to write*.
    - "color", not Robbie's "colour", in the new strings: the user-facing strings are American English.
+   ✅ **One app yellow, and halved-rate stepping (Robbie, 2026-10-25 / 26; I2 decision).** Built and tested 2026-10-26,
+   in the app the same evening, commit `<commit — to be filled in>`. Predictions: `build/token-step/predictions.md`,
+   `predictions-2.md`.
+   - **One yellow, #FFE600**, the playhead's, defined once: `AppYellow` (`Packages/ManifoldCore/Sources/PlayheadSlider/
+     PlayheadSlider.swift`), `Color.appYellow` in the app (`App/AppYellow.swift`). It marks something turned on or
+     asserted: the pin when pinned (was the accent colour), the playhead's default, the Color control's face when
+     overridden or a LUT is applied (was amber), the chain readout's override words and LUT line (was amber), the
+     hold-to-compare badge (was amber), and Loop when on (was green). Green is kept for live only: the DeckLink output
+     button while output runs, and the connected-stream button. The other greens (captions on, the reload button's
+     highlight, the scopes tray open, the Inspector's monitored track) and every `Color.accentColor` (the framing-guide
+     and empty-state radio marks, the edited stream row, the customised-shortcut dot) now read the yellow. The Bypass
+     badge and the warnings stay amber.
+   - **The playhead colour setting** keeps working and changes the playhead only: every other use stays #FFE600
+     (decided in the brief). Only Settings and the scrubber read `manifold.playhead.lineColor`.
+   - **Text on a light background (Robbie, 2026-10-26):** text whose background follows the appearance uses a darker
+     variant in LIGHT appearance only, **#645A00** (`AppYellow.textOnLightHex`, the same hue darkened): WCAG contrast
+     6.99:1 on white, 5.92:1 on #ECECEC, 4.53:1 on #D0D0D0 (computed; a popover's material cannot be read without a
+     screenshot, so #D0D0D0 is a bound darker than a light popover). That is the chain readout's override words and LUT
+     line, and nothing else (`Color.appYellowText`). Icons, the playhead, the pin, Loop, the compare badge and the Color
+     control's face (text on the always-dark control bar) stay #FFE600 in both appearances.
+   - **Not tinted (decided):** controls macOS draws itself (switches, segmented pickers, menu and list highlights, focus
+     rings, text selection) still follow the accent colour.
+   - **Halved-rate stepping:** on a file whose rate decision 3 halved, one step is one frame of the halved rate (two of
+     the file's samples): `FrameEngine.frameGrid` is the track's grid taken in pairs (`FrameGrid.pairingSamples`) when
+     `VideoMetadata.frameRateHalvedFrom` is set, else the track's grid unchanged. Seeks and `totalFrames` follow it.
+   - **Measured 2026-10-26, no app launched (Robbie grading on this machine):** code-level token check 16 / 16
+     (`build/token-step/token-check.txt`); `default.metallib` byte-identical to HEAD and no renderer, DeckLink, shader
+     or export file in the diff; stepping, HEAD's grid against the tree's on each file's own track timing, 0 of 5,921
+     presses differ on 35 files, and the halved file steps 1001/30000 s to a last index of 119 (HEAD 1001/60000 s, 239;
+     `build/token-step/stepcmp.txt`); the 5 MXF files step on libav's grid, built by unchanged code and returned
+     unchanged unless halved (none is); `swift test` 625 / 625 (HEAD 623, plus 2); warnings the same 11.
+   - **Measured in the app, 2026-10-26 evening** (`build/token-step/eve/`; HEAD-M = `ca4d868` plus the same DEBUG
+     measurement hooks, nothing else): the 20-file export set (`.png`, `.v210`, `.rgba16f`, `.v210.json`) 80 / 80
+     byte-identical to HEAD-M, again after the DeckLink pull fix below; stepping through `MANIFOLD_DEBUG_STEPS`, 12 presses
+     on the progressive control, `mark-prores-1080i5994-tff.mov` and the halved file: every press on the same frame and
+     time as HEAD-M, and the halved file's single presses where HEAD-M's doubled presses land, 144 / 144 exports
+     byte-identical (the end clamp included: sample 238, the tree's last frame, and 239, HEAD's, are the same picture).
+     Token check 19 / 19 with the text variant (`build/token-step/token-check2.txt`); unit test resolves #FFE600 / #645A00
+     in dark / light. Accessibility, both appearances (per-app launch argument; the system stays Dark): the pin reads
+     "Unpin controls" when pinned; the override reached the readout ("overridden (709)", `[CHAIN]` log). Loop's state and
+     the readout popover are not exposed to Accessibility, and no Accessibility attribute carries a colour.
+   - **For Robbie by eye, on the LG:** the readout's override words and LUT line in light appearance (#645A00, an olive:
+     is it still "the yellow"?); the yellow face and words on the control bar over a bright picture (the HUD is 55 %
+     black, so over white video #FFE600 is about 3.8:1 and the bar's white text about 4.7:1, estimated as #737373 behind); the compare badge;
+     Loop, captions, tray and reload in yellow beside the green DeckLink and stream buttons.
 4. **The release gate:**
    - the sync leftovers;
    - the user guide, including a note that an interlaced NDI source is deinterlaced by the NDI SDK before
@@ -1275,6 +1320,15 @@ to send Export Diagnostics for a sync problem.
     line: a wake not followed by a tick within 500 ms is logged with the link's state. Both
     `MetalVideoRenderer.swift`, `#if DEBUG`. The `[IDLE] ⚠️ display link would not restart … recreating it` lines are
     NOT this hook: they ship, once per refused restart.
+  - **`MANIFOLD_DECKLINK_CADENCE_LOG=1`** (launch environment, added 2026-10-26, the repeat-then-skip investigation):
+    a `[CADENCE]` line per scheduled frame (its host time, the handed frame's pts, the front's age, the source clock), a
+    `[CADENCE-SWAP]` line per front swap, and the first 8 completions' result and stream time. `DeckLinkService.swift`
+    (`cadenceLog`), `MetalVideoRenderer.swift` (`deckLinkFrontForCadence`, `deckLinkFrontSwapHost`), `DeckLinkBridge.mm`
+    (`ScheduledFrameCompleted`), all `#if DEBUG`.
+  - **`MANIFOLD_DEBUG_STEPS="1,1,-1,…"`** (launch environment, added 2026-10-26, halved-rate stepping): after a file
+    loads, presses each step through `FrameEngine.stepFrame(by:)` 1.5 s apart and writes the support export after each,
+    because frame steps are key-only and the drivers send no keystrokes. `App/DebugStepHook.swift` and one call in
+    `ContentView`'s `currentURL` observer, `#if DEBUG`.
 - **Gating:** all eleven `#if DEBUG` (ten, plus `MANIFOLD_FRAME_EXPORT_DIR`, since the v210 dump ships): absent
   from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
@@ -2001,7 +2055,7 @@ it, or quits, the card should hold black whatever its idle setting, and the last
 
 ---
 
-## ✅ FIXED 2026-10-25 (commit `<commit — to be filled in>`) — REGRESSION FROM `b418161` (unreleased) — a window's display link could fail to restart after idling, so the window and the DeckLink output stayed on the last or neutral frame
+## ✅ FIXED 2026-10-25 (commit `0501067`) — REGRESSION FROM `b418161` (unreleased) — a window's display link could fail to restart after idling, so the window and the DeckLink output stayed on the last or neutral frame
 
 **Fixed 2026-10-25** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 HDMI follow-up*). Found by the HDMI loopback (`23070cb`).
 
@@ -2037,6 +2091,113 @@ it, or quits, the card should hold black whatever its idle setting, and the last
     recovered, no silent-link restarts, watchdog 0. Idle CPU was not re-measured on it (no per-tick work changed).
 
 ---
+
+## ✅ FIXED 2026-10-26 (commit `<commit — to be filled in>`; files only) — PRE-EXISTING, ALL BUILDS — DeckLink: during file playback the card is now and then handed the same frame twice, then the frame after next
+
+**Fixed 2026-10-26, measured on the loops the same evening** (`build/token-step/eve/`, predictions
+`build/token-step/predictions-3.md`, written before each build):
+
+- **Cause, confirmed** (`MANIFOLD_DECKLINK_CADENCE_LOG`, the pull and every front swap timed): the card took whatever frame
+  was in front at its pull, and a frame reaches the front 0.5–12.2 ms after it is due (the display tick it renders on,
+  then the convert; LG at 120 Hz). When the pull fell inside that spread, it landed on either side of a swap. Of the
+  repeats away from a Play's edges, **182 of 183** (H.264 1080p29.97, 30 starts) and **47 of 49** (ProRes 1080i59.94,
+  15 starts) came at a pull where the next frame was already due (by 0.9–10.6 ms) and not yet in front; every skipped
+  frame had been in front between the two pulls (the renderer showed it; the pull missed it). This run's rate was far
+  higher than the I2 runs': repeats away from edges in 13 of 36 H.264 and 5 of 31 ProRes segments. The prediction's
+  band (≥ 90 % within 2 ms of a swap) was wrong: 62 % were, because the spread is ~10 ms of tick quantisation, not ~1 ms
+  of jitter. The convert gate is not involved.
+- **Fix** (`MetalVideoRenderer`, `deckLinkRingCount` and `deckLinkPullSlotLocked`): the converted frames are kept in a ring
+  of 4 with their source pts. While a FILE plays, the pull hands the card the newest frame due at least the margin
+  (median display tick + 10 ms: 18.3 ms at 120 Hz, 26.7 ms at 60 Hz) before the slot's time on the source clock. The
+  slot's time comes from a slot timeline, not from the callback (callbacks: sd 1.3 ms, up to 26 ms late, two 0.44 ms
+  apart), and never an older frame than the one handed last unless that one is ahead of the clock (a loop's wrap, a seek
+  back). ±2 ms hysteresis toward one new frame per pull absorbs the slot clock's 0.4 ms wobble. Paused, stepping,
+  seeking, a fast shuttle: the newest frame, as before; a pause catches up one frame per pull. SDI audio aligns to the
+  frame handed (`currentDeckLinkSourcePts`), so SDI audio and picture stay together. **Live sources are unchanged**
+  (`setDeckLinkPullByTime(false)`): the timed pull is not verified on a live server (CLAUDE.md), the next step if wanted.
+- **Proof** (fix v4; v1–v3 failed their bands and are recorded in the predictions file): every consecutive pair of pulls
+  classified (`build/token-step/stream.py`), 30 H.264 1080p29.97 starts and 15 ProRes 1080i59.94 starts, 23,262 pulls:
+  **0 mid-play repeats, 0 mid-play skips, 0 pause skips, 0 Play-start skips** (baseline, same files: 179 + 47 repeats,
+  184 + 49 skips). Left, all by design and in the baseline too: one held pull at each Play start (the paused frame until
+  the next is due), the file's last frame held until a loop restarts, and the pull on which a pause lands. With a
+  per-start baseline rate of ~36 % (H.264), 30 + 15 starts with none has a chance below 1e-9 if nothing had changed.
+  **late = 0, dropped = 0** in every run. Pictures: through the SDI loop, 249 / 249 marker pictures in common with HEAD-M
+  have identical full-frame FNVs (205 / 205 with the I2 night run of the same code); the export set 80 / 80 and the step
+  exports 144 / 144 byte-identical to HEAD-M.
+- **⚠️ SDI LATENCY: +11 ms for files.** The picture's age at the card's pull (source clock − handed pts), mean over all
+  settled pulls: H.264 1080p29.97 23.90 → 35.81 ms (**+11.9 ms**), ProRes 1080i59.94 23.37 → 33.80 ms (**+10.4 ms**). Per
+  Play start it still depends on the phase at Play: 7.5–34.1 ms before, 17.9–49.9 ms after. Measured at 120 Hz; at
+  60 Hz the margin is 8.4 ms longer. SDI audio follows the picture. **The A/V offset defaults are not changed: re-measure
+  SDI sync for files** (the window's picture and sound are untouched).
+- Not changed: the window, the scopes, the export, the convert and its kernels, live sources.
+
+**Investigation as written before the fix (2026-10-26, morning):**
+
+
+- **What:** on SDI and HDMI, a whole frame is repeated and the next one skipped, in short bursts. Fields are never split.
+  The card reports `late=0 dropped=0` throughout.
+- **Measured from the bridge read-back** (the DEBUG `[SIGNAL-TRACE] pixels changed at scheduled frame #n` lines of the
+  2026-10-25 I2 marker runs; no output started for this; `build/token-step/readback-repeats.py` and `.txt`). During
+  playback every scheduled frame should carry new pixels; a scheduled index with none is a repeat at the card's input:
+
+  | Run | Mode | Repeats | Frames after Play |
+  |---|---|---|---|
+  | tree, H.264 MBAFF TFF, HDMI | 1080i59.94 | 5 | 68, 76, 82, 84, 88 |
+  | tree, ProRes BFF, SDI | 1080i59.94 | 2 | 99, 204 |
+  | HEAD `6a39299`, ProRes BFF, HDMI | 1080p29.97 | 9 | 106, 124, 134, 138, 211, 226, 231, 233, 235 |
+  | the other 16 runs (tree 12, HEAD 4) | 1080i50 / 59.94 / 60, 1080p29.97 | 0 | — |
+
+  The read-back's repeats are the capture's: in the H.264 HDMI run the capture's repeats sit at received frames 2, 10,
+  16, 18 and 22, the same gaps (8, 6, 2, 4) as the read-back's. So the card sends what it is given: **the repeats are in
+  what is handed to the card.**
+- **Correction to I2's report:** not "in the first 0.8 s after Play" (that was from the capture's start). They come 2.3–
+  2.9 s after Play (H.264 HDMI), 3.3 s and 6.8 s (ProRes BFF SDI), 3.5–7.8 s (HEAD). Bursts: repeats 2–8 frames apart
+  across 20–32 frames; the two runs with two bursts both have them 105 frames apart.
+- **Which sources and modes:** 3 of 19 runs. H.264 MBAFF and ProRes BFF, at 1080i59.94 and 1080p29.97. None in the
+  runs at 50 or 60, with DNxHD, or at 1440×1080, but those are 10 runs: too few to say it is source- or mode-specific.
+  The same file had none on the other connector, so it varies per start, not per file.
+- **Where frames are handed to the card:** `ScheduledFrameCompleted` (`App/DeckLink/DeckLinkBridge.mm`) refills the
+  frame just completed and schedules it 4 frames ahead. Its fill (the fill block in `DeckLinkService.startOutputOnQueue`
+  → `MetalVideoRenderer.copyLatestDeckLinkFrame`) copies whichever converted frame is in front at that instant. The front
+  changes when a render (driven by the display link, ticking every 8.33 ms on the LG, max 9.35 ms) completes and its
+  v210 convert completes (`pushDeckLinkConvert`, one in flight).
+- **Cause, probable, not proven:** the pull runs on the card's clock, and the front swaps at a time set by the display
+  tick and the render. When the swap instant drifts across the pull instant, tick jitter decides, frame by frame, whether
+  the pull sees the frame before the swap or after it. The result is a repeat then a skip, in bursts, and only on starts
+  whose phase brings the two together, which fits 3 of 19. The convert gate is an unlikely cause: converts finish in
+  under 5 ms (`latMs` max 4.51) against a 33 ms frame. The 105-frame spacing does not match the 120 Hz tick against
+  29.97 (250 frames), so **what moves the phase is UNKNOWN**.
+- **To confirm (needs output running, no loopback cable):** apply `build/token-step/cadence-instrumentation.patch`
+  (DEBUG; `MANIFOLD_DECKLINK_CADENCE_LOG=1`; compiled against `ca4d868`, the same 11 warnings). It logs one `[CADENCE]`
+  line per scheduled frame, with its host time, the front frame's source pts, and how long before the pull the front
+  changed (`swapAgo`). The hypothesis predicts every repeat at a pull where `swapAgo` is near 0, and `swapAgo` drifting
+  through 0 across each burst. If repeats come with a large `swapAgo`, it is wrong.
+- **Proposed fix, after confirmation:** stop taking "the latest". Keep a small ring (3–4) of converted frames with their
+  source pts, and fill scheduled frame n with the frame due at n's time (the source time the timebase gives that slot,
+  less a fixed half frame), so the choice no longer depends on when a swap happened. Cost: up to half a frame more SDI
+  latency, which the SDI A/V offset must be re-measured for.
+
+## ☐ OPEN — PRE-EXISTING (seen 2026-10-25 and in an S7 run) — DeckLink: the first scheduled frame of an output start is now and then reported Dropped
+
+- **What:** 2 of the 532 output starts logged under `build/` (0.4 %) report their FIRST scheduled frame Dropped (`DeckLink
+  D3: !! Dropped at frame 4`: the line names the index being refilled, so the frame dropped is #0). Both were paused
+  starts, before any Play: the I2 progressive control (`prores-1080p2997-control.mov`, 1080p29.97, tree; HEAD showed none
+  in its one run) and an S7 stall run (`build/s7-5b/stall-pre`, 2160p23.98, before I2). No other drop in the first 48
+  frames of any start.
+- **Effect:** frame #0 is not displayed. On a paused start frames #0–#3 hold the same picture, so the output shows that
+  picture one frame later. Nothing else.
+- **Where:** the preroll schedules frames #0–#3 at stream times 0–3, then `StartScheduledPlayback(0, …)`
+  (`DeckLinkBridge.mm`, `preroll` and the start after it). The likely reading is that playback began too close to the
+  card's next frame boundary to show #0, but the logs carry no stream time, so the **cause is UNKNOWN**.
+- **To confirm:** the same patch logs the first 8 completions' result, the stream time and each frame's completion
+  timestamp (`GetFrameCompletionReferenceTimestamp`), so a frame-#0 drop can be placed against the card's clock.
+- **Proposed fix:** none until the timestamps show where it lands. If it is the start race, preroll from one frame after
+  the playback start time, so the card has a frame of slack.
+- **Measured 2026-10-26 evening, not reproduced:** 50 output starts with the first completions timed (40 paused starts of
+  the progressive control, 10 starts in the cadence runs): frame #0 completed 50 / 50 times, its completion callback
+  0.13–0.33 ms after its interval ended; no other Dropped or DisplayedLate. At the 0.4 % rate, 50 starts expect 0.2
+  drops, so this neither confirms nor rules out the start race. **Cause UNKNOWN; not fixed.** The patch's completion
+  lines stay (DEBUG, pre-ship list) for the next time it appears.
 
 ## ⏸ PARKED 2026-10-25 — KNOWN LIMITATION (S7-5 HDMI loopback) — DeckLink: HLG is not signalled on HDMI to this sink; no SDK route changes it
 
@@ -3424,7 +3585,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `<commit — to be filled in>`** (below). Open for files: the reference-monitor check (§9 P5, attended) and field-correct colour (P6, I3).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended) and field-correct colour (P6, I3).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -3478,7 +3639,7 @@ Streams are I6, after 1.0. The decisions:
   source is cleared, logging `[EDR] … AFTER a frame was already on screen` and a `[MATRIX]` line against the cleared
   state (2 of 5 runs).
 
-**I2 (SDI 1080i, files), built and run unattended on the loops 2026-10-25, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §11):
+**I2 (SDI 1080i, files), built and run unattended on the loops 2026-10-25, commit `ca4d868`** (`INTERLACED_FINDINGS.md` §11):
 - an interlaced 1080-line file at 25 / 29.97 / 30 frames goes out at 1080i50 / 1080i59.94 / 1080i60 under Follow
   source, whatever its width; the three modes are in the picker; the bridge names the mode from its field dominance;
 - the woven frame is sent untouched. A BFF file is not re-ordered (decision 2): its fields arrive top N+1, bottom N on the
@@ -3488,10 +3649,12 @@ Streams are I6, after 1.0. The decisions:
   row, with an advisory;
 - an interlaced file reporting 50 / 59.94 / 60 is halved (decision 3), logged `[SCAN] rate:`; the Inspector's Frame Rate
   row gives the field rate;
-- stepping is unchanged: one step is one coded frame (two fields). On a file whose rate was halved, the step grid still
-  follows the file's own samples (§11 finding 3);
+- stepping: one step is one coded frame (two fields). On a file whose rate was halved, a step is one frame of the
+  halved rate since 2026-10-26 (commit `<commit — to be filled in>`; release scope, *One app yellow, and halved-rate
+  stepping*), where `ca4d868` stepped one of the file's samples (§11 finding 3);
 - seen during the runs, pre-existing (HEAD too): the file → card pull now and then repeats one whole frame and skips the
-  next (2 of 14 tree runs, 1 of 5 HEAD runs); fields are never split.
+  next (2 of 14 tree runs, 1 of 5 HEAD runs); fields are never split. Fixed for files 2026-10-26 (commit `<commit — to be filled in>`): *the card is
+  now and then handed the same frame twice*, below.
 
 **Done means (files, 1.0):**
 - scan type and field order reach the mode decision from the file's own bitstream and container (I1 detects them;

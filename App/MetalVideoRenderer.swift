@@ -421,9 +421,52 @@ final class MetalVideoRenderer {
     private let deckLinkScaledPipelineState: MTLComputePipelineState?
     private let deckLinkCommandQueue: MTLCommandQueue
     private let deckLinkLock = NSLock()
-    private var deckLinkStaging: [MTLBuffer] = []      // 2 buffers; [frontIndex] is complete, [1-front] is written
+    private var deckLinkStaging: [MTLBuffer] = []      // the ring (`deckLinkRingCount`); [frontIndex] is the newest
     private var deckLinkFrontIndex = 0
     private var deckLinkFrameReady = false             // front holds a complete converted frame
+
+    // ── THE CARD GETS THE FRAME DUE AT ITS SLOT, NOT THE LATEST (docs/BUGS.md, 2026-10-26) ─────────────────────────
+    // A frame reaches the front 0.5–11 ms after it is due (the display tick it renders on, then the convert). The card
+    // used to take whatever was in front at its pull, so whenever its pull fell inside that spread the pulls landed on
+    // either side of a swap: the same frame twice, then a skip. Measured: at 182 of 183 repeats the next frame was
+    // already due and not yet in front. Now the converted frames are kept in a ring with their source pts, and while a
+    // FILE plays the pull hands over the newest frame due at least `deckLinkPullMargin` before the slot's time, read
+    // from a slot timeline that ignores the callback's own jitter. Paused (the clock still), a live source, or anything
+    // the timed choice cannot serve gets the newest frame, as before.
+    static let deckLinkRingCount = 4
+    private var deckLinkSlotPts: [Double] = []         // per ring slot: source pts of its frame, NaN while empty/written
+    private var deckLinkSlotSignal: [OutputSignal] = []
+    private var deckLinkSlotSeq: [UInt64] = []         // completion order; the newest slot has the largest
+    private var deckLinkSeq: UInt64 = 0
+    /// Pull by time only for a file (`setDeckLinkPullByTime`, DeckLinkService with each source format). A live source
+    /// keeps the newest-frame pull until the change is verified on a non-Cloudflare server (CLAUDE.md).
+    private var deckLinkPullByTime = false
+    /// One card frame in seconds (the output mode's), for the slot timeline. 0 = unknown: newest-frame pull.
+    private var deckLinkCardFrame: Double = 0
+    /// Slot timeline: each pull's host time less its slot index × one card frame, over the last 64 pulls. Its MINIMUM
+    /// is the timeline: a callback is only ever late (measured: sd 1.3 ms, up to 26 ms late, two pulls 0.44 ms apart).
+    private var deckLinkSlotOffsets: [Double] = []
+    private var deckLinkLastPull: (host: Double, clock: Double)?
+    private var deckLinkLastPullTimed = false
+    /// The source pts of the frame last handed to the card: what is on the wire (`currentDeckLinkSourcePts`).
+    private var deckLinkHandedPts: Double = .nan
+    /// Recent display-tick intervals while output runs; their median sets the pull margin.
+    private var deckLinkTickIntervals: [Double] = []
+    private var deckLinkLastTick: Double = 0
+    #if DEBUG
+    /// [CADENCE] (MANIFOLD_DECKLINK_CADENCE_LOG=1): the host time the front buffer last changed. Measurement only.
+    private var deckLinkFrontSwapHost = Double.nan
+    func deckLinkFrontForCadence() -> (pts: Double, host: Double, swapAgoMs: Double, clock: Double) {
+        let source = clock?() ?? .nan
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        let now = CACurrentMediaTime()
+        let handed = deckLinkHandedPts.isFinite ? deckLinkHandedPts : deckLinkFrontPts
+        return (deckLinkFrameReady ? handed : .nan, now, (now - deckLinkFrontSwapHost) * 1000, source)
+    }
+    /// [CADENCE] every front swap: its host time and source pts, so a frame that was in front between two pulls and
+    /// never pulled can be told from one that never reached the front.
+    static let cadenceLog = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] == "1"
+    #endif
     private var deckLinkConverting = false             // one-in-flight gate (push path)
     private var deckLinkActive = false                 // only convert while DeckLink output is running
     private var deckLinkOutputSize: (w: Int, h: Int)?  // DeckLink output frame dims (e.g. 3840x2160)
@@ -2865,6 +2908,7 @@ final class MetalVideoRenderer {
     /// Called each display refresh (on the CVDisplayLink thread). Picks the
     /// newest frame whose PTS <= current playback time and renders it.
     private func displayTick() {
+        noteDeckLinkTick(CACurrentMediaTime())   // the pull margin's tick (`deckLinkPullMarginLocked`)
         #if DEBUG
         // DISPLAY-LINK CADENCE: stamp the interval since the previous tick BEFORE any work, so it
         // measures the callback's arrival cadence, not how long this tick takes. See rpLastTickWall.
@@ -4138,15 +4182,18 @@ final class MetalVideoRenderer {
 
     // MARK: - DeckLink output (D-real: RGB offscreen → v210 10-bit, push-on-render, pull-latest)
 
-    /// Begin DeckLink output for a fixed output frame size. Allocates the double-buffered .shared
-    /// staging pair (dst v210 = rowBytes*height each) and arms the push convert. Called from the App
-    /// (DeckLinkService) when scheduled playback starts. Idempotent.
-    func beginDeckLinkOutput(width: Int, height: Int) {
+    /// Begin DeckLink output for a fixed output frame size. Allocates the ring of .shared staging buffers (dst v210 =
+    /// rowBytes*height each, `deckLinkRingCount` of them) and arms the push convert. `frameDuration` is one card frame in
+    /// seconds, for the pull's slot timeline. Called from the App (DeckLinkService) when scheduled playback starts.
+    /// Idempotent.
+    func beginDeckLinkOutput(width: Int, height: Int, frameDuration: Double) {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         let rowBytes = Self.v210RowBytes(width: width)
-        if deckLinkOutputSize?.w != width || deckLinkOutputSize?.h != height || deckLinkStaging.count != 2 {
+        if deckLinkOutputSize?.w != width || deckLinkOutputSize?.h != height || deckLinkStaging.count != Self.deckLinkRingCount {
             let bytes = rowBytes * height   // v210: full padded rows
-            deckLinkStaging = (0..<2).compactMap { _ in device.makeBuffer(length: bytes, options: .storageModeShared) }
+            deckLinkStaging = (0..<Self.deckLinkRingCount).compactMap { _ in
+                device.makeBuffer(length: bytes, options: .storageModeShared)
+            }
             deckLinkOutputSize = (width, height)
             deckLinkRowBytes = rowBytes
         }
@@ -4155,7 +4202,9 @@ final class MetalVideoRenderer {
         deckLinkConverting = false
         deckLinkResMismatchLogged = false
         deckLinkFrontPts = .nan          // no frame on the wire yet → audio has nothing to align to
-        deckLinkActive = (deckLinkStaging.count == 2)
+        resetDeckLinkRingLocked()
+        deckLinkCardFrame = frameDuration > 0 ? frameDuration : 0
+        deckLinkActive = (deckLinkStaging.count == Self.deckLinkRingCount)
     }
 
     /// DeckLink queue, after `beginDeckLinkOutput`, only while PAUSED: ask for one render of the current frame and
@@ -4198,6 +4247,58 @@ final class MetalVideoRenderer {
         deckLinkLock.lock(); deckLinkSourceInterlaced = interlaced; deckLinkLock.unlock()
     }
 
+    /// True for a file: the pull hands the card the frame due at its slot (see `deckLinkRingCount`). False for a live
+    /// source, which keeps the newest-frame pull. Written on main by DeckLinkService with each source format.
+    func setDeckLinkPullByTime(_ byTime: Bool) {
+        deckLinkLock.lock(); deckLinkPullByTime = byTime; deckLinkLock.unlock()
+    }
+
+    /// Empty ring, no pull history. Called with `deckLinkLock` held.
+    private func resetDeckLinkRingLocked() {
+        deckLinkSlotPts = Array(repeating: .nan, count: Self.deckLinkRingCount)
+        deckLinkSlotSignal = Array(repeating: .sdr709, count: Self.deckLinkRingCount)
+        deckLinkSlotSeq = Array(repeating: 0, count: Self.deckLinkRingCount)
+        deckLinkSlotOffsets.removeAll(keepingCapacity: true)
+        deckLinkLastPull = nil
+        deckLinkLastPullTimed = false
+        deckLinkHandedPts = .nan
+    }
+
+    /// The slot the next convert writes: an empty one, else the oldest. Called with `deckLinkLock` held.
+    private func deckLinkWriteSlotLocked() -> Int {
+        if let empty = deckLinkSlotPts.indices.first(where: { deckLinkSlotPts[$0].isNaN }) { return empty }
+        return deckLinkSlotSeq.indices.min(by: { deckLinkSlotSeq[$0] < deckLinkSlotSeq[$1] }) ?? 0
+    }
+
+    /// A convert completed: its slot now holds that frame. Called with `deckLinkLock` held.
+    private func publishDeckLinkSlotLocked(_ slot: Int, pts: Double, signal: OutputSignal) {
+        guard slot < deckLinkSlotPts.count else { return }
+        deckLinkSeq &+= 1
+        deckLinkSlotPts[slot] = pts.isFinite ? pts : -.infinity   // a frame without a pts is never chosen by time
+        deckLinkSlotSignal[slot] = signal
+        deckLinkSlotSeq[slot] = deckLinkSeq
+    }
+
+    /// Display link thread, while output runs: the tick interval, for the pull margin.
+    private func noteDeckLinkTick(_ now: Double) {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        guard deckLinkActive else { deckLinkLastTick = 0; return }
+        if deckLinkLastTick > 0, case let dt = now - deckLinkLastTick, dt > 0.002, dt < 0.05 {
+            deckLinkTickIntervals.append(dt)
+            if deckLinkTickIntervals.count > 32 { deckLinkTickIntervals.removeFirst() }
+        }
+        deckLinkLastTick = now
+    }
+
+    /// How long before a slot's time its frame must have been due: one display tick (the frame renders on the first
+    /// tick after it is due) plus 10 ms for the render and the convert. Measured on the LG at 120 Hz: a frame reached
+    /// the front 0.5–10.9 ms after it was due, so 18.3 ms leaves 7.4 ms. 1/60 s is assumed until ticks are seen.
+    private var deckLinkPullMarginLocked: Double {
+        let sorted = deckLinkTickIntervals.sorted()
+        let tick = sorted.isEmpty ? 1.0 / 60 : sorted[sorted.count / 2]
+        return tick + 0.010
+    }
+
     /// Clear the one-in-flight gate; if output has stopped meanwhile, release the scaler now that nothing reads it
     /// (F5). Every path that ends a convert comes through here. Called with `deckLinkLock` held.
     private func endDeckLinkConvertLocked() {
@@ -4235,6 +4336,7 @@ final class MetalVideoRenderer {
         deckLinkOutputSize = nil
         deckLinkRowBytes = 0
         deckLinkFrontPts = .nan
+        resetDeckLinkRingLocked()
         let wasMismatched = deckLinkResMismatchLogged
         deckLinkResMismatchLogged = false
         let hadPlacement = deckLinkLastPlacement != nil
@@ -4266,10 +4368,11 @@ final class MetalVideoRenderer {
             if deckLinkConverting { v210Skipped += 1 }
         }
         #endif
-        guard deckLinkActive, !deckLinkConverting, deckLinkStaging.count == 2,
+        guard deckLinkActive, !deckLinkConverting, deckLinkStaging.count == Self.deckLinkRingCount,
               let outSize = deckLinkOutputSize else { deckLinkLock.unlock(); return }
-        let backIndex = 1 - deckLinkFrontIndex
+        let backIndex = deckLinkWriteSlotLocked()
         let back = deckLinkStaging[backIndex]
+        deckLinkSlotPts[backIndex] = .nan   // being written: no pull may choose it
         deckLinkConverting = true
         deckLinkLock.unlock()
 
@@ -4345,8 +4448,13 @@ final class MetalVideoRenderer {
             // SOURCE pts is published in the SAME critical section as the pixels it belongs to, so the
             // audio callback can never pair a source time with the wrong frame (D4b-2).
             self.deckLinkFrontIndex = backIndex
+            #if DEBUG
+            let swapHost = CACurrentMediaTime()
+            self.deckLinkFrontSwapHost = swapHost
+            #endif
             self.deckLinkFrontPts = sourcePts
             self.deckLinkFrontSignal = frameOutput.signal
+            self.publishDeckLinkSlotLocked(backIndex, pts: sourcePts, signal: frameOutput.signal)
             #if DEBUG
             // The SOURCE time the card is now being fed. Tracked as a span so the `[V210]` line can
             // say whether SDI actually swept the dragged range — "converts happened" and "the wire
@@ -4360,6 +4468,9 @@ final class MetalVideoRenderer {
             self.deckLinkFrameReady = true
             self.endDeckLinkConvertLocked()
             self.deckLinkLock.unlock()
+            #if DEBUG
+            if Self.cadenceLog { print(String(format: "[CADENCE-SWAP] host %.6f pts %.6f", swapHost, sourcePts)) }
+            #endif
         }
         cmd.commit()
     }
@@ -4461,8 +4572,13 @@ final class MetalVideoRenderer {
             // The same publication as the native path: pixels, source pts and signal in one critical section.
             self.deckLinkLock.lock()
             self.deckLinkFrontIndex = backIndex
+            #if DEBUG
+            let swapHost = CACurrentMediaTime()
+            self.deckLinkFrontSwapHost = swapHost
+            #endif
             self.deckLinkFrontPts = sourcePts
             self.deckLinkFrontSignal = frameOutput.signal
+            self.publishDeckLinkSlotLocked(backIndex, pts: sourcePts, signal: frameOutput.signal)
             #if DEBUG
             if sourcePts.isFinite {
                 self.v210PtsMin = self.v210PtsMin.isFinite ? min(self.v210PtsMin, sourcePts) : sourcePts
@@ -4472,6 +4588,9 @@ final class MetalVideoRenderer {
             self.deckLinkFrameReady = true
             self.endDeckLinkConvertLocked()
             self.deckLinkLock.unlock()
+            #if DEBUG
+            if Self.cadenceLog { print(String(format: "[CADENCE-SWAP] host %.6f pts %.6f", swapHost, sourcePts)) }
+            #endif
         }
         cmd.commit()
     }
@@ -4483,7 +4602,9 @@ final class MetalVideoRenderer {
     /// this time and those pixels are always the same frame.
     func currentDeckLinkSourcePts() -> Double {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
-        return deckLinkFrameReady ? deckLinkFrontPts : .nan
+        guard deckLinkFrameReady else { return .nan }
+        // The frame last handed to the card is the one on the wire (since 2026-10-26 it can be older than the front).
+        return deckLinkHandedPts.isFinite ? deckLinkHandedPts : deckLinkFrontPts
     }
 
     /// Take the mismatch warning down, once, when the raster starts matching again. Reads and
@@ -4498,20 +4619,26 @@ final class MetalVideoRenderer {
         DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(nil) }
     }
 
-    /// PULL (DeckLink callback thread): memcpy the current FRONT staging buffer into the DeckLink
-    /// v210 frame pointer, respecting rowBytes. Returns false if no converted frame is ready yet or
-    /// dims don't match (caller fills neutral). The ONLY work on the callback thread — NO GPU wait.
-    /// The lock is held across the memcpy so the front index can't swap mid-copy (the convert's
-    /// swap + the push dispatch both take the lock), guaranteeing a tear-free complete frame.
+    /// PULL (DeckLink callback thread): memcpy a converted frame from the ring into the DeckLink v210 frame pointer,
+    /// respecting rowBytes, for scheduled frame `index`. Returns nil if no converted frame is ready yet or dims don't
+    /// match (caller fills neutral). The ONLY work on the callback thread — NO GPU wait. The lock is held across the
+    /// memcpy, and a slot is marked empty under the lock before a convert writes it, so the copy is tear-free.
     ///
-    /// Colour S7 (D1): returns the frame's own output signal, read under the same lock as its pixels; nil means
-    /// nothing was copied.
-    func copyLatestDeckLinkFrame(into dst: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int) -> OutputSignal? {
+    /// WHICH FRAME (see `deckLinkRingCount`): while a file plays, the newest frame due at least the pull margin before
+    /// this slot's time on the source clock, never one older than the frame handed last; paused, a live source, or with
+    /// no frame to serve that, the newest frame, as before 2026-10-26.
+    ///
+    /// Colour S7 (D1): returns the frame's own output signal, read under the same lock as its pixels.
+    func copyLatestDeckLinkFrame(into dst: UnsafeMutableRawPointer, rowBytes: Int, width: Int, height: Int,
+                                 index: Int64) -> OutputSignal? {
+        let clockNow = clock?()            // before the lock: a clock takes its own
+        let host = CACurrentMediaTime()
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
-        guard deckLinkFrameReady, deckLinkStaging.count == 2,
+        guard deckLinkFrameReady, deckLinkStaging.count == Self.deckLinkRingCount,
               let outSize = deckLinkOutputSize, outSize.w == width, outSize.h == height else { return nil }
+        let slot = deckLinkPullSlotLocked(index: index, host: host, clock: clockNow)
         let srcRowBytes = deckLinkRowBytes   // v210 stride (matches the frame's; equal for 48-multiple widths)
-        let srcPtr = deckLinkStaging[deckLinkFrontIndex].contents()
+        let srcPtr = deckLinkStaging[slot].contents()
         if rowBytes == srcRowBytes {
             memcpy(dst, srcPtr, srcRowBytes * height)
         } else {
@@ -4519,7 +4646,79 @@ final class MetalVideoRenderer {
                 memcpy(dst.advanced(by: y * rowBytes), srcPtr.advanced(by: y * srcRowBytes), srcRowBytes)
             }
         }
-        return deckLinkFrontSignal
+        let pts = deckLinkSlotPts[slot]
+        deckLinkHandedPts = pts.isFinite ? pts : .nan
+        return deckLinkSlotSignal[slot]
+    }
+
+    /// The ring slot to hand over for scheduled frame `index`. Called with `deckLinkLock` held.
+    private func deckLinkPullSlotLocked(index: Int64, host: Double, clock: Double?) -> Int {
+        let newest = deckLinkFrontIndex
+        guard deckLinkPullByTime, deckLinkCardFrame > 0, let clock, clock.isFinite else {
+            deckLinkLastPull = nil
+            return newest
+        }
+        // The slot timeline: the earliest recent pull, carried forward a card frame per slot. Kept while paused, so it
+        // is settled by the time Play is pressed.
+        let slotBase = Double(index) * deckLinkCardFrame
+        deckLinkSlotOffsets.append(host - slotBase)
+        if deckLinkSlotOffsets.count > 64 { deckLinkSlotOffsets.removeFirst() }
+        let slotHost = slotBase + (deckLinkSlotOffsets.min() ?? (host - slotBase))
+        let last = deckLinkLastPull
+        deckLinkLastPull = (host, clock)
+        guard let last else { return newest }
+        let dc = clock - last.clock, dh = host - last.host
+        let handed = deckLinkHandedPts
+        let pts = deckLinkSlotPts
+        // Paused, or a pause landing (after a timed pull, the clock ran slower than real time): the frame on screen, as
+        // before, but reached one frame per pull from the frame handed last, so a pause neither holds nor skips.
+        let wasTimed = deckLinkLastPullTimed
+        deckLinkLastPullTimed = false
+        if abs(dc) < 1e-4 || (wasTimed && dc < dh - 0.002) {
+            guard handed.isFinite, pts[newest] > handed else { return newest }
+            var next = newest
+            for k in pts.indices where pts[k].isFinite && pts[k] > handed && pts[k] < pts[next] { next = k }
+            return next
+        }
+        // Timed only while the clock runs no faster than real time since the last pull: Play, including the pull on
+        // which it started from a pause. A step, a seek, a loop's wrap or a fast shuttle: the newest frame, as before;
+        // the next timed pull picks up from the frame handed then.
+        guard dc > 0, dc <= dh + 0.002 else { return newest }
+        deckLinkLastPullTimed = true
+        let target = clock - (host - slotHost) - deckLinkPullMarginLocked
+        // Never an older frame than the one handed last, unless that frame is ahead of the clock: a loop's wrap or a
+        // seek back started a new timeline, and its frames are all "older".
+        let floor = handed.isFinite && handed <= clock + deckLinkCardFrame ? handed : -Double.infinity
+        var due: Int?
+        for k in pts.indices where pts[k].isFinite && pts[k] >= floor && pts[k] <= target + 1e-4 {
+            if due.map({ pts[k] > pts[$0] }) ?? true { due = k }
+        }
+        // HYSTERESIS TOWARD ONE NEW FRAME PER PULL. The slot clock wobbles ~0.4 ms (measured), so a target that sits on a
+        // frame's due time would alternate between the two frames: a repeat, then a skip. Within `hysteresis` of the
+        // boundary, the frame after the one handed last wins. A real drift of the card against the source still moves
+        // the choice, once, when it passes the band.
+        if floor.isFinite {
+            var next: Int?
+            for k in pts.indices where pts[k].isFinite && pts[k] > floor {
+                if next.map({ pts[k] < pts[$0] }) ?? true { next = k }
+            }
+            if let next {
+                let hysteresis = 0.002
+                if due.map({ pts[$0] <= floor }) ?? true {
+                    if pts[next] <= target + hysteresis { due = next }          // would repeat
+                } else if let d = due, pts[d] > pts[next], pts[d] > target - hysteresis {
+                    due = next                                                  // would skip
+                }
+            }
+        }
+        if let due { return due }
+        // Nothing due yet: hold the frame handed last if it is still in the ring, else the earliest frame there is.
+        if floor.isFinite, let held = pts.indices.first(where: { pts[$0] == floor }) { return held }
+        var earliest: Int?
+        for k in pts.indices where pts[k].isFinite && pts[k] > target {
+            if earliest.map({ pts[k] < pts[$0] }) ?? true { earliest = k }
+        }
+        return earliest ?? newest
     }
 
     /// Unpack an rgba16Float (4 × half) buffer to 16-bit RGBA (alpha skipped/opaque).

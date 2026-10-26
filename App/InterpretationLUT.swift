@@ -8,7 +8,8 @@
 //
 //  L1 IS MINIMAL ON PURPOSE. Load LUT… and Remove LUT in the Interpretation menu, and the interpolation
 //  setting. The output space is the source's (no tag moves until L2); Recent LUTs, Bypass, the readout line,
-//  the title suffix, the amber face and the refusal banner are L3 (below; L1's alert sheet is gone).
+//  the title suffix, the coloured face (amber; the app's yellow since 2026-10-25) and the refusal banner are L3
+//  (below; L1's alert sheet is gone).
 //
 //  L2 (D3, D4): the OUTPUT SPACE. Same as Source (the default, and where a load starts unless Recent LUTs
 //  remember one for that file), a preset, or Custom. It is handed to the renderer with the LUT, through
@@ -159,15 +160,15 @@ final class InterpretationLUTModel: ObservableObject {
     /// The window title's words: "LUT name.cube", "LUT name.cube (bypassed)". nil with no LUT.
     var titleSuffix: String? { name.map { "LUT " + $0 + (bypassed ? " (bypassed)" : "") } }
 
-    /// The Color control's face: " + LUT" while applied (amber). Empty while bypassed and with no LUT; a bypassed
+    /// The Color control's face: " + LUT" while applied (the app's yellow). Empty while bypassed and with no LUT; a bypassed
     /// LUT's words are `faceBypassedWords`, drawn in their own style.
     var faceSuffix: String { isApplied ? " + LUT" : "" }
 
     /// "LUT bypassed" while bypassed, else nil. Drawn struck through and dimmed, so the face tells bypassed apart from
-    /// applied (amber) and from none (no words) — LG session, 2026-10-22: " + LUT off" read as "bypass of what?".
+    /// applied (yellow) and from none (no words) — LG session, 2026-10-22: " + LUT off" read as "bypass of what?".
     var faceBypassedWords: String? { name != nil && bypassed ? "LUT bypassed" : nil }
 
-    /// A LUT is changing the picture: the face turns amber, as an override does.
+    /// A LUT is changing the picture: the face turns the app's yellow, as an override does.
     var isApplied: Bool { lut != nil && !bypassed }
 
     // MARK: Loading

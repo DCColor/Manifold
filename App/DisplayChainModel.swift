@@ -51,9 +51,9 @@ struct DisplayChain: Equatable {
     /// (stated)" — or nil with none. `InterpretationLUTModel.readoutLine`.
     var lut: String? = nil
     /// The Source line's override words — "overridden (Override 1·1·9)", its tail — or nil when the source is not
-    /// overridden. The view draws them in the Color control's amber (LG session, 2026-10-22).
+    /// overridden. The view draws them in the Color control's colour, the app's yellow (LG session, 2026-10-22; amber until 2026-10-25).
     var overriddenWords: String? = nil
-    /// The LUT is changing the picture (loaded, not bypassed): the view draws the LUT line in amber, as the face is.
+    /// The LUT is changing the picture (loaded, not bypassed): the view draws the LUT line in the app's yellow, as the face is.
     var lutApplied: Bool = false
     /// The window's chosen mode is Reference, the only mode that reads the display's calibration: the calibration
     /// section is enabled only then (Robbie, 2026-10-24). The chosen mode, not a hold's.

@@ -879,7 +879,7 @@ final class DeckLinkService: ObservableObject {
 
         // Arm the renderer's push convert (allocate v210 staging sized to the OUTPUT frame = the mode's
         // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
-        self.renderer?.beginDeckLinkOutput(width: mode.width, height: mode.height)
+        self.renderer?.beginDeckLinkOutput(width: mode.width, height: mode.height, frameDuration: 1 / mode.standardRate)
 
         // A PAUSED picture reaches the card only if something renders it after the convert is armed: prime it here,
         // before the preroll, so frame #0 carries it (docs/BUGS.md, L4). Every start comes through here — a click,
@@ -908,12 +908,19 @@ final class DeckLinkService: ObservableObject {
         let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height, signal in
             if let r = self?.renderer,
                let s = r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
-                                                 rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+                                                 rowBytes: Int(rowBytes), width: Int(width), height: Int(height),
+                                                 index: index) {
                 signal.pointee = Self.bridgeSignal(s)
                 probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
                 #if DEBUG
                 trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: s)
                 trace?.noteCadence(index: index, sourcePts: r.currentDeckLinkSourcePts())
+                if Self.cadenceLog {
+                    // [CADENCE] scheduled index, host time of this fill, the front frame's source pts, and how long
+                    // before this fill the front last changed (ms). A repeat is a pts equal to the previous line's.
+                    let f = r.deckLinkFrontForCadence()
+                    print(String(format: "[CADENCE] #%lld host %.6f pts %.6f swapAgo %.3f clock %.6f", index, f.host, f.pts, f.swapAgoMs, f.clock))
+                }
                 dump?.note(index: index, buffer: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height),
                            placement: FrameDump.onPlacement ? r.deckLinkPlacementForDebug : nil)
                 #endif
@@ -1122,6 +1129,8 @@ final class DeckLinkService: ObservableObject {
         liveHold.end()
         // I2: the renderer keeps an interlaced picture's rows 1:1 on SDI (`SDIPlacement.fieldsKept`), in any mode.
         renderer?.setDeckLinkSourceInterlaced(scan.interlaced)
+        // A file's frames go to the card by time: the frame due at each slot (docs/BUGS.md, 2026-10-26).
+        renderer?.setDeckLinkPullByTime(true)
         resolveFileMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate, scan: scan)
         applyEffectiveMode(trigger: "file source format")
     }
@@ -1169,6 +1178,8 @@ final class DeckLinkService: ObservableObject {
         dispatchPrecondition(condition: .onQueue(.main))
         // Streams carry no scan yet (I6): a live picture is placed as progressive.
         renderer?.setDeckLinkSourceInterlaced(false)
+        // A live source keeps the newest-frame pull until the timed pull is verified on a live server (CLAUDE.md).
+        renderer?.setDeckLinkPullByTime(false)
 
         guard let format else {
             // The live source is gone. Drop the derived mode but leave `currentMode` exactly where
@@ -1412,6 +1423,11 @@ final class FirstFrameProbe: @unchecked Sendable {
 /// index at which a frame's pixels change (an FNV-1a over every 64th word of the v210) and at which its signal
 /// changes, so a run can show the two move on the same frame. The bridge's `[DeckLink] signal on scheduled frame #N`
 /// line is the tag actually applied.
+extension DeckLinkService {
+    /// Measurement only (repeat-then-skip after Play, docs/BUGS.md): one [CADENCE] line per scheduled frame.
+    static let cadenceLog = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] == "1"
+}
+
 final class SignalTrace: @unchecked Sendable {
     static let enabled = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_SIGNAL_TRACE"] == "1"
     private let lock = NSLock()

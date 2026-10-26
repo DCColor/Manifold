@@ -367,7 +367,7 @@ final class WindowDeck: ObservableObject {
     ///
     ///   6. **A live stream with a colorimetry override in force appends " — Color 2020 PQ"**, before
     ///      the A/V suffix, on every transport, NDI included (docs/COLOR_MANAGEMENT_FINDINGS.md §6.9,
-    ///      decision 4). The Color control's amber hides with the overlay HUD; this does not. Only
+    ///      decision 4). The Color control's yellow hides with the overlay HUD; this does not. Only
     ///      while this deck owns the live source, like case 5.
     ///
     ///   7. **A loaded LUT appends " — LUT name.cube"** after the colour suffix, " (bypassed)" while

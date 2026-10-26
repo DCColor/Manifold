@@ -41,6 +41,20 @@ public struct FrameGrid: Equatable, Sendable {
         self.frameCount = count
     }
 
+    private init(origin: CMTime, frameDuration: CMTime, frameCount: Int) {
+        self.origin = origin
+        self.frameDuration = frameDuration
+        self.frameCount = frameCount
+    }
+
+    /// The samples taken in pairs: frame n is sample 2n, one frame is two samples, and a trailing odd sample is
+    /// its own last frame. For an interlaced file whose sample rate decision 3 halved (docs/INTERLACED_FINDINGS.md
+    /// §5, I2): the file counts fields, so a frame is two of its samples.
+    public func pairingSamples() -> FrameGrid {
+        FrameGrid(origin: origin, frameDuration: CMTimeMultiply(frameDuration, multiplier: 2),
+                  frameCount: (frameCount + 1) / 2)
+    }
+
     /// The last frame's index. Stepping's ceiling.
     public var lastIndex: Int { frameCount - 1 }
 

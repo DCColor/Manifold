@@ -174,7 +174,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// early"; the arithmetic is `FrameGrid`'s note), and every libav seek starts at one of its frames (docs/BUGS.md,
     /// "a typed timecode lands one frame late on MXF and every libav-decoded file"). Without it, a variable-rate
     /// track, which has no single frame duration, keeps the old arithmetic.
-    public private(set) var frameGrid: FrameGrid?
+    ///
+    /// On a file whose rate decision 3 halved (I2, `VideoMetadata.frameRateHalvedFrom`) it is the track's samples
+    /// taken in pairs (`FrameGrid.pairingSamples`), so a step is one frame of the halved rate, as the Frame Rate
+    /// row, timecode and Follow source count it. Every other file steps on its own samples, as before.
+    public var frameGrid: FrameGrid? {
+        guard let grid = sampleGrid else { return nil }
+        return metadata?.frameRateHalvedFrom == nil ? grid : grid.pairingSamples()
+    }
+    /// The track's own frame times, from the track (AVFoundation) or libav's rate. See `frameGrid`.
+    private var sampleGrid: FrameGrid?
     // JKL shuttle transport rate (transient session state — not persisted).
     // Signed: > 0 forward, 0 paused, < 0 reverse. Forward rates drive the
     // synchronizer directly; reverse is a best-effort jog (see setShuttleRate).
@@ -707,7 +716,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         guard let vTrack = try? await freshAsset.loadTracks(withMediaType: .video).first else { return }
         self.videoTrack = vTrack
-        if !useLibav { frameGrid = await Self.makeFrameGrid(for: vTrack, url: url) }
+        if !useLibav { sampleGrid = await Self.makeFrameGrid(for: vTrack, url: url) }
         // A re-inspect follows a rewrite of the SAME file, so the track set is usually identical —
         // keep the monitored track if the new asset still has one at that index, rather than
         // yanking a colourist back to track 1 because the file was re-wrapped underneath them.
@@ -1167,7 +1176,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // `stepFrame`), so a step in a freshly loaded file would start from the old one's position.
         pendingStepTarget = nil
         stepFrameIndex = nil
-        frameGrid = nil
+        sampleGrid = nil
         // A full teardown must leave NO transport readout from the departed source: the same
         // incoherence we fixed for scopes (blank-on-disconnect). duration + tcInfo drive the
         // scrubber range and the source/end-timecode readouts; without this a file→stream takeover
@@ -1704,7 +1713,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // The bump above is what makes a drain loop already running notice and retire itself.
         pendingStepTarget = nil
         stepFrameIndex = nil
-        frameGrid = nil                                  // the previous file's frames; rebuilt below if AVFoundation
+        sampleGrid = nil                                 // the previous file's frames; rebuilt below if AVFoundation
 
         // New file: retire any prior libav sources (bound to the old file). The
         // per-file libav video+audio sources are created lazily in beginLibavReading.
@@ -1834,7 +1843,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // step has it.
             let grid = useLibav ? nil : await Self.makeFrameGrid(for: vTrack, url: url)
             if loadAbandoned(generation, url, at: "the frame grid") { return }
-            frameGrid = grid
+            sampleGrid = grid
             // ── THE FILE'S CHROMA, AT THE SAME POINT AND ON THE SAME ARGUMENT (Stage 3b S2) ──────
             // Before `installScrubProducer` below and before `beginReading`: both read
             // `videoPixelFormat`, so this one answer is what both decoders are built with. libav
@@ -2411,7 +2420,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 }
                 // The libav path's frame grid, from the decoder's own timeline: before the arm below, so the first
                 // seek, step and typed timecode land on its frames.
-                frameGrid = Self.makeLibavFrameGrid(info, url: url)
+                sampleGrid = Self.makeLibavFrameGrid(info, url: url)
                 print("FrameEngine: libav opened — \(info.width)x\(info.height), "
                     + "src \(info.sourcePixelFormat), range \(info.rangeName), "
                     + "matrix \(info.matrixName), audio=\(info.hasAudio)")

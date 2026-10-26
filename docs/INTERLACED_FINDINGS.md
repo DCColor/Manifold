@@ -366,6 +366,7 @@ timestamped). Results follow. Nothing above this section was changed by I2.
   uses identity taps. The v210 kernels are unchanged.
 - **Stepping:** unchanged. One step is one coded frame, which for every interlaced file here is one woven frame (two
   fields). Both step grids come from the file's own samples (AVFoundation) or libav's rate, not from the metadata rate.
+  (Since 2026-10-26 a halved file steps one frame of the halved rate: finding 3.)
 - **Tools:** `scripts/interlaced/generate-i2.sh` (marker fixtures: each field carries its picture number as a 16-bit
   luma code with a check pattern), `scripts/decklink-loopback/fieldtool.cpp` (`marks`, per-field `cmp`), `capture
   --marks`. Tests: `SDIInterlacedModeTests` (7), `InterlacedRateTests` (4).
@@ -400,15 +401,21 @@ screenshots; every quit by a Quit event to the bundle path. Runs: `build/interla
 **Findings.**
 
 1. **The file → card pull repeats one whole frame and skips the next, now and then** (pre-existing). 2 of 14 tree
-   marker runs (H.264 HDMI: 5, all in the first 0.8 s after Play; ProRes BFF SDI: 2), and 1 of 5 HEAD runs (ProRes BFF
-   HDMI: 9, at 1080p29.97). The card reports `late=0 dropped=0` throughout, so it is upstream of the card: the renderer's
-   front buffer and the card's pull (`copyLatestDeckLinkFrame`, §2) disagreeing for a frame. Whole frames only: no
-   received frame ever mixed two source frames' fields, so I2's field order holds. Not investigated further here.
+   marker runs (H.264 HDMI: 5; ProRes BFF SDI: 2), and 1 of 5 HEAD runs (ProRes BFF HDMI: 9, at 1080p29.97). The card
+   reports `late=0 dropped=0` throughout, so it is upstream of the card: the renderer's front buffer and the card's pull
+   (`copyLatestDeckLinkFrame`, §2) disagreeing for a frame. Whole frames only: no received frame ever mixed two source
+   frames' fields, so I2's field order holds. **Corrected 2026-10-26:** "all in the first 0.8 s after Play" was counted
+   from the capture's start; from Play they come 2.3–2.9 s in (H.264 HDMI), and the bridge read-back shows the same
+   repeats at the same gaps, so they are in what is handed to the card. **Fixed for files 2026-10-26** (commit `<commit —
+   to be filled in>`): the card is handed the frame due at its slot; 0 repeats or skips over 45 Play starts, +11 ms SDI
+   latency (`BUGS.md`, *the card is now and then handed the same frame twice*).
 2. **The F2 luma band was set from ProRes.** DNxHD (max 9) and 4:2:0 H.264 (max 76) differ from FFmpeg's decode by more,
    identically on HEAD; 4:2:0 chroma is I3's job.
 3. **On a file whose rate is halved, stepping follows the file's samples, not the halved rate.** The one such fixture
    repeats every woven frame, so its 59.94 samples are pairs of the same frame; a step moves one sample (half a frame),
    while the Frame Rate row, timecode and Follow source use 29.97. No real file here has this shape. Making the step grids
-   follow the halving is a small change, left for a decision.
+   follow the halving is a small change, left for a decision. **Decided and built 2026-10-26** (commit `<commit — to be
+   filled in>`): a step is one frame of the halved rate (the track's samples in pairs, `FrameGrid.pairingSamples`); 0 of
+   5,921 presses differ from HEAD on the 35 other files with a track grid (`BUGS.md` release scope).
 4. **The 8K Pro sends 1080i on HDMI** at all three rates, detected as `Hi50 / Hi59 / Hi60`, upper field first.
 5. The §2 mode-label bug is fixed: the established mode reads `1080i59.94` from the mode's own field dominance.

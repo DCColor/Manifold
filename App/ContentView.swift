@@ -220,7 +220,7 @@ struct ScopeGearRadioRow: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    .foregroundStyle(selected ? Color.appYellow : .secondary)
                 Text(label)
                 Spacer()
             }
@@ -868,6 +868,9 @@ struct ContentView: View {
             // arithmetic — its rate, its start timecode, its last frame — and commit it against the
             // new one. The entry belonged to the file that just left.
             transportKeys.cancel()
+            #if DEBUG
+            DebugStepHook.run(engine: engine, renderer: metalRenderer)   // measurement only, env-gated
+            #endif
         }
         // The watch's OTHER re-baseline — the one that covers re-opening the file this deck already
         // has — rides in the `engine.metadata` observer further up, for the same type-checker
@@ -2196,7 +2199,7 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "textformat")
             }
-            .foregroundStyle(captions.enabled ? Color.green : .white.opacity(0.9))
+            .foregroundStyle(captions.enabled ? Color.appYellow : .white.opacity(0.9))
             .help(captions.isLoaded
                   ? (captions.enabled ? "Captions on — click to hide" : "Captions off — click to show")
                   : "Load subtitles…")
@@ -2818,11 +2821,11 @@ struct ContentView: View {
                     // to catch streams. `position` says the intended thing, and the pair costs
                     // nothing.
                     .disabled(!engine.hasMedia || !position)
-                    // Three states, and the middle one is the new part: ON (green), available
-                    // (0.9), gated (0.35). This button ALREADY overrode the row's foreground style
-                    // to carry its green, so it was the clearest case of a disabled control drawn
-                    // at full brightness — see the `dim` note above.
-                    .foregroundStyle(engine.isLooping ? Color.green
+                    // Three states, and the middle one is the new part: ON (the app's yellow; green
+                    // until 2026-10-25, now kept for live), available (0.9), gated (0.35). This button
+                    // ALREADY overrode the row's foreground style to carry its colour, so it was the
+                    // clearest case of a disabled control drawn at full brightness — see the `dim` note above.
+                    .foregroundStyle(engine.isLooping ? Color.appYellow
                                      : ((engine.hasMedia && position) ? live : dim))
                 Button { showGuidesPanel.toggle() } label: {
                     // `viewfinder.rectangular` — an outer frame with corner brackets and OPEN space
@@ -2909,7 +2912,7 @@ struct ContentView: View {
                 }) {
                     Image(systemName: "arrow.clockwise")
                 }
-                .foregroundStyle(fileWatch.isHighlighted ? Color.green : .white.opacity(0.9))
+                .foregroundStyle(fileWatch.isHighlighted ? Color.appYellow : .white.opacity(0.9))
                 .help(reloadHelp)
                 .disabled(engine.currentURL == nil)
 
@@ -2934,7 +2937,7 @@ struct ContentView: View {
                 Button { chrome.showTray.toggle(); updateScopeSampling() } label: {
                     Image(systemName: "chart.bar.xaxis")
                 }
-                .foregroundStyle(chrome.showTray ? Color.green : .white.opacity(0.9))
+                .foregroundStyle(chrome.showTray ? Color.appYellow : .white.opacity(0.9))
                 .help(keys.helpText("Scopes tray", .scopesTray))
 
                 // DeckLink output: split-button — main toggles output, chevron picks device + status.
@@ -2982,8 +2985,8 @@ struct ContentView: View {
                     Button { togglePin() } label: {
                         Image(systemName: pinned ? "pin.fill" : "pin")
                     }
-                    // Pinned reads in the accent colour, as Loop reads green when on (§8 item 16).
-                    .foregroundStyle(pinned ? Color.accentColor : live)
+                    // Pinned reads in the app's yellow, as Loop does when on (§8 item 16; Robbie, 2026-10-25).
+                    .foregroundStyle(pinned ? Color.appYellow : live)
                     .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
                     // Test drivers find the button by this, not by its help text, which names the shortcut.
                     .accessibilityIdentifier("pinControls")

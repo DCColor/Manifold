@@ -198,7 +198,7 @@ struct StreamBookmarksSheet: View {
         .opacity(supported ? 1 : 0.55)
         // The row being edited is marked, because the composer below is otherwise the only clue as
         // to WHICH stream those prefilled fields belong to.
-        .listRowBackground(isEditing ? AnyView(Color.accentColor.opacity(0.12)) : AnyView(Color.clear))
+        .listRowBackground(isEditing ? AnyView(Color.appYellow.opacity(0.12)) : AnyView(Color.clear))
         .contentShape(Rectangle())
         .onTapGesture { if supported { connect(bookmark) } }
     }

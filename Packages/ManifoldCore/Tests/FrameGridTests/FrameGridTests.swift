@@ -151,4 +151,26 @@ final class FrameGridTests: XCTestCase {
         XCTAssertEqual(g.frame(steppingFromIndex: 10, by: Int.max), 359)
         XCTAssertEqual(g.frame(steppingFromIndex: 10, by: Int.min), 0)
     }
+
+    /// I2, decision 3: a file whose 59.94 / 50 / 60 samples were halved steps on its samples in pairs. Frame n is
+    /// sample 2n exactly, one press moves two samples, and an odd trailing sample is the last frame.
+    func testPairingSamplesStepsOneHalvedFrame() {
+        for (name, ts, dur, nfr) in rates where ["50", "59.94", "60"].contains(name) {
+            for samples in [30, 31] {
+                let s = grid(ts, dur, nfr, frames: samples)
+                let p = s.pairingSamples()
+                XCTAssertEqual(p.frameCount, (samples + 1) / 2, "\(name) \(samples)")
+                XCTAssertEqual(CMTimeCompare(p.frameDuration, CMTime(value: 2 * dur, timescale: ts)), 0, name)
+                XCTAssertEqual(p.rate, s.rate / 2, accuracy: 1e-9, name)
+                for n in 0...p.lastIndex {
+                    XCTAssertEqual(CMTimeCompare(p.time(ofFrame: n), s.time(ofFrame: 2 * n)), 0, "\(name) n=\(n)")
+                    XCTAssertEqual(p.frame(atSeconds: s.seconds(ofFrame: 2 * n)), n, "\(name) sample \(2 * n)")
+                    XCTAssertEqual(p.frame(atSeconds: s.seconds(ofFrame: min(2 * n + 1, s.lastIndex))), n,
+                                   "\(name): the pair's second sample is the same frame")
+                }
+                XCTAssertEqual(p.frame(steppingFromIndex: 3, by: 1), 4, name)
+                XCTAssertEqual(p.frame(steppingFromIndex: p.lastIndex, by: 1), p.lastIndex, name)
+            }
+        }
+    }
 }

@@ -320,4 +320,42 @@ final class PlayheadSliderTests: XCTestCase {
         XCTAssertEqual(PlayheadStyle.defaultColorHex, "FFE600")
         XCTAssertEqual(PlayheadStyle.defaultsKey, "manifold.playhead.style")
     }
+
+    /// The app's one yellow (Robbie, 2026-10-25) is #FFE600 in sRGB, and the playhead's default is it, not
+    /// `systemYellow`.
+    func testAppYellowIsThePlayheadDefault() {
+        XCTAssertEqual(AppYellow.hex, "FFE600")
+        XCTAssertEqual(PlayheadStyle.defaultColorHex, AppYellow.hex)
+        for c in [AppYellow.nsColor, PlayheadScrubber(frame: .zero).lineColor] {
+            let s = c.usingColorSpace(.sRGB)!
+            XCTAssertEqual(s.redComponent, 1, accuracy: 1e-6)
+            XCTAssertEqual(s.greenComponent, 230.0 / 255, accuracy: 1e-6)
+            XCTAssertEqual(s.blueComponent, 0, accuracy: 1e-6)
+        }
+    }
+
+    /// The text variant: #FFE600 in dark, #645A00 in light, the light one ≥ 4.5:1 (WCAG) against white, #ECECEC and
+    /// #D0D0D0, and the same hue as the yellow.
+    func testAppYellowTextVariant() {
+        func resolved(_ name: NSAppearance.Name) -> NSColor {
+            var out = NSColor.clear
+            NSAppearance(named: name)!.performAsCurrentDrawingAppearance {
+                out = AppYellow.textNSColor.usingColorSpace(.sRGB)!
+            }
+            return out
+        }
+        func lum(_ c: NSColor) -> Double {
+            func l(_ v: CGFloat) -> Double { let v = Double(v); return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            return 0.2126 * l(c.redComponent) + 0.7152 * l(c.greenComponent) + 0.0722 * l(c.blueComponent)
+        }
+        let dark = resolved(.darkAqua), light = resolved(.aqua)
+        XCTAssertEqual(dark.greenComponent, 230.0 / 255, accuracy: 1e-6)
+        XCTAssertEqual(light.redComponent, 0x64 / 255.0, accuracy: 1e-6)
+        XCTAssertEqual(light.greenComponent, 0x5A / 255.0, accuracy: 1e-6)
+        XCTAssertEqual(light.greenComponent / light.redComponent, 230.0 / 255, accuracy: 0.01, "same hue")
+        for grey in [1.0, 236.0 / 255, 208.0 / 255] {
+            let bg = lum(NSColor(srgbRed: grey, green: grey, blue: grey, alpha: 1))
+            XCTAssertGreaterThanOrEqual((bg + 0.05) / (lum(light) + 0.05), 4.5, "on grey \(grey)")
+        }
+    }
 }

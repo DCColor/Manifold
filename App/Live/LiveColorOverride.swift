@@ -253,8 +253,8 @@ struct ColorInterpretationControl: View {
     /// useful thing are the same sentence here — "709 · Assumed" tells the user both what the scopes
     /// are doing and that nobody actually verified it. The chevron (matching the streaming / DeckLink
     /// split-buttons) makes it read as a menu you OPEN, not a passive readout. An override turns the
-    /// control amber: something on screen is a human assertion, not a reading, and that should never
-    /// look like the neutral resting state.
+    /// control the app's yellow (amber until 2026-10-25): something on screen is a human assertion, not
+    /// a reading, and that should never look like the neutral resting state.
     ///
     /// Most NDI senders declare nothing (OmniScope declares nothing at all), so for the common case
     /// the colorimetry section is not a corner-case escape hatch — it is how the stream's colorimetry
@@ -277,7 +277,7 @@ struct ColorInterpretationControl: View {
         // why the streaming / DeckLink chevrons render. Both halves open the SAME presets, so the
         // whole face stays clickable; the readout half also reads the effective colorimetry + tier.
         //
-        // ⚠️ THE AMBER IS APPLIED TO THE LEAF `Text`s, AND `Image` IS WRAPPED IN ONE — MEASURED.
+        // ⚠️ THE YELLOW IS APPLIED TO THE LEAF `Text`s, AND `Image` IS WRAPPED IN ONE — MEASURED.
         //
         // `.foregroundStyle(…)` on this HStack is what the code used to do, and §6.8 measured the
         // result: **max(r − b) = 0 across the whole face** while the label read "Overridden".
@@ -372,8 +372,8 @@ struct ColorInterpretationControl: View {
         }
     }
 
-    /// Amber when something on screen is a human assertion rather than a reading, the control
-    /// bar's own white otherwise. Applied per leaf — see the note on `body`.
+    /// The app's yellow when something on screen is a human assertion rather than a reading (amber until
+    /// 2026-10-25), the control bar's own white otherwise. Applied per leaf — see the note on `body`.
     private var colorControlTint: Color {
         let overridden: Bool
         switch subject {
@@ -381,7 +381,7 @@ struct ColorInterpretationControl: View {
         case .file: overridden = fileModel.override != .auto
         }
         // Colour S6, L3: an applied LUT is an assertion too (the face reads "+ LUT"); a bypassed one is not.
-        return overridden || lut.isApplied ? Color.orange : .white.opacity(0.9)
+        return overridden || lut.isApplied ? Color.appYellow : .white.opacity(0.9)
     }
 
     // MARK: The menu

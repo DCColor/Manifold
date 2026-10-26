@@ -663,6 +663,19 @@ public:
 
     // --- IDeckLinkVideoOutputCallback (runs on the SDK's dedicated callback thread) ---
     HRESULT ScheduledFrameCompleted(IDeckLinkVideoFrame *completedFrame, BMDOutputFrameCompletionResult result) override {
+#if DEBUG
+        // [CADENCE] the first completions against the card's clock: which result, the stream time now, and the
+        // frame's own completion timestamp, so a frame-#0 drop at start can be placed (docs/BUGS.md).
+        if (getenv("MANIFOLD_DECKLINK_CADENCE_LOG") && m_completed.load() + m_dropped.load() + m_late.load() < 8) {
+            BMDTimeValue streamTime = 0; double speed = 0; BMDTimeValue doneTime = 0;
+            m_output->GetScheduledStreamTime(m_timeScale, &streamTime, &speed);
+            m_output->GetFrameCompletionReferenceTimestamp(completedFrame, m_timeScale, &doneTime);
+            fprintf(stdout, "[CADENCE] completion result %d stream %lld done %lld (timescale %lld, frame %lld)\n",
+                    (int)result, (long long)streamTime, (long long)doneTime, (long long)m_timeScale,
+                    (long long)m_frameDuration);
+            fflush(stdout);
+        }
+#endif
         // Tally + immediately surface any non-Completed result (the "is scheduling keeping up?" signal).
         switch (result) {
             case bmdOutputFrameCompleted:     m_completed.fetch_add(1); break;

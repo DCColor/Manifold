@@ -454,7 +454,7 @@ private struct AudioTrackRow: View {
                 if selectable {
                     Image(systemName: isMonitored ? "speaker.wave.2.fill" : "speaker")
                         .font(.system(size: 9))
-                        .foregroundStyle(isMonitored ? Color.green : .white.opacity(0.3))
+                        .foregroundStyle(isMonitored ? Color.appYellow : .white.opacity(0.3))
                 }
                 Text(showIndex ? "Track \(index + 1)" : "Track")
                     .font(.system(.caption, design: .default))

@@ -118,7 +118,7 @@ struct KeyboardShortcutsView: View {
     /// The mark on a row whose key differs from Manifold's default, and in the legend that explains it.
     private var customizedDot: some View {
         Circle()
-            .fill(Color.accentColor)
+            .fill(Color.appYellow)
             .frame(width: 6, height: 6)
     }
 

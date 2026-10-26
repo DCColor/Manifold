@@ -24,10 +24,44 @@ public enum PlayheadStyle: String, CaseIterable, Identifiable {
 
     /// The line's colour, as the app's usual 6-digit hex (see `ScopeColorCodec`).
     public static let colorDefaultsKey = "manifold.playhead.lineColor"
-    /// YELLOW, and deliberately a lemon rather than `systemYellow`: amber (`Color.orange`) is what an
-    /// override indicator wears on this bar's neighbours, and a playhead near it in hue would read as
-    /// one more warning. #FFE600 sits at ~54°, systemOrange at ~36°.
-    public static let defaultColorHex = "FFE600"
+    /// The app's yellow (`AppYellow`), which started here. A colour chosen in Settings changes the
+    /// playhead only; every other use of the yellow stays `AppYellow`.
+    public static let defaultColorHex = AppYellow.hex
+}
+
+/// THE APP'S ONE YELLOW (Robbie, 2026-10-25): the playhead's #FFE600, defined here and nowhere else. It
+/// marks something the user has turned on or asserted: the pin when pinned, the playhead's default, an
+/// override's and an applied LUT's words and readouts, the hold-to-compare badge, Loop when on. Green is
+/// kept for LIVE only (DeckLink output running, a connected stream). Nothing follows the macOS accent colour.
+///
+/// A lemon rather than `systemYellow`, and not the system orange: amber is what a WARNING wears (the Bypass
+/// badge), and a yellow near it in hue would read as one more warning. #FFE600 sits at ~54°, systemOrange
+/// at ~36°.
+public enum AppYellow {
+    /// The app's usual 6-digit hex (see `ScopeColorCodec`).
+    public static let hex = "FFE600"
+
+    /// TEXT on a background that follows the appearance (the chain readout), in LIGHT appearance only (Robbie,
+    /// 2026-10-26): #FFE600 is 1.3:1 on white. The same hue darkened to the first value with ≥ 4.5:1 against #D0D0D0,
+    /// darker than a light popover: 6.99:1 on white, 5.92:1 on #ECECEC, 4.53:1 on #D0D0D0. Icons, the playhead, the
+    /// pin and Loop stay `hex` in both appearances, and so does text on the always-dark control bar.
+    public static let textOnLightHex = "645A00"
+
+    /// sRGB, as `ScopeColorCodec` reads a hex, so every use draws what the playhead draws.
+    public static var nsColor: NSColor { srgb(hex) }
+
+    /// For text whose background follows the appearance: `hex` in dark, `textOnLightHex` in light.
+    public static var textNSColor: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? srgb(hex) : srgb(textOnLightHex)
+        }
+    }
+
+    static func srgb(_ hex: String) -> NSColor {
+        let v = Int(hex, radix: 16) ?? 0
+        return NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+                       blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
 }
 
 /// The line playhead's measurements, in points. Public so the tests read the numbers the drawing uses.
@@ -124,7 +158,7 @@ public final class PlayheadScrubber: NSView {
     public var style: PlayheadStyle = PlayheadStyle.defaultStyle {
         didSet { if style != oldValue { applyStyle() } }
     }
-    public var lineColor: NSColor = .systemYellow {
+    public var lineColor: NSColor = AppYellow.nsColor {
         didSet { lineView.needsDisplay = true }
     }
 

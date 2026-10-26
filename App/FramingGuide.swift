@@ -185,7 +185,7 @@ struct GuidesPanel: View {
                 Button { guideMode = .custom } label: {
                     HStack(spacing: 8) {
                         Image(systemName: guideMode == .custom ? "largecircle.fill.circle" : "circle")
-                            .foregroundStyle(guideMode == .custom ? Color.accentColor : .secondary)
+                            .foregroundStyle(guideMode == .custom ? Color.appYellow : .secondary)
                         Text("Custom")
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
@@ -243,7 +243,7 @@ struct GuidesPanel: View {
         Button(action: action) {
             HStack(spacing: 8) {
                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                    .foregroundStyle(selected ? Color.appYellow : .secondary)
                 Text(label)
                 Spacer()
             }
