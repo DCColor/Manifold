@@ -922,6 +922,10 @@ final class DeckLinkService: ObservableObject {
     /// Stop scheduled playback cleanly + disarm the renderer's push convert (D3 race-safe stop). Audio
     /// tears down inside the bridge's stop, symmetric with setup (stop playback → unset the audio
     /// callback → flush → DisableAudioOutput → DisableVideoOutput).
+    ///
+    /// The output ENDS here (the button, ⇧⌘D, the owning window closing, a device switch leaving the old card), so
+    /// it ends on a final black frame tagged Rec.709 SDR (Robbie, 2026-10-25). A re-establish (mode or audio format
+    /// change) stops the bridge directly, with no black frame between files.
     func stopScheduledOutput() {
         guard isOutputting else { return }
         isOutputting = false
@@ -932,12 +936,29 @@ final class DeckLinkService: ObservableObject {
         // which is exactly why this call is unconditional and not guarded on `audioDestination == .sdi`.
         applyAudioRouting()
         queue.async {
-            self.bridge.stopScheduledPlayback()
+            self.bridge.stopScheduledPlayback(endingOnBlack: true)
             self.renderer?.stopDeckLinkOutput()
             self.enabledAudioFormat = nil
             self.activeStart = nil
             print("DeckLink D-real: output stopped")
         }
+    }
+
+    /// Quit: end the output on its final black frame before the process exits (Robbie, 2026-10-25). Before this the
+    /// process simply exited and the card fell back to its idle setting with the last frame's signalling.
+    /// SYNCHRONOUS, because the process exits when `willTerminate` returns; it waits behind anything already queued
+    /// (a start or a stop in flight), so a stop the user has just asked for still completes. Main actor.
+    func stopScheduledOutputForQuit() {
+        let wasOn = isOutputting
+        isOutputting = false
+        let started = Date()
+        queue.sync {
+            self.bridge.stopScheduledPlayback(endingOnBlack: true)
+            self.renderer?.stopDeckLinkOutput()
+            self.activeStart = nil
+        }
+        print(String(format: "DeckLink: quit — output %@ in %.1f ms", wasOn ? "ended" : "already off; queue drained",
+                     Date().timeIntervalSince(started) * 1000))
     }
 
     // MARK: - D4b-2: audio stream configuration

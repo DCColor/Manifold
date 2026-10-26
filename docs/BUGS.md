@@ -224,7 +224,8 @@ held back until after release, and the numbered defect entries follow.
        to do. Its SDI-wire half was measured by loopback on 2026-10-23: the wire matches what Manifold sends, ST
        2108-1 included, apart from the two open loopback entries below. Its HDMI-wire half was measured on 2026-10-25 (`23070cb`):
        pictures and PQ match; HLG is not signalled, SDR after PQ sends no InfoFrame, and a same-mode colorimetry change
-       drops the link for a frame (entries below). The reference monitor remains.**
+       drops the link for a frame (entries below). The reference monitor remains. The HDMI entries are parked
+       (2026-10-25): retest on a second Mac, on the LG over HDMI, and with the SDK updated to the 16.4 driver.**
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -1949,6 +1950,53 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
+## ✅ BUILT 2026-10-25 (commit `<commit — to be filled in>`) — CHANGE (Robbie, 2026-10-25) — DeckLink: an output that ends sends a final black frame tagged SDR
+
+**Asked for (Robbie, 2026-10-25):** when output stops because the user stops it, closes the file or window that owns
+it, or quits, the card should hold black whatever its idle setting, and the last signalling it saw should be SDR.
+- **Before:** a stop disabled the output after the last picture, so the card fell back to its idle setting (black, or
+  the last frame) with the last frame's signalling, PQ or HLG included. **Quit ran nothing at all**: the process exited
+  with the output running.
+- **Now** (`DeckLinkBridge.mm` `stop(endOnBlack)`, `showFinalBlack`; `DeckLinkService.stopScheduledOutput`,
+  `stopScheduledOutputForQuit`; a `willTerminate` observer in `ManifoldApp.init`): a frame of video black (Y 64,
+  Cb / Cr 512, the output's only range) is made while playback still runs; playback stops; the frame is tagged
+  Rec.709 · EOTF 0 · HDR flag clear, shown with `DisplayVideoFrameSync`, held two frame durations, and only then is
+  the output disabled. Logged: `DeckLink: final black frame … the black step added N ms to the stop`.
+  - Covers the output button and ⇧⌘D, the owning window closing (File ▸ Close, the close button), quit, and a device
+    switch (the old device ends on black; not tested, one output device in this profile).
+  - **Unchanged:** a mode change and an audio-format re-establish stop the bridge without a black frame; a file or
+    source change at the same mode never stops the output. The card's idle-output setting is not touched.
+- **Measured on the SDI loop** (`build/black-stop`, predictions written first; every probe read device 0's input SDI;
+  idle black and pass-through as found; defaults restored dictionary-equal, licence keys never in a snapshot):
+  - **All six stop paths** (stop paused at 1080p25 PQ and playing at 2160p23.98 PQ; window close on HLG and on P3 PQ
+    playing; quit on 2160p PQ and on 1080p PQ playing): the frame after the last picture is **black, byte-exact**
+    (FNV-1a `cdfb2ef4aca3db25` / `dc26a9fb9e290325`), **Rec.709 · EOTF 0 · flag clear, no ST 2108-1**, and it is the
+    last frame received. The 7 control-set stops, the transitions' final stops and the mode-change run's final
+    stop did the same (by log).
+  - The black then stayed on the input to the end of every capture (about 10 s, no loss of lock): with a capture
+    running, pass-through (`pcln`) feeds the input back out once the output is disabled. So the loop shows what the
+    card was last sent, not what a monitor would see from the idle setting.
+  - The frame just before the black carries the old picture with Rec.709 colorspace and the old EOTF: the known
+    *colorimetry one frame early* on SDI (open entry below), now also at a stop.
+  - **Cost:** the black step adds **91–134 ms** to a stop (15 stops; prediction 40–200 ms). Quit with output on
+    took **0.28 s** from the Quit event to exit (2 / 2), against 0.11–0.17 s for quits with the output already off;
+    the log's `DeckLink: quit — output ended in 121 / 132 ms` accounts for the difference.
+  - **While output runs, unchanged:** the 7-file control set, frame #0 FNV-1a = `23070cb` on all 7; HDMI 940 / 940
+    and SDI 528 / 528 received frames byte-identical (5 relock frames per SDI capture excluded, as before); SDI
+    signals as s7-5b. Same-mode transitions 3 → 5 → 3 → 7 → 4 → 5 → 3 on SDI: the same received signal sequence as
+    s7-5b's `post-trsd`, no black frame and no 709 SDR tag at any change. Mode changes 1 → 4 → 1 → 4 → 1: four
+    re-establishes with no final-black line; only the input's own no-input relock frames between them.
+    `late=0 dropped=0` on every output.
+  - One HDMI reading differs from s7-5b, for the better: file 7 (709 SDR) now reads Rec.709 · EOTF 0 on HDMI where it
+    read stale PQ, because the previous launch's stop now leaves the sink on 709 SDR. Files 4 and 5 read stale PQ as
+    before (HDMI entries, parked).
+  - Missed prediction: "1–4 black frames, then loss of signal or the capture's end" (B4) — the black never stopped
+    arriving, because of pass-through, above.
+  - `swift test` 612 / 612; Profile clean build, the same warning set as HEAD's (`build/s7-5b/build-final2.log`; App
+    code unchanged since `0501067`).
+
+---
+
 ## ✅ FIXED 2026-10-25 (commit `<commit — to be filled in>`) — REGRESSION FROM `b418161` (unreleased) — a window's display link could fail to restart after idling, so the window and the DeckLink output stayed on the last or neutral frame
 
 **Fixed 2026-10-25** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 HDMI follow-up*). Found by the HDMI loopback (`23070cb`).
@@ -1986,7 +2034,9 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
-## ⚠️ KNOWN LIMITATION 2026-10-25 (S7-5 HDMI loopback, retest on Robbie's LG over HDMI) — DeckLink: HLG is not signalled on HDMI to this sink; no SDK route changes it
+## ⏸ PARKED 2026-10-25 — KNOWN LIMITATION (S7-5 HDMI loopback) — DeckLink: HLG is not signalled on HDMI to this sink; no SDK route changes it
+
+**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable); and with the vendored SDK (16.0) updated to match the installed Desktop Video 16.4 driver.
 
 **Found by the HDMI loopback** (`23070cb`); **every SDK route checked 2026-10-25** (§6.11, *S7-5 HDMI follow-up*, item 3).
 - **What:** an HLG source reaches HDMI as Rec.2020 with no transfer signalled. **SDI carries HLG** (EOTF 3, dynamic
@@ -2004,7 +2054,10 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
-## ☐ OPEN — NEW 2026-10-25 (S7-5 HDMI loopback) — DECISION FOR ROBBIE — DeckLink: on HDMI, a sink can stay in PQ after PQ → HLG, after HLG → SDR, and after a colorimetry change; setting the HDR flag on SDR does not help
+## ⏸ PARKED 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, a sink can stay in PQ after PQ → HLG, after HLG → SDR, and after a colorimetry change; setting the HDR flag on SDR does not help
+
+**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable); and with the vendored SDK (16.0) updated to match the installed Desktop Video 16.4 driver.
+Robbie's decision on the options below waits for the retest. Black on stop (below) is separate: it ends an output on SDR, it does not change signalling between files.
 
 **Found by the HDMI loopback** (`23070cb`). **Re-measured 2026-10-25 within one output session** (§6.11, *S7-5 HDMI
 follow-up*, item 2), which **corrects 23070cb**: there, "SDR with the flag set resets the sink" (control c6) came from
@@ -2025,10 +2078,26 @@ sessions reset the sink whatever the flag (s4, flag clear, reset the same way).
   DeckLink output on a PQ → non-PQ change at the same mode. **Not shown to work:** the gap between `hdrout` sessions
   reset this sink, but Manifold's own output restarts between files did not (f4 → f5, f6 → f7 stayed stale), and it
   would cost a re-establish's neutral frames; (c) nothing else was found in the SDK.
+- **Idle-output setting, measured 2026-10-25 (`59d1032`; `build/s7-5c`, `cfghold`): it does not explain this.** Idle
+  = black and idle = last frame, each held for a block (read first, never written to preferences, restored to black;
+  the probe read the input SDI and idle black after every case): PQ → SDR 709, PQ → HLG and PQ → HLG → SDR 2020, within
+  one session and across a stop and restart, `hdrout` and Manifold. **Every case read the same under both.** While a
+  capture runs, pass-through (`pcln`) feeds the HDMI input back out during a stop, so a loopback cannot show the idle
+  setting on a real display.
+- **Across a restart (correcting the entry above):** HLG → SDR 2020 **does reset** across an output restart (4 / 4:
+  `hdrout` and Manifold, both settings), never within a session. PQ → HLG stays PQ every time. PQ → SDR 709 resets
+  only after a long dropout (next point).
+- **Clue — the dropout's length predicts the reset, pointing at the receiving side.** PQ 2020 → SDR 709, 18 runs
+  (within and across a restart, both tools, both settings), the same signal sent each time: **13–14 no-input frames
+  at the change → SDR, 10 / 10; 1–2 no-input frames → stale PQ, 8 / 8.** The idle setting does not choose the length
+  (`hdrout` within a session: long 3 / 6 under black, 4 / 6 under last frame). Fits an input that re-reads the
+  InfoFrames only after a long loss of lock. Not established: the transmitter's resync could differ too.
 
 ---
 
-## ☐ OPEN — NEW 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, a colorimetry change at an unchanged mode drops the link for one frame, then two frames arrive partly written
+## ⏸ PARKED 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, a colorimetry change at an unchanged mode drops the link for one frame, then two frames arrive partly written
+
+**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable); and with the vendored SDK (16.0) updated to match the installed Desktop Video 16.4 driver.
 
 **Found by the HDMI loopback** (`23070cb`; `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback — HDMI*, transitions).
 - **What:** 9-1-9 → 1-1-1 (Rec.2020 → Rec.709, both 1080p25), 2 of 2 runs. The HDMI input reports **one no-input
@@ -2045,7 +2114,8 @@ sessions reset the sink whatever the flag (s4, flag clear, reset the same way).
 
 - **Re-measured 2026-10-25** (§6.11, *S7-5 HDMI follow-up*, item 4; recorded, no fix): the dropout's length depends
   on the change. 2020 → 709: 1–2 no-input frames (2 of 2 in controls t3, t4; 2 in the transitions run, with no
-  partial frames that time). **709 → 2020: 14 no-input frames.** A change of EOTF only (PQ ↔ SDR at 2020) drops
+  partial frames that time). **Corrected 2026-10-25 (`build/s7-5c`):** 2020 → 709 drops either 1–2 or 13–14 frames
+  (8 and 10 of 18 runs), and the long dropouts are the ones after which the sink resets to SDR (entry above). **709 → 2020: 14 no-input frames.** A change of EOTF only (PQ ↔ SDR at 2020) drops
   nothing. **Item 2's change (the HDR flag on SDR) does not alter it**: t3 (flag set) and t4 (flag clear) drop out
   identically.
 ---

@@ -94,6 +94,12 @@ struct ManifoldApp: App {
         // file or stream arriving early cannot briefly establish the card at a mode the operator
         // already overrode. Cheap and synchronous: one UserDefaults read.
         DeckLinkService.shared.restoreManualMode()
+        // Quit ends the output on a final black frame tagged SDR, as a stop does, before the process exits (Robbie,
+        // 2026-10-25). Nothing else runs at quit: the process used to exit with the card on its last frame.
+        _ = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,
+                                                   queue: .main) { _ in
+            DeckLinkService.shared.stopScheduledOutputForQuit()
+        }
         // Opt this PROCESS in to Apple's professional-video-workflow plug-in decoders and format
         // readers. See ProVideoWorkflow.swift for what it costs (12–15 ms, hence off the main
         // actor) and why "we called it" is not the same as "they are installed".

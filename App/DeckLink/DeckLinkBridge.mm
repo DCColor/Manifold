@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <unistd.h>
 
 #pragma mark - Value object
 
@@ -198,6 +200,19 @@ static bool SameSignal(const DeckLinkOutputSignal &a, const DeckLinkOutputSignal
                 && a.maxCLL == b.maxCLL && a.maxFALL == b.maxFALL));
 }
 
+// What the final frame of an ended output is tagged with: Rec.709, EOTF 0, HDR flag clear (Robbie, 2026-10-25).
+static const DeckLinkOutputSignal kSDR709Signal = { NO, 0, NO };
+
+// Video black in v210, the output's only range (10-bit Y 64, Cb = Cr = 512): the same words as the service's neutral
+// fill (`DeckLinkService.fillNeutralV210`), across the whole of rowBytes.
+static void FillVideoBlackV210(uint8_t *buffer, int32_t rowBytes, int32_t height) {
+    const uint32_t w0 = 0x20010200, w1 = 0x04080040;   // Cb|Y|Cr = 512|64|512, Y|Cb|Y = 64|512|64
+    for (int32_t y = 0; y < height; y++) {
+        uint32_t *p = (uint32_t *)(buffer + (size_t)y * rowBytes);
+        for (int32_t g = 0; g < rowBytes / 16; g++, p += 4) { p[0] = w0; p[1] = w1; p[2] = w0; p[3] = w1; }
+    }
+}
+
 // --- Synthetic fill: a solid-color per-frame HUE WALK. Steady color change on the monitor == frames
 // advancing on the clock; a frozen color == a stall. No spatial pattern (a solid proves advance).
 static void HSVtoRGB(double h, double s, double v, double &r, double &g, double &b) {
@@ -356,7 +371,7 @@ public:
             const int64_t idx = m_nextIndex.fetch_add(1);
             const CallResult filled = fillFrame(m_pool[i], idx);
             if (!filled.ok()) return filled;
-            tagFrame(m_pool[i], idx);   // the signal this frame's picture was rendered under (colour S7, D1)
+            tagFrame(m_pool[i], idx, m_signal);   // the signal this frame's picture was rendered under (colour S7, D1)
             const HRESULT hr = m_output->ScheduleVideoFrame(m_pool[i], idx * m_frameDuration, m_frameDuration, m_timeScale);
             if (hr != S_OK) return { "ScheduleVideoFrame", hr };
         }
@@ -414,9 +429,17 @@ public:
     // OR audio): m_running is cleared FIRST (both callbacks early-return on it, so neither reschedules
     // nor touches the output), then playback is stopped and BOTH callbacks are unset (the SDK stops
     // invoking us) BEFORE the pool/output are released. Audio teardown mirrors setup in reverse.
-    void stop() {
+    //
+    // `endOnBlack`: the output is ending, not re-establishing (Robbie, 2026-10-25). Before the output is disabled, one
+    // frame of video black tagged Rec.709 SDR is shown and held, so the card holds black whatever its idle setting and
+    // the last signalling it saw is SDR. The frame is filled before playback stops, to keep the gap short; it is
+    // tagged after the callback is unset, when nothing else touches the signal log.
+    void stop(bool endOnBlack = false) {
         m_running = false;
         if (m_output) {
+            using Clock = std::chrono::steady_clock;
+            const auto t0 = Clock::now();
+            IDeckLinkMutableVideoFrame *black = endOnBlack ? makeBlackFrame() : NULL;
             BMDTimeValue actualStop = 0;
             m_output->StopScheduledPlayback(0, &actualStop, m_timeScale);
             m_output->SetScheduledFrameCompletionCallback(NULL);
@@ -426,6 +449,10 @@ public:
                 m_output->FlushBufferedAudioSamples();   // drop anything still queued
                 m_output->DisableAudioOutput();
                 m_audioEnabled = false;
+            }
+            if (endOnBlack) {
+                if (black) showFinalBlack(black, t0);
+                else { fprintf(stdout, "DeckLink: ⚠️ final black frame not shown — the frame could not be made\n"); fflush(stdout); }
             }
             m_output->DisableVideoOutput();
         }
@@ -654,7 +681,7 @@ public:
         IDeckLinkMutableVideoFrame *frame = static_cast<IDeckLinkMutableVideoFrame *>(completedFrame);
         const int64_t idx = m_nextIndex.fetch_add(1);
         fillFrame(frame, idx);
-        tagFrame(frame, idx);   // the signal this frame's picture was rendered under (colour S7, D1)
+        tagFrame(frame, idx, m_signal);   // the signal this frame's picture was rendered under (colour S7, D1)
         m_output->ScheduleVideoFrame(frame, idx * m_frameDuration, m_frameDuration, m_timeScale);
 
         // Periodic queue-depth + completion summary (~every 48 frames ≈ 2 s).
@@ -827,13 +854,56 @@ private:
         return { "GetBytes", S_OK };
     }
 
+    // A fresh frame (not a pooled one, which the card may still hold) filled with video black, or NULL. Made while
+    // playback still runs; tagged in `showFinalBlack`.
+    IDeckLinkMutableVideoFrame *makeBlackFrame() {
+        IDeckLinkMutableVideoFrame *f = NULL;
+        if (m_output->CreateVideoFrame(m_width, m_height, m_rowBytes, bmdFormat10BitYUV, bmdFrameFlagDefault, &f) != S_OK || f == NULL)
+            return NULL;
+        IDeckLinkVideoBuffer *buffer = NULL;
+        void *bytes = NULL;
+        bool filled = false;
+        if (f->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&buffer) == S_OK && buffer != NULL) {
+            if (buffer->StartAccess(bmdBufferAccessWrite) == S_OK) {
+                if (buffer->GetBytes(&bytes) == S_OK && bytes != NULL) {
+                    FillVideoBlackV210((uint8_t *)bytes, m_rowBytes, m_height);
+                    filled = true;
+                }
+                buffer->EndAccess(bmdBufferAccessWrite);
+            }
+            buffer->Release();
+        }
+        if (!filled) { f->Release(); return NULL; }
+        return f;
+    }
+
+    // Show `black` as the output's last frame, tagged SDR, and hold it two frame durations so it reaches the wire before
+    // the output is disabled. Logs the result and what the whole black step added to the stop (from `t0`, its start).
+    void showFinalBlack(IDeckLinkMutableVideoFrame *black, std::chrono::steady_clock::time_point t0) {
+        using Clock = std::chrono::steady_clock;
+        // `DisplayVideoFrameSync` is refused during scheduled playback; the stop above is immediate, but wait for the
+        // driver to say so (bounded: at most 100 ms).
+        bool running = true;
+        for (int i = 0; i < 100 && m_output->IsScheduledPlaybackRunning(&running) == S_OK && running; i++) usleep(1000);
+        tagFrame(black, -1, kSDR709Signal);
+        const HRESULT hr = m_output->DisplayVideoFrameSync(black);
+        const double frameSeconds = (double)m_frameDuration / (double)m_timeScale;
+        if (hr == S_OK) usleep((useconds_t)(2.0 * frameSeconds * 1e6));
+        black->Release();
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        fprintf(stdout, "DeckLink: final black frame (Rec.709 · EOTF 0 · HDR flag clear) — DisplayVideoFrameSync → 0x%08X%s; "
+                        "held 2 frames (%.1f ms); the black step added %.1f ms to the stop\n",
+                (unsigned)hr, hr == S_OK ? "" : " ⚠️ not shown", 2.0 * frameSeconds * 1000.0, ms);
+        fflush(stdout);
+    }
+
     // Colour S7: tag the frame with the signal its picture was rendered under (`m_signal`, set by `fillFrame`). The
     // colorspace and the EOTF go on every frame, as Blackmagic's SignalGenHDR does. PQ also sets
     // `bmdFrameContainsHDRMetadata` and the static metadata, which only HDMI's InfoFrame carries (D6: SDI's VPID has
     // colorimetry and transfer only). HLG and SDR clear the flag (D3). The S7-0 probe found that a pooled frame KEEPS
     // its static values after the flag is cleared and that no call unsets them, so the flag is what says "none".
-    void tagFrame(IDeckLinkMutableVideoFrame *frame, int64_t frameIndex) {
-        const DeckLinkOutputSignal &s = m_signal;
+    // `frameIndex` -1 is the final black frame of an ended output, which is not scheduled.
+    void tagFrame(IDeckLinkMutableVideoFrame *frame, int64_t frameIndex, const DeckLinkOutputSignal &s) {
         const BMDFrameFlags flags = frame->GetFlags();
         frame->SetFlags(s.hasStaticMetadata ? (flags | bmdFrameContainsHDRMetadata) : (flags & ~bmdFrameContainsHDRMetadata));
         IDeckLinkVideoFrameMutableMetadataExtensions *meta = NULL;
@@ -882,8 +952,11 @@ private:
             } else {
                 snprintf(extra, sizeof extra, " · HDR flag clear");
             }
-            fprintf(stdout, "[DeckLink] signal on scheduled frame #%lld: read-back colorspace %s · EOTF %lld%s%s\n",
-                    (long long)frameIndex, cs == bmdColorspaceRec2020 ? "Rec.2020" : (cs == bmdColorspaceRec709 ? "Rec.709" : "other"),
+            char which[48];
+            if (frameIndex < 0) snprintf(which, sizeof which, "the final black frame");
+            else snprintf(which, sizeof which, "scheduled frame #%lld", (long long)frameIndex);
+            fprintf(stdout, "[DeckLink] signal on %s: read-back colorspace %s · EOTF %lld%s%s\n",
+                    which, cs == bmdColorspaceRec2020 ? "Rec.2020" : (cs == bmdColorspaceRec709 ? "Rec.709" : "other"),
                     (long long)eotf, extra, worst == S_OK ? "" : " · ⚠️ a Set call failed");
             if (worst != S_OK) fprintf(stdout, "[DeckLink] ⚠️ metadata Set returned 0x%08X on frame #%lld\n", (unsigned)worst, (long long)frameIndex);
             fflush(stdout);
@@ -1669,9 +1742,13 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 }
 
 - (void)stopScheduledPlayback {
+    [self stopScheduledPlaybackEndingOnBlack:NO];
+}
+
+- (void)stopScheduledPlaybackEndingOnBlack:(BOOL)endOnBlack {
     if (_player != NULL) {
         const bool hadAudio = _player->audioEnabled();
-        _player->stop();      // StopScheduledPlayback → unset both callbacks → Disable audio + video → free pool/output
+        _player->stop(endOnBlack);   // StopScheduledPlayback → unset both callbacks → Disable audio → [final black] → Disable video → free pool/output
         // Final run summary (post-stop, so counts are settled).
         fprintf(stdout, "DeckLink D3: stopped — scheduled=%lld completed=%llu late=%llu dropped=%llu flushed=%llu\n",
                 (long long)_player->framesScheduled(),

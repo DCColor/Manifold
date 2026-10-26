@@ -220,8 +220,15 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
                                                          audio:(nullable DeckLinkAudioConfig *)audio;
 
 /// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →
-/// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback.
+/// release frame pool + callback). Safe to call when not playing; safe against an in-flight callback. For a
+/// re-establish (a mode change, an audio format change): no final frame.
 - (void)stopScheduledPlayback;
+
+/// The same stop, for an output that is ENDING (the user stops it, the owning window closes, the app quits). With
+/// `endOnBlack`, one frame of video black tagged Rec.709 · EOTF 0 · HDR flag clear is shown and held two frame
+/// durations before the output is disabled, so the card holds black whatever its idle setting and the last signalling
+/// it saw is SDR (Robbie, 2026-10-25). Blocks for that long (logged).
+- (void)stopScheduledPlaybackEndingOnBlack:(BOOL)endOnBlack NS_SWIFT_NAME(stopScheduledPlayback(endingOnBlack:));
 @end
 
 NS_ASSUME_NONNULL_END

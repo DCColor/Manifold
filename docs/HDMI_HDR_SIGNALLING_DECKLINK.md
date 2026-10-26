@@ -8,7 +8,7 @@
 Our player sends per-frame HDR signalling to a DeckLink 8K Pro. On **SDI** everything arrives correctly: PQ, HLG and SDR, including ST 2108-1 static metadata on PQ. On **HDMI**, PQ arrives exactly (EOTF, colorimetry and all static-metadata values), but:
 
 1. **HLG is never signalled.** No HLG EOTF reaches the receiver; it keeps the previous PQ state.
-2. **SDR after PQ is not signalled when the colorimetry also changes.** For example, Rec.2020 PQ followed by Rec.709 SDR: the receiver keeps reporting the old PQ infoframe values. Rec.2020 PQ followed by Rec.2020 SDR does reset correctly.
+2. **SDR after PQ is often not signalled when the colorimetry also changes.** For example, Rec.2020 PQ followed by Rec.709 SDR: the receiver keeps reporting the old PQ infoframe values, except when the link drops for long at the change (13–14 frames rather than 1–2; see *A clue*, below). Rec.2020 PQ followed by Rec.2020 SDR does reset correctly.
 
 We can't tell whether the card isn't sending the change or whether our receiver (the same card's HDMI input) is latching the old values.
 
@@ -75,11 +75,47 @@ The obvious "reset" is to tag SDR frames with the **HDR flag set and EOTF 0**, s
 
 So the flag makes no difference. (An earlier result suggesting "flag set resets it" turned out to be the card passing its input through between separate test sessions, not a real reset.) On SDI, setting the flag on SDR frames is harmless: no ST 2108-1 packet, signal unchanged.
 
-Restarting output between files also didn't reset the HDMI input.
+Restarting output between files didn't reliably reset the HDMI input either: PQ → HLG stayed on PQ every time, and
+PQ → Rec.709 SDR reset only when the link dropped for long (next sections). The one exception is **HLG → Rec.2020 SDR,
+which does reset across an output restart** (4 of 4: our test tool and our player, each under both idle settings),
+though never within one session.
 
 ## Another HDMI observation
 
-A same-mode **colorimetry** change drops the HDMI signal at the input briefly: Rec.2020 → Rec.709 loses 1–2 frames; Rec.709 → Rec.2020 loses about 14 frames, then two partially written frames before a clean one. EOTF-only changes cause no dropout. SDI shows no dropout.
+A same-mode **colorimetry** change drops the HDMI signal at the input briefly: Rec.2020 → Rec.709 loses either 1–2 frames or 13–14 (below); Rec.709 → Rec.2020 loses about 14 frames, then two partially written frames before a clean one. EOTF-only changes cause no dropout. SDI shows no dropout.
+
+## The card's idle-output setting
+
+We also checked whether the card's **idle output** setting (`bmdDeckLinkConfigVideoOutputIdleOperation`: black, or
+last frame) explains any of this. It was held at each value for a block of runs by a small tool (read first, never
+written to preferences, restored after; the card's own setting is black), and the same cases were run under each:
+PQ → Rec.709 SDR, PQ → HLG and PQ → HLG → Rec.2020 SDR, within one output session and across an output stop and
+restart, with the test tool and with our player.
+
+**Every case read the same under both settings.** It does not explain the stale signalling.
+
+One limit of the loopback: while a capture is running, the card passes its HDMI input back out of its output during a
+stop (`bmdDeckLinkConfigCapturePassThroughMode` is clean pass-through). So during a stop the input sees itself, not
+the idle setting, and a loopback cannot show what the idle setting does to a real display.
+
+## A clue: the dropout's length predicts the reset
+
+PQ Rec.2020 → SDR Rec.709 at the same mode was run 18 times (within a session and across a restart, test tool and
+player, both idle settings). The signal sent was the same each time. What the input reported afterwards followed
+**how long the link dropped at the change**, and nothing else we varied:
+
+| Dropout at the change | Runs | Input afterwards |
+|---|---|---|
+| 13–14 frames | 10 | **SDR** (EOTF 0, no values) — every time |
+| 1–2 frames | 8 | **previous PQ state** — every time |
+
+Within one session, the test tool's 12 runs were long 3 of 6 times with idle = black and 4 of 6 with idle = last
+frame: the setting does not choose the length either.
+
+Since the transmitted signalling did not change between runs, this points at the **receiving side**: after a long
+loss of lock the input re-reads the InfoFrames; after a short one it keeps what it had latched. That fits
+possibility 2 below. It is a clue, not a proof: the transmitter's own resync could also differ between short and long
+dropouts.
 
 ## The two possibilities we can't separate
 
@@ -98,4 +134,10 @@ Because the same card is on both ends, we can't tell:
 
 ## Next step on our side
 
-Test over HDMI into an LG TV that advertises HLG: play PQ, then HLG, then Rec.709 SDR, and watch whether the TV's HDR indicator and picture mode follow each change. An HDMI analyser, if available, would settle what's actually on the wire.
+Parked until we can change the receiver or the machine. Then:
+
+- Over HDMI into an LG TV that advertises HLG: play PQ, then HLG, then Rec.709 SDR, and watch whether the TV's HDR indicator and picture mode follow each change.
+- The same loopback on a second Mac with a DeckLink, to separate this card and machine from the behaviour.
+- With the SDK headers updated to match the installed Desktop Video 16.4 driver (we compile against 16.0).
+
+An HDMI analyser, if available, would settle what's actually on the wire.
