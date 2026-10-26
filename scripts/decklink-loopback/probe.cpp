@@ -129,6 +129,7 @@ int main() {
             if (c->GetInt(bmdDeckLinkConfigSDIOutputLinkConfiguration, &v) == S_OK) printf("    %-26s %s\n", "cfg SDIOutputLinkConfig", fcc(v).c_str());
             if (c->GetInt(bmdDeckLinkConfigCapturePassThroughMode, &v) == S_OK) printf("    %-26s %s\n", "cfg CapturePassThrough", fcc(v).c_str());
             if (c->GetFlag(bmdDeckLinkConfigRec2020Output, &f) == S_OK) printf("    %-26s %s\n", "cfg Rec2020Output", f ? "true" : "false");
+            if (c->GetInt(bmdDeckLinkConfigVideoOutputIdleOperation, &v) == S_OK) printf("    %-26s %s\n", "cfg OutputIdleOperation", fcc(v).c_str());
             c->Release();
         }
         IDeckLinkStatus *st = nullptr;

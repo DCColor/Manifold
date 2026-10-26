@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdio>
 #include <csignal>
+#include <sys/time.h>
+#include <ctime>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -44,6 +46,11 @@ static std::string flagsStr(int64_t f) {
 
 struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input; int dumpmax = 0; } A;
 static volatile sig_atomic_t stopRequested = 0;
+// Wall-clock time of day, so a capture's lines can be lined up with another tool's event log.
+static std::string wall() {
+    timeval tv; gettimeofday(&tv, nullptr); tm lt; localtime_r(&tv.tv_sec, &lt);
+    char b[32]; snprintf(b, sizeof b, "%02d:%02d:%02d.%03d", lt.tm_hour, lt.tm_min, lt.tm_sec, (int)(tv.tv_usec / 1000)); return b;
+}
 static void onSignal(int) { stopRequested = 1; }
 static std::string conns(int64_t m) {
     std::string s;
@@ -195,7 +202,7 @@ public:
                                 (long long)hof, dv.c_str());
         const bool picCh = full != lastPic, sigCh = sig != lastSig, ancCh = anc != lastAnc, fmtCh = fmt != lastFmt;
         if (i == 0 || picCh || sigCh || ancCh || fmtCh) {
-            printf("[%s] rx #%ld t=%.4fs%s%s%s%s · %s · picture FNV %016llx sampled %016llx%s · %s · ANC %d packet(s) %s\n", A.label.c_str(), i, (double)t / 240000,
+            printf("[%s] %s rx #%ld t=%.4fs%s%s%s%s · %s · picture FNV %016llx sampled %016llx%s · %s · ANC %d packet(s) %s\n", A.label.c_str(), wall().c_str(), i, (double)t / 240000,
                    picCh ? " PICTURE" : "", sigCh ? " SIGNAL" : "", ancCh ? " ANC" : "", fmtCh ? " FORMAT" : "", fmt,
                    (unsigned long long)full, (unsigned long long)samp, refres.c_str(), sig.c_str(), npk, anc.c_str());
             fflush(stdout);

@@ -8,18 +8,23 @@
 //                                  [--rec2020out] [--then-eotf N [--then-flag] [--then-zero] [--then-colorspace 709|2020] --then-after S]
 // --then-*: after S seconds the SAME scheduled output switches to a second frame with that signal, so a change can be
 // seen without the output restarting (an idle card passes its input through, which can reset an HDMI sink).
+// --phase cs,eotf,flag,maxcll,seconds (repeatable; maxcll -1 = no values, 0 = all values 0): any number of signals in one
+// output session, shown synchronously in order. Overrides the single-frame options.
 #include <CoreFoundation/CoreFoundation.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <unistd.h>
 #include "DeckLinkAPI.h"
 
 int main(int argc, char **argv) {
     int device = 0, eotf = 0; double seconds = 4, maxcll = -1; bool flag = false, zero = false, rec2020out = false;
     BMDColorspace cs = bmdColorspaceRec709;
+    struct Phase { BMDColorspace cs; int eotf; bool flag; double maxcll, seconds; };
+    std::vector<Phase> phases;
     int thenEotf = -1; bool thenFlag = false, thenZero = false; double thenAfter = 0; BMDColorspace thenCs = (BMDColorspace)0;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i]; auto nx = [&]() { return std::string(i + 1 < argc ? argv[++i] : ""); };
@@ -29,6 +34,12 @@ int main(int argc, char **argv) {
         else if (a == "--rec2020out") rec2020out = true;
         else if (a == "--then-eotf") thenEotf = std::stoi(nx()); else if (a == "--then-flag") thenFlag = true;
         else if (a == "--then-zero") thenZero = true; else if (a == "--then-after") thenAfter = std::stod(nx());
+        else if (a == "--phase") {
+            Phase ph{}; int c = 0, f = 0; double m = -1, sec = 1;
+            if (sscanf(nx().c_str(), "%d,%d,%d,%lf,%lf", &c, &ph.eotf, &f, &m, &sec) == 5) {
+                ph.cs = c == 2020 ? bmdColorspaceRec2020 : bmdColorspaceRec709; ph.flag = f != 0; ph.maxcll = m; ph.seconds = sec; phases.push_back(ph);
+            } else { printf("[hdrout] --phase takes cs,eotf,flag,maxcll,seconds\n"); return 2; }
+        }
         else if (a == "--then-colorspace") thenCs = nx() == "2020" ? bmdColorspaceRec2020 : bmdColorspaceRec709;
         else if (a == "--colorspace") cs = nx() == "2020" ? bmdColorspaceRec2020 : bmdColorspaceRec709;
     }
@@ -84,6 +95,52 @@ int main(int argc, char **argv) {
             printf(" · static P3-D65 1000 / 0.005 MaxCLL %.0f MaxFALL 400", maxcll);
         }
         printf("\n"); m->Release();
+    }
+    if (!phases.empty()) {
+        // Each phase gets its own frame, a copy of the first frame's picture, tagged with that phase's signal.
+        const BMDDeckLinkFrameMetadataID ids[12] = {
+            bmdDeckLinkFrameMetadataHDRDisplayPrimariesRedX, bmdDeckLinkFrameMetadataHDRDisplayPrimariesRedY,
+            bmdDeckLinkFrameMetadataHDRDisplayPrimariesGreenX, bmdDeckLinkFrameMetadataHDRDisplayPrimariesGreenY,
+            bmdDeckLinkFrameMetadataHDRDisplayPrimariesBlueX, bmdDeckLinkFrameMetadataHDRDisplayPrimariesBlueY,
+            bmdDeckLinkFrameMetadataHDRWhitePointX, bmdDeckLinkFrameMetadataHDRWhitePointY,
+            bmdDeckLinkFrameMetadataHDRMaxDisplayMasteringLuminance, bmdDeckLinkFrameMetadataHDRMinDisplayMasteringLuminance,
+            bmdDeckLinkFrameMetadataHDRMaximumContentLightLevel, bmdDeckLinkFrameMetadataHDRMaximumFrameAverageLightLevel};
+        std::vector<IDeckLinkMutableVideoFrame *> pf;
+        void *src = nullptr; IDeckLinkVideoBuffer *sb = nullptr;
+        fr->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&sb); sb->StartAccess(bmdBufferAccessRead); sb->GetBytes(&src);
+        for (auto &ph : phases) {
+            IDeckLinkMutableVideoFrame *f = nullptr;
+            out->CreateVideoFrame(1920, 1080, 5120, bmdFormat10BitYUV, ph.flag ? bmdFrameContainsHDRMetadata : bmdFrameFlagDefault, &f);
+            IDeckLinkVideoBuffer *db = nullptr; void *dst = nullptr;
+            if (f->QueryInterface(IID_IDeckLinkVideoBuffer, (void **)&db) == S_OK && db->StartAccess(bmdBufferAccessWrite) == S_OK) {
+                db->GetBytes(&dst); memcpy(dst, src, 5120 * 1080); db->EndAccess(bmdBufferAccessWrite); }
+            if (db) db->Release();
+            IDeckLinkVideoFrameMutableMetadataExtensions *pm = nullptr;
+            if (f->QueryInterface(IID_IDeckLinkVideoFrameMutableMetadataExtensions, (void **)&pm) == S_OK) {
+                pm->SetInt(bmdDeckLinkFrameMetadataColorspace, ph.cs);
+                pm->SetInt(bmdDeckLinkFrameMetadataHDRElectroOpticalTransferFunc, ph.eotf);
+                if (ph.maxcll >= 0) {
+                    const double v[12] = {0.68, 0.32, 0.265, 0.69, 0.15, 0.06, 0.3127, 0.329, 1000, 0.005, ph.maxcll, 400};
+                    for (int k = 0; k < 12; k++) pm->SetFloat(ids[k], ph.maxcll == 0 ? 0 : v[k]);
+                }
+                pm->Release();
+            }
+            printf("[hdrout] phase: colorspace %s EOTF %d flag %s%s for %.1f s\n", ph.cs == bmdColorspaceRec2020 ? "Rec.2020" : "Rec.709", ph.eotf,
+                   ph.flag ? "set" : "clear", ph.maxcll < 0 ? "" : ph.maxcll == 0 ? " · static all 0" : (" · MaxCLL " + std::to_string((int)ph.maxcll)).c_str(), ph.seconds);
+            pf.push_back(f);
+        }
+        sb->EndAccess(bmdBufferAccessRead); sb->Release();
+        int fails = 0, shown = 0;
+        for (size_t p = 0; p < phases.size(); p++) {
+            printf("[hdrout] phase %zu starts\n", p + 1); fflush(stdout);
+            for (int i = 0; i < (int)(phases[p].seconds * 25); i++, shown++) { if (out->DisplayVideoFrameSync(pf[p]) != S_OK) fails++; usleep(40000); }
+        }
+        printf("[hdrout] %d frames shown synchronously, %d refused\n", shown, fails); fflush(stdout);
+        for (auto *f : pf) f->Release();
+        fr->Release(); out->DisableVideoOutput(); out->Release();
+        if (cfg) { cfg->SetFlag(bmdDeckLinkConfigRec2020Output, prior2020); cfg->Release(); }
+        dl->Release(); it->Release();
+        return 0;
     }
     IDeckLinkMutableVideoFrame *fr2 = nullptr;
     if (thenEotf >= 0) {
