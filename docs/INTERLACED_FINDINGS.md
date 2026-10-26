@@ -419,3 +419,119 @@ screenshots; every quit by a Quit event to the bundle path. Runs: `build/interla
    5,921 presses differ from HEAD on the 35 other files with a track grid (`BUGS.md` release scope).
 4. **The 8K Pro sends 1080i on HDMI** at all three rates, detected as `Hi50 / Hi59 / Hi60`, upper field first.
 5. The §2 mode-label bug is fixed: the established mode reads `1080i59.94` from the mode's own field dominance.
+
+---
+
+## 12. I3 — per-field 4:2:0 colour (files): scope, predictions, results
+
+**Written 2026-10-26 15:36 EDT, before any code change or build, against `d8fc945`** (plus the uncommitted Stage 0 sleep
+assertion, which touches no pixel path). Predictions with their timestamp and hash: `build/interlaced-i3/predictions.md`,
+`predictions.timestamp`. Results follow. Nothing above this section was changed by I3.
+
+### 12.1 Scope: where the I3 brief and this document differ (the document wins)
+
+| Brief asked | This document says | I3 does |
+|---|---|---|
+| Per-field chroma in the window renderer, scopes, export **and** the SDI/HDMI v210 path | §8 I3: `passthroughFragment` reconstructs 4:2:0 chroma from the same field. §1: every consumer reads the one offscreen ring it writes | One change, in the fragment. The v210 kernels do horizontal chroma work only (pair average / co-sited / halfband) and read their own row (§2), so they are unchanged |
+| H.264, HEVC, MPEG-2 4:2:0 | Streams are I6; HEVC interlaced files are field sequences (§10.6 finding 6) | Files only. A field sequence is one field per picture, already per field, and keeps the progressive upsample (`picturesAreFields`). MPEG-2: AVFoundation decodes it (measured), so it is included |
+| Pass band "within a stated tolerance" | §9 P6: ≥ 99.9 % of rows within ±2 codes of their own field | P6's band, measured two ways (12.3) |
+
+### 12.2 What changed
+
+- **The filter** (`InterlacedChroma.taps`, FileScan; restated in `PassthroughShader.metal`, `sampleChromaOwnField`). 4:2:0
+  chroma row c belongs to field c mod 2 (top field = even rows, whatever the temporal order) and sits at frame line
+  2c + 0.5. That is MPEG-2's interlaced siting, and it is where the progressive sample already puts it, so only the
+  neighbours change. Line y of field f interpolates the two nearest chroma rows of its own field: t = (y − 2f − 0.5) / 4,
+  rows 2⌊t⌋+f and 2⌊t⌋+2+f, weight frac(t). The taps are 5/8·3/8 and 1/8·7/8 on the top field, 7/8·1/8 and 3/8·5/8 on
+  the bottom, clamped within the field at the edges. Horizontally each row is sampled as before (8-bit-flagged buffers
+  through the same quantised-texel filter).
+- **The rule** (`InterlacedChroma.perField`): woven interlaced only (`isInterlaced && !picturesAreFields`). The renderer
+  applies it per frame to **x420 buffers only** (`ColorParams.fieldChroma`); x422 and x444 have a chroma row per line.
+- **Plumbing:** `FrameEngine.onSourceScan` is published on the geometry's edges (AVFoundation: same format description,
+  before `beginReading`; libav: restated where the geometry is cleared, since the field structure survives the decode;
+  false at unload and when there is no format description). `WindowDeck` passes it to
+  `MetalVideoRenderer.setSourceInterlaced`, which parks it under `refreshLock` and installs it on the render thread
+  beside the geometry, with a re-render. One `[SCAN] chroma:` line when a file turns it on, one when it goes off;
+  progressive files log nothing new.
+- **Tests:** `InterlacedChromaTests` (5): the rule; every line reads only its own field; the weights and edges; the siting
+  equals the progressive siting; tiny planes stay in bounds.
+- **Tools** (`scripts/interlaced/`): `i3field.py` + `generate-i3.sh` (the sharp fixture, below), `i3cmp.cpp` (the
+  independent reference and comparison), `vtprobe.swift` / `vtdump.swift` (what VideoToolbox hands Manifold, read-only).
+
+**The sharp fixture** (`build/interlaced-fixtures/i3/`). It is written directly as Y'CbCr, with the raw input tagged
+BT.709 limited so FFmpeg converts nothing. (Untagged, FFmpeg read the input as 601 and rematrixed it on the way to the
+encoder; the first encode was thrown away for that.) Luma is constant (128 / 512). Field 1 and field 2 always carry
+opposite colours, A (Cb 352, Cr 672) and B (672, 352), in three regions: uniform (x < 960, y < 540), 64-line bands
+(x < 960, y ≥ 540) and 64-pixel bars (x ≥ 960). It is made as H.264 MBAFF TFF and BFF, MPEG-2 TFF, ProRes 422 HQ TFF,
+ProRes 4444 TFF and DNxHD 185x MXF TFF. FFmpeg's decode of each equals the written picture (H.264 exactly; the others
+within 1 code).
+
+### 12.3 Results (built and run unattended 2026-10-26)
+
+**Estimated** 5 h (band 3½–7). **Actual** about 1 h from the predictions to the last loop run, plus this record. No
+attended steps, no screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Runs, logs and exports:
+`build/interlaced-i3/`.
+
+**Two references.** The independent one is FFmpeg's decode of frame 0, split into fields and upsampled per field with
+the filter above (8-bit widened ×4). The second is the same per-field filter applied to **VideoToolbox's own x420
+delivery** of frame 0 (`vtdump`, read-only), i.e. the buffer Manifold's shader actually receives. The first measures the
+whole chain against the file. The second measures I3's shader alone. They differ because the decode does not hand
+Manifold the file's chroma (12.4). The model was validated first: HEAD's export against the *progressive* filter on the
+VideoToolbox planes matches within 1 code on the v210 and 0.17 code in the offscreen (100 % of rows).
+
+| # | Measured | Verdict |
+|---|---|---|
+| A1 | Sharp H.264 TFF and BFF, v210 and offscreen (`.rgba16f` back to Y'CbCr). **Against the VideoToolbox-plane per-field reference:** 1080 / 1080 rows within ±2, max 1 code (v210), 0.19 code (offscreen). **Against FFmpeg's per-field reference:** 1 / 1080 rows, chroma off by 80 codes, every row | Shader **PASS**; whole chain **FAIL** (the decode, 12.4) |
+| A2 | Bleed on the uniform region, per row. HEAD: mean **50.0 %** (rows alternate 62.5 / 37.5 %, the two-field mix). Tree: **25.0 %** on every row, exactly VideoToolbox's 25 % (12.4). MPEG-2: 49.9 % on both (Apple's decoder mixes the fields) | **FAIL** against the ≤ 1 % band. I3 removed Manifold's share (50 → 25 %); the rest is in the decoded buffer |
+| A3 | testsrc2 H.264 MBAFF TFF / BFF and the I2 H.264 marker. Against the VideoToolbox-plane per-field reference: ≥ 99.96 % within ±2, max 3, 1080 / 1080 rows. Against FFmpeg per-field: chroma max 581 → 232 (HEAD → tree), rows within ±2 34.8 % → 60.3 % | Shader **PASS**; whole chain **FAIL** (decode) |
+| A4 | Not as predicted: Manifold's H.264 luma equals FFmpeg's ×4 exactly (max 0, every file). AVAssetReader's x420 gives luma 514 for 128 (full scale), so the app's luma path differs from that reader's; its chroma does not | prediction wrong; no offset in luma |
+| B1 | 4:2:2 and 4:4:4 interlaced (ProRes HQ TFF / BFF / 50 / PsF / both disagreeing, DNxHD MXF TFF / BFF and `.mov`, the six 4:2:2 I2 markers, the halved file, sharp ProRes 422 / 4444 / DNxHD): `.rgba16f`, `.v210`, `.v210.json` **byte-identical to HEAD**, every file | **PASS** |
+| B2 | Sharp ProRes 422 / DNxHD / ProRes 4444 on HEAD and tree: rows alternate exactly 352 / 672 (no vertical filter in the x422 / x444 path); bars edge as designed (4:4:4 shows the D3 halfband) | **PASS** |
+| C1 | 20-file control set: 60 / 60 files byte-identical, PNG 20 / 20 byte-identical. The progressive ProRes control and three progressive probes (8-bit H.264, 8-bit MPEG-2, 10-bit HEVC of the same sharp picture): byte-identical | **PASS** |
+| C2 | HEVC field sequence: byte-identical (no `[SCAN] chroma` line) | **PASS** |
+| D1 | v210 luma on every changed file: 0 samples differ from HEAD | **PASS** |
+| E1 | §11.3's gaps, attributed (12.4) | **PASS** (each part named) |
+| F1 | Loop, SDI, tree and HEAD on sharp H.264 TFF / BFF, MPEG-2, ProRes 422 and testsrc H.264 TFF: `D4a … → mode 1080i59.94` and bridge `mode: 1080i59.94 (… interlaced, upper field first)` identical on both; input `Hi59`, field dominance upper | **PASS** (mode lines). Temporal field order was not re-measured: I3 touches no mode, placement or scheduling code; the I2 marker runs stand |
+| F2 | Every received frame equal to the read-back: 131 / 131, 131, 131, 131, 130 (tree), the same on HEAD; **while playing**, sharp TFF 130 / 130 and BFF 130 / 130. The read-back equals the export `.v210` (tree 6 / 6, HEAD 4 / 4) | **PASS** |
+| F3 | `late=0 dropped=0` on all 12 loop runs | **PASS** |
+| G1 | `swift test` **631 / 631** (626 + 5) | **PASS** |
+| G2 | Profile warnings: the same 11 on HEAD and tree (and as I2's set) | **PASS** |
+| H1 | 21 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | **PASS** |
+
+### 12.4 Where the rest of the bleed comes from: the decode (measured, read-only)
+
+The same sharp picture, through `vtprobe` (AVAssetReader at Manifold's request, x420, and at 8-bit `420v`), and through
+Manifold's export:
+
+| Source | x420 chroma rows (Cb) | 420v | Manifold HEAD export |
+|---|---|---|---|
+| H.264 8-bit MBAFF TFF (rows 352 / 672 coded) | 432 / 592 alternating: each row 75 % own field, 25 % the other ([1 6 1]/8 vertically) | 88 / 168: the coded values | x420's rows, bilinear |
+| H.264 8-bit **progressive**, same picture | 432 / 592, the same filter | 88 / 168 | the same |
+| MPEG-2 8-bit interlaced | 433, 513, 513 …: the fields fully mixed | 108, 128, 128 …: mixed too | the same |
+| MPEG-2 8-bit progressive | 353 / 674: the coded values (full-scale widening) | 88 / 168 | clean |
+| HEVC Main 10 progressive | — | — | raw 352 / 672 through the bilinear: clean |
+
+1. **8-bit H.264 → x420 (VideoToolbox's 8→10-bit delivery) filters chroma vertically by [1 6 1]/8**, interlaced or not.
+   At `420v` the chroma is exact. So on an 8-bit interlaced H.264 file 25 % of the other field remains after I3, and every
+   8-bit H.264 file (progressive too) loses vertical chroma detail to this filter. **Not changed here:** the remedy is to
+   ask for `420v` on 8-bit 4:2:0 files and widen ×4 in the shader (the 8-bit path that exists for live sources). That
+   changes the decode format, scrub and playback together, and the pictures of every 8-bit H.264 file, progressive ones
+   included, which I3 must not. Recorded in BUGS.md as its own item.
+2. **Apple's MPEG-2 decoder mixes the two fields' chroma on interlaced coding,** at either format. Manifold cannot undo
+   it. A field-correct MPEG-2 needs another decoder (decision 7's libav question).
+3. **§11.3's H.264 luma max 76 and DNxHD max 9 were not Manifold.** Against FFmpeg's frame 0 widened ×4, HEAD's H.264
+   read-back luma is identical (max 0), and the DNxHD read-backs (MXF TFF / BFF, `.mov`) are identical in luma **and**
+   chroma (max 0); ProRes is within 1. The 4:2:2 chroma max 60 is also gone. So those gaps came from I2's reference. How
+   I2 built it was not kept, so which step introduced them is UNKNOWN. The luma can never have been cross-field chroma:
+   the offscreen is float and unclamped, so luma survives the R'G'B' round trip whatever the chroma.
+4. **§11.3's 4:2:0 chroma max 361** was Manifold's two-field mix plus the decode's filter, measured against a reference
+   that itself upsampled progressively. With I3, testsrc H.264 against FFmpeg's per-field reference: max 581 → 232; the
+   232 is item 1.
+5. **Not measured:** a 4:2:2 file that falls back to 4:2:0 (`chromaFallback`, or the DEBUG force) would be reduced to
+   4:2:0 by VideoToolbox or sws progressively, mixing fields, before I3's upsample. No fixture falls back.
+6. **Not in I3:** the display copy's bilinear resample still blends lines of the two fields away from 100 % (§3; I4's
+   job). It reads the corrected offscreen.
+
+**Done for files, with the decode's limits:** Manifold no longer mixes the fields of a 4:2:0 picture anywhere (window,
+scopes, export and SDI all read the corrected offscreen). P6 is met against what the decoder delivers. Against the file
+it is not met for 8-bit H.264 (item 1, fixable) or MPEG-2 (item 2, the decoder).

@@ -27,6 +27,8 @@ struct ColorParams {
     // Nonzero = this buffer was widened from an 8-bit source (see "8-bit sources" below). Mirrors
     // ColorParams.eightBitSource in MetalVideoRenderer.swift.
     int eightBitSource;
+    // Interlaced I3: nonzero = an x420 buffer holding a woven interlaced picture; chroma per field (below).
+    int fieldChroma;
 };
 
 // MARK: - Sample domain (10-bit x420)
@@ -110,6 +112,51 @@ static inline float2 sampleChromaExactTimes4(texture2d<float> tex, float2 uv) {
     float2 c01 = exactTimes4(tex.read(uint2(a.x, b.y)).rg);
     float2 c11 = exactTimes4(tex.read(uint2(b.x, b.y)).rg);
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+}
+
+// MARK: - Interlaced 4:2:0 (I3, docs/INTERLACED_FINDINGS.md §8)
+//
+// In a woven interlaced 4:2:0 picture chroma row c belongs to field c mod 2, so the bilinear sample above (which
+// mixes neighbouring chroma rows) mixes the two fields. Here each line takes its chroma from ITS OWN FIELD's rows.
+// Chroma row c sits at frame line 2c + 0.5 (MPEG-2 interlaced siting, which is where the progressive sample already
+// puts it), so only the neighbours change: line y of field f = y mod 2 mixes that field's two nearest chroma rows,
+// t = (y − 2f − 0.5) / 4 → rows 2⌊t⌋ + f and 2⌊t⌋ + 2 + f, weight frac(t) — 5/8·3/8 and 1/8·7/8 on the top field,
+// 7/8·1/8 and 3/8·5/8 on the bottom, clamped within the field at the edges. Restated from `InterlacedChroma.taps`
+// (FileScan), which the unit tests pin. Horizontally each row is sampled exactly as the progressive path samples it.
+// The line is the BUFFER's (from the luma texture): the crop is on the even grid, so its parity is the source's.
+
+// One chroma row, filtered horizontally only: the progressive path's horizontal filter over quantised texels (8-bit).
+static inline float2 sampleChromaRowExactTimes4(texture2d<float> tex, float u, uint row) {
+    const float w = float(tex.get_width());
+    const float p = u * w - 0.5;
+    const float i0 = floor(p);
+    const float f = rint((p - i0) * 256.0) / 256.0;
+    const int hi = int(w) - 1;
+    const uint a = uint(clamp(int(i0), 0, hi)), b = uint(clamp(int(i0) + 1, 0, hi));
+    return mix(exactTimes4(tex.read(uint2(a, row)).rg), exactTimes4(tex.read(uint2(b, row)).rg), f);
+}
+
+static inline float2 sampleChromaOwnField(texture2d<float> lumaTex, texture2d<float> chromaTex, float2 uv, bool eightBit) {
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    const int h = int(chromaTex.get_height());
+    const int y = int(floor(uv.y * float(lumaTex.get_height())));
+    const int f = y & 1;
+    const float t = (float(y - 2 * f) - 0.5) * 0.25;
+    const float j0 = floor(t);
+    const float wB = t - j0;
+    const int last = max((h - 1 - f) / 2, 0);
+    const int ra = min(2 * clamp(int(j0), 0, last) + f, h - 1);
+    const int rb = min(2 * clamp(int(j0) + 1, 0, last) + f, h - 1);
+    float2 a, b;
+    if (eightBit) {
+        a = sampleChromaRowExactTimes4(chromaTex, uv.x, uint(ra));
+        b = sampleChromaRowExactTimes4(chromaTex, uv.x, uint(rb));
+    } else {
+        // At a row's centre the sampler's vertical weight is 0: the row itself, filtered horizontally.
+        a = chromaTex.sample(s, float2(uv.x, (float(ra) + 0.5) / float(h))).rg;
+        b = chromaTex.sample(s, float2(uv.x, (float(rb) + 0.5) / float(h))).rg;
+    }
+    return mix(a, b, wB);
 }
 
 // The ACTIVE PICTURE's uv range inside the decoded buffer — the encoded raster with the declared
@@ -280,7 +327,12 @@ fragment half4 passthroughFragment(VertexOut in [[stage_in]],
 
     float y  = lumaTex.sample(s, in.texCoord).r;
     float2 cbcr;
-    if (params.eightBitSource != 0) {
+    if (params.fieldChroma != 0) {
+        // Interlaced I3: a woven interlaced x420 picture, chroma from each line's own field (above).
+        if (params.eightBitSource != 0) y = exactTimes4(y);
+        cbcr = sampleChromaOwnField(lumaTex, chromaTex, in.texCoord + float2(params.chromaShiftU, 0.0),
+                                    params.eightBitSource != 0);
+    } else if (params.eightBitSource != 0) {
         // An 8-bit source: every sample exactly ×4 (the block above).
         y = exactTimes4(y);
         cbcr = sampleChromaExactTimes4(chromaTex, in.texCoord + float2(params.chromaShiftU, 0.0));

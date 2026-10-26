@@ -243,7 +243,21 @@ held back until after release, and the numbered defect entries follow.
      locks 1080i at its rate, upper field first, on both inputs; received frames byte-identical to the read-back;
      fields in temporal order over 374–456 fields per run (0 swapped); pictures byte-identical to HEAD; no vertical
      scaling of an interlaced picture. The reference-monitor half of §9 P5 is still to do (attended).
-   - **I3 — per-field 4:2:0 colour** in the renderer. (The 4:2:2 file half is in HEVC Stage 3b, above.)
+   - **I3 — per-field 4:2:0 colour** in the renderer. (The 4:2:2 file half is in HEVC Stage 3b, above.) **Built and run
+     unattended 2026-10-26, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §12): a woven interlaced
+     file's 4:2:0 chroma is reconstructed from each line's own field in `passthroughFragment`, so the window, scopes,
+     export and SDI all get it; the shader matches a per-field reference on the decoder's own planes to 1 code (100 %
+     of rows); 4:2:2 / 4:4:4 interlaced, the HEVC field sequence and the 20-file control set byte-identical to HEAD;
+     SDI loop 0 different, late = 0 dropped = 0; 631 / 631 tests; warnings unchanged. **Against the file, P6 is not met
+     for 8-bit H.264 or MPEG-2:** the decoder hands over chroma already mixed across fields (H.264 25 %, the next item;
+     MPEG-2 fully, Apple's decoder). Sharp-fixture bleed 50 % → 25 % (H.264).
+   - **8-bit H.264 files lose vertical chroma detail in the decode (found in I3, 2026-10-26; not fixed).** VideoToolbox's
+     delivery of 8-bit H.264 at x420, which every file decode asks for, filters chroma vertically by [1 6 1]/8. At
+     `420v` the chroma is exact (`scripts/interlaced/vtprobe.swift`, `INTERLACED_FINDINGS.md` §12.4). On interlaced
+     files it leaves 25 % of the other field after I3; on progressive ones it softens vertical colour edges. Fix to
+     decide: ask for `420v` on 8-bit 4:2:0 files (scrub and playback together) and widen ×4 in the shader, as the
+     live 8-bit path does. It changes every 8-bit H.264 file's pictures, so it needs its own predictions and a full
+     re-measure. HEVC Main 10 and 10-bit sources are unaffected.
    - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
      Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
    - **Not in 1.0:** I5 (true bob at field rate) and I6 (interlaced streams, including NDI's built-in
@@ -336,6 +350,16 @@ held back until after release, and the numbered defect entries follow.
      is it still "the yellow"?); the yellow face and words on the control bar over a bright picture (the HUD is 55 %
      black, so over white video #FFE600 is about 3.8:1 and the bar's white text about 4.7:1, estimated as #737373 behind); the compare badge;
      Loop, captions, tray and reload in yellow beside the green DeckLink and stream buttons.
+   ✅ **DeckLink output holds the Mac awake (SDI_OUTPUT_TIMING.md §3, Stage 0; Robbie, 2026-10-26).** Built and tested
+   2026-10-26, commit `<commit — to be filled in>`. While output runs, one activity
+   (`ProcessInfo.beginActivity([.userInitiated, .idleDisplaySleepDisabled, .latencyCritical])`, "Manifold is sending
+   video to a DeckLink output") keeps the displays and the Mac from idle-sleeping and App Nap from throttling Manifold,
+   because every SDI frame is still made by a window render. One owner: `DeckLinkService.isOutputting`'s observer
+   (`outputActivity`). Measured with `pmset -g assertions`: present only while output runs; released after Stop, closing
+   the owning window, a device switch whose restart failed, a forced failed start, and Quit (none left). A switch that
+   stays running could not be made on this card. Pictures byte-identical to `d8fc945` (20-file export set); 626 / 626
+   tests; warnings unchanged. Not yet run: a playout past a display-sleep timeout (this Mac's is "never"). The full
+   decoupling is a 1.1 item (*card-clock-driven DeckLink output*, below).
 4. **The release gate:**
    - the sync leftovers;
    - the user guide, including a note that an interlaced NDI source is deinterlaced by the NDI SDK before
@@ -1654,6 +1678,24 @@ items.
 
 
 ---
+
+## ☐ POST-RELEASE (1.1): card-clock-driven DeckLink output, independent of the window
+
+**Decided (Robbie, 2026-10-26): after 1.0.** Design, risks and staged plan: `docs/SDI_OUTPUT_TIMING.md` §3.
+
+- **What:** every SDI / HDMI frame is still made by the owning window's render: its display link picks the frame and its
+  render's completion converts it to v210 (`MetalVideoRenderer.swift:3645`, since `1b43979`). If the window's
+  `nextDrawable()` returns nil, the offscreen render and its SDI convert are dropped with it (`:3552`). The card's own
+  clock should instead ask for the frame due at each slot, rendered and converted off-screen by the same code.
+- **Why it can wait:** measured frame-perfect in every window state (LG 120 Hz, ASUS 60 Hz, minimised, covered, another
+  Space, paused) at 23.98 / 25 / 29.97: 0 repeats, 0 skips, late = 0, dropped = 0 (`SDI_OUTPUT_TIMING.md` §2). The
+  sleep and App Nap exposure is closed by Stage 0 (the activity assertion while output runs, 2026-10-26).
+- **Plan (from the doc):** (1) split the offscreen pass from the present, so a nil drawable no longer drops the SDI frame;
+  (2) a non-consuming frame read for the output; (3) the card's clock drives the output render for files, the `9aaff2d`
+  ring as the fallback, measured in every §2 condition plus display sleep, 4K and a 60 Hz main display; (4) live sources,
+  verified on a non-Cloudflare server.
+- **Risks:** about twice the GPU work at 4K while the window is visible; paused priming and seek renders; live clocks on
+  the card's thread; the scopes must keep reading the window's ring; the shared frame queue.
 
 ## ☐ POST-RELEASE: `CVDisplayLink` → `CADisplayLink`, as its own project with a full re-measure
 
@@ -3585,7 +3627,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended) and field-correct colour (P6, I3).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, not yet against the file for 8-bit H.264 (the decode's vertical chroma filter, release scope) or MPEG-2 (Apple's decoder mixes the fields).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -3661,7 +3703,8 @@ Streams are I6, after 1.0. The decisions:
   I2 makes the decision);
 - 1080i50, 1080i59.94 and 1080i60 exist and are chosen for such files;
 - the card is verified on the reference monitor with the TFF and BFF fixtures (`INTERLACED_FINDINGS.md`
-  P3–P5), and colour is field-correct (P6).
+  P3–P5), and colour is field-correct (P6). P6: Manifold's part done in I3; 8-bit H.264 waits on the decode-format item
+  (release scope, *8-bit H.264 files lose vertical chroma detail in the decode*).
 
 **Done means (streams, I6, after 1.0):**
 - interlaced-ness reaches the mode decision from the stream's own signalling (SPS `frame_mbs_only_flag`,

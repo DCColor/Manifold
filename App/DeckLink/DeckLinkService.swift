@@ -79,7 +79,28 @@ final class DeckLinkService: ObservableObject {
     static let primeTimeout: TimeInterval = 0.25
 
     // Observable UI state (mutated on main).
-    @Published private(set) var isOutputting = false     // reflects the ACTUAL scheduled-playback state
+    @Published private(set) var isOutputting = false {   // reflects the ACTUAL scheduled-playback state
+        didSet { if isOutputting != oldValue { updateOutputActivity() } }
+    }
+    /// SDI_OUTPUT_TIMING.md §3, Stage 0 (Robbie, 2026-10-26): while output runs, neither the displays nor the Mac may
+    /// idle-sleep and App Nap may not throttle Manifold, because every SDI frame is still made by a window render. ONE
+    /// owner: `isOutputting`'s observer. Every start and every end of output moves that flag on main (Start, a failed
+    /// start, Stop — which the owning window closing, black-on-stop and a device switch go through — and quit), so the
+    /// activity begins and ends with it and nothing else holds one.
+    private var outputActivity: NSObjectProtocol?
+
+    private func updateOutputActivity() {
+        if isOutputting, outputActivity == nil {
+            outputActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .idleDisplaySleepDisabled, .latencyCritical],
+                reason: "Manifold is sending video to a DeckLink output")
+            print("[POWER] DeckLink output running — display and system sleep held off, App Nap off")
+        } else if !isOutputting, let activity = outputActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            outputActivity = nil
+            print("[POWER] DeckLink output stopped — sleep and App Nap released")
+        }
+    }
     @Published private(set) var selectedDeviceIndex = 0  // which enumerated device output targets
     @Published private(set) var devices: [Device] = []   // cached enumeration for the picker
     /// How many devices the last walk returned BEFORE the output filter, and the ones it dropped.

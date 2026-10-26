@@ -1089,6 +1089,10 @@ final class DeckRegistry {
             renderer?.setSourceGeometry(encodedWidth: encodedW, encodedHeight: encodedH,
                                         aperture: aperture, pixelAspect: pixelAspect)
         }
+        // INTERLACED I3: the file's field structure, same edges, same destination (per-field 4:2:0 chroma).
+        engine.onSourceScan = { [weak renderer] perField in
+            renderer?.setSourceInterlaced(perField)
+        }
         // THE SCRUB SEAM'S DESTINATION — per-window, same shape and same site as the three above.
         // The engine's coalescer has already applied the delivery-side token check; this is the
         // hand-off itself. `presentImmediate` bypasses the frame queue and the `pts <= clock()`

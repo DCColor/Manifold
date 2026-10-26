@@ -10,6 +10,7 @@ import FileAudioLookahead
 import ColorimetryModel   // SourceChroma — the chain readout's Chroma line (Stage 3b S2)
 import FileChroma
 import FrameGrid
+import FileScan        // InterlacedChroma — per-field 4:2:0 (I3)
 // The file audio reader's output layout, and the size check a source's own layout must pass first.
 import AudioOutputLayout
 
@@ -280,6 +281,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// published there: a deck emptied by an unload must not crop the next source by the departed
     /// file's aperture, nor tag its export with the departed file's squeeze.
     public var onSourceGeometry: ((Int, Int, DeclaredCleanAperture, DeclaredPixelAspect) -> Void)?
+
+    /// Interlaced I3 (docs/INTERLACED_FINDINGS.md §8): true when the file is woven interlaced, so the renderer
+    /// reconstructs its 4:2:0 chroma per field (`InterlacedChroma.perField`). Published on the same edges as
+    /// `onSourceGeometry` (the scan is read from the same format description and the file's first video packet, before
+    /// the first frame) and false at unload. Not part of the geometry: the libav path clears that, and the field
+    /// structure still holds there.
+    public var onSourceScan: ((Bool) -> Void)?
 
     nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
@@ -1220,6 +1228,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // file that never declared one, which is a worse failure than the padding it removes, and
         // a stale `pasp` would follow the next file into its exported filename.
         onSourceGeometry?(0, 0, .undeclared, .undeclared)
+        onSourceScan?(false)
     }
 
     /// Publish the frame size of a LIVE (non-file) source into this deck.
@@ -1834,6 +1843,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             onSourceGeometry?(Int(encoded.width), Int(encoded.height),
                               MediaInspector.cleanAperture(for: fmt),
                               MediaInspector.pixelAspect(for: fmt))
+            // Interlaced I3: the field structure, at the same point, read as the Inspector reads it (I1).
+            onSourceScan?(InterlacedChroma.perField(FileScanProbe.resolve(url: url, formatDescription: fmt, mxf: false)))
             // DNxHR can't decode through VideoToolbox; route it to libav. Its real
             // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
             // beginLibavReading — overriding the often-untagged AVFoundation read.
@@ -1860,6 +1871,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
             // be published for the same reason the nil codes are.
             onSourceGeometry?(0, 0, .undeclared, .undeclared)
+            onSourceScan?(false)
             adoptFileChroma(FileChromaResolver.resolve(.unknown, basis: "no format description",
                                                        force420: false, forceReason: ""))
         }
@@ -2409,6 +2421,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // supplies its own sample aspect and this path does not read it, so claiming a
                 // declaration we have not read would be worse than claiming none.
                 onSourceGeometry?(0, 0, .undeclared, .undeclared)
+                // Interlaced I3: the field structure is not geometry and survives the decode, so it is restated here
+                // from this path's own reading (as `applyLibavMetadata` reads it).
+                onSourceScan?(InterlacedChroma.perField(FileScanProbe.resolve(
+                    url: url, formatDescription: libavFileFormatDescription, mxf: url.pathExtension.lowercased() == "mxf")))
                 // MXF: AVFoundation is blind to the container, so the UI facts
                 // (duration/size/fps/color/codec) come from libav. .mov-DNx already
                 // has them from AVFoundation (videoTrack set) — leave those untouched.

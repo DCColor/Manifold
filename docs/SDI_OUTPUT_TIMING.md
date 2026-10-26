@@ -1,6 +1,6 @@
 # SDI / HDMI output timing and the window's display
 
-Audit, 2026-10-26, at `9aaff2d` (the frame-due pull). Question (Robbie): does DeckLink output timing depend on the
+Audit, 2026-10-26, measured at `9aaff2d` (the frame-due pull); committed as `d8fc945`. Question (Robbie): does DeckLink output timing depend on the
 window's display, and does it matter in practice? No app code was changed for this audit. The measurement used the
 DEBUG `[CADENCE]` log that ships in `9aaff2d` (pre-ship removal list) and the SDI loop.
 
@@ -15,8 +15,9 @@ The exceptions are untested, not measured failures:
   is still produced by a render that needs the window's display link and a drawable.
 - **A future or power-saving macOS** that stops giving hidden windows drawables or display-link ticks.
 
-The cheap guard (a power and activity assertion while output runs) is worth doing before 1.0. The full decoupling
-(§3) is not needed for 1.0 on this evidence.
+The cheap guard (a power and activity assertion while output runs) is worth doing before 1.0: **built 2026-10-26,
+commit `<commit — to be filled in>`** (§3, Stage 0). The full decoupling (§3) is not needed for 1.0 on this evidence;
+it is a 1.1 item in `BUGS.md` (*card-clock-driven DeckLink output*).
 
 ## 0. History
 
@@ -103,6 +104,16 @@ playing case, minimised and other-Space included. The display link ticked every 
 displays and the Mac awake and opts out of App Nap and timer coalescing for the output's duration. End it when output
 stops. It touches `DeckLinkService` only. Risk: low (the displays stay on during output, which is the intent). Verify
 with `pmset -g assertions` and a playout past the display-sleep timeout on a Mac with defaults.
+
+**Stage 0, built 2026-10-26** (commit `<commit — to be filled in>`; predictions `build/token-step/predictions-stage0.md`):
+`DeckLinkService.outputActivity`, owned by `isOutputting`'s observer, which every start and end of output already moves on
+main. `pmset -g assertions` (`build/token-step/power/`): none at launch or with a file open; two while output runs
+(`PreventUserIdleSystemSleep` and `PreventUserIdleDisplaySleep`, named "Manifold is sending video to a DeckLink output");
+none after the Stop button, closing the owning window, a device switch to DeckLink 8K Pro (2) (which refused the mode, so
+the restart failed and released it), a forced failed start (`MANIFOLD_DECKLINK_ENABLE_HR`), and Quit (process gone). A
+device switch that stays running could not be made on this card (only (1) outputs in its profile). A `[POWER]` line logs
+each begin and end. The 20-file export set is byte-identical to `d8fc945`; `swift test` 626 / 626; warnings the same 11.
+**Not yet tested:** a playout past a display-sleep timeout (this Mac's is "never").
 
 **The full fix (only if a case above is shown to fail, or for 1.1):** the card's clock requests the frame due for each
 slot, and the same conversion code runs off-screen, independent of the window.

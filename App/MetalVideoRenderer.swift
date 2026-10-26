@@ -36,6 +36,9 @@ private struct ColorParams {
     /// to exactly ×4 (clears the two low bits) before anything else. 0 for every other buffer, which
     /// then takes the arithmetic it always did. §6.10, *8-bit sources mapped exactly ×4*.
     var eightBitSource: Int32 = 0
+    /// Interlaced I3: 1 = this x420 buffer is a woven interlaced picture, so the shader reconstructs each line's chroma
+    /// from its own field (`InterlacedChroma`, FileScan). 0 for every other buffer, which takes the arithmetic it always did.
+    var fieldChroma: Int32 = 0
 }
 
 /// Matches the shader's CropRect struct (memory layout). The ACTIVE PICTURE's uv range inside the
@@ -713,6 +716,7 @@ final class MetalVideoRenderer {
         refreshLock.lock()
         let armed = pendingRefresh || pendingSeekRender || pendingClear || pendingImmediate != nil
             || pendingColorState != nil || pendingDrawableSize != nil || pendingGeometry != nil
+            || pendingFieldChroma != nil
         refreshLock.unlock()
         let canIdle = !armed && onDisplayTick == nil && presentationHoldFloor == nil && calibrationFlash == nil
             && isPausedProvider?() == true
@@ -1696,6 +1700,14 @@ final class MetalVideoRenderer {
     ///     compares a producer's buffer against the ENCODED raster rather than the offscreen;
     ///   * `exportCurrentFrame`, which needs the PIXEL ASPECT to annotate the PNG.
     private var mainSourceGeometry: SourceGeometry?
+    /// Interlaced I3: parked by `setSourceInterlaced` (main) under `refreshLock`, installed at the top of
+    /// `performDisplayTick` into `activeFieldChroma` (RENDER THREAD ONLY), which the offscreen pass reads per frame.
+    private var pendingFieldChroma: Bool?
+    private var activeFieldChroma = false
+    private var mainSourceInterlaced = false   // MAIN THREAD ONLY: the no-op guard
+    /// Whether the last buffer drawn took the per-field chroma. RENDER THREAD only. Starts false, so a progressive
+    /// file logs nothing: one `[SCAN]` line when a file turns it on, one when it goes off.
+    private var lastFieldChroma = false
 
     /// ── THE DISPLAY RASTER, HANDED FROM MAIN TO THE RENDER THREAD ────────────────────────
     ///
@@ -2207,6 +2219,20 @@ final class MetalVideoRenderer {
 
         refreshLock.lock()
         pendingGeometry = state
+        pendingRefresh = true
+        refreshLock.unlock()
+        wakeDisplayLink()
+    }
+
+    /// Interlaced I3 (docs/INTERLACED_FINDINGS.md §8): whether this deck's file is woven interlaced, so its 4:2:0
+    /// chroma is reconstructed per field (`InterlacedChroma.perField`). Published by the engine on the same edges as the
+    /// geometry, ahead of the first frame, and false at unload; parked and installed on the render thread like the
+    /// geometry, with a re-render so a paused frame is redrawn. Live sources never set it (streams are I6).
+    func setSourceInterlaced(_ perField: Bool) {
+        guard mainSourceInterlaced != perField else { return }
+        mainSourceInterlaced = perField
+        refreshLock.lock()
+        pendingFieldChroma = perField
         pendingRefresh = true
         refreshLock.unlock()
         wakeDisplayLink()
@@ -2981,6 +3007,8 @@ final class MetalVideoRenderer {
         pendingDrawableSize = nil
         let geometry = pendingGeometry
         pendingGeometry = nil
+        let fieldChroma = pendingFieldChroma
+        pendingFieldChroma = nil
         refreshLock.unlock()
 
         // THE ACTIVE PICTURE, INSTALLED HERE FOR THE SAME REASON AS THE TWO ABOVE IT — and with
@@ -2990,6 +3018,8 @@ final class MetalVideoRenderer {
         // no layer property, so it needs no CATransaction; it is parked and installed here purely
         // to keep the "one writer, one thread" rule that governs everything else on this type.
         if let geometry { activeGeometry = geometry }
+        // Interlaced I3: the file's field structure, installed at the same point for the same reason.
+        if let fieldChroma { activeFieldChroma = fieldChroma }
 
         // THE DISPLAY RASTER, INSTALLED HERE AND NOWHERE ELSE — same placement and the same reason
         // as the colour state above: this is the one thread that touches the layer, and it must
@@ -3518,6 +3548,15 @@ final class MetalVideoRenderer {
         let eightBit = SourceBitDepth.isEightBit(pixelBuffer)
         if eightBit { params.eightBitSource = 1 }
         noteEightBitSource(eightBit)
+        // Interlaced I3: a woven interlaced file's 4:2:0 chroma from each line's own field. Only x420 has a vertical
+        // upsample to change: x422 and x444 carry a chroma row per line, and every other buffer keeps 0.
+        let fieldChroma = activeFieldChroma && frameChroma == .c420
+        if fieldChroma { params.fieldChroma = 1 }
+        if fieldChroma != lastFieldChroma {
+            lastFieldChroma = fieldChroma
+            NSLog("[SCAN] %@", fieldChroma ? "chroma: interlaced 4:2:0, reconstructed from each line's own field (I3)"
+                                           : "chroma: per-field reconstruction off")
+        }
         // Colour S6, L1: a LUT's own pipeline (the same fragment, specialised with the LUT on), or the
         // everyday one. Nothing else in this pass changes with it.
         if let lut = activeLUT {
