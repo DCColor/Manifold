@@ -328,3 +328,87 @@ diagnostics tag list; `Package.swift`; `Tests/FileScanTests/` (15 tests). Script
 `verify.sh`, `scanprobe.swift`.
 
 **Not in I1, as §10.1 says:** the chain readout (I4), the rate halving and 1080i modes (I2), streams (I6), SD.
+
+---
+
+## 11. I2 — SDI 1080i (files): scope, predictions, results
+
+**Written 2026-10-25 22:39 EDT, before any code change, build or run, against `6a39299`** (`build/interlaced-i2/predictions.md`,
+timestamped). Results follow. Nothing above this section was changed by I2.
+
+### 11.1 Scope: where the I2 brief and this document differ (the document wins)
+
+| Brief asked | This document says | I2 does |
+|---|---|---|
+| A BFF source's fields "handled correctly, not just woven" | **Decision 2:** BFF HD files are sent untouched, with a warning; the judder is the defect QC should see (§9 P5: "the BFF judder is the pass") | The woven frame goes out as decoded. On the top-field-first 1080i wire its later (top) field is shown first in every frame. The advisory (`sourceAdvisory`, DeckLink menu ▸ Signal) says so. Re-ordering the fields (a one-line shift, or a field-delay) would hide a faulty master and change the picture the scopes and export read |
+| Manual picker: 1080i rows only if the doc includes them | §5, §8 I2: the three 1080i modes are in the picker | 1080i50 / 59.94 / 60 after the 1080p rows, under both mode sets |
+| Rate: interlaced reports its frame rate correctly | Decision 3: an interlaced 50 / 59.94 / 60 is halved, logged | Halved for woven frames only (`InterlacedRate`). A field sequence (HEVC `field_seq_flag`: every picture one field) really delivers pictures at the field rate; it is I4 / I6, left as reported |
+| Scaling: horizontal only within each field; other heights: refuse or place unscaled | Silent, except decision 8 (SD out of scope) | The brief applies. 1080 interlaced: rows 1:1, width to the display width (1440 at 4:3 → 1920). Any other interlaced height, and 1080 at 23.98 / 24 (§5: no 1080i mode): progressive mode chosen under the 1:1 rule, picture **placed unscaled** on an even row (field parity kept), with an advisory. Not refused: refusing would put black on the wire |
+| Verification on the loops | §9 P5 asks for the reference monitor | The loops measure the wire (mode, field dominance, bytes, temporal order). The reference-monitor half of P5 is not done (attended) |
+| — | §8 I2: "unit tests for `resolveOutputMode`" | The rule lives in `SDIOutputModeSelector` (ColorimetryModel), so it is tested there; `resolveOutputMode` passes `interlaced` through |
+| Streams | I6 | Files only. Every live path places pictures as progressive (`setDeckLinkSourceInterlaced(false)`) and picks modes as before |
+
+### 11.2 What changed
+
+- **`SDIOutputMode.swift`:** `SDIModeFamily.i1080` (offered at the frame rates 25 / 29.97 / 30, labelled by the field rate
+  through `SDIStandardRate.fieldToken`); `SDIOutputMode.interlacedTable`, kept out of `table` so D1–D9 are unchanged;
+  `select(…, interlaced:)` and `interlacedMode(height:frameRate:)`; `SDIPlacement.fit(…, interlaced:)` and `fieldsKept`
+  (rows 1:1, even row, width resampled only); `SDIResampleTaps.identity`.
+- **`FileScan`:** `InterlacedRate` (decision 3) and `SourceScan.fieldRateSuffix`; `ScanReading.picturesAreFields` (set
+  by the HEVC field-sequence reader). `VideoMetadata.applyInterlacedRate()`, called by both metadata producers;
+  `frameRateString` gives the field rate and says when the rate was halved. The libav path's start timecode now parses
+  at the halved rate (identical for every progressive file).
+- **`DeckLinkService`:** `OutputMode.interlaced`; the 1080i picker rows; `sourceFormatChanged(…, scan:)`; the advisory
+  (`interlacedAdvisory`), set or cleared on every file resolve; the bridge call passes `interlaced`.
+- **`DeckLinkBridge.mm`:** `BMDModeForRasterRate(…, interlaced)` → `bmdModeHD1080i50 / i5994 / i6000` (never PsF);
+  `ModeNameForResolved` takes the mode's `GetFieldDominance` (§2's label bug) and logs the dominance.
+- **`MetalVideoRenderer`:** `setDeckLinkSourceInterlaced`; the placement passes it; a `fieldsKept` scaler's vertical pass
+  uses identity taps. The v210 kernels are unchanged.
+- **Stepping:** unchanged. One step is one coded frame, which for every interlaced file here is one woven frame (two
+  fields). Both step grids come from the file's own samples (AVFoundation) or libav's rate, not from the metadata rate.
+- **Tools:** `scripts/interlaced/generate-i2.sh` (marker fixtures: each field carries its picture number as a 16-bit
+  luma code with a check pattern), `scripts/decklink-loopback/fieldtool.cpp` (`marks`, per-field `cmp`), `capture
+  --marks`. Tests: `SDIInterlacedModeTests` (7), `InterlacedRateTests` (4).
+
+### 11.3 Results (built and run unattended on the SDI and HDMI loops 2026-10-25)
+
+**Estimated** 6 h (band 4–8). **Actual** about 2 h 30 min from the predictions to this record. Loops: device 0, profile
+`1dfd`, SDI out → SDI in, HDMI out → HDMI in. HDMI input switched per capture only (`capture --input hdmi`, never
+persisted); the probe read `cfg VideoInputConnection SDI` after **every** capture (69 of 69, the smoke run included). No keystrokes, no
+screenshots; every quit by a Quit event to the bundle path. Runs: `build/interlaced-i2/` (`tree-files`, `head-files`,
+`marks`, `head-marks`, `export-head`, `export-tree`).
+
+| # | Measured | Verdict |
+|---|---|---|
+| R1 | Unit tests: the three 1080i modes at every width / set / scaling; halving; 23.98 interlaced → 1080p23.98; 540- and 576-line interlaced → the 1:1 choice; progressive selection identical with and without the parameter over the whole table | **PASS** |
+| R2 | Inspector Frame Rate: `29.970 fps (59.94 fields/s)` on every 59.94 fixture, `25.000 fps (50 fields/s)`, `30.000 fps (60 fields/s)`; the 59.94-frame interlaced file `29.970 fps (59.94 fields/s) · file says 59.940, halved` with `[SCAN] rate: interlaced, reported 59.940 fps — counting fields (decision 3)`; the progressive control `29.970 fps`; the HEVC field sequence `59.940 fps` (not halved) | **PASS** |
+| M1 | Follow source and the bridge: ProRes TFF / BFF / PsF / both `fiel`-disagreeing files, DNxHD MXF TFF / BFF, H.264 MBAFF TFF / BFF, 1440×1080i, the halved file → **1080i59.94** (`30000/1001 …, interlaced, upper field first`); ProRes and DNxHD 1080i50 → **1080i50** (`25000/1000`); the 60-field marker → **1080i60**. The input detected `Hi59` / `Hi50` / `Hi60`, field dominance upper, on SDI **and** HDMI, every fixture. HEAD sent the same files as 1080p29.97 / 25 / 30 (`Hp…`, progressive) | **PASS** |
+| M2 | Progressive control → 1080p29.97 on HEAD and tree, `Hp29` progressive on both inputs | **PASS** (the 20-file set ran exports only, see E; its modes are not re-measured) |
+| M3 | `DoesSupportVideoMode` accepted 1080i50, 1080i59.94 and 1080i60 (reached through Follow source; no defaults write). Card `late=0` on every run; `dropped=0` on every run but one: the **progressive** control on the tree, `dropped=1` at output start, on a path I2 does not change (HEAD 0 on the same file) | **PASS** for 1080i; one sporadic drop on 1080p, recorded |
+| F1 | Paused at frame 0, every received frame equal to Manifold's `[SDI-DUMP]` read-back: 16 fixtures × SDI and HDMI, 108–264 frames each, **0 different** | **PASS** |
+| F2 | Received fields against FFmpeg's decode of frame 0 (`fieldtool cmp`): every fixture matches **the same field** and not the other (other field: luma mean \|Δ\| 13.6–15.5 codes; PsF and progressive 3.0, both fields one instant). Same field, luma: ProRes ≥ 99.9988 % within ±1, max 2 (as predicted); the 60-field marker and the halved file max 5; **DNxHD 99.83 %, max 9; H.264 4:2:0 99.66–99.71 %, max 76; chroma max 60 (4:2:2) and 361 (4:2:0)** — outside the band. But every first frame is **byte-identical to HEAD's** (16 / 16), so these are the decode and RGB round trip as they were, not I2 (the 4:2:0 chroma is I3) | **PASS** on field placement; the luma band was wrong for DNxHD and 4:2:0 (prediction, not I2) |
+| T1 | TFF 1080i59.94 marker playing: SDI 450 fields, HDMI 452 — fields in temporal order, **0 swapped, 0 repeated, 0 skipped**. DNxHD MXF (452 / 456) and the 1440×1080i file (450 / 452) the same. H.264 MBAFF: SDI 454 fields clean; HDMI 448 fields, 0 swapped, **5 whole frames repeated and 5 skipped**, all in the first 0.8 s after Play | **PASS** on field order; one run's start-up repeats (below) |
+| T2 | BFF marker: every frame arrives untouched, **top N+1, bottom N**, 0 frames broken (SDI 454, HDMI 450 fields); advisory up. SDI run: 2 whole frames repeated and 2 skipped | **PASS** (judder as decided); the repeats as T1 |
+| T3 | 1080i50 marker (SDI 376, HDMI 374 fields) and 1080i60 (450 / 452): 0 swapped, 0 repeated, 0 skipped | **PASS** |
+| S1 | 1440×1080i (pasp 4:3): `desqueezed to 1920×1080, fields kept`, scaler `taps V 1 · H 7 · C 11`; markers in order (T1). Its first frame is byte-identical to HEAD's 1080p29.97 one (HEAD's Lanczos-3 at ratio 1 read the neighbouring rows with ~1e-17 weights, which change no code) | **PASS** |
+| S2 | HEVC field sequence (1920×540 at 59.94): 1080p59.94 (as HEAD), `source 1920×540 1:1, letterboxed, fields kept`, advisory; bytes as HEAD's | **PASS** |
+| C1 | Frame-0 signal on all 16 files identical to HEAD's (`Rec.709 · EOTF 0 · HDR flag clear`); no signal line changed | **PASS** |
+| E | 20-file control set (I1's), Export Frame for Support on HEAD and tree: `.rgba16f`, `.v210`, `.v210.json` **60 / 60 byte-identical**; PNG pixels and ICC equal 20 / 20 | **PASS** |
+| G | `swift test` **623 / 623** (HEAD 612, plus 11). Profile warnings: the same 11 as HEAD's clean build (paths and lines normalised) | **PASS** |
+| D | After the runs: 54 keys added, all `NSWindow Frame …`; each read, then deleted, stopping at the first failure. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys never in a snapshot (presence only, untouched) | **PASS** |
+
+**Findings.**
+
+1. **The file → card pull repeats one whole frame and skips the next, now and then** (pre-existing). 2 of 14 tree
+   marker runs (H.264 HDMI: 5, all in the first 0.8 s after Play; ProRes BFF SDI: 2), and 1 of 5 HEAD runs (ProRes BFF
+   HDMI: 9, at 1080p29.97). The card reports `late=0 dropped=0` throughout, so it is upstream of the card: the renderer's
+   front buffer and the card's pull (`copyLatestDeckLinkFrame`, §2) disagreeing for a frame. Whole frames only: no
+   received frame ever mixed two source frames' fields, so I2's field order holds. Not investigated further here.
+2. **The F2 luma band was set from ProRes.** DNxHD (max 9) and 4:2:0 H.264 (max 76) differ from FFmpeg's decode by more,
+   identically on HEAD; 4:2:0 chroma is I3's job.
+3. **On a file whose rate is halved, stepping follows the file's samples, not the halved rate.** The one such fixture
+   repeats every woven frame, so its 59.94 samples are pairs of the same frame; a step moves one sample (half a frame),
+   while the Frame Rate row, timecode and Follow source use 29.97. No real file here has this shape. Making the step grids
+   follow the halving is a small change, left for a decision.
+4. **The 8K Pro sends 1080i on HDMI** at all three rates, detected as `Hi50 / Hi59 / Hi60`, upper field first.
+5. The §2 mode-label bug is fixed: the established mode reads `1080i59.94` from the mode's own field dominance.

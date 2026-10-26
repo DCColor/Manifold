@@ -7,11 +7,12 @@ bundle. None of them activates a profile. **One configuration write exists:** `c
 
 | file | what it is |
 |---|---|
-| `build.sh` | `zsh scripts/decklink-loopback/build.sh [probe] [capture] [ancout] [hdrout] [v210cmp] [cfghold]` (default: `probe`) |
+| `build.sh` | `zsh scripts/decklink-loopback/build.sh [probe] [capture] [ancout] [hdrout] [v210cmp] [cfghold] [fieldtool]` (default: `probe`) |
 | `probe.cpp` | **Read-only.** For every device: identity, sub-device, active profile and the profiles on offer, duplex, connections, the input and output connection settings (`Get*` only), and status: input lock, detected mode, flags, colorspace and dynamic range, output mode, busy, PCIe; the HDMI output's actual mode and format flags, TMDS / FRL rates, and the received EDID decoded (maker, name, CTA-861 HDR static metadata EOTFs, colorimetry, deep colour) |
 | `capture.cpp` | Enables one device's input (format detection, 10-bit YUV) for N seconds. For each received frame, see the table below. Prints a line whenever any of it changes, then a summary |
 | `hdrout.cpp` | Control: a mid-grey 1080p25 frame with a chosen colorspace, EOTF, HDR flag and static values (`--maxcll`, or `--zero` for all 0), so a capture shows what the input reports for a known signal. `--then-*` switches to a second signal **within the same output session** (shown synchronously). `--rec2020out` holds `bmdDeckLinkConfigRec2020Output` on for the run (read first, never written to preferences, restored). Run with Manifold closed |
 | `cfghold.cpp` | Holds `bmdDeckLinkConfigVideoOutputIdleOperation` at black or last frame for N seconds, so it stays in force across other processes' output stops and starts. Reads and logs the prior value, never writes preferences, restores and releases on exit or signal. While a capture runs, pass-through (`pcln`) feeds the card's own HDMI input back out during a stop, so the idle setting is not what the input sees then |
+| `fieldtool.cpp` | Interlaced I2. `marks`: the picture number each field carries in the I2 marker band (`scripts/interlaced/generate-i2.sh`), per frame of a raw v210 file. `cmp`: two v210 frames field by field (top and bottom against both), per channel. No SDK calls |
 | `v210cmp.cpp` | Byte compare of two v210 frames, per channel: identical count, max \|Δ\|, Δ histogram, received low bits, and how many components each 10 → 8-bit rule explains |
 | `ancout.cpp` | Positive control: black 1080p25 frames carrying two VANC test packets (0x51 / 0x01 and 0x61 / 0x01). **On the 8K Pro loop its packets never arrived, while the driver's own ST 2108-1 packets did**, so it is not a working control (§6.11) |
 
@@ -22,6 +23,7 @@ What `capture` records for each received frame:
 - a raw-VANC header scan;
 - the v210's full FNV-1a, and the sampled FNV that Manifold's `[SIGNAL-TRACE]` prints;
 - with `--ref`, a byte compare against a reference v210, such as Manifold's `[SDI-DUMP]`;
+- with `--marks out.txt` (interlaced I2), each field's marker number and the input's field dominance, one line per frame;
 - the input's detection status (format, colorspace, dynamic range), the HDMI output's format flags, and Dolby Vision
   metadata if present.
 

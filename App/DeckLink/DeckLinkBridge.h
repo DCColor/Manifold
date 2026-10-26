@@ -206,7 +206,8 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// 24 / 25 / 29.97 / 30 / 50 / 59.94 / 60); the bridge maps them to the matching BMDDisplayMode,
 /// checks DoesSupportVideoMode(v210, output), and falls back to 2160p23.98 if unsupported. The
 /// scheduling timing (frameDuration/timeScale) follows the resolved mode. Result.activeModeName
-/// reports the mode actually established.
+/// reports the mode actually established. Interlaced I2: `interlaced` selects 1080i50 / 59.94 / 60 for 1920×1080 at the
+/// frame rate 25 / 29.97 / 30 (`standardRate` is the FRAME rate); the established name then reads "1080i59.94".
 ///
 /// D4b-2: pass `audio` to embed SDI audio on the same output, clock-anchored to the video on the wire
 /// (the stream is enabled/prerolled/started inside this one call, in the SDK's required order). Pass
@@ -217,6 +218,7 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
                                                    outputWidth:(NSInteger)outputWidth
                                                   outputHeight:(NSInteger)outputHeight
                                                   standardRate:(double)standardRate
+                                                    interlaced:(BOOL)interlaced
                                                          audio:(nullable DeckLinkAudioConfig *)audio;
 
 /// Stop scheduled playback cleanly (StopScheduledPlayback → unset callback → DisableVideoOutput →

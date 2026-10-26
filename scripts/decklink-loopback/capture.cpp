@@ -9,6 +9,10 @@
 // SIGINT / SIGTERM) sets the prior value back and releases the configuration object. It never calls
 // WriteConfigurationToPreferences, so per the SDK (2.5.15) the change cannot outlive the process. Run the probe after.
 //   build/decklink-loopback/capture --device 0 --seconds 6 [--input hdmi] [--ref f.v210] [--dumpdir d --dumpmax 8] [--label x]
+//       [--marks out.txt [--band x0 width]]
+// --marks (interlaced I2): for every received frame, the picture number each field carries in the I2 marker band
+// (scripts/interlaced/generate-i2.sh; the same reader as fieldtool marks), one line per frame: rx index, stream time,
+// top, bottom ("?" when a field's band does not read), and the input's field dominance.
 #include <CoreFoundation/CoreFoundation.h>
 #include <atomic>
 #include <cmath>
@@ -44,7 +48,29 @@ static std::string flagsStr(int64_t f) {
     return s.empty() ? "none" : s;
 }
 
-struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input; int dumpmax = 0; } A;
+struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input, marks; int dumpmax = 0;
+              long bandX = 0, bandW = -1; } A;
+static FILE *marksFile = nullptr;
+static std::string dominanceNow = "?";
+// The I2 marker reader (fieldtool.cpp, `fieldMark`): rows 10..55 of one parity must all read the same number with the
+// check pattern 1 0 1 0 in blocks 16–19, else -1.
+static long fieldMark(const uint8_t *fr, long rb, int parity, long x0, long bw) {
+    auto luma = [&](long y, long x) -> uint16_t {
+        const long k = 2 * x + 1; const uint32_t *row = (const uint32_t *)(fr + y * rb);
+        return (row[(k / 12) * 4 + (k % 12) / 3] >> (10 * ((k % 12) % 3))) & 0x3FF;
+    };
+    long got = -2;
+    for (long y = 10 + parity; y < 56; y += 2) {
+        long v = 0; bool ok = true;
+        for (int b = 0; b < 20; b++) {
+            const int bit = luma(y, x0 + (long)((b + 0.5) * bw / 20.0)) > 512;
+            if (b < 16) v |= (long)bit << b; else if (bit != ((b % 2) == 0)) ok = false;
+        }
+        if (!ok) return -1;
+        if (got == -2) got = v; else if (got != v) return -1;
+    }
+    return got;
+}
 static volatile sig_atomic_t stopRequested = 0;
 // Wall-clock time of day, so a capture's lines can be lined up with another tool's event log.
 static std::string wall() {
@@ -80,6 +106,12 @@ public:
                (ev & bmdVideoInputDisplayModeChanged) ? " mode" : "", (ev & bmdVideoInputFieldDominanceChanged) ? " field" : "",
                (ev & bmdVideoInputColorspaceChanged) ? " colorspace" : "", buf, fcc(mode->GetDisplayMode()).c_str(), flagsStr(f).c_str(),
                fcc(cs).c_str(), fcc(dr).c_str());
+        {
+            const BMDFieldDominance fd = mode->GetFieldDominance();
+            dominanceNow = fd == bmdUpperFieldFirst ? "upper" : fd == bmdLowerFieldFirst ? "lower" : fd == bmdProgressiveFrame ? "progressive"
+                         : fd == bmdProgressiveSegmentedFrame ? "PsF" : "unknown";
+            printf("[%s] FORMAT field dominance %s\n", A.label.c_str(), dominanceNow.c_str());
+        }
         if (ev & bmdVideoInputDisplayModeChanged) {
             in->PauseStreams();
             in->EnableVideoInput(mode->GetDisplayMode(), bmdFormat10BitYUV, bmdVideoInputEnableFormatDetection);
@@ -180,6 +212,12 @@ public:
                     char b[64]; snprintf(b, sizeof b, " ≠ ref (first diff byte %zu, row %zu)", k, k / rb); refres = b;
                 }
             }
+            if (marksFile && w >= 20 && h >= 56) {
+                const long bw = A.bandW > 0 ? A.bandW : w;
+                const long tm = fieldMark((const uint8_t *)bytes, rb, 0, A.bandX, bw), bm = fieldMark((const uint8_t *)bytes, rb, 1, A.bandX, bw);
+                fprintf(marksFile, "%ld %.5f %s %s %s%s\n", i, (double)t / 240000, tm < 0 ? "?" : std::to_string(tm).c_str(),
+                        bm < 0 ? "?" : std::to_string(bm).c_str(), dominanceNow.c_str(), (ff & bmdFrameHasNoInputSource) ? " NOINPUT" : "");
+            }
             if (full != lastPic && dumps < A.dumpmax && !A.dumpdir.empty()) {
                 char p[1024]; snprintf(p, sizeof p, "%s/%s-rx%05ld.v210", A.dumpdir.c_str(), A.label.c_str(), i);
                 if (FILE *f = fopen(p, "wb")) { fwrite(bytes, 1, sz, f); fclose(f); dumps++; }
@@ -218,7 +256,10 @@ int main(int argc, char **argv) {
         if (a == "--device") A.device = std::stoi(nx()); else if (a == "--seconds") A.seconds = std::stod(nx());
         else if (a == "--ref") A.ref = nx(); else if (a == "--dumpdir") A.dumpdir = nx(); else if (a == "--dumpmax") A.dumpmax = std::stoi(nx());
         else if (a == "--label") A.label = nx(); else if (a == "--input") A.input = nx();
+        else if (a == "--marks") A.marks = nx();
+        else if (a == "--band") { A.bandX = std::stol(nx()); A.bandW = std::stol(nx()); }
     }
+    if (!A.marks.empty() && !(marksFile = fopen(A.marks.c_str(), "w"))) { printf("cannot write marks\n"); return 2; }
     IDeckLinkIterator *it = CreateDeckLinkIteratorInstance(); if (!it) { printf("no driver\n"); return 2; }
     IDeckLink *dl = nullptr; for (int k = 0; k <= A.device; k++) { if (dl) dl->Release(); if (it->Next(&dl) != S_OK) { printf("no device %d\n", A.device); return 2; } }
     Cap c;
@@ -250,6 +291,17 @@ int main(int argc, char **argv) {
     };
     int64_t mode = bmdModeHD1080p25; if (c.st) c.st->GetInt(bmdDeckLinkStatusDetectedVideoInputMode, &mode);
     if (mode == 0 || mode == bmdModeUnknown) mode = bmdModeHD1080p25;
+    {
+        IDeckLinkDisplayMode *dm = nullptr;
+        if (c.in->GetDisplayMode((BMDDisplayMode)mode, &dm) == S_OK && dm) {
+            const BMDFieldDominance fd = dm->GetFieldDominance();
+            dominanceNow = fd == bmdUpperFieldFirst ? "upper" : fd == bmdLowerFieldFirst ? "lower" : fd == bmdProgressiveFrame ? "progressive"
+                         : fd == bmdProgressiveSegmentedFrame ? "PsF" : "unknown";
+            CFStringRef nm = nullptr; dm->GetName(&nm); char buf[128] = ""; if (nm) { CFStringGetCString(nm, buf, sizeof buf, kCFStringEncodingUTF8); CFRelease(nm); }
+            printf("[%s] DETECTED MODE at start %s %s · field dominance %s\n", A.label.c_str(), buf, fcc(mode).c_str(), dominanceNow.c_str());
+            dm->Release();
+        }
+    }
     c.in->SetCallback(&c);
     HRESULT hr = c.in->EnableVideoInput((BMDDisplayMode)mode, bmdFormat10BitYUV, bmdVideoInputEnableFormatDetection);
     printf("[%s] EnableVideoInput(%s, v210, format detection) → 0x%08X\n", A.label.c_str(), fcc(mode).c_str(), (unsigned)hr);
@@ -264,6 +316,7 @@ int main(int argc, char **argv) {
            A.label.c_str(), c.n, c.dropped, c.noInput, c.refSame, c.refDiff, c.refSizeMismatch, c.anyPacketFrames, c.s2108, c.rawVancOK, c.rawVancFail,
            c.rawAncFrames, c.dumps);
     restore();
+    if (marksFile) fclose(marksFile);
     c.in->Release(); if (c.st) c.st->Release(); dl->Release(); it->Release();
     return 0;
 }

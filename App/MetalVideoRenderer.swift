@@ -432,6 +432,10 @@ final class MetalVideoRenderer {
     /// The source's declared pixel aspect for the SDI placement (D6), nil when undeclared. Written on main by
     /// `setSourceGeometry`, read by the convert; guarded by `deckLinkLock`.
     private var deckLinkPixelAspect: Double?
+    /// Interlaced I2: the file is interlaced, so its SDI placement keeps the rows 1:1 (`SDIPlacement.fieldsKept`). Written
+    /// on main by `setDeckLinkSourceInterlaced` (DeckLinkService, with each source format), read by the convert; guarded
+    /// by `deckLinkLock`.
+    private var deckLinkSourceInterlaced = false
     /// The placement last reported (edge-triggered, like the mismatch); guarded by `deckLinkLock`.
     private var deckLinkLastPlacement: SDIPlacement?
     /// The scaled path's taps and intermediate, rebuilt when the placement changes. Touched by the convert, which the
@@ -4189,6 +4193,11 @@ final class MetalVideoRenderer {
         deckLinkLock.lock(); deckLinkScaling = scaling; deckLinkLock.unlock()
     }
 
+    /// Interlaced I2: whether the source's SDI picture must keep its fields (rows 1:1). Next converted frame.
+    func setDeckLinkSourceInterlaced(_ interlaced: Bool) {
+        deckLinkLock.lock(); deckLinkSourceInterlaced = interlaced; deckLinkLock.unlock()
+    }
+
     /// Clear the one-in-flight gate; if output has stopped meanwhile, release the scaler now that nothing reads it
     /// (F5). Every path that ends a convert comes through here. Called with `deckLinkLock` held.
     private func endDeckLinkConvertLocked() {
@@ -4275,8 +4284,10 @@ final class MetalVideoRenderer {
         // Under Fit to mode (F1) a picture is scaled up or down to meet the mode's sides; under 1:1 pixels, as before.
         deckLinkLock.lock()
         let pixelAspect = deckLinkPixelAspect
+        // I2: an interlaced picture is never resampled vertically, so each output row is one of its own field's rows.
         let placement = SDIPlacement.fit(sourceWidth: src.width, sourceHeight: src.height, pixelAspect: pixelAspect,
-                                         outputWidth: outSize.w, outputHeight: outSize.h, scaling: deckLinkScaling)
+                                         outputWidth: outSize.w, outputHeight: outSize.h, scaling: deckLinkScaling,
+                                         interlaced: deckLinkSourceInterlaced)
         let placementChanged = placement != deckLinkLastPlacement
         deckLinkLastPlacement = placement
         deckLinkLock.unlock()
@@ -5110,7 +5121,9 @@ private final class DeckLinkScaler {
 
     init?(device: MTLDevice, placement: SDIPlacement) {
         self.placement = placement
-        let v = SDIResampleTaps.lanczos3(sourceLength: placement.sourceHeight, pictureLength: placement.height)
+        // I2: a fields-kept placement's rows are 1:1, so its vertical pass is the exact identity (`identity`'s note).
+        let v = placement.fieldsKept ? SDIResampleTaps.identity(length: placement.height)
+            : SDIResampleTaps.lanczos3(sourceLength: placement.sourceHeight, pictureLength: placement.height)
         let h = SDIResampleTaps.lanczos3(sourceLength: placement.sourceWidth, pictureLength: placement.width)
         let c = SDIResampleTaps.lanczos3(sourceLength: placement.sourceWidth, pictureLength: placement.width, stride: 2)
         func buffer<T>(_ a: [T]) -> MTLBuffer? {

@@ -770,9 +770,14 @@ struct ContentView: View {
                     // D4a: derive the output display mode (video cadence) from the file's
                     // resolution + rate. Updates the status label; live-switches the output mode if
                     // it's running and changed.
+                    // I2: and its scan, so an interlaced 1080 file goes out as 1080i with its fields intact.
                     DeckLinkService.shared.sourceFormatChanged(width: meta.width, height: meta.height,
                                                                pixelAspect: meta.pixelAspect.ratio,
-                                                               frameRate: meta.frameRate)
+                                                               frameRate: meta.frameRate,
+                                                               scan: .init(interlaced: meta.isInterlaced,
+                                                                           bottomFieldFirst: meta.isBottomFieldFirst,
+                                                                           fieldOrderStated: meta.isFieldOrderStated,
+                                                                           picturesAreFields: meta.interlacedPicturesAreFields))
                 }
             }
             // ⚠️ NO SCOPE COLOUR HERE ANY MORE. The scope headers read the RENDERER, through
@@ -2070,7 +2075,8 @@ struct ContentView: View {
                                 .tag(Self.followSourceTag)
                         }
                         // SDI scaling follow-up F3: 2160p, 1080p and 720p at every rate the card offers each, then 2K
-                        // and 4K DCI only while Settings ▸ SDI output modes is Include DCI.
+                        // and 4K DCI only while Settings ▸ SDI output modes is Include DCI. Interlaced I2: 1080i50,
+                        // 1080i59.94 and 1080i60 after the 1080p rows.
                         ForEach(deckLink.pickerModes, id: \.id) { mode in
                             Text(mode.label).tag(mode.id)
                         }

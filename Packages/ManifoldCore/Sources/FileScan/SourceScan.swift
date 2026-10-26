@@ -32,15 +32,19 @@ public struct ScanReading: Equatable, Sendable {
     public let orderSource: String
     /// The values as coded, for the log: "FieldCount 2, FieldDetail SpatialFirstLineEarly".
     public let detail: String
+    /// Each coded picture is ONE field (an HEVC field sequence), not a frame of two woven fields (I2: such a stream's
+    /// picture rate is its field rate, so the rate rule leaves it alone).
+    public let picturesAreFields: Bool
 
     public init(interlaced: Bool?, fieldOrder: FieldOrder?, scanSource: String, orderSource: String? = nil,
-                detail: String) {
+                detail: String, picturesAreFields: Bool = false) {
         self.interlaced = interlaced
         // An order is only meaningful for an interlaced picture; a reading that says progressive has none.
         self.fieldOrder = interlaced == false ? nil : fieldOrder
         self.scanSource = scanSource
         self.orderSource = orderSource ?? scanSource
         self.detail = detail
+        self.picturesAreFields = interlaced == true && picturesAreFields
     }
 
     /// True when the reading states neither axis.
@@ -91,6 +95,9 @@ public struct SourceScan: Equatable, Sendable {
 
     public var isInterlaced: Bool { if case .interlaced = scan { return true }; return false }
     public var fieldOrder: FieldOrder? { if case .interlaced(let o) = scan { return o }; return nil }
+    /// Interlaced, with each coded picture one field (the bitstream decided the scan and says so). False for woven
+    /// frames, which is every interlaced file but an HEVC field sequence.
+    public var picturesAreFields: Bool { isInterlaced && bitstream?.interlaced == true && bitstream?.picturesAreFields == true }
 
     // MARK: - The rule
 

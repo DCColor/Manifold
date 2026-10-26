@@ -1034,12 +1034,23 @@ public:
 // no input can be trapped on a bucket edge. The fractional NTSC rates use their EXACT n/1001 value
 // (24000/1001 = 23.976…, 30000/1001 = 29.970…, 60000/1001 = 59.940…), so a 29.970 source lands ~0 from
 // the 29.97 row and ~0.03 from the 30 row → p2997, never p30 and never a fallback. Every rate resolves
-// to a real, card-supported progressive mode (all 15 are supported on device 0); interlaced is never
-// selected (the decode path is progressive). Actual timing is read back off the resolved mode.
+// to a real, card-supported progressive mode (all 15 are supported on device 0). Actual timing is read back off the
+// resolved mode.
+// Interlaced I2 (docs/INTERLACED_FINDINGS.md §2, §8): `interlaced` with 1920×1080 at the FRAME rate 25 / 29.97 / 30
+// selects 1080i50 / 1080i59.94 / 1080i60 — the interlaced modes, never PsF. The decode path delivers woven frames
+// untouched, and the SDK schedules an interlaced mode one woven frame per frame period (1001/30000 for 1080i59.94),
+// so nothing else in the output changes. Any other rate or raster with `interlaced` → bmdModeUnknown.
 // SDI scaling (§6.11): the raster is now any of the five the selector chooses from (`SDIOutputMode`, ColorimetryModel):
 // 1280×720 (50 / 59.94 / 60 only), 1920×1080, 2048×1080 (2K DCI), 3840×2160, 4096×2160 (4K DCI). Unknown raster, or
 // 720p at a rate it does not offer → bmdModeUnknown, and the start falls back to 2160p23.98 as before. Never 8K.
-static BMDDisplayMode BMDModeForRasterRate(int32_t width, int32_t height, double rate) {
+static BMDDisplayMode BMDModeForRasterRate(int32_t width, int32_t height, double rate, bool interlaced) {
+    if (interlaced) {
+        if (width != 1920 || height != 1080) return bmdModeUnknown;
+        struct IRow { double rate; BMDDisplayMode mode; };
+        static const IRow irows[] = { {25.0, bmdModeHD1080i50}, {30000.0 / 1001.0, bmdModeHD1080i5994}, {30.0, bmdModeHD1080i6000} };
+        for (const IRow &r : irows) if (fabs(rate - r.rate) <= r.rate * 0.001) return r.mode;
+        return bmdModeUnknown;
+    }
     struct Row { double rate; BMDDisplayMode p720; BMDDisplayMode hd; BMDDisplayMode dci2k; BMDDisplayMode uhd; BMDDisplayMode dci4k; };
     static const Row rows[] = {
         {24000.0 / 1001.0, bmdModeUnknown,    bmdModeHD1080p2398, bmdMode2kDCI2398, bmdMode4K2160p2398, bmdMode4kDCI2398},   // 23.976…
@@ -1084,13 +1095,19 @@ static NSString *FourCCString(BMDDisplayMode m) {
     return [NSString stringWithFormat:@"'%s'", c];
 }
 
-static NSString *ModeNameForResolved(int32_t width, int32_t height, BMDTimeValue frameDuration, BMDTimeScale timeScale) {
+// I2: the scan comes from the mode's own field dominance (`GetFieldDominance`), so an interlaced mode reads "1080i" and
+// its token is the FIELD rate ("1080i59.94" for 1001/30000), as Blackmagic and `SDIOutputMode.label` name it.
+static NSString *ModeNameForResolved(int32_t width, int32_t height, BMDTimeValue frameDuration, BMDTimeScale timeScale,
+                                     BMDFieldDominance dominance) {
+    const bool fields = dominance == bmdLowerFieldFirst || dominance == bmdUpperFieldFirst;
     // The same family names as `SDIModeFamily` (ColorimetryModel), so the label the card settles on is the selector's.
-    const char *fam = (width == 1280 && height == 720) ? "720p"
+    const char *fam = fields ? "1080i"
+                    : (width == 1280 && height == 720) ? "720p"
                     : (width == 2048 && height == 1080) ? "2K DCI p"
                     : (width == 4096 && height == 2160) ? "4K DCI p"
                     : (height >= 1620) ? "2160p" : "1080p";
-    const double r = (frameDuration > 0) ? (double)timeScale / (double)frameDuration : 0.0;
+    double r = (frameDuration > 0) ? (double)timeScale / (double)frameDuration : 0.0;
+    if (fields) r *= 2;
     struct { double rate; const char *tok; } toks[] = {
         {24000.0 / 1001.0,"23.98"}, {24,"24"}, {25,"25"}, {30000.0 / 1001.0,"29.97"},
         {30,"30"}, {48000.0 / 1001.0,"47.95"}, {48,"48"}, {50,"50"}, {60000.0 / 1001.0,"59.94"}, {60,"60"},
@@ -1554,12 +1571,16 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     const int32_t height = (int32_t)mode->GetHeight();
     BMDTimeValue frameDuration = 0; BMDTimeScale timeScale = 0;
     mode->GetFrameRate(&frameDuration, &timeScale);
+    const BMDFieldDominance dominance = mode->GetFieldDominance();
     mode->Release();
-    NSString *modeName = ModeNameForResolved(width, height, frameDuration, timeScale);
+    NSString *modeName = ModeNameForResolved(width, height, frameDuration, timeScale, dominance);
     int32_t rowBytes = 0;
     output->RowBytesForPixelFormat(bmdFormat10BitYUV, width, &rowBytes);   // authoritative v210 stride (128-aligned)
-    [log addObject:[NSString stringWithFormat:@"mode: %@ (%dx%d @ %lld/%lld duration/timescale), v210 rowBytes=%d",
-                    modeName, width, height, (long long)timeScale, (long long)frameDuration, rowBytes]];
+    [log addObject:[NSString stringWithFormat:@"mode: %@ (%dx%d @ %lld/%lld duration/timescale, %s), v210 rowBytes=%d",
+                    modeName, width, height, (long long)timeScale, (long long)frameDuration,
+                    dominance == bmdUpperFieldFirst ? "interlaced, upper field first"
+                    : dominance == bmdLowerFieldFirst ? "interlaced, lower field first"
+                    : dominance == bmdProgressiveSegmentedFrame ? "PsF" : "progressive", rowBytes]];
 
     // Build the player (SEAM: fill source is pluggable — synthetic hue-walk for D3). The player
     // AddRefs the output; drop our local ref. `initialSignal` is what frames carry until the first picture brings
@@ -1725,6 +1746,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                                                    outputWidth:(NSInteger)outputWidth
                                                   outputHeight:(NSInteger)outputHeight
                                                   standardRate:(double)standardRate
+                                                    interlaced:(BOOL)interlaced
                                                          audio:(DeckLinkAudioConfig *)audio {
     DeckLinkFillBlock block = [fill copy];
     FrameFillFn fn = [block](int64_t frameIndex, uint8_t *buffer, int32_t rowBytes, int32_t width, int32_t height,
@@ -1733,7 +1755,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     };
     // D4a: derive the DISPLAY MODE from the output raster + standard rate (SDI scaling: 720p and DCI too). The
     // private start path falls back to 2160p23.98 if this resolves unknown or the card doesn't support it.
-    BMDDisplayMode displayMode = BMDModeForRasterRate((int32_t)outputWidth, (int32_t)outputHeight, standardRate);
+    BMDDisplayMode displayMode = BMDModeForRasterRate((int32_t)outputWidth, (int32_t)outputHeight, standardRate, interlaced);
     return [self startScheduledPlaybackWithFillFn:fn
                                       deviceIndex:deviceIndex
                                     initialSignal:initialSignal

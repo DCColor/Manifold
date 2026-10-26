@@ -22,6 +22,11 @@
 //    • F2 every rate the card offers up to 120: 47.95, 48, 95.90, 96, 100, 119.88 and 120 join the eight.
 //    • F4 a live source's mode is chosen once per session and held (`SDILiveModeHold`).
 //
+//  Interlaced I2 (docs/INTERLACED_FINDINGS.md §5, §8): 1080i50 / 1080i59.94 / 1080i60 (`SDIModeFamily.i1080`), at the
+//  FRAME rates 25 / 29.97 / 30, labelled by the field rate. Kept out of `SDIOutputMode.table`, which stays the
+//  progressive set D1–D9 choose from; Follow source reaches them only for an interlaced 1080-line source, and the
+//  picker lists them. An interlaced source is never scaled vertically (`SDIPlacement.fieldsKept`).
+//
 
 import Foundation
 
@@ -60,11 +65,13 @@ public enum SDIModeFamily: String, CaseIterable, Sendable {
     case dci2K = "2K DCI p"
     case p2160 = "2160p"
     case dci4K = "4K DCI p"
+    /// Interlaced I2. The rate is the frame rate; the label's token is the field rate.
+    case i1080 = "1080i"
 
     public var width: Int {
         switch self {
         case .p720: return 1280
-        case .p1080: return 1920
+        case .p1080, .i1080: return 1920
         case .dci2K: return 2048
         case .p2160: return 3840
         case .dci4K: return 4096
@@ -73,22 +80,28 @@ public enum SDIModeFamily: String, CaseIterable, Sendable {
     public var height: Int {
         switch self {
         case .p720: return 720
-        case .p1080, .dci2K: return 1080
+        case .p1080, .dci2K, .i1080: return 1080
         case .p2160, .dci4K: return 2160
         }
     }
     public var isDCI: Bool { self == .dci2K || self == .dci4K }
+    public var isInterlaced: Bool { self == .i1080 }
 
     public func isAvailable(in set: SDIOutputModeSet) -> Bool { !isDCI || set == .includeDCI }
 
     /// The rates the card offers this raster at (SDK probe, 2026-10-23: 720p only at 50, 59.94 and 60; the others at
     /// all fifteen, 23.98 to 120).
+    /// 1080i at the frame rates of its three field rates (DeckLinkAPIModes.h: HD1080i50, i5994, i6000).
     public func offers(_ rate: SDIStandardRate) -> Bool {
-        self != .p720 || rate.token == "50" || rate.token == "59.94" || rate.token == "60"
+        switch self {
+        case .p720: return rate.token == "50" || rate.token == "59.94" || rate.token == "60"
+        case .i1080: return rate.token == "25" || rate.token == "29.97" || rate.token == "30"
+        default: return true
+        }
     }
 
-    /// F1: the rasters Fit to mode chooses among. 720p is reached only natively (D2).
-    public var isFitTier: Bool { self != .p720 }
+    /// F1: the rasters Fit to mode chooses among. 720p is reached only natively (D2); 1080i only for interlaced sources.
+    public var isFitTier: Bool { self != .p720 && self != .i1080 }
 }
 
 /// One of the card's progressive rates up to 120, as an exact fps and the label's token.
@@ -125,6 +138,9 @@ public struct SDIStandardRate: Equatable, Sendable {
     /// Whether `fps` is this rate, within 0.1 % (a measured or rounded rate); otherwise the card has no mode at it and
     /// snapping changes the cadence (12, 15, 72 fps), which the caller says.
     public func matches(_ fps: Double) -> Bool { fps > 0 && abs(fps - self.fps) <= self.fps * 0.001 }
+
+    /// The field rate's token, for an interlaced mode's label: 29.97 → "59.94", 25 → "50", 30 → "60".
+    public var fieldToken: String { Self.nearest(to: fps * 2).token }
 }
 
 /// An output mode: a raster and a rate.
@@ -136,20 +152,39 @@ public struct SDIOutputMode: Equatable, Sendable {
 
     public var width: Int { family.width }
     public var height: Int { family.height }
-    /// "1080p23.98", "720p59.94", "2K DCI p23.98". The bridge names an established mode the same way.
-    public var label: String { family.rawValue + rate.token }
+    public var isInterlaced: Bool { family.isInterlaced }
+    /// "1080p23.98", "720p59.94", "2K DCI p23.98", "1080i59.94" (field rate). The bridge names an established mode the
+    /// same way.
+    public var label: String { family.rawValue + (isInterlaced ? rate.fieldToken : rate.token) }
 
-    /// Every mode in scope: each family at each rate the card offers it.
-    public static let table: [SDIOutputMode] = SDIModeFamily.allCases.flatMap { f in
+    /// Every PROGRESSIVE mode in scope: each family at each rate the card offers it. What D1–D9 choose from.
+    public static let table: [SDIOutputMode] = SDIModeFamily.allCases.filter { !$0.isInterlaced }.flatMap { f in
         SDIStandardRate.all.filter { f.offers($0) }.map { SDIOutputMode(family: f, rate: $0) }
     }
+
+    /// I2: 1080i50, 1080i59.94, 1080i60.
+    public static let interlacedTable: [SDIOutputMode] = SDIStandardRate.all.filter { SDIModeFamily.i1080.offers($0) }
+        .map { SDIOutputMode(family: .i1080, rate: $0) }
 }
 
 public enum SDIOutputModeSelector {
     /// THE one function: the mode a source goes out at under Follow source (D1–D3; F1 under Fit to mode).
-    /// `pixelAspect` is the declared h/v ratio, nil when undeclared (square assumed, D6).
+    /// `pixelAspect` is the declared h/v ratio, nil when undeclared (square assumed, D6). `frameRate` is the FRAME rate
+    /// (an interlaced file's after `InterlacedRate`, decision 3).
+    ///
+    /// I2: an `interlaced` source (woven fields) of 1080 lines at 25 / 29.97 / 30 goes out at 1080i50 / 59.94 / 60,
+    /// whatever its width (a 1440 or 1280 width is resampled horizontally only, `SDIPlacement.fieldsKept`). Any other
+    /// interlaced source has no interlaced mode — 1080 at 23.98 or 24 (§5), or not 1080 lines (SD is out of scope,
+    /// decision 8) — and is chosen for as progressive under the 1:1 rule, because its picture is never scaled
+    /// vertically.
     public static func select(width: Int, height: Int, pixelAspect: Double?, frameRate: Double,
-                              set: SDIOutputModeSet, scaling: SDIScaling = .oneToOne) -> SDIOutputMode {
+                              set: SDIOutputModeSet, scaling: SDIScaling = .oneToOne,
+                              interlaced: Bool = false) -> SDIOutputMode {
+        if interlaced {
+            if let m = interlacedMode(height: height, frameRate: frameRate) { return m }
+            return select(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate, set: set,
+                          scaling: .oneToOne)
+        }
         let rate = SDIStandardRate.nearest(to: frameRate)
         let modes = SDIOutputMode.table.filter { $0.rate == rate && $0.family.isAvailable(in: set) }
         let par = SDIPlacement.effectiveAspect(pixelAspect)
@@ -172,6 +207,14 @@ public enum SDIOutputModeSelector {
         func scale(_ m: SDIOutputMode) -> Double { min(Double(m.width) / dw, Double(m.height) / dh) }
         return largest.reduce(largest[0]) { best, m in scale(m) > scale(best) ? m : best }
     }
+
+    /// I2: the 1080i mode for an interlaced source, or nil when it has none (not 1080 lines, or a frame rate whose
+    /// nearest standard rate is not 25 / 29.97 / 30). The rate snaps as D1 does.
+    public static func interlacedMode(height: Int, frameRate: Double) -> SDIOutputMode? {
+        guard height == 1080 else { return nil }
+        let rate = SDIStandardRate.nearest(to: frameRate)
+        return SDIOutputMode.interlacedTable.first { $0.rate == rate }
+    }
 }
 
 /// Where a source's picture sits in an output mode (D3, D4, D9).
@@ -188,6 +231,9 @@ public struct SDIPlacement: Equatable, Sendable {
     public let pixelAspect: Double
     /// Whether the pixel aspect was declared (D6: undeclared is assumed square, and the log says so).
     public let pixelAspectDeclared: Bool
+    /// I2: an interlaced picture placed with its fields intact: rows 1:1 (never scaled vertically), on an even row so
+    /// each source line keeps its field's parity; only the width is resampled.
+    public var fieldsKept: Bool = false
 
     /// The picture's pixels map 1:1 onto the output's: no resampling, only placement.
     public var isUnscaled: Bool { width == sourceWidth && height == sourceHeight }
@@ -221,9 +267,27 @@ public struct SDIPlacement: Equatable, Sendable {
     /// Fit to mode (F1): scaled up or down until it meets the mode's sides, unscaled only when it already does. Aspect
     /// kept, never cropped, either way. x on the 6-pixel group nearest the centre (ties to the smaller); y centred, the
     /// odd row to the bottom bar; a scaled width rounded to even, a scaled height to the nearest row.
+    ///
+    /// `interlaced` (I2): when the source's rows fit the mode, they are placed 1:1 on an even row (`fieldsKept`) and only
+    /// the width is resampled, to the display width (`sourceWidth` × pixel aspect) capped at the mode's, whichever the
+    /// scaling setting: Fit to mode's vertical fit would resample across the two fields. A source taller than the mode
+    /// (a manual pick smaller than the source) is placed as progressive, its fields mixed by the vertical scale.
     public static func fit(sourceWidth: Int, sourceHeight: Int, pixelAspect: Double?,
-                           outputWidth: Int, outputHeight: Int, scaling: SDIScaling = .oneToOne) -> SDIPlacement {
+                           outputWidth: Int, outputHeight: Int, scaling: SDIScaling = .oneToOne,
+                           interlaced: Bool = false) -> SDIPlacement {
         let par = effectiveAspect(pixelAspect)
+        if interlaced && sourceHeight <= outputHeight {
+            let dw = Double(sourceWidth) * par
+            let w = par == 1 && sourceWidth <= outputWidth ? sourceWidth
+                  : max(2, min(outputWidth, Int((dw / 2).rounded(.toNearestOrAwayFromZero)) * 2))
+            let y = ((outputHeight - sourceHeight) / 2) & ~1
+            var p = SDIPlacement(sourceWidth: sourceWidth, sourceHeight: sourceHeight,
+                                 outputWidth: outputWidth, outputHeight: outputHeight,
+                                 x: nearestMultipleOf6(Double(outputWidth - w) / 2), y: y, width: w, height: sourceHeight,
+                                 scale: Double(w) / dw, pixelAspect: par, pixelAspectDeclared: pixelAspect != nil)
+            p.fieldsKept = true
+            return p
+        }
         let dw = Double(sourceWidth) * par, dh = Double(sourceHeight)
         let toSides = min(Double(outputWidth) / dw, Double(outputHeight) / dh)
         let fits = scaling == .fit ? toSides == 1 : dw <= Double(outputWidth) && dh <= Double(outputHeight)
@@ -259,6 +323,7 @@ public struct SDIPlacement: Equatable, Sendable {
         case .windowbox: s += ", windowboxed"
         case .fill, .native: break
         }
+        if fieldsKept { s += ", fields kept (rows 1:1, horizontal only)" }
         return s
     }
 
@@ -306,6 +371,14 @@ public struct SDIResampleTaps: Equatable, Sendable {
             }
         }
         return SDIResampleTaps(outputCount: count, tapsPerOutput: n, indices: idx, weights: wts)
+    }
+
+    /// I2: every output row is its own source row, weight exactly 1 — the vertical pass of a `fieldsKept` placement.
+    /// (Lanczos-3 at ratio 1 is the identity in exact arithmetic, but its zero taps come out of `sin(πk)` as ~1e-16,
+    /// not 0, so it would still read the neighbouring rows, which belong to the other field.)
+    public static func identity(length: Int) -> SDIResampleTaps {
+        SDIResampleTaps(outputCount: length, tapsPerOutput: 1, indices: (0..<length).map { Int32($0) },
+                        weights: [Float](repeating: 1, count: length))
     }
 
     static func lanczos3(_ x: Double) -> Double {

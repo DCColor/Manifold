@@ -362,6 +362,14 @@ public struct VideoMetadata: Equatable, Sendable {
     /// Progressive or interlaced, the field order, and which source said so (docs/INTERLACED_FINDINGS.md §10,
     /// I1). THE place later stages read it from. `.notRead` until a producer reads the file.
     public var scan: SourceScan = .notRead
+    /// The rate the file or decoder reported, when decision 3 halved it (I2, `InterlacedRate`); nil otherwise.
+    public var frameRateHalvedFrom: Double?
+    /// I2, for the SDI mode decision in the app (which does not import `FileScan`): interlaced at all; bottom field
+    /// first; and each coded picture a single field (an HEVC field sequence) rather than a woven frame.
+    public var isInterlaced: Bool { scan.isInterlaced }
+    public var isBottomFieldFirst: Bool { scan.fieldOrder == .bottomFirst }
+    public var isFieldOrderStated: Bool { scan.fieldOrder != nil }
+    public var interlacedPicturesAreFields: Bool { scan.picturesAreFields }
     public var fileName: String = "—"
     public var container: String = "—"
     public var videoDataRate: Double = 0    // bits/sec (estimated)
@@ -461,7 +469,18 @@ public struct VideoMetadata: Equatable, Sendable {
                                   aperture: cleanAperture)
     }
     public var frameRateString: String {
-        frameRate > 0 ? String(format: "%.3f fps", frameRate) : "—"
+        guard frameRate > 0 else { return "—" }
+        return String(format: "%.3f fps", frameRate) + scan.fieldRateSuffix(frameRate: frameRate)
+            + (frameRateHalvedFrom.map { String(format: " · file says %.3f, halved", $0) } ?? "")
+    }
+
+    /// I2, decision 3: once `scan` and `frameRate` are read, an interlaced file counting fields gets its frame rate.
+    /// Both metadata producers call it, so every reader of `frameRate` sees the one answer. Logs when it halves.
+    public mutating func applyInterlacedRate() {
+        let r = InterlacedRate.resolve(reported: frameRate, scan: scan)
+        frameRate = r.frameRate
+        frameRateHalvedFrom = r.halvedFrom
+        if let line = r.logLine { print(line) }
     }
     /// The Inspector's Scan row, so the app reads words and not `FileScan`'s types.
     public var scanString: String { scan.readout }

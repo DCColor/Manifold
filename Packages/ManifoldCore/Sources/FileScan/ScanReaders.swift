@@ -270,7 +270,7 @@ public enum BitstreamScan {
             default: order = nil
             }
             return ScanReading(interlaced: true, fieldOrder: order, scanSource: "HEVC field_seq_flag",
-                               orderSource: "HEVC pic_struct SEI", detail: detail)
+                               orderSource: "HEVC pic_struct SEI", detail: detail, picturesAreFields: true)
         }
         switch timing?.picStruct {
         case 3?, 5?: return ScanReading(interlaced: true, fieldOrder: .topFirst, scanSource: "HEVC pic_struct SEI", detail: detail)

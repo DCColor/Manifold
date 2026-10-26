@@ -529,8 +529,9 @@ final class DeckLinkService: ObservableObject {
     struct OutputMode: Equatable {
         let width: Int          // output raster width (1280, 1920, 2048, 3840 or 4096 — SDI scaling)
         let height: Int         // output raster height (720, 1080 or 2160)
-        let standardRate: Double // snapped standard rate (`SDIStandardRate.all`: 23.976 … 120)
-        let label: String       // "2160p23.98", "1080p25", …
+        let standardRate: Double // snapped standard rate (`SDIStandardRate.all`: 23.976 … 120); the FRAME rate for 1080i
+        let label: String       // "2160p23.98", "1080p25", "1080i59.94" (field rate), …
+        let interlaced: Bool    // I2: 1080i50 / 59.94 / 60
 
         /// Default when no file is loaded / rate can't be matched — matches the pre-D4a fixed output.
         static let default2160p2398 = OutputMode(width: 3840, height: 2160, standardRate: 24000.0 / 1001.0, label: "2160p23.98")
@@ -542,10 +543,11 @@ final class DeckLinkService: ObservableObject {
 
         /// The selector's mode (`SDIOutputModeSelector`, ColorimetryModel) as the service carries it.
         init(_ m: SDIOutputMode) {
-            self.init(width: m.width, height: m.height, standardRate: m.rate.fps, label: m.label)
+            self.init(width: m.width, height: m.height, standardRate: m.rate.fps, label: m.label, interlaced: m.isInterlaced)
         }
-        init(width: Int, height: Int, standardRate: Double, label: String) {
+        init(width: Int, height: Int, standardRate: Double, label: String, interlaced: Bool = false) {
             self.width = width; self.height = height; self.standardRate = standardRate; self.label = label
+            self.interlaced = interlaced
         }
     }
 
@@ -553,9 +555,11 @@ final class DeckLinkService: ObservableObject {
     /// every rate the card offers each, then 2K DCI and 4K DCI only when DCI is included. Built from the SAME table
     /// the selector chooses from (`SDIOutputMode.table`), so a mode can never appear in the picker that Follow source
     /// cannot produce, or vice versa. The ids (labels) of the 2160p and 1080p rows are the ones stored before.
+    /// Interlaced I2 (§5): 1080i50, 1080i59.94 and 1080i60 after the 1080p rows, under either set, which also covers a
+    /// file mis-flagged either way.
     static func selectableModes(for set: SDIOutputModeSet) -> [OutputMode] {
-        [SDIModeFamily.p2160, .p1080, .p720, .dci2K, .dci4K].filter { $0.isAvailable(in: set) }.flatMap { family in
-            SDIOutputMode.table.filter { $0.family == family }.map(OutputMode.init)
+        [SDIModeFamily.p2160, .p1080, .i1080, .p720, .dci2K, .dci4K].filter { $0.isAvailable(in: set) }.flatMap { family in
+            (SDIOutputMode.table + SDIOutputMode.interlacedTable).filter { $0.family == family }.map(OutputMode.init)
         }
     }
 
@@ -639,11 +643,51 @@ final class DeckLinkService: ObservableObject {
     /// the picture is native at (D2), else the smallest that holds it unscaled, else the largest, fitted (D3). Which
     /// modes it may pick is the Settings choice (`SDIOutputModeSet`: HD/UHD only, or include DCI). The renderer places
     /// the picture in whatever mode is in force (`SDIPlacement`), so a raster that is not the mode's is no longer black.
+    /// Interlaced I2: `interlaced` (woven fields, a file's `VideoMetadata.isInterlaced`) picks 1080i for a 1080-line
+    /// source at 25 / 29.97 / 30 frames (`SDIOutputModeSelector.interlacedMode`); `frameRate` is the frame rate.
     static func resolveOutputMode(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double,
                                   set: SDIOutputModeSet = currentModeSet,
-                                  scaling: SDIScaling = currentScaling) -> OutputMode {
+                                  scaling: SDIScaling = currentScaling, interlaced: Bool = false) -> OutputMode {
         OutputMode(SDIOutputModeSelector.select(width: width, height: height, pixelAspect: pixelAspect,
-                                                frameRate: frameRate, set: set, scaling: scaling))
+                                                frameRate: frameRate, set: set, scaling: scaling, interlaced: interlaced))
+    }
+
+    /// Interlaced I2: what a file's scan means for SDI, in the terms the mode decision and the advisory need.
+    struct FileScanFacts: Equatable {
+        var interlaced = false
+        var bottomFieldFirst = false
+        var fieldOrderStated = true
+        var picturesAreFields = false
+        static let progressive = FileScanFacts()
+    }
+
+    /// The advisory (the source's, not the output's: `sourceAdvisory`) an interlaced file earns on SDI, or nil. Decision 2:
+    /// a BFF HD file is SENT UNTOUCHED — the woven frame as decoded — so on the top-field-first 1080i wire its later field
+    /// plays first in every frame. That judder is the defect QC should see; correcting it would hide a faulty master.
+    static func interlacedAdvisory(width: Int, height: Int, frameRate: Double, scan: FileScanFacts,
+                                   mode: OutputMode) -> String? {
+        guard scan.interlaced else { return nil }
+        if mode.interlaced {
+            if scan.bottomFieldFirst {
+                return "This file is bottom field first. SDI \(mode.label) is top field first, and the file is sent "
+                    + "untouched, so its fields play out of order (judder). That is the file, not the output."
+            }
+            if !scan.fieldOrderStated {
+                return "This interlaced file does not state its field order. It is sent untouched as \(mode.label), "
+                    + "top field first."
+            }
+            return nil
+        }
+        if scan.picturesAreFields {
+            return "This file codes each field as its own \(width)×\(height) picture. Field sequences are not supported "
+                + "on SDI yet: the pictures go out 1:1 in \(mode.label)."
+        }
+        if height == 1080 {
+            return String(format: "Interlaced at %.3f fps has no 1080i mode: sent as %@, fields woven, not scaled "
+                                  + "vertically.", frameRate, mode.label)
+        }
+        return "Interlaced \(width)×\(height) is not supported on SDI (only 1080-line interlaced is): sent 1:1 in "
+            + "\(mode.label), fields woven, not scaled."
     }
 
     /// Settings ▸ DeckLink Output ▸ SDI output modes (default HD/UHD only).
@@ -666,7 +710,7 @@ final class DeckLinkService: ObservableObject {
     }
 
     /// The last source format Follow source resolved, kept so a change of the Settings re-resolves it.
-    private enum LastFormat { case file(Int, Int, Double?, Double), live(LiveVideoFormat) }
+    private enum LastFormat { case file(Int, Int, Double?, Double, FileScanFacts), live(LiveVideoFormat) }
     private var lastFormat: LastFormat?
     private var modeSetInForce = DeckLinkService.currentModeSet
     private var scalingInForce = DeckLinkService.currentScaling
@@ -694,8 +738,8 @@ final class DeckLinkService: ObservableObject {
             print("DeckLink D4a: SDI scaling → \(scaling.label)")
         }
         switch lastFormat {
-        case .file(let w, let h, let par, let fps)?:
-            resolveFileMode(width: w, height: h, pixelAspect: par, frameRate: fps)
+        case .file(let w, let h, let par, let fps, let scan)?:
+            resolveFileMode(width: w, height: h, pixelAspect: par, frameRate: fps, scan: scan)
         case .live?:
             if let m = liveHold.reresolve(set: set, scaling: scaling) {
                 sourceDerivedMode = OutputMode(m)
@@ -897,6 +941,7 @@ final class DeckLinkService: ObservableObject {
                                                         initialSignal: Self.bridgeSignal(startSignal),
                                                         outputWidth: mode.width, outputHeight: mode.height,
                                                         standardRate: mode.standardRate,
+                                                        interlaced: mode.interlaced,
                                                         audio: audio)
         for line in result.log { print("DeckLink D-real: \(line)") }
         print("DeckLink D-real: \(result.success ? "SUCCESS — real-video scheduled playback on device \(deviceIndex) @ \(result.activeModeName ?? mode.label)" : "FAILED")")
@@ -1069,26 +1114,37 @@ final class DeckLinkService: ObservableObject {
     /// actually changed, cleanly SWITCH: stop the old scheduled playback then re-establish at the new
     /// mode — both hops on the serial queue so teardown finishes before re-establish (no race). If
     /// output is off, just remember the target so the next start uses it. Call after setSourceColorSpace.
-    func sourceFormatChanged(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double) {
+    func sourceFormatChanged(width: Int, height: Int, pixelAspect: Double? = nil, frameRate: Double,
+                             scan: FileScanFacts = .progressive) {
         // A FILE's format change is immediate. A file's raster and rate are facts read once at load,
         // they do not step the way an ABR ladder does, and there is no session to hold: the live
         // path's one-mode-per-session rule (F4) is for the live path only.
         liveHold.end()
-        resolveFileMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate)
+        // I2: the renderer keeps an interlaced picture's rows 1:1 on SDI (`SDIPlacement.fieldsKept`), in any mode.
+        renderer?.setDeckLinkSourceInterlaced(scan.interlaced)
+        resolveFileMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate, scan: scan)
         applyEffectiveMode(trigger: "file source format")
     }
 
-    /// A file's mode under the Settings in force, into `sourceDerivedMode`; the caller applies it.
-    private func resolveFileMode(width: Int, height: Int, pixelAspect: Double?, frameRate: Double) {
-        lastFormat = .file(width, height, pixelAspect, frameRate)
+    /// A file's mode under the Settings in force, into `sourceDerivedMode`; the caller applies it. Also the file's
+    /// interlaced advisory (I2), set or cleared on every resolve.
+    private func resolveFileMode(width: Int, height: Int, pixelAspect: Double?, frameRate: Double,
+                                 scan: FileScanFacts) {
+        lastFormat = .file(width, height, pixelAspect, frameRate, scan)
         let mode = Self.resolveOutputMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate,
-                                          set: modeSetInForce, scaling: scalingInForce)
+                                          set: modeSetInForce, scaling: scalingInForce, interlaced: scan.interlaced)
         sourceDerivedMode = mode
         followSourceUnavailableReason = nil
+        let scanWords = !scan.interlaced ? "" : scan.picturesAreFields ? ", interlaced (field pictures)"
+            : ", interlaced " + (!scan.fieldOrderStated ? "order not stated" : scan.bottomFieldFirst ? "BFF" : "TFF")
         print("DeckLink D4a: FILE source format \(width)x\(height) @ "
-            + String(format: "%.3f fps", frameRate) + " → mode \(mode.label) (\(modeSetInForce.label), \(scalingInForce.label)"
+            + String(format: "%.3f fps", frameRate) + scanWords
+            + " → mode \(mode.label) (\(modeSetInForce.label), \(scalingInForce.label)"
             + (pixelAspect.map { String(format: ", pixel aspect %.4f", $0) } ?? ", pixel aspect not declared — square") + ")")
         if let warning = Self.rateWarning(frameRate, mode: mode) { print("DeckLink D4a: \(warning)") }
+        let advisory = Self.interlacedAdvisory(width: width, height: height, frameRate: frameRate, scan: scan, mode: mode)
+        if let advisory { print("DeckLink D4a: ⚠️ interlaced: \(advisory)") }
+        setSourceAdvisory(advisory)
     }
 
     // MARK: - The live path into the same decision
@@ -1111,6 +1167,8 @@ final class DeckLinkService: ObservableObject {
     /// how a source in that state gets a correct mode.
     func liveFormatChanged(_ format: LiveVideoFormat?) {
         dispatchPrecondition(condition: .onQueue(.main))
+        // Streams carry no scan yet (I6): a live picture is placed as progressive.
+        renderer?.setDeckLinkSourceInterlaced(false)
 
         guard let format else {
             // The live source is gone. Drop the derived mode but leave `currentMode` exactly where

@@ -2069,6 +2069,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // `fiel` from, so its container reading is empty and the bitstream decides (I1).
         meta.scan = FileScanProbe.resolve(url: url, formatDescription: nil,
                                           mxf: url.pathExtension.lowercased() == "mxf")
+        meta.applyInterlacedRate()
         meta.colorPrimariesCode = info.primariesCode
         meta.transferFunctionCode = info.transferCode
         meta.colorMatrixCode = info.matrixCode
@@ -2094,7 +2095,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // controls show REAL timecode (start TC + elapsed), not a 00:00:00 counter.
         // Nil string → no source TC (transport falls back to the elapsed counter).
         if let tcString = info.startTimecode {
-            self.tcInfo = TimecodeReader.parse(timecode: tcString, fps: info.frameRate)
+            self.tcInfo = TimecodeReader.parse(timecode: tcString, fps: meta.frameRate)   // after the I2 rate rule (unchanged for progressive)
         }
 
         // Data rate: estimate from file size / duration (libav reports no per-stream

@@ -238,7 +238,11 @@ held back until after release, and the numbered defect entries follow.
      read.
    - **I2 — SDI 1080i:** 1080i50, 1080i59.94 and 1080i60 in the mode table, the picker and Follow source;
      fields sent untouched. An interlaced 50/59.94/60 frame rate is halved to 25/29.97/30, logged.
-     Bottom-field-first HD files are sent untouched, with a warning.
+     Bottom-field-first HD files are sent untouched, with a warning. **Built and run unattended on the SDI and HDMI
+     loops 2026-10-25 (commit `<commit — to be filled in>`)** (`INTERLACED_FINDINGS.md` §11): every interlaced fixture
+     locks 1080i at its rate, upper field first, on both inputs; received frames byte-identical to the read-back;
+     fields in temporal order over 374–456 fields per run (0 swapped); pictures byte-identical to HEAD; no vertical
+     scaling of an interlaced picture. The reference-monitor half of §9 P5 is still to do (attended).
    - **I3 — per-field 4:2:0 colour** in the renderer. (The 4:2:2 file half is in HEVC Stage 3b, above.)
    - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
      Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
@@ -1950,7 +1954,7 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
-## ✅ BUILT 2026-10-25 (commit `<commit — to be filled in>`) — CHANGE (Robbie, 2026-10-25) — DeckLink: an output that ends sends a final black frame tagged SDR
+## ✅ BUILT 2026-10-25 (commit `6a39299`) — CHANGE (Robbie, 2026-10-25) — DeckLink: an output that ends sends a final black frame tagged SDR
 
 **Asked for (Robbie, 2026-10-25):** when output stops because the user stops it, closes the file or window that owns
 it, or quits, the card should hold black whatever its idle setting, and the last signalling it saw should be SDR.
@@ -3420,7 +3424,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed. Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); the mode decision (I2) not started.
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `<commit — to be filled in>`** (below). Open for files: the reference-monitor check (§9 P5, attended) and field-correct colour (P6, I3).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -3473,6 +3477,21 @@ Streams are I6, after 1.0. The decisions:
 - seen during the runs, pre-existing (HEAD too), at quit only: a frame of the previous file is presented after the
   source is cleared, logging `[EDR] … AFTER a frame was already on screen` and a `[MATRIX]` line against the cleared
   state (2 of 5 runs).
+
+**I2 (SDI 1080i, files), built and run unattended on the loops 2026-10-25, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §11):
+- an interlaced 1080-line file at 25 / 29.97 / 30 frames goes out at 1080i50 / 1080i59.94 / 1080i60 under Follow
+  source, whatever its width; the three modes are in the picker; the bridge names the mode from its field dominance;
+- the woven frame is sent untouched. A BFF file is not re-ordered (decision 2): its fields arrive top N+1, bottom N on the
+  top-field-first wire, with the advisory in the DeckLink menu. Measured on SDI and HDMI with marker fixtures;
+- an interlaced picture is never scaled vertically: a 1440×1080i (4:3 pixels) file is resampled horizontally only, with
+  exact identity vertical taps. Non-1080 interlaced (and 1080 at 23.98 / 24) goes out progressive, unscaled, on an even
+  row, with an advisory;
+- an interlaced file reporting 50 / 59.94 / 60 is halved (decision 3), logged `[SCAN] rate:`; the Inspector's Frame Rate
+  row gives the field rate;
+- stepping is unchanged: one step is one coded frame (two fields). On a file whose rate was halved, the step grid still
+  follows the file's own samples (§11 finding 3);
+- seen during the runs, pre-existing (HEAD too): the file → card pull now and then repeats one whole frame and skips the
+  next (2 of 14 tree runs, 1 of 5 HEAD runs); fields are never split.
 
 **Done means (files, 1.0):**
 - scan type and field order reach the mode decision from the file's own bitstream and container (I1 detects them;
