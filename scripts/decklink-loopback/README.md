@@ -10,7 +10,7 @@ bundle. None of them activates a profile. **One configuration write exists:** `c
 | `build.sh` | `zsh scripts/decklink-loopback/build.sh [probe] [capture] [ancout] [hdrout] [v210cmp]` (default: `probe`) |
 | `probe.cpp` | **Read-only.** For every device: identity, sub-device, active profile and the profiles on offer, duplex, connections, the input and output connection settings (`Get*` only), and status: input lock, detected mode, flags, colorspace and dynamic range, output mode, busy, PCIe; the HDMI output's actual mode and format flags, TMDS / FRL rates, and the received EDID decoded (maker, name, CTA-861 HDR static metadata EOTFs, colorimetry, deep colour) |
 | `capture.cpp` | Enables one device's input (format detection, 10-bit YUV) for N seconds. For each received frame, see the table below. Prints a line whenever any of it changes, then a summary |
-| `hdrout.cpp` | Control: a mid-grey 1080p25 frame with a chosen colorspace, EOTF, HDR flag and static values, so a capture shows what the input reports for a known signal. Run with Manifold closed |
+| `hdrout.cpp` | Control: a mid-grey 1080p25 frame with a chosen colorspace, EOTF, HDR flag and static values (`--maxcll`, or `--zero` for all 0), so a capture shows what the input reports for a known signal. `--then-*` switches to a second signal **within the same output session** (shown synchronously). `--rec2020out` holds `bmdDeckLinkConfigRec2020Output` on for the run (read first, never written to preferences, restored). Run with Manifold closed |
 | `v210cmp.cpp` | Byte compare of two v210 frames, per channel: identical count, max \|Δ\|, Δ histogram, received low bits, and how many components each 10 → 8-bit rule explains |
 | `ancout.cpp` | Positive control: black 1080p25 frames carrying two VANC test packets (0x51 / 0x01 and 0x61 / 0x01). **On the 8K Pro loop its packets never arrived, while the driver's own ST 2108-1 packets did**, so it is not a working control (§6.11) |
 
@@ -33,6 +33,11 @@ after every such capture and confirm `cfg VideoInputConnection SDI`.
 On HDMI, read the static values with care: the input keeps reporting the **last DRM InfoFrame it received** (EOTF 2,
 flag set and the old values) after the output stops sending one, until the link relocks. The ancillary packet DID 0x41
 SDID 0x0C is present only while an InfoFrame is arriving, so it is the reliable sign of one (§6.11).
+
+**Compare HDMI signals within one output session.** An idle card passes its input through
+(`CapturePassThrough` `pcln`), and the gap between two output sessions can reset an HDMI sink by itself; a control
+that changes signal by restarting `hdrout` measures that gap, not the signal (§6.11, *S7-5 HDMI follow-up*). Use
+`--then-*`. The probe also reads `cfg Rec2020Output`.
 
 ```sh
 zsh scripts/decklink-loopback/build.sh probe capture

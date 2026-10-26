@@ -7863,7 +7863,7 @@ driver inserts by itself from the frame's HDR metadata whenever `bmdFrameContain
 it on PQ frames only, so the packet follows PQ exactly. Nothing in Manifold changes. *SDI carries colorimetry and
 transfer only* is retired.
 
-#### S7-5 by loopback — HDMI, 2026-10-25 17:53–18:14 (attended session, not committed)
+#### S7-5 by loopback — HDMI, 2026-10-25 17:53–18:14 (attended session, committed `23070cb`)
 
 **Scope:** S7-5's HDMI half. Robbie looped the DeckLink 8K Pro's HDMI output into its HDMI input. The capture measures
 what arrives on the HDMI input against what Manifold's bridge handed the card, as the SDI half did. **The reference
@@ -7943,7 +7943,7 @@ the names):
 | c3 | HLG · flag set, no values | EOTF 2 · MaxCLL 1234 (stale) | no |
 | c4 | SDR · 709 · flag clear (what Manifold sends) | 709 · EOTF 2 · MaxCLL 1234 (stale) | no |
 | c5 | PQ · flag set · MaxCLL 2345 | EOTF 2 · MaxCLL 2345 | yes |
-| c6 | **SDR · 709 · flag set** | **EOTF 0 · flag clear · no values** (reset) | no |
+| c6 | **SDR · 709 · flag set** | **EOTF 0 · flag clear · no values** (reset; ⚠️ the session gap, not the flag — corrected below) | no |
 | c7 | PQ · flag set · MaxCLL 3456 | EOTF 2 · MaxCLL 3456 | yes |
 | c8 | HLG · flag set · values, MaxCLL 4567 | EOTF 2 · MaxCLL **3456** (stale) | no |
 
@@ -8010,8 +8010,111 @@ the names):
 - *Open SDI item 2, HLG read with the flag set:* on HDMI the input also reads HLG with the flag set, but for a
   different reason: **nothing arrives for HLG**, and the input repeats the last PQ InfoFrame. On SDI the VPID carries
   HLG (EOTF 3 received, dynamic range HLG, control c2s). **HDMI does not signal HLG at all**, which SDI does.
+- ⚠️ *Corrected 2026-10-25 (S7-5 HDMI follow-up, below): c6's reset came from the gap between output sessions, not the
+  flag; within one session the flag makes no difference.*
 - *SDR after PQ:* SDI's VPID says SDR at once. HDMI sends no SDR InfoFrame unless the flag is set (control c6), so a
   sink that keeps the last InfoFrame, as this input does, stays in PQ until the link relocks.
+
+#### S7-5 HDMI follow-up — the neutral stall, SDR and HLG on HDMI, 2026-10-25 18:24–20:40 (attended session, not committed)
+
+**Scope:** four items from *S7-5 by loopback — HDMI* (`23070cb`): (1) the neutral stall after a mode change; (2) a
+proposal to signal SDR on HDMI by setting the HDR flag with EOTF 0; (3) every SDK route for HLG on HDMI; (4) the
+dropout at a same-mode colour change, recorded. Both loops in place (SDI out → SDI in, HDMI out → HDMI in, device 0,
+profile `1dfd`). The HDMI input was switched per capture only (`capture --input hdmi`), never persisted; the probe
+read device 0's input as SDI after every capture and every control, and `Rec2020Output` false after every case of
+`controls.sh` (the only controls that held it). The drivers stop at the first probe that reads otherwise; none did. Defaults: snapshot without licence keys; restored dictionary-equal (one key, `showTray`,
+read and written back; window-frame keys deleted).
+
+**Predictions** (`build/s7-5b/predictions.md`, written 18:24:55, before any build or run):
+
+| # | Prediction | Band | Result | Verdict |
+|---|---|---|---|---|
+| R1 | Stall recurs on HEAD; not on `b418161^` | HEAD ≥ 1 in ≥ 50; `b418161^` 0 in ≥ 50 | Harness: HEAD 0 / 52, `b418161^` 0 / 52. With the HDMI capture alongside: HEAD **2 / 10** (one launch of five), instrumented — cause below | Band not met as written (HEAD 0 / 52 in the plain harness); cause **established by instrumentation** |
+| R2 | After the fix, 0 stuck | 0 in ≥ 50 | **0 / 107** (55 with capture, 52 paused and playing); CoreVideo refused a restart twice by itself and both were recovered; forced failure 0 / 20 with 29 recoveries | **PASS** |
+| R3 | Idle CPU unchanged | ≤ 5 % of a core, 12 paused windows, scopes open | **2.93 %** (HEAD 2.70 %, same driver; `b418161` 3.5 %); watchdog 0 | **PASS** |
+| S1 | SDR, flag set: SDI unchanged, no ST 2108-1; HDMI resets | Exact | SDI unchanged, no packet (s1–s3). HDMI reset — but only across output sessions; see S3 | SDI **PASS**; HDMI confounded |
+| S2 | Stale values on an SDR frame with the flag set | Reported | No packet on SDI, no values on HDMI (s2) | Reported |
+| S3 | After item 2, SDR after PQ arrives on HDMI as SDR on the new picture's first frame | Same frame | Within one session the flag makes **no difference**; files 5 and 7 read stale PQ with the change built in | **FAIL** — change not adopted |
+| S4 | SDI, 7 files: bytes identical to the bridge and to `23070cb`'s frame #0; signals as before | 0 differ | **529 / 529** identical (5 relock frames per file excluded); frame #0 FNV-1a = `23070cb` on all 7; signals as `6be1fa8` | **PASS** |
+| S5 | HDMI, 7 files: PQ exact; SDR as SDR; HLG as item 3 | Exact | **939 / 939** identical; PQ exact (4 files); SDR and HLG stale PQ, as `23070cb` | PQ **PASS**; SDR as HEAD |
+| H1 | No HLG route on HDMI; EOTF 1 arriving would point at the sink's EDID | Reported | No route; **EOTF 1 arrives** | As predicted |
+| D1 | Dropout unchanged; item 2 does not alter it | Reported | Unchanged; flag set and clear drop out identically | As predicted |
+| G1 | `late=0 dropped=0`; tests; warnings | Exact | `late=0 dropped=0` on every output; `swift test` 612 / 612; warnings 12 = 12 (clean builds of HEAD and the tree) | **PASS** |
+
+**1. The neutral stall — cause and fix.**
+- *Instruments* (DEBUG): `CVDisplayLinkStart`'s return on every resume; a check that a woken link is running; a
+  watchdog for a wake with no tick within 500 ms; a forced wake between the idle decision and the stop.
+- *Ruled out:* a wake racing the stop — 416 forced back-to-back stop → start cycles, every one ticked (0 / 20 stuck);
+  a nil link and a blocked link queue (watchdog: link present, simply not running).
+- *Caught* (HEAD + instruments, five launches with the HDMI capture, the conditions of `23070cb`'s stall): in one
+  launch, after the link had been idle-stopped for 17 s across display-change notifications,
+  **`CVDisplayLinkStart → -6660` (`kCVReturnError`), running false**. The wake had already cleared `idleStopped`, so
+  every later wake read the link as running. No tick ran again: no colour state installed, no render, the prime timed
+  out (`no frame within 250 ms`), and the two later loads never reached the window or the card.
+- *Fix* (`MetalVideoRenderer.ensureRunningOnQueue`, `makeDisplayLink`): check the restart; recreate the link if it
+  did not take; if that fails, leave it marked stopped so the next wake retries. While wakes arrive, a link meant to
+  run that has not ticked for 250 ms is restarted the same way. Idle windows get no wakes and pay nothing.
+- *Final build* (after one more change: a link just started or recreated is stamped as having ticked): 0 stuck in 24
+  unforced changes, 16 / 16 forced refusals recovered, watchdog 0. Idle CPU not re-measured on it (no per-tick work
+  changed).
+- *Proof:* forced failure (`MANIFOLD_IDLE_FAIL_START=1`) 29 / 29 recovered, 0 stuck; unforced 0 / 107 stuck with two
+  natural refusals recovered (`[IDLE] ⚠️ display link would not restart (CVDisplayLinkStart → -6660) — recreating
+  it`, then `recreated and running`).
+
+**2. SDR on HDMI — controls, and a correction to `23070cb`.**
+
+| # | Sent (after a PQ marker) | SDI | HDMI |
+|---|---|---|---|
+| s1 | SDR 709 · flag set · values 0 | 709 · EOTF 0 · SDR · no packet | EOTF 0 · no values |
+| s2 | SDR 709 · flag set · stale values | same as s1 | same as s1 |
+| s3 | SDR 2020 · flag set · values 0 | 2020 · EOTF 0 · SDR · no packet | EOTF 0 · no values |
+| s4 | SDR 709 · flag clear | as s1 | **EOTF 0 · no values — also reset** |
+
+- s4 resetting with the flag clear exposed the confound: each case was a separate `hdrout` session, and an idle card
+  passes its input through (`CapturePassThrough` `pcln`). So the controls were repeated **within one output session**
+  (`hdrout --then-*`, two phases shown synchronously):
+
+| # | Phase 1 → phase 2, same session | HDMI |
+|---|---|---|
+| t1 / t2 | PQ 2020 → SDR 2020, flag set / clear | resets to SDR in two frames — **both** |
+| t3 / t4 | PQ 2020 → SDR 709, flag set / clear | one no-input frame, then **stale PQ — both** |
+| t5 | PQ 2020 → HLG 2020 | InfoFrame stops; stale PQ |
+| t6 / t7 | HLG 2020 → SDR 2020, flag set / clear | **stale PQ — both** |
+
+- **The flag on SDR changes nothing on HDMI within a session.** `23070cb`'s c6 reading ("SDR with the flag set
+  resets it") was the session gap, not the flag. Built into Manifold, the change left files 5 and 7 stale exactly as
+  HEAD (SDI unchanged). **Not adopted; reverted.** Options for Robbie in `BUGS.md`.
+
+**3. HLG on HDMI — every route.** After a PQ marker each: EOTF 3 × flag clear / set / set with values / set with
+zeros × Rec.2020 / Rec.709, and with `Rec2020Output` held on. **None gave HLG**: at 2020 the sink kept PQ, at 709 it
+reset to SDR. SDI received HLG in every case. **EOTF 1 (traditional HDR), which this sink's EDID lists, did arrive** —
+consistent with a driver that follows the sink's EDID (no HLG listed). Known limitation, retest on the LG.
+
+**4. The dropout, recorded.** Same-mode transitions 3 → 5 → 3 → 7 → 4 → 5 → 3 at 1080p25, HDMI and SDI:
+
+| Change | HDMI | SDI |
+|---|---|---|
+| PQ → SDR 2020 | one frame EOTF 2 with values 0, then EOTF 0, then the picture | on time |
+| SDR 2020 → PQ | one mixed frame (EOTF 0 with PQ values), then PQ, then the picture | on time |
+| PQ → SDR 709 | **2 no-input frames**, then the picture with stale PQ | colorimetry one frame early (open SDI item) |
+| SDR 709 → HLG | **14 no-input frames**, then HLG read as 2020 SDR | colorimetry one frame early |
+| HLG → SDR 2020 | nothing changes | on time |
+
+The dropout's length depends on the change; item 2's flag does not alter it (t3 = t4).
+
+**Seven-file tables on the fix (HEAD + the stall fix):**
+
+| File | Mode | Handed | HDMI received | SDI received | Bytes HDMI / SDI |
+|---|---|---|---|---|---|
+| 1 Meta | 2160p23.98 | 2020 · PQ · 2020 4000 / 0.0001 · 5500 / 800 | identical, packet | identical, ST 2108-1 | 130 / 73 ✅ |
+| 2 NoMeta | 2160p23.98 | 2020 · PQ · defaults | identical | identical | 131 / 73 ✅ |
+| 3 HEVC | 1080p25 | 2020 · PQ · P3 1000 / 0.005 · 800 / 400 | identical | identical | 135 / 77 ✅ |
+| 4 HLG | 1080p25 | 2020 · EOTF 3 · clear | stale PQ (item 3) ❌ | 2020 · EOTF 3 · flag set (open SDI item) | 136 / 77 ✅ |
+| 5 9-1-9 | 1080p25 | 2020 · EOTF 0 · clear | stale PQ (item 2) ❌ | identical | 136 / 76 ✅ |
+| 6 p3pq | 1080p25 | 2020 · PQ · defaults | identical | identical | 135 / 77 ✅ |
+| 7 1-1-1 | 1080p25 | 709 · EOTF 0 · clear | stale PQ (item 2) ❌ | identical | 136 / 76 ✅ |
+
+Every frame #0 dump has `23070cb`'s FNV-1a. Output `late=0 dropped=0` on every run.
 
 ---
 

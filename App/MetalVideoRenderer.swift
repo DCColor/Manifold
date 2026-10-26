@@ -561,32 +561,99 @@ final class MetalVideoRenderer {
     private var wakeGeneration: UInt64 = 0   // idleLock
     private var lastActiveTick: CFTimeInterval = 0          // CVDisplayLink thread only
     private var lastSeenWakeGeneration: UInt64 = .max      // CVDisplayLink thread only
+    private var nextRunningCheck: CFTimeInterval = 0   // idleLock
+    private var lastTickAt: CFTimeInterval = 0         // idleLock; written by every tick (`noteIdleTick`)
     private static let idleAfter: CFTimeInterval = 0.5
+    /// A link meant to run that has not ticked for this long is not running (a tick comes every 4–17 ms).
+    private static let silentLink: CFTimeInterval = 0.25
     #if DEBUG
     private var idleTicksSinceStart = 0      // CVDisplayLink thread; read on linkQueue only while stopped
+    /// DEBUG `MANIFOLD_IDLE_FAIL_START=1` (pre-ship removal, docs/BUGS.md): every restart of the link is made to fail
+    /// as CoreVideo's did (`kCVReturnError`), so the recovery in `ensureRunningOnQueue` runs on every wake.
+    private static let failStart = ProcessInfo.processInfo.environment["MANIFOLD_IDLE_FAIL_START"] == "1"
+    // The watchdog's clocks: when the last tick began and ended (CVDisplayLink thread; read racily on linkQueue, which
+    // is enough to tell "no tick" from "a tick that never ended").
+    private var watchTickBegan: CFTimeInterval = 0
+    private var watchTickEnded: CFTimeInterval = 0
     #endif
 
-    /// Any thread. Something may need a render: count it, and restart the link if idle stopped it.
+    /// Any thread. Something may need a render: count it, and restart the link if idle stopped it. While wakes keep
+    /// coming, also check at most every 250 ms that a link meant to run is ticking (`ensureRunningOnQueue`); an idle
+    /// window gets no wakes, so this costs it nothing.
     func wakeDisplayLink() {
         idleLock.lock()
         wakeGeneration &+= 1
         let resume = idleStopped
         idleStopped = false
+        let now = CACurrentMediaTime()
+        let verify = !resume && now >= nextRunningCheck && now - lastTickAt > Self.silentLink
+        if resume || verify { nextRunningCheck = now + Self.silentLink }
         idleLock.unlock()
-        guard resume else { return }
-        linkQueue.async { [weak self] in
-            guard let self, let link = self.displayLink else { return }
-            #if DEBUG
-            self.rpLastTickWall = 0          // the stopped interval is not a tick interval
-            self.idleTicksSinceStart = 0
-            #endif
-            Self.setRunning(link, true)
+        #if DEBUG
+        if resume || verify { armWatchdog(wokeAt: now) }
+        #endif
+        guard resume || verify else { return }
+        linkQueue.async { [weak self] in self?.ensureRunningOnQueue(resuming: resume) }
+    }
+
+    /// `linkQueue`. Start the link if it is not running, and make sure the start took.
+    ///
+    /// ⚠️ A START CAN BE REFUSED. CoreVideo refused to restart a link that had sat idle-stopped across a display
+    /// change (`CVDisplayLinkStart` → `kCVReturnError`, -6660; running false). The wake had already cleared
+    /// `idleStopped`, so every later wake took the link for running and none restarted it: the window and the
+    /// DeckLink output never rendered again (docs/BUGS.md, the neutral stall, 2026-10-25). So: check the start;
+    /// if it did not take, recreate the link; if that fails too, mark it stopped so the next wake tries again.
+    /// Never leave `idleStopped` false on a link that is not running.
+    private func ensureRunningOnQueue(resuming: Bool) {
+        guard let link = displayLink else { return }   // `stop()` took it: not ours to start
+        if !resuming {
+            idleLock.lock()
+            let silent = !idleStopped && CACurrentMediaTime() - lastTickAt > Self.silentLink
+            idleLock.unlock()
+            // An idle stop that ran since the wake leaves the restart to the next wake; a tick since then means it runs.
+            guard silent else { return }
+            print("[IDLE] ⚠️ display link meant to run has not ticked for \(Int(Self.silentLink * 1000)) ms — restarting it")
+        }
+        #if DEBUG
+        rpLastTickWall = 0          // the stopped interval is not a tick interval
+        idleTicksSinceStart = 0
+        #endif
+        var rc = Self.setRunning(link, true)
+        #if DEBUG
+        if Self.failStart { Self.setRunning(link, false); rc = kCVReturnError }
+        #endif
+        if rc == kCVReturnSuccess { return }
+        print("[IDLE] ⚠️ display link would not restart (CVDisplayLinkStart → \(rc)) — recreating it")
+        Self.setRunning(link, false)
+        if let fresh = makeDisplayLink(), Self.setRunning(fresh, true) == kCVReturnSuccess {
+            displayLink = fresh
+            idleLock.lock(); lastTickAt = CACurrentMediaTime(); idleLock.unlock()
+            print("[IDLE] display link recreated and running")
+        } else {
+            idleLock.lock(); idleStopped = true; idleLock.unlock()
+            print("[IDLE] ⚠️ display link could not be recreated — the next wake tries again")
         }
     }
 
+    #if DEBUG
+    /// DEBUG: a wake not followed by a tick within 500 ms is logged with the link's state. The proof that the stall
+    /// is gone counts these (docs/BUGS.md).
+    private func armWatchdog(wokeAt: CFTimeInterval) {
+        linkQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            self.idleLock.lock(); let stopped = self.idleStopped; self.idleLock.unlock()
+            guard !stopped, self.watchTickBegan < wokeAt, self.displayLink != nil else { return }   // nil: a closed window
+            let inFlight = self.watchTickBegan > self.watchTickEnded
+            FileHandle.standardError.write(Data(String(format: "[IDLE] ⚠️ WATCHDOG: no tick in 500 ms after a wake · last tick began %.3f s before the wake%@\n",
+                wokeAt - self.watchTickBegan, inFlight ? " and is STILL IN FLIGHT" : "").utf8))
+        }
+    }
+    #endif
+
     /// `linkQueue`. The one place the link is started or stopped.
-    private static func setRunning(_ link: CVDisplayLink, _ running: Bool) {
-        if running { CVDisplayLinkStart(link) } else { CVDisplayLinkStop(link) }
+    @discardableResult
+    private static func setRunning(_ link: CVDisplayLink, _ running: Bool) -> CVReturn {
+        running ? CVDisplayLinkStart(link) : CVDisplayLinkStop(link)
     }
 
     /// CVDisplayLink thread, after every tick. Quiet for `idleAfter` → queue a stop.
@@ -595,7 +662,7 @@ final class MetalVideoRenderer {
         #if DEBUG
         idleTicksSinceStart += 1
         #endif
-        idleLock.lock(); let generation = wakeGeneration; idleLock.unlock()
+        idleLock.lock(); let generation = wakeGeneration; lastTickAt = now; idleLock.unlock()
         refreshLock.lock()
         let armed = pendingRefresh || pendingSeekRender || pendingClear || pendingImmediate != nil
             || pendingColorState != nil || pendingDrawableSize != nil || pendingGeometry != nil
@@ -618,9 +685,10 @@ final class MetalVideoRenderer {
         guard wakeGeneration == generation, !idleStopped, let link = displayLink else { idleLock.unlock(); return }
         idleStopped = true
         idleLock.unlock()
-        Self.setRunning(link, false)
+        let rc = Self.setRunning(link, false)
         #if DEBUG
-        FileHandle.standardError.write(Data("[IDLE] display link stopped (paused, nothing to draw) after \(idleTicksSinceStart) ticks\n".utf8))
+        FileHandle.standardError.write(Data(("[IDLE] display link stopped (paused, nothing to draw) after \(idleTicksSinceStart) ticks"
+            + (rc == kCVReturnSuccess ? "" : " · CVDisplayLinkStop → \(rc) ⚠️") + "\n").utf8))
         #endif
     }
 
@@ -2754,20 +2822,27 @@ final class MetalVideoRenderer {
     func start() {
         linkQueue.sync {
             guard displayLink == nil else { return }
-            var link: CVDisplayLink?
-            CVDisplayLinkCreateWithActiveCGDisplays(&link)
-            guard let link else { print("MetalVideoRenderer: CVDisplayLink create failed"); return }
-
-            let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
-                let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
-                renderer.displayTick()
-                return kCVReturnSuccess
-            }
-            CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
-            idleLock.lock(); idleStopped = false; idleLock.unlock()
+            guard let link = makeDisplayLink() else { print("MetalVideoRenderer: CVDisplayLink create failed"); return }
+            // A link just started has not ticked yet: stamp it, so the first wakes do not read it as silent.
+            idleLock.lock(); idleStopped = false; lastTickAt = CACurrentMediaTime(); idleLock.unlock()
             Self.setRunning(link, true)
             displayLink = link
         }
+    }
+
+    /// `linkQueue`. A display link on the active displays, calling this renderer's tick. `start()` and the recovery in
+    /// `ensureRunningOnQueue` both make theirs here.
+    private func makeDisplayLink() -> CVDisplayLink? {
+        var link: CVDisplayLink?
+        CVDisplayLinkCreateWithActiveCGDisplays(&link)
+        guard let link else { return nil }
+        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
+            let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
+            renderer.displayTick()
+            return kCVReturnSuccess
+        }
+        CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
+        return link
     }
 
     func stop() {
@@ -2809,8 +2884,14 @@ final class MetalVideoRenderer {
         // a free drawable — the confirmed live-path stall (drawMs balloons, presented-fps sags, while
         // the display-link interval stays flat). Draining a pool every tick returns each drawable
         // promptly, so the pool never starves under sustained 24fps.
+        #if DEBUG
+        watchTickBegan = CACurrentMediaTime()
+        #endif
         autoreleasepool { performDisplayTick() }
         noteIdleTick()
+        #if DEBUG
+        watchTickEnded = CACurrentMediaTime()
+        #endif
     }
 
     /// The body of one display-link tick, run inside `displayTick`'s per-tick autorelease pool.

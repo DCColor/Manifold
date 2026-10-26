@@ -127,6 +127,7 @@ bullet.
 
 ### Known limitations
 
+- Known limitation: over HDMI, an HLG picture goes out without its HLG signal, so the display isn't told to switch to HLG. Seen with a display that doesn't list HLG among its HDR formats; a TV that does list it is still to be checked. SDI carries HLG.
 - Known limitation: interlaced sources go out over SDI as progressive: a 1080i59.94 source is sent as 1080p29.97, with both fields woven into each frame. An interlaced NDI source arrives already deinterlaced by NDI.
 - Known limitation: SDI audio goes silent for up to about a tenth of a second at each seek, scrub release and loop point during file playback.
 - Known limitation: after a network stall of a second or more, live sound can stay 10–20 ms late for up to a minute before it settles.
@@ -252,6 +253,7 @@ Every commit since `dd3984b` (0.8.4), grouped by area. "Visible?" says whether a
 | Help ▸ Export Frame for Support… (Robbie, 2026-10-24): the frame's diagnostic set (`.png`, `.v210`, `.rgba16f`, `.v210.json`, byte-identical to File ▸ Export Frame (Diagnostic Set)) through a save panel, with a dated name and a note that it holds the picture; public, no longer `#if DEBUG` or behind `ShortcutDebugGate`; never in Export Diagnostics. DEBUG `MANIFOLD_FRAME_EXPORT_DIR` skips the panel for unattended runs (pre-ship removal) | `72bb925` | Yes |
 | Privacy stage P2 (`docs/PRIVACY_AUDIT.md`): each saved stream's full URL and passphrase in one Keychain item (`tools.graviton.manifold.streams`, per bookmark id); the plist keeps name, host and a reference; migrated at launch with read-back, resumable; edit form shows the URL only on "Show saved URL"; a "Saved streams" count line in diagnostics | `3c5526d` | **Yes** |
 | Idle windows (BUGS.md 2026-10-24): the audio meter publishes only on change, so a paused window with the scopes open no longer re-runs its whole view 30 times a second (26–30 % → 0.7 % of a core); a paused window stops its display link after 0.5 s with nothing to draw and any render input, or Play, wakes it. 12 paused windows 103 % → 3.5 %; Accessibility at 12 windows 0.2 s; pictures byte-identical, playback unchanged | `b418161` | Yes |
+| Idle windows follow-up (BUGS.md 2026-10-25): a display-link restart that CoreVideo refuses (`kCVReturnError`) is now checked and the link recreated, so a paused window and its DeckLink output can no longer stay on their last or a neutral frame after idling. Fixes a regression from `b418161`, never released. 0 stuck in 107 mode changes; 12 paused windows 2.9 % | `<commit — to be filled in>` | No |
 | File ▸ Close and Window ▸ Minimize (BUGS.md 2026-10-24): enabled whenever a window is in front, not only while the controls show; the traffic lights' container fades instead of the buttons, so AppKit no longer treats them as disabled; ⌘W, ⌘M and an Accessibility press on the close button work in every state; a click on a hidden button is still ignored. 80/80 support exports byte-identical | `036b048` | Yes |
 
 #### Keyboard shortcuts
