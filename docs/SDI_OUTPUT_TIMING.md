@@ -16,7 +16,7 @@ The exceptions are untested, not measured failures:
 - **A future or power-saving macOS** that stops giving hidden windows drawables or display-link ticks.
 
 The cheap guard (a power and activity assertion while output runs) is worth doing before 1.0: **built 2026-10-26,
-commit `<commit — to be filled in>`** (§3, Stage 0). The full decoupling (§3) is not needed for 1.0 on this evidence;
+commit `afce63d`** (§3, Stage 0). The full decoupling (§3) is not needed for 1.0 on this evidence;
 it is a 1.1 item in `BUGS.md` (*card-clock-driven DeckLink output*).
 
 ## 0. History
@@ -105,7 +105,7 @@ displays and the Mac awake and opts out of App Nap and timer coalescing for the 
 stops. It touches `DeckLinkService` only. Risk: low (the displays stay on during output, which is the intent). Verify
 with `pmset -g assertions` and a playout past the display-sleep timeout on a Mac with defaults.
 
-**Stage 0, built 2026-10-26** (commit `<commit — to be filled in>`; predictions `build/token-step/predictions-stage0.md`):
+**Stage 0, built 2026-10-26** (commit `afce63d`; predictions `build/token-step/predictions-stage0.md`):
 `DeckLinkService.outputActivity`, owned by `isOutputting`'s observer, which every start and end of output already moves on
 main. `pmset -g assertions` (`build/token-step/power/`): none at launch or with a file open; two while output runs
 (`PreventUserIdleSystemSleep` and `PreventUserIdleDisplaySleep`, named "Manifold is sending video to a DeckLink output");

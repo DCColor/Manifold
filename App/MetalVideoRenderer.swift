@@ -3400,15 +3400,17 @@ final class MetalVideoRenderer {
         // shader's range-expansion constants are in the 10-bit domain to match (see the
         // kCodeMax block in PassthroughShader.metal). The gap is NOT negligible: the old
         // 8-bit constants left legal white ~4 codes low and put neutral chroma off zero,
-        // casting grays. In practice both decode paths request x420, so the r8/rg8 branch
-        // below is currently unreachable; reviving it means making those constants
-        // per-bit-depth (a uniform), not just flipping the texture format.
+        // casting grays. The r8/rg8 branch is reached by one source: an 8-bit 4:2:0 FILE,
+        // decoded to 420v because VideoToolbox's x420 filters its chroma vertically
+        // (docs/BUGS.md). Such a buffer always takes the shader's 8-bit path (below), whose
+        // `exactTimes4` maps an r8Unorm sample n/255 to exactly 4n in the 10-bit domain, so
+        // the constants stay 10-bit.
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let is10Bit = Self.isTenBit(pixelFormat)
         // Stage 3b: what this frame carries, for the readout (on change only) and, per ring slot,
         // for the v210 output's chroma reduction.
         noteCarriedPixelFormat(pixelFormat)
-        let frameChroma = ChromaSubsampling(pixelFormat: pixelFormat)
+        let frameChroma = ChromaSubsampling(sampledFormat: pixelFormat)
         let frameOutput = activeOutput   // colour S7 (D1): the state this frame is drawn under
         let lumaFormat: MTLPixelFormat = is10Bit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = is10Bit ? .rg16Unorm : .rg8Unorm
@@ -3544,8 +3546,9 @@ final class MetalVideoRenderer {
         if frameChroma == .c422 { params.chromaShiftU = 0.5 / Float(width) }
         // THE 8-BIT FLAG, PER FRAME, FROM THE FRAME: the producer that knew the source's bit depth set
         // it on this buffer (`SourceBitDepth`). Absent = not 8-bit = the arithmetic every 10-bit source
-        // always had.
-        let eightBit = SourceBitDepth.isEightBit(pixelBuffer)
+        // always had. An 8-bit buffer (420v) is 8-bit whatever its flag says: its r8 samples are only right through
+        // the 8-bit path.
+        let eightBit = SourceBitDepth.isEightBit(pixelBuffer) || !is10Bit
         if eightBit { params.eightBitSource = 1 }
         noteEightBitSource(eightBit)
         // Interlaced I3: a woven interlaced file's 4:2:0 chroma from each line's own field. Only x420 has a vertical

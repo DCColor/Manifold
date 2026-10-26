@@ -406,17 +406,17 @@ screenshots; every quit by a Quit event to the bundle path. Runs: `build/interla
    (`copyLatestDeckLinkFrame`, §2) disagreeing for a frame. Whole frames only: no received frame ever mixed two source
    frames' fields, so I2's field order holds. **Corrected 2026-10-26:** "all in the first 0.8 s after Play" was counted
    from the capture's start; from Play they come 2.3–2.9 s in (H.264 HDMI), and the bridge read-back shows the same
-   repeats at the same gaps, so they are in what is handed to the card. **Fixed for files 2026-10-26** (commit `<commit —
-   to be filled in>`): the card is handed the frame due at its slot; 0 repeats or skips over 45 Play starts, +11 ms SDI
-   latency (`BUGS.md`, *the card is now and then handed the same frame twice*).
+   repeats at the same gaps, so they are in what is handed to the card. **Fixed for files 2026-10-26** (commit `9aaff2d`):
+   the card is handed the frame due at its slot; 0 repeats or skips over 45 Play starts, +11 ms SDI latency (`BUGS.md`,
+   *the card is now and then handed the same frame twice*).
 2. **The F2 luma band was set from ProRes.** DNxHD (max 9) and 4:2:0 H.264 (max 76) differ from FFmpeg's decode by more,
    identically on HEAD; 4:2:0 chroma is I3's job.
 3. **On a file whose rate is halved, stepping follows the file's samples, not the halved rate.** The one such fixture
    repeats every woven frame, so its 59.94 samples are pairs of the same frame; a step moves one sample (half a frame),
    while the Frame Rate row, timecode and Follow source use 29.97. No real file here has this shape. Making the step grids
-   follow the halving is a small change, left for a decision. **Decided and built 2026-10-26** (commit `<commit — to be
-   filled in>`): a step is one frame of the halved rate (the track's samples in pairs, `FrameGrid.pairingSamples`); 0 of
-   5,921 presses differ from HEAD on the 35 other files with a track grid (`BUGS.md` release scope).
+   follow the halving is a small change, left for a decision. **Decided and built 2026-10-26** (commit `9aaff2d`):
+   a step is one frame of the halved rate (the track's samples in pairs, `FrameGrid.pairingSamples`); 0 of 5,921
+   presses differ from HEAD on the 35 other files with a track grid (`BUGS.md` release scope).
 4. **The 8K Pro sends 1080i on HDMI** at all three rates, detected as `Hi50 / Hi59 / Hi60`, upper field first.
 5. The §2 mode-label bug is fixed: the established mode reads `1080i59.94` from the mode's own field dominance.
 
@@ -466,7 +466,7 @@ opposite colours, A (Cb 352, Cr 672) and B (672, 352), in three regions: uniform
 ProRes 4444 TFF and DNxHD 185x MXF TFF. FFmpeg's decode of each equals the written picture (H.264 exactly; the others
 within 1 code).
 
-### 12.3 Results (built and run unattended 2026-10-26)
+### 12.3 Results (built and run unattended 2026-10-26, committed `afce63d`)
 
 **Estimated** 5 h (band 3½–7). **Actual** about 1 h from the predictions to the last loop run, plus this record. No
 attended steps, no screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Runs, logs and exports:
@@ -516,7 +516,8 @@ Manifold's export:
    8-bit H.264 file (progressive too) loses vertical chroma detail to this filter. **Not changed here:** the remedy is to
    ask for `420v` on 8-bit 4:2:0 files and widen ×4 in the shader (the 8-bit path that exists for live sources). That
    changes the decode format, scrub and playback together, and the pictures of every 8-bit H.264 file, progressive ones
-   included, which I3 must not. Recorded in BUGS.md as its own item.
+   included, which I3 must not. Recorded in BUGS.md as its own item. **Fixed for files 2026-10-26** (§13, commit
+   `<commit — to be filled in>`): 8-bit 4:2:0 files decode to `420v`; bleed 25 % → 0.000 %.
 2. **Apple's MPEG-2 decoder mixes the two fields' chroma on interlaced coding,** at either format. Manifold cannot undo
    it. A field-correct MPEG-2 needs another decoder (decision 7's libav question).
 3. **§11.3's H.264 luma max 76 and DNxHD max 9 were not Manifold.** Against FFmpeg's frame 0 widened ×4, HEAD's H.264
@@ -534,4 +535,66 @@ Manifold's export:
 
 **Done for files, with the decode's limits:** Manifold no longer mixes the fields of a 4:2:0 picture anywhere (window,
 scopes, export and SDI all read the corrected offscreen). P6 is met against what the decoder delivers. Against the file
-it is not met for 8-bit H.264 (item 1, fixable) or MPEG-2 (item 2, the decoder).
+it is not met for 8-bit H.264 (item 1, fixable) or MPEG-2 (item 2, the decoder). **Since §13:** met for 8-bit H.264
+(and 8-bit HEVC) against the file; MPEG-2 unchanged.
+
+## 13. 8-bit 4:2:0 files decoded to `420v` (§12.4 item 1): scope, predictions, results
+
+**Written 2026-10-26 17:14 EDT, before any probe, code change or build, against `afce63d`.** Predictions with their
+timestamp and hash: `build/h264-chroma/predictions.md`, `predictions.timestamp`. Run unattended; no attended steps, no
+screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Commit `<commit — to be filled in>`.
+Runs, logs and exports: `build/h264-chroma/`. **Estimated** 4½ h (band 3–6½). **Actual** about 1¼ h (17:14–17:20, then
+18:30–19:30), with a pause between (the Mac was needed) before the first probe or build.
+
+### 13.1 Measured first (read-only)
+
+`scripts/interlaced/vtplanes.swift` decodes frame 0 through the three routes Manifold uses (the playback reader
+`AVAssetReaderTrackOutput`, the scrub output `AVPlayerItemVideoOutput`, and a `VTDecompressionSession` with
+`LiveVideoDecoder`'s attributes, the SRT / WHEP decoder), each at x420 and `420v`, and compares every plane with FFmpeg's
+decode ×4 (`build/h264-chroma/measure/step1.txt`). x420 is shown raw and as the shader takes a flagged 8-bit buffer (low
+two bits cleared).
+
+| Source (frame 0) | x420, low bits cleared | `420v` |
+|---|---|---|
+| 8-bit H.264: progressive sharp probe, sharp TFF / BFF | luma max 0; chroma max 80, mean 79.3 (rows 432 / 592 for coded 352 / 672) | luma and chroma max 0 |
+| 8-bit H.264: testsrc MBAFF TFF / BFF, I2 marker, cadence file, `caseg`, `patches-9-14-9`, `still-420` | luma max 0; chroma max 100–240, 79–99 % exact | max 0, 100 % |
+| 8-bit HEVC (generated: `scripts/interlaced/generate-h264-chroma.sh`; the repo had none) | as the H.264 sharp probe | max 0 |
+| MPEG-2 8-bit progressive / interlaced | the same as `420v` | max 80 / 324 (Apple's decoder) |
+
+The three routes agree to the code on every file: the filter is in VideoToolbox's 8→10-bit delivery, not in a route.
+So the fix applies to every 8-bit 4:2:0 file with an SPS (H.264 and HEVC). MPEG-2 gains nothing from it. **Streams
+carry the same filter** (route `vt`); they are not changed (BUGS.md, *8-bit H.264 / HEVC streams …*).
+
+### 13.2 What changed
+
+- `FileChromaResolver.carrier(for:eightBitSource:)`: 8-bit 4:2:0 by the SPS → `420v`
+  (`ChromaSubsampling.eightBitCarrier420`); every other file keeps its 10-bit carrier. One answer for scrub and playback.
+- The renderer samples `420v` as r8 / rg8 and always through the 8-bit path of `3c911fb`: `exactTimes4` of n/255 is
+  floor(n·(1 + 1/256) + 1/1024) = n, so 4n exactly, for every n ≤ 255. The I3 per-field sample reads quantised texels
+  the same way. No shader arithmetic changed.
+- `ChromaSubsampling(sampledFormat:)` / `sampledBitDepth`: the renderer (I3's `fieldChroma`, the v210 mode, the 4:2:2
+  shift), the chain readout (`4:2:0 8-bit (420v) — native`) and `[CHROMA-FILE]` name `420v`. `init?(pixelFormat:)`
+  is unchanged, so the live promotes decide as before.
+- `FrameEngine.chromaFallback`: a decoder that refuses `420v` falls back to x420 for both decoders, with a banner that
+  says vertical colour detail is softer. Not seen in any run.
+- Tests: `testEightBitFourTwoZeroDecodesToTheEightBitCarrier`, `testTheEightBitCarrierIsSampledAsFourTwoZero`.
+
+### 13.3 Results
+
+| # | Measured | Verdict |
+|---|---|---|
+| M1–M3 | Playback reader, scrub output, VT session: x420 filtered, `420v` exact (max 0), every 8-bit H.264 file | **PASS** |
+| M4 | 8-bit HEVC: x420 filtered the same way, `420v` exact (the 50 % prediction held) | **PASS**; HEVC included |
+| M5 | MPEG-2 8-bit: the same at both formats; not flagged, not changed | **PASS** |
+| F1 | Progressive 8-bit H.264 / HEVC against FFmpeg ×4 (progressive filter): v210 luma max 0, chroma max 0 (sharp) / 1 (testsrc-like); 1080 / 1080 rows within ±2; offscreen within 0.42 code. HEAD: chroma max 80–175. `caseg` and `patches-9-14-9` carry a BT.2020 matrix, so only their v210 is compared (i3cmp converts the offscreen with 709): max 1, HEAD 78 | **PASS** (expected 0; band ≤ 1, the v210 pair average) |
+| F2 | Sharp H.264 TFF and BFF, per-field reference: v210 chroma max **0**, 1080 / 1080 rows; bleed **25.000 % → 0.000 %** (v210), 0.005 % (offscreen) | **PASS** |
+| F3 | testsrc MBAFF TFF / BFF and the I2 marker, per-field: chroma max 231–235 → **1**, 1080 / 1080 rows within ±2 (HEAD 645–684) | **PASS** |
+| F4 | 43 / 54 exported files byte-identical to HEAD in `.rgba16f`, `.v210`, `.v210.json` and PNG pixels: the 20-file control set's non-H.264 files, the interlaced 4:2:2 / 4:4:4 set, the HEVC field sequence, HEVC Main 10, ProRes, DNx, MPEG-2 | **PASS** |
+| F5 | The 11 that differ are exactly the 8-bit H.264 / HEVC files (one flat 8-bit H.264 clip, `manifold-sync-29.97p`, is identical). v210 luma identical to HEAD on every one (max 0 against FFmpeg on both builds) | **PASS** |
+| F6 | SDI loop, tree, paused and playing, sharp TFF, progressive H.264 and HEVC: every received frame equals the read-back (131, 128, 129 paused; 127, 128, 130 playing; 0 different); every read-back equals the export `.v210`; modes `1080i59.94` / `1080p29.97` as before. The scopes read the same offscreen | **PASS** |
+| F7 | 8-bit H.264 1080p29.97, output on, 2 × 30 s per build: CPU 20.1 / 18.2 % (HEAD), 19.4 / 19.8 % (tree); GPU 0.091 ms a frame on both; late = 0 dropped = 0 | **PASS** (within noise) |
+| F8 | Readout `[CHROMA] 4:2:0 8-bit (420v) — native`, `[CHROMA-FILE] … → 420v 4:2:0 · 8-bit source (exact ×4)`, `[BITDEPTH] 8-bit source …`; no fallback | **PASS** |
+| G1 | `swift test` 633 / 633 (631 + 2) | **PASS** |
+| G2 | Profile warnings: the same 11 as HEAD (clean builds) | **PASS** |
+| H1 | 14 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | **PASS** |
+| S1 | Streams: measured (13.1), not changed | as predicted |

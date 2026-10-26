@@ -158,6 +158,33 @@ final class FileChromaTests: XCTestCase {
         XCTAssertFalse(ResolvedChroma.undetermined.eightBitSource)
     }
 
+    /// An 8-bit 4:2:0 file is decoded to `420v`, where VideoToolbox hands over the decoder's chroma; at `x420` it filters
+    /// it vertically (docs/BUGS.md, *8-bit H.264 files lose vertical chroma detail in the decode*). Only 8-bit 4:2:0:
+    /// 10-bit files, 8-bit 4:2:2 / 4:4:4, unknown chroma and the forced 4:2:0 keep their 10-bit carrier.
+    func testEightBitFourTwoZeroDecodesToTheEightBitCarrier() {
+        let v420 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        let r = FileChromaResolver.resolve(.declared(.c420), basis: "b", force420: false, forceReason: "f",
+                                           eightBitSource: true)
+        XCTAssertEqual(r.pixelFormat, v420)
+        XCTAssertNil(r.reason)
+        XCTAssertTrue(r.logLine.contains("→ 420v 4:2:0"))
+        XCTAssertEqual(ChromaReadout.text(carried: r.pixelFormat, source: r.source, reason: r.reason),
+                       "4:2:0 8-bit (420v) — native")
+        // Forcing 4:2:0 changes nothing for a 4:2:0 file.
+        XCTAssertEqual(FileChromaResolver.resolve(.declared(.c420), basis: "b", force420: true, forceReason: "f",
+                                                  eightBitSource: true).pixelFormat, v420)
+        XCTAssertEqual(FileChromaResolver.resolve(.declared(.c420), basis: "b", force420: false, forceReason: "f")
+                        .pixelFormat, x420)
+        XCTAssertEqual(FileChromaResolver.resolve(.declared(.c422), basis: "b", force420: false, forceReason: "f",
+                                                  eightBitSource: true).pixelFormat, x422)
+        XCTAssertEqual(FileChromaResolver.resolve(.declared(.c444), basis: "b", force420: false, forceReason: "f",
+                                                  eightBitSource: true).pixelFormat, x444)
+        XCTAssertEqual(FileChromaResolver.resolve(.declared(.c422), basis: "b", force420: true, forceReason: "f",
+                                                  eightBitSource: true).pixelFormat, x420)
+        XCTAssertEqual(FileChromaResolver.resolve(.unknown, basis: "b", force420: false, forceReason: "f",
+                                                  eightBitSource: true).pixelFormat, x420)
+    }
+
     // MARK: - Fixture bytes (scripts/chroma/generate.sh)
 
     /// `still-420-h264.mov` (x264 High, 4:2:0)

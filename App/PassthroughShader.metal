@@ -47,10 +47,10 @@ struct ColorParams {
 // R/G/B spread on grays (measured on the legal white/black fixtures). Working in the same domain the
 // sampler actually uses makes both exact: legal white 940 -> 1.0, neutral chroma 512 -> 0.0, no cast.
 //
-// (MetalVideoRenderer still has an .r8Unorm/.rg8Unorm branch for 8-bit buffers, but it is currently
-// UNREACHABLE — every decode path requests a 10-bit carrier — so these constants are not per-depth.
-// If an 8-bit decode path is ever reintroduced, they become per-depth and must be passed in. An 8-bit
-// SOURCE in a 10-bit carrier is the next block's business, not this one's.)
+// (MetalVideoRenderer samples an 8-bit buffer as .r8Unorm/.rg8Unorm. One source sends one: an 8-bit 4:2:0
+// FILE, decoded to 420v because VideoToolbox's x420 filters its chroma vertically (docs/BUGS.md). It always
+// takes the next block's 8-bit path, which lands it in this 10-bit domain exactly, so these constants are not
+// per-depth. Any other 8-bit buffer must do the same. An 8-bit SOURCE in a 10-bit carrier is that block's too.)
 constexpr constant float kCodeMax     = 1023.984375;      // 65535/64 — max normalized 10-bit MSB-aligned code
 constexpr constant float kLumaBlack   = 64.0 / kCodeMax;  // legal luma floor  (was 16/255)
 constexpr constant float kLumaSwing   = kCodeMax / 876.0; // luma 64..940      (was 255/219)
@@ -66,7 +66,8 @@ constexpr constant float kResolveChromaScale = 219.0 / 224.0;
 
 // MARK: - 8-bit sources (exactly ×4)
 //
-// Every 8-bit source reaches this shader in a 10-bit carrier, and VideoToolbox — its decoder asked for
+// An 8-bit source reaches this shader in a 10-bit carrier (every stream, and 8-bit files before 420v), or as 420v
+// (8-bit 4:2:0 files: below). In a 10-bit carrier, VideoToolbox — its decoder asked for
 // x420 / x422, and VTPixelTransferSession from an IOSurface-backed source (the SRT / WHEP promotes) —
 // widens 8-bit FULL-SCALE (≈ v·1023/255), not BT.709 / BT.2100's ×4. Measured, every value lies in
 // 4v … 4v+3: mid-grey 128 → 514, white 235 → 943, neutral chroma 128 → 513 in x422
@@ -87,6 +88,9 @@ constexpr constant float kResolveChromaScale = 219.0 / 224.0;
 // export). Truncated, every value measured is 4v … 4v+3. So this is floor(code / 4) · 4 with code the
 // truncation, in one floor: the fraction of v·kCodeMax/4 is at most (3 + 63/64)/4, and 1/1024 absorbs
 // float error below an exact multiple without reaching the next one.
+//
+// 420v (r8Unorm, a sample n/255): v·kCodeMax/4 = n·(1 + 1/256), whose fraction n/256 + 1/1024 stays below 1 for every
+// n ≤ 255, so the same floor gives exactly 4n. The renderer sends every 420v buffer here, flagged or not.
 //
 // Unflagged buffers (every 10-bit source, libav files, which sws already widens ×4) never reach these.
 static inline float exactTimes4(float v) {

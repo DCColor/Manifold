@@ -538,6 +538,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// source is NOT carried exactly: VideoToolbox widens it full-scale (≈ v·1023/255, not ×4), so its
     /// AVFoundation frames are flagged (`eightBitSource`, `SourceBitDepth`) and the shader takes them
     /// back to ×4 (§6.10, *8-bit sources mapped exactly ×4*). libav files are not flagged: sws is ×4.
+    /// An 8-bit 4:2:0 file is decoded to `420v` instead, because VideoToolbox's `x420` filters its chroma vertically;
+    /// the shader takes those samples ×4 the same way (`FileChromaResolver.carrier(for:eightBitSource:)`).
     private var fileChroma: ResolvedChroma = .undetermined
     private var videoPixelFormat: OSType { fileChroma.pixelFormat }
     /// The first frame of a playback session is checked against the request once per file
@@ -1923,14 +1925,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// The decoder did not deliver the format it was asked for (`delivered` nil: it would not start
     /// at it). THE FALLBACK: from here on this file is carried at 4:2:0 by BOTH decoders, so scrub
-    /// and playback stay equal, and the readout and the banner say why.
+    /// and playback stay equal, and the readout and the banner say why. An 8-bit 4:2:0 file asked for
+    /// `420v` falls back to `x420` the same way: still 4:2:0, but with VideoToolbox's vertical chroma filter.
     private func chromaFallback(delivered: OSType?, requested: OSType) {
         guard fileChroma.pixelFormat == requested,
               requested != kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange else { return }
+        let outcome = requested == ChromaSubsampling.eightBitCarrier420
+            ? "decoded at x420, which softens vertical color detail" : "converted to 4:2:0"
         let reason = delivered.map {
             "the decoder delivered \(ChromaReadout.fourCC($0)) instead of \(ChromaReadout.fourCC(requested)); "
-                + "converted to 4:2:0"
-        } ?? "the decoder would not start at \(ChromaReadout.fourCC(requested)); converted to 4:2:0"
+                + outcome
+        } ?? "the decoder would not start at \(ChromaReadout.fourCC(requested)); \(outcome)"
         let fallback = ResolvedChroma(pixelFormat: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
                                       source: fileChroma.source, reason: reason,
                                       basis: fileChroma.basis + ", fallback",
@@ -1944,6 +1949,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func raiseChromaNotice(source: SourceChroma, reason: String) {
         let label: String
         if case .declared(let c) = source { label = c.label } else { label = "higher-resolution" }
+        if source == .declared(.c420) {
+            // The 8-bit fallback (`chromaFallback`): the chroma resolution is kept, its vertical detail is not.
+            playbackNotice = "This file’s 8-bit color could not be decoded exactly (\(reason)). "
+                + "The picture, scopes, SDI output and frame export carry slightly softer vertical color detail."
+            return
+        }
         playbackNotice = "This file’s color is \(label), but Manifold is showing it at 4:2:0 (\(reason)). "
             + "The picture, scopes, SDI output and frame export carry 4:2:0 color resolution."
     }

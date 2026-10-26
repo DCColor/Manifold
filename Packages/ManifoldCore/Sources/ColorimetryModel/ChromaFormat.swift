@@ -42,6 +42,23 @@ public enum ChromaSubsampling: Int, Comparable, Sendable, CaseIterable {
         }
     }
 
+    /// The 8-bit carrier an 8-bit 4:2:0 FILE decodes to (`420v`, video range). VideoToolbox's `x420` output filters an
+    /// 8-bit decode's chroma vertically ([1 6 1]/8, measured on H.264 and HEVC); at `420v` it is the decoder's own
+    /// (docs/BUGS.md, *8-bit H.264 files lose vertical chroma detail in the decode*). The shader takes it ×4 exactly.
+    public static let eightBitCarrier420: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+
+    /// The chroma of a buffer the RENDERER samples: the 10-bit carriers (`init?(pixelFormat:)`) and the 8-bit
+    /// `420v` (`eightBitCarrier420`). Kept apart from `init?(pixelFormat:)`, on which the live promotes decide whether
+    /// a buffer still needs promoting to a 10-bit carrier, so streams are unchanged by it.
+    public init?(sampledFormat pf: OSType) {
+        if let carried = ChromaSubsampling(pixelFormat: pf) { self = carried; return }
+        guard pf == Self.eightBitCarrier420 else { return nil }
+        self = .c420
+    }
+
+    /// The sample depth of a format `init?(sampledFormat:)` accepts: 8 for `420v`, 10 for the rest.
+    public static func sampledBitDepth(_ pf: OSType) -> Int { pf == eightBitCarrier420 ? 8 : 10 }
+
     /// The 10-bit biplanar video-range format that carries this chroma: `x420`, `x422`, `x444` — the
     /// renderer's sample domain (stored codes; the shader does any range expansion).
     public var carrierPixelFormat: OSType {
@@ -159,7 +176,8 @@ public enum V210ChromaMode: UInt32, Sendable {
 public enum ChromaReadout {
 
     /// - Parameters:
-    ///   - carried: the pixel format of the last buffer the renderer drew; nil before the first.
+    ///   - carried: the pixel format of the last buffer the renderer drew; nil before the first. Its depth is the
+    ///     carrier's: an 8-bit source in `x420` reads 10-bit, in `420v` 8-bit.
     ///   - source: what the source declared.
     ///   - reason: why the carried chroma is lower than the source's, when a path said so.
     ///   - note: a fact about the decode that is not a chroma loss, appended as " · note" — today only
@@ -167,10 +185,10 @@ public enum ChromaReadout {
     public static func text(carried: OSType?, source: SourceChroma, reason: String?,
                             note: String? = nil) -> String {
         guard let carried else { return "no picture" }
-        guard let chroma = ChromaSubsampling(pixelFormat: carried) else {
+        guard let chroma = ChromaSubsampling(sampledFormat: carried) else {
             return "\(fourCC(carried)) — not a format the renderer samples" + (note.map { " · \($0)" } ?? "")
         }
-        let head = "\(chroma.label) 10-bit (\(fourCC(carried)))"
+        let head = "\(chroma.label) \(ChromaSubsampling.sampledBitDepth(carried))-bit (\(fourCC(carried)))"
         let tail = (chroma == .c444 ? " · DeckLink v210 output: reduced once to 4:2:2 (halfband)" : "")
             + (note.map { " · \($0)" } ?? "")
         switch source {

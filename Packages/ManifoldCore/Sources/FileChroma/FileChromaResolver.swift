@@ -17,7 +17,8 @@ import SPSColor
 /// The resolver's answer for one file.
 public struct ResolvedChroma: Equatable, Sendable {
     /// What both decoders are asked for: `x420`, `x422` or `x444` (10-bit biplanar, video range: the
-    /// stored codes, unclipped; the shader does any range expansion, as it always has).
+    /// stored codes, unclipped; the shader does any range expansion, as it always has), or `420v` for an
+    /// 8-bit 4:2:0 file (`ChromaSubsampling.eightBitCarrier420`: VideoToolbox's `x420` filters its chroma).
     public let pixelFormat: OSType
     /// What the file is. `.unknown` for a codec with no table (D8), never a guess.
     public let source: SourceChroma
@@ -47,7 +48,7 @@ public struct ResolvedChroma: Equatable, Sendable {
 
     /// The `[CHROMA-FILE]` log line.
     public var logLine: String {
-        let carried = ChromaSubsampling(pixelFormat: pixelFormat)?.label ?? "?"
+        let carried = ChromaSubsampling(sampledFormat: pixelFormat)?.label ?? "?"
         let src: String
         switch source {
         case .notStated: src = "not stated"
@@ -85,8 +86,16 @@ public enum FileChromaResolver {
             return ResolvedChroma(pixelFormat: pixelFormat(for: .c420), source: source,
                                   reason: forceReason, basis: basis, eightBitSource: eightBitSource)
         }
-        return ResolvedChroma(pixelFormat: pixelFormat(for: chroma), source: source,
+        return ResolvedChroma(pixelFormat: carrier(for: chroma, eightBitSource: eightBitSource), source: source,
                               reason: nil, basis: basis, eightBitSource: eightBitSource)
+    }
+
+    /// The format a file of KNOWN chroma is decoded to. An 8-bit 4:2:0 file (its SPS says 8 bits) is decoded to
+    /// `420v`: VideoToolbox's `x420` delivery of an 8-bit decode filters chroma vertically by [1 6 1]/8, and `420v`
+    /// is the decoder's chroma exactly (measured on H.264 and HEVC, playback reader and scrub output alike; docs/BUGS.md,
+    /// *8-bit H.264 files lose vertical chroma detail in the decode*). Every other file keeps its 10-bit carrier.
+    public static func carrier(for chroma: ChromaSubsampling, eightBitSource: Bool) -> OSType {
+        chroma == .c420 && eightBitSource ? ChromaSubsampling.eightBitCarrier420 : pixelFormat(for: chroma)
     }
 
     // MARK: - AVFoundation files: the codec type, and the SPS in avcC / hvcC

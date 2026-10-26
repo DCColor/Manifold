@@ -92,6 +92,25 @@ final class ChromaFormatTests: XCTestCase {
                        "2vuy — not a format the renderer samples")
     }
 
+    /// An 8-bit 4:2:0 file is decoded to `420v` (docs/BUGS.md, *8-bit H.264 files lose vertical chroma detail in the
+    /// decode*): the renderer samples it as 4:2:0 and the readout names its depth. The live promotes' question
+    /// (`init?(pixelFormat:)`: is this already a 10-bit carrier?) is unchanged, so 420v still needs promoting there.
+    func testTheEightBitCarrierIsSampledAsFourTwoZero() {
+        let v420 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        XCTAssertEqual(ChromaSubsampling.eightBitCarrier420, v420)
+        XCTAssertEqual(ChromaSubsampling(sampledFormat: v420), .c420)
+        XCTAssertNil(ChromaSubsampling(pixelFormat: v420))
+        for (pf, c) in [(x420, ChromaSubsampling.c420), (x422, .c422), (x444, .c444)] {
+            XCTAssertEqual(ChromaSubsampling(sampledFormat: pf), c)
+            XCTAssertEqual(ChromaSubsampling.sampledBitDepth(pf), 10)
+        }
+        XCTAssertEqual(ChromaSubsampling.sampledBitDepth(v420), 8)
+        XCTAssertNil(ChromaSubsampling(sampledFormat: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+        XCTAssertNil(ChromaSubsampling(sampledFormat: kCVPixelFormatType_422YpCbCr8))
+        XCTAssertEqual(ChromaReadout.text(carried: v420, source: .declared(.c420), reason: nil),
+                       "4:2:0 8-bit (420v) — native")
+    }
+
     // MARK: - Live decode (Stage 3b S3/S4)
 
     /// The request follows the SPS's chroma. A 4:2:0 SPS — every WHEP stream — asks for x420, exactly

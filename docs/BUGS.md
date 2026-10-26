@@ -244,20 +244,51 @@ held back until after release, and the numbered defect entries follow.
      fields in temporal order over 374–456 fields per run (0 swapped); pictures byte-identical to HEAD; no vertical
      scaling of an interlaced picture. The reference-monitor half of §9 P5 is still to do (attended).
    - **I3 — per-field 4:2:0 colour** in the renderer. (The 4:2:2 file half is in HEVC Stage 3b, above.) **Built and run
-     unattended 2026-10-26, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §12): a woven interlaced
+     unattended 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): a woven interlaced
      file's 4:2:0 chroma is reconstructed from each line's own field in `passthroughFragment`, so the window, scopes,
      export and SDI all get it; the shader matches a per-field reference on the decoder's own planes to 1 code (100 %
      of rows); 4:2:2 / 4:4:4 interlaced, the HEVC field sequence and the 20-file control set byte-identical to HEAD;
      SDI loop 0 different, late = 0 dropped = 0; 631 / 631 tests; warnings unchanged. **Against the file, P6 is not met
      for 8-bit H.264 or MPEG-2:** the decoder hands over chroma already mixed across fields (H.264 25 %, the next item;
-     MPEG-2 fully, Apple's decoder). Sharp-fixture bleed 50 % → 25 % (H.264).
-   - **8-bit H.264 files lose vertical chroma detail in the decode (found in I3, 2026-10-26; not fixed).** VideoToolbox's
-     delivery of 8-bit H.264 at x420, which every file decode asks for, filters chroma vertically by [1 6 1]/8. At
-     `420v` the chroma is exact (`scripts/interlaced/vtprobe.swift`, `INTERLACED_FINDINGS.md` §12.4). On interlaced
-     files it leaves 25 % of the other field after I3; on progressive ones it softens vertical colour edges. Fix to
-     decide: ask for `420v` on 8-bit 4:2:0 files (scrub and playback together) and widen ×4 in the shader, as the
-     live 8-bit path does. It changes every 8-bit H.264 file's pictures, so it needs its own predictions and a full
-     re-measure. HEVC Main 10 and 10-bit sources are unaffected.
+     MPEG-2 fully, Apple's decoder). Sharp-fixture bleed 50 % → 25 % (H.264). **H.264 met since the next item:** bleed
+     25 % → 0.000 %, P6 met against the file; MPEG-2 still not (the decoder).
+   - ✅ **FIXED for files 2026-10-26, commit `<commit — to be filled in>`.** ~~**8-bit H.264 files lose vertical chroma
+     detail in the decode** (found in I3, 2026-10-26).~~ VideoToolbox's delivery of an 8-bit decode at x420, which
+     every file decode asked for, filters chroma vertically by [1 6 1]/8. **Measured first, read-only**
+     (`scripts/interlaced/vtplanes.swift`, `build/h264-chroma/measure/step1.txt`): frame 0 of 11 8-bit 4:2:0 files
+     (H.264 progressive and MBAFF TFF / BFF, the sharp fixtures, testsrc, the I2 marker, two control files, the
+     60 s cadence file; one 8-bit HEVC, generated because the repo had none) through all three routes Manifold decodes
+     with, the playback reader (`AVAssetReaderTrackOutput`), the scrub output (`AVPlayerItemVideoOutput`) and a
+     `VTDecompressionSession` with `LiveVideoDecoder`'s attributes (the SRT / WHEP decoder). At x420 every route gives
+     the same filtered chroma (sharp rows 432 / 592 for coded 352 / 672; testsrc max 164–240 codes against FFmpeg),
+     8-bit HEVC included. At `420v` every route gives luma **and** chroma equal to FFmpeg's decode ×4, max 0, 100 %
+     of samples. MPEG-2 (no SPS, so not known to be 8-bit, not flagged) is the same at both formats: not this filter.
+     **The fix:** `FileChromaResolver.carrier(for:eightBitSource:)` asks for `420v`
+     (`ChromaSubsampling.eightBitCarrier420`) when the file's SPS says 8-bit and its chroma is 4:2:0, for scrub and
+     playback alike (one answer). The renderer samples it as r8 / rg8 and always takes an 8-bit buffer through the
+     existing 8-bit path (3c911fb): `exactTimes4` of an r8 sample n/255 is exactly 4n for every n, so the shader's
+     arithmetic is unchanged. `ChromaSubsampling(sampledFormat:)` names `420v` for the renderer, the readout and
+     the log; `init?(pixelFormat:)`, on which the live promotes decide, is unchanged. The readout reads
+     `4:2:0 8-bit (420v) — native`. A decoder that refuses `420v` falls back to x420 with a banner, never silently.
+     10-bit, 4:2:2, 4:4:4, unknown-chroma and libav files keep their carrier. **Proved** (`build/h264-chroma/`,
+     predictions first, `predictions.md`): 8-bit H.264 / HEVC exports against FFmpeg ×4, v210 luma max **0**, chroma
+     max **1** code (0 on the sharp fixtures; expected 0, band ≤ 1: the v210 pair average), 1080 / 1080 rows within
+     ±2 (HEAD: chroma max 80–235, as few as 1 / 1080 rows); offscreen within 0.42 code; sharp interlaced bleed 25 % →
+     **0.000 %** (v210), 0.005 % (offscreen). 43 / 54 exported files byte-identical to HEAD (`.rgba16f`, `.v210`,
+     `.v210.json`, PNG pixels): every 10-bit, ProRes, DNx, MPEG-2, libav and HEVC Main 10 file, the 4:2:2 / 4:4:4
+     interlaced set, and one flat 8-bit H.264 clip; the other 11 are the 8-bit H.264 / HEVC files. SDI loop: received
+     frames equal the read-back paused and playing (131, 128, 129, 127, 128, 130; 0 different), read-backs equal the
+     export `.v210`, late = 0 dropped = 0 on all runs; scopes read the same offscreen. Playback of an 8-bit H.264
+     1080p29.97 file with output on, 2 × 30 s each: CPU 19.2 % (HEAD) / 19.6 % (tree), GPU 0.091 ms a frame on both,
+     late = 0 dropped = 0. 633 / 633 tests (631 + 2); the same 11 Profile warnings. Defaults restored to the snapshot.
+   - **8-bit H.264 / HEVC streams lose vertical chroma detail in the decode (found 2026-10-26; not fixed).** The same
+     filter, measured at the decoder: `LiveVideoDecoder` asks VideoToolbox for x420, and a `VTDecompressionSession`
+     with its attributes filters 8-bit chroma by [1 6 1]/8 exactly as the file routes did, exact at `420v`
+     (`build/h264-chroma/measure/step1.txt`, route `vt`). So SRT and WHEP 8-bit streams carry it; HLS (AVPlayer, x420)
+     by inference, not measured. **Not changed:** a stream fix changes the decoder request and the promote, and must be
+     run against a live non-Cloudflare server (CLAUDE.md), an OBS step that needs Robbie. Fix to decide: request
+     `420v` for an 8-bit 4:2:0 SPS (`ChromaSubsampling.liveDecodeRequest`) and measure whether the promote keeps the
+     chroma, or hand `420v` to the renderer as files do.
    - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
      Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
    - **Not in 1.0:** I5 (true bob at field rate) and I6 (interlaced streams, including NDI's built-in
@@ -306,7 +337,7 @@ held back until after release, and the numbered defect entries follow.
      Sections still to write*.
    - "color", not Robbie's "colour", in the new strings: the user-facing strings are American English.
    ✅ **One app yellow, and halved-rate stepping (Robbie, 2026-10-25 / 26; I2 decision).** Built and tested 2026-10-26,
-   in the app the same evening, commit `<commit — to be filled in>`. Predictions: `build/token-step/predictions.md`,
+   in the app the same evening, commit `9aaff2d`. Predictions: `build/token-step/predictions.md`,
    `predictions-2.md`.
    - **One yellow, #FFE600**, the playhead's, defined once: `AppYellow` (`Packages/ManifoldCore/Sources/PlayheadSlider/
      PlayheadSlider.swift`), `Color.appYellow` in the app (`App/AppYellow.swift`). It marks something turned on or
@@ -351,7 +382,7 @@ held back until after release, and the numbered defect entries follow.
      black, so over white video #FFE600 is about 3.8:1 and the bar's white text about 4.7:1, estimated as #737373 behind); the compare badge;
      Loop, captions, tray and reload in yellow beside the green DeckLink and stream buttons.
    ✅ **DeckLink output holds the Mac awake (SDI_OUTPUT_TIMING.md §3, Stage 0; Robbie, 2026-10-26).** Built and tested
-   2026-10-26, commit `<commit — to be filled in>`. While output runs, one activity
+   2026-10-26, commit `afce63d`. While output runs, one activity
    (`ProcessInfo.beginActivity([.userInitiated, .idleDisplaySleepDisabled, .latencyCritical])`, "Manifold is sending
    video to a DeckLink output") keeps the displays and the Mac from idle-sleeping and App Nap from throttling Manifold,
    because every SDI frame is still made by a window render. One owner: `DeckLinkService.isOutputting`'s observer
@@ -2134,7 +2165,7 @@ it, or quits, the card should hold black whatever its idle setting, and the last
 
 ---
 
-## ✅ FIXED 2026-10-26 (commit `<commit — to be filled in>`; files only) — PRE-EXISTING, ALL BUILDS — DeckLink: during file playback the card is now and then handed the same frame twice, then the frame after next
+## ✅ FIXED 2026-10-26 (commit `9aaff2d`; files only) — PRE-EXISTING, ALL BUILDS — DeckLink: during file playback the card is now and then handed the same frame twice, then the frame after next
 
 **Fixed 2026-10-26, measured on the loops the same evening** (`build/token-step/eve/`, predictions
 `build/token-step/predictions-3.md`, written before each build):
@@ -3627,7 +3658,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, not yet against the file for 8-bit H.264 (the decode's vertical chroma filter, release scope) or MPEG-2 (Apple's decoder mixes the fields).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `<commit — to be filled in>`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -3692,10 +3723,10 @@ Streams are I6, after 1.0. The decisions:
 - an interlaced file reporting 50 / 59.94 / 60 is halved (decision 3), logged `[SCAN] rate:`; the Inspector's Frame Rate
   row gives the field rate;
 - stepping: one step is one coded frame (two fields). On a file whose rate was halved, a step is one frame of the
-  halved rate since 2026-10-26 (commit `<commit — to be filled in>`; release scope, *One app yellow, and halved-rate
+  halved rate since 2026-10-26 (commit `9aaff2d`; release scope, *One app yellow, and halved-rate
   stepping*), where `ca4d868` stepped one of the file's samples (§11 finding 3);
 - seen during the runs, pre-existing (HEAD too): the file → card pull now and then repeats one whole frame and skips the
-  next (2 of 14 tree runs, 1 of 5 HEAD runs); fields are never split. Fixed for files 2026-10-26 (commit `<commit — to be filled in>`): *the card is
+  next (2 of 14 tree runs, 1 of 5 HEAD runs); fields are never split. Fixed for files 2026-10-26 (commit `9aaff2d`): *the card is
   now and then handed the same frame twice*, below.
 
 **Done means (files, 1.0):**
@@ -3703,8 +3734,10 @@ Streams are I6, after 1.0. The decisions:
   I2 makes the decision);
 - 1080i50, 1080i59.94 and 1080i60 exist and are chosen for such files;
 - the card is verified on the reference monitor with the TFF and BFF fixtures (`INTERLACED_FINDINGS.md`
-  P3–P5), and colour is field-correct (P6). P6: Manifold's part done in I3; 8-bit H.264 waits on the decode-format item
-  (release scope, *8-bit H.264 files lose vertical chroma detail in the decode*).
+  P3–P5), and colour is field-correct (P6). P6: Manifold's part done in I3; 8-bit H.264 met since the decode-format fix
+  (release scope, *8-bit H.264 files lose vertical chroma detail in the decode*, commit `<commit — to be filled in>`);
+  MPEG-2 not
+  (Apple's decoder).
 
 **Done means (streams, I6, after 1.0):**
 - interlaced-ness reaches the mode decision from the stream's own signalling (SPS `frame_mbs_only_flag`,
