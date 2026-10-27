@@ -1236,7 +1236,7 @@ struct ContentView: View {
         .clipped()
         .overlay(alignment: .topTrailing) {
             if showInspector && engine.hasMedia {
-                InspectorPanel(metadata: engine.metadata, engine: engine)
+                InspectorPanel(metadata: engine.metadata, engine: engine, chrome: chrome)
                     .padding(16)
                     .transition(.opacity)
             }

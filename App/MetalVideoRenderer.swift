@@ -15,6 +15,7 @@ import ColorimetryModel   // SourceColorProvenance — the source colour tier th
 import SyncCalibration   // calibration mode's flash detector (docs/AUDIO_RESAMPLER_DESIGN.md §19.10)
 import FrameQueuePolicy  // the paused-picture rules: which end a full queue trims, when the seek fallback may draw
 import LUTCube           // colour S6: the Interpretation LUT's tables (docs/COLOR_MANAGEMENT_FINDINGS.md §6.11)
+import FileScan          // interlaced I4: the window's field view (docs/INTERLACED_FINDINGS.md §14)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
 // UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
@@ -423,6 +424,8 @@ final class MetalVideoRenderer {
     private let deckLinkVerticalPipelineState: MTLComputePipelineState?
     private let deckLinkScaledPipelineState: MTLComputePipelineState?
     private let deckLinkCommandQueue: MTLCommandQueue
+    /// Interlaced I4: the window's field view (`fieldViewKernel`), display only. nil → every view draws as Weave.
+    private let fieldViewPipelineState: MTLComputePipelineState?
     private let deckLinkLock = NSLock()
     private var deckLinkStaging: [MTLBuffer] = []      // the ring (`deckLinkRingCount`); [frontIndex] is the newest
     private var deckLinkFrontIndex = 0
@@ -716,7 +719,7 @@ final class MetalVideoRenderer {
         refreshLock.lock()
         let armed = pendingRefresh || pendingSeekRender || pendingClear || pendingImmediate != nil
             || pendingColorState != nil || pendingDrawableSize != nil || pendingGeometry != nil
-            || pendingFieldChroma != nil
+            || pendingFieldChroma != nil || pendingFieldView != nil
         refreshLock.unlock()
         let canIdle = !armed && onDisplayTick == nil && presentationHoldFloor == nil && calibrationFlash == nil
             && isPausedProvider?() == true
@@ -1061,6 +1064,9 @@ final class MetalVideoRenderer {
         } else {
             self.deckLinkPipelineState = nil
         }
+        // Interlaced I4: the field view. Non-fatal: without it the window shows the woven frame (Weave), and says so.
+        self.fieldViewPipelineState = library.makeFunction(name: "fieldViewKernel")
+            .flatMap { try? device.makeComputePipelineState(function: $0) }
         // SDI scaling. Non-fatal in the same way: without them a non-native source holds neutral and says so.
         self.deckLinkPlacedPipelineState = library.makeFunction(name: "rgbToV210Placed")
             .flatMap { try? device.makeComputePipelineState(function: $0) }
@@ -1708,6 +1714,19 @@ final class MetalVideoRenderer {
     /// Whether the last buffer drawn took the per-field chroma. RENDER THREAD only. Starts false, so a progressive
     /// file logs nothing: one `[SCAN]` line when a file turns it on, one when it goes off.
     private var lastFieldChroma = false
+    /// Interlaced I4: the window's field view and the field order it is read against. Parked by `setFieldView` (main) under
+    /// `refreshLock`, installed at the top of `performDisplayTick` into `activeFieldView` (RENDER THREAD ONLY).
+    private var pendingFieldView: (view: FieldView, order: FieldOrder?)?
+    private var activeFieldView: (view: FieldView, order: FieldOrder?) = (.weave, nil)
+    private var mainFieldView: (view: FieldView, order: FieldOrder?) = (.weave, nil)   // MAIN THREAD ONLY: the no-op guard
+    /// The display-only texture a field view is drawn into (offscreen-sized). RENDER THREAD ONLY; nil until a view first needs it.
+    private var fieldViewTexture: MTLTexture?
+    #if DEBUG
+    /// The texture the last completed frame's display copy sampled — the offscreen slot in Weave, `fieldViewTexture` in a field
+    /// view — with its view. Set in the render completion under `offscreenIndexLock`; read by the measurement read-back
+    /// (`MANIFOLD_DISPLAY_READBACK`, §14.2 decision 10).
+    private var readableDisplaySource: (texture: MTLTexture, view: FieldView, order: FieldOrder?)?
+    #endif
 
     /// ── THE DISPLAY RASTER, HANDED FROM MAIN TO THE RENDER THREAD ────────────────────────
     ///
@@ -2233,6 +2252,33 @@ final class MetalVideoRenderer {
         mainSourceInterlaced = perField
         refreshLock.lock()
         pendingFieldChroma = perField
+        pendingRefresh = true
+        refreshLock.unlock()
+        wakeDisplayLink()
+    }
+
+    /// Interlaced I4 (docs/INTERLACED_FINDINGS.md §3, §14): how THIS WINDOW shows a woven interlaced picture. Call from MAIN,
+    /// only through `DeckRegistry.setFieldView` and the deck's source-change reset. Display only: the view is drawn into a
+    /// separate texture that the display copy samples; the offscreen ring, and so the scopes, SDI and export, never see it.
+    /// Parked and installed on the render thread like the field chroma, with a re-render so a paused frame is redrawn.
+    func setFieldView(_ view: FieldView, order: FieldOrder?) {
+        guard mainFieldView.view != view || mainFieldView.order != order else { return }
+        // In Weave the order draws nothing, so an order change alone (every interlaced load and unload) is parked for the
+        // next tick without a log line, a redraw or a wake (§14.4, W1: the first runs logged "→ WEAVE" at each load).
+        if view == .weave && mainFieldView.view == .weave {
+            mainFieldView.order = order
+            refreshLock.lock()
+            pendingFieldView = (view, order)
+            refreshLock.unlock()
+            return
+        }
+        mainFieldView = (view, order)
+        print("[FIELDS] window view → \(view.logLabel)"
+            + (view == .weave ? " — both fields woven, as stored"
+                              : " (\(view.detail(order))) — DISPLAY ONLY; scopes, SDI and export read the woven frame")
+            + (view != .weave && fieldViewPipelineState == nil ? "  ⚠️ no field-view pipeline: the window shows Weave" : ""))
+        refreshLock.lock()
+        pendingFieldView = (view, order)
         pendingRefresh = true
         refreshLock.unlock()
         wakeDisplayLink()
@@ -3009,6 +3055,8 @@ final class MetalVideoRenderer {
         pendingGeometry = nil
         let fieldChroma = pendingFieldChroma
         pendingFieldChroma = nil
+        let fieldView = pendingFieldView
+        pendingFieldView = nil
         refreshLock.unlock()
 
         // THE ACTIVE PICTURE, INSTALLED HERE FOR THE SAME REASON AS THE TWO ABOVE IT — and with
@@ -3020,6 +3068,8 @@ final class MetalVideoRenderer {
         if let geometry { activeGeometry = geometry }
         // Interlaced I3: the file's field structure, installed at the same point for the same reason.
         if let fieldChroma { activeFieldChroma = fieldChroma }
+        // Interlaced I4: the window's field view, at the same point: any frame this tick draws is drawn in it.
+        if let fieldView { activeFieldView = fieldView }
 
         // THE DISPLAY RASTER, INSTALLED HERE AND NOWHERE ELSE — same placement and the same reason
         // as the colour state above: this is the one thread that touches the layer, and it must
@@ -3580,6 +3630,13 @@ final class MetalVideoRenderer {
         encoder.setFragmentBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+        // Interlaced I4: what the display stage samples. Weave (and anything the field view cannot draw) samples the offscreen
+        // itself, exactly as before I4; a field view first draws into its own display-only texture. Never into the ring.
+        let displaySource = encodeFieldView(from: offscreen, into: cmdBuffer) ?? offscreen
+        #if DEBUG
+        let displaySourceView = displaySource === offscreen ? (view: FieldView.weave, order: activeFieldView.order)
+                                                            : activeFieldView
+        #endif
         #if DEBUG
         let rpEncEnd = CACurrentMediaTime()
         #endif
@@ -3616,7 +3673,7 @@ final class MetalVideoRenderer {
             refDesc.colorAttachments[0].storeAction = .store
             if let refEnc = cmdBuffer.makeRenderCommandEncoder(descriptor: refDesc) {
                 refEnc.setRenderPipelineState(refPipeline)
-                refEnc.setFragmentTexture(offscreen, index: 0)
+                refEnc.setFragmentTexture(displaySource, index: 0)
                 refEnc.setFragmentBytes(&reference, length: MemoryLayout<ReferenceShaderParams>.stride, index: 0)
                 refEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 refEnc.endEncoding()
@@ -3628,7 +3685,7 @@ final class MetalVideoRenderer {
             copyDesc.colorAttachments[0].storeAction = .store
             if let copyEnc = cmdBuffer.makeRenderCommandEncoder(descriptor: copyDesc) {
                 copyEnc.setRenderPipelineState(copyPipeline)
-                copyEnc.setFragmentTexture(offscreen, index: 0)
+                copyEnc.setFragmentTexture(displaySource, index: 0)
                 copyEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 copyEnc.endEncoding()
             }
@@ -3639,7 +3696,7 @@ final class MetalVideoRenderer {
             // the old form read 64 px past the end of the texture. It fires only when
             // `displayCopyPipelineState` is nil, which essentially never happens — so it would
             // have shipped untested and failed on a machine where the pipeline failed to build.
-            blit.copy(from: offscreen, sourceSlice: 0, sourceLevel: 0,
+            blit.copy(from: displaySource, sourceSlice: 0, sourceLevel: 0,
                       sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                       sourceSize: MTLSize(width: offscreen.width, height: offscreen.height, depth: 1),
                       to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
@@ -3680,6 +3737,9 @@ final class MetalVideoRenderer {
             self.offscreenReadableIndex = writeIndex
             self.offscreenReadableChroma = frameChroma
             self.offscreenReadableOutput = frameOutput
+            #if DEBUG
+            self.readableDisplaySource = (displaySource, displaySourceView.view, displaySourceView.order)
+            #endif
             self.offscreenIndexLock.unlock()
             #if DEBUG
             ScopePerf.count("frames")
@@ -3929,6 +3989,41 @@ final class MetalVideoRenderer {
     /// what the four scope kernels, the v210 convert and `readbackRenderedFrame` already do, and
     /// is what makes them inherit the crop with no plumbing. The two blits in `renderPixelBuffer`
     /// did not, and were reading past the end of the texture as a result.
+    /// Interlaced I4: draw this window's field view of `woven` into the display-only `fieldViewTexture`, in `cmd`, and
+    /// return it; nil in Weave, or when the view cannot be drawn (no pipeline, no texture, a one-row picture), in which case
+    /// the display copy samples the woven frame, as it always did. RENDER THREAD ONLY. Reads the offscreen, never writes it.
+    private func encodeFieldView(from woven: MTLTexture, into cmd: MTLCommandBuffer) -> MTLTexture? {
+        let (view, order) = activeFieldView
+        guard let parity = view.parity(order), woven.height > 1,
+              let pipeline = fieldViewPipelineState else { return nil }
+        if fieldViewTexture?.width != woven.width || fieldViewTexture?.height != woven.height {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: Self.renderPixelFormat, width: woven.width, height: woven.height, mipmapped: false)
+            desc.storageMode = .private
+            desc.usage = [.shaderRead, .shaderWrite]
+            fieldViewTexture = device.makeTexture(descriptor: desc)
+        }
+        guard let target = fieldViewTexture, let enc = cmd.makeComputeCommandEncoder() else { return nil }
+        var params = FieldViewParams(mode: view.shaderMode, parity: UInt32(parity), pad0: 0, pad1: 0)
+        enc.setComputePipelineState(pipeline)
+        enc.setTexture(woven, index: 0)
+        enc.setTexture(target, index: 1)
+        enc.setBytes(&params, length: MemoryLayout<FieldViewParams>.stride, index: 0)
+        let tpg = MTLSize(width: 16, height: 16, depth: 1)
+        enc.dispatchThreadgroups(MTLSize(width: (woven.width + 15) / 16, height: (woven.height + 15) / 16, depth: 1),
+                                 threadsPerThreadgroup: tpg)
+        enc.endEncoding()
+        return target
+    }
+
+    /// Mirrors `FieldViewParams` in PassthroughShader.metal (field order and types must match).
+    private struct FieldViewParams {
+        var mode: UInt32
+        var parity: UInt32
+        var pad0: UInt32
+        var pad1: UInt32
+    }
+
     private func ensureOffscreenTexture(width: Int, height: Int) {
         if !offscreenRing.isEmpty, let size = offscreenSize, size.w == width, size.h == height {
             return
@@ -4889,7 +4984,18 @@ final class MetalVideoRenderer {
         let filename: String
         let readback: [UInt8], readbackBytesPerRow: Int
         let v210Dump: V210Dump?
+        #if DEBUG
+        /// Interlaced I4's measurement read-back (§14.2 decision 10): the texture the display copy sampled for this frame, and
+        /// the view it was drawn in. nil unless `MANIFOLD_DISPLAY_READBACK=1`.
+        var display: (bytes: [UInt8], bytesPerRow: Int, view: FieldView, order: FieldOrder?)? = nil
+        #endif
     }
+
+    #if DEBUG
+    /// `MANIFOLD_DISPLAY_READBACK=1` (launch environment; pre-ship removal with `MANIFOLD_FRAME_EXPORT_DIR`, docs/BUGS.md):
+    /// Export Frame for Support also writes `<name>.display.rgba16f` and `<name>.display.json`. Unset, nothing changes.
+    private static let displayReadbackEnabled = ProcessInfo.processInfo.environment["MANIFOLD_DISPLAY_READBACK"] == "1"
+    #endif
 
     private func captureFrameExport(diagnosticSet: Bool) -> FrameExport? {
         // ONE SLOT, READ ONCE: the PNG and the v210 dump below are the same frame.
@@ -5002,9 +5108,20 @@ final class MetalVideoRenderer {
 
         let ts = Int(Date().timeIntervalSince1970)
         let filename = "Manifold_frame_\(ts)" + (parTag.map { "_\($0)" } ?? "") + ".png"
-        return FrameExport(image: cgImage, properties: properties, colorSpace: cs, width: width, height: height,
-                           pixelAspect: pixelAspect, parTag: parTag, filename: filename,
-                           readback: bytes, readbackBytesPerRow: bytesPerRow, v210Dump: v210Dump)
+        var export = FrameExport(image: cgImage, properties: properties, colorSpace: cs, width: width, height: height,
+                                 pixelAspect: pixelAspect, parTag: parTag, filename: filename,
+                                 readback: bytes, readbackBytesPerRow: bytesPerRow, v210Dump: v210Dump)
+        #if DEBUG
+        if diagnosticSet, Self.displayReadbackEnabled {
+            offscreenIndexLock.lock(); let source = readableDisplaySource; offscreenIndexLock.unlock()
+            if let source, let d = readback(source.texture) {
+                export.display = (d.bytes, d.bytesPerRow, source.view, source.order)
+            } else {
+                print("[FIELDS] display read-back: nothing drawn yet")
+            }
+        }
+        #endif
+        return export
     }
 
     /// The PNG at `url`, and the diagnostic set's files beside it when the export carries a v210 dump.
@@ -5028,6 +5145,21 @@ final class MetalVideoRenderer {
                 Self.writeV210Dump(export.v210Dump, readback: export.readback,
                                    readbackBytesPerRow: export.readbackBytesPerRow, besidePNG: url)
             }
+            #if DEBUG
+            if let d = export.display {
+                let stem = url.deletingPathExtension()
+                let meta: [String: Any] = ["width": export.width, "height": export.height, "bytesPerRow": d.bytesPerRow,
+                                           "view": d.view.rawValue, "fieldOrder": d.order?.rawValue ?? "none"]
+                do {
+                    try Data(d.bytes).write(to: stem.appendingPathExtension("display.rgba16f"))
+                    try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys])
+                        .write(to: stem.appendingPathExtension("display.json"))
+                    print("[FIELDS] display read-back \(stem.lastPathComponent).display.rgba16f — view \(d.view.logLabel)")
+                } catch {
+                    print("[FIELDS] display read-back write failed: \(error)")
+                }
+            }
+            #endif
         } else {
             print("[EXPORT] PNG finalize failed")
         }

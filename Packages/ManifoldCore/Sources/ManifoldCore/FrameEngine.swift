@@ -282,12 +282,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// file's aperture, nor tag its export with the departed file's squeeze.
     public var onSourceGeometry: ((Int, Int, DeclaredCleanAperture, DeclaredPixelAspect) -> Void)?
 
-    /// Interlaced I3 (docs/INTERLACED_FINDINGS.md §8): true when the file is woven interlaced, so the renderer
-    /// reconstructs its 4:2:0 chroma per field (`InterlacedChroma.perField`). Published on the same edges as
-    /// `onSourceGeometry` (the scan is read from the same format description and the file's first video packet, before
-    /// the first frame) and false at unload. Not part of the geometry: the libav path clears that, and the field
-    /// structure still holds there.
-    public var onSourceScan: ((Bool) -> Void)?
+    /// Interlaced I3 (docs/INTERLACED_FINDINGS.md §8): the file's scan, so the renderer reconstructs a woven interlaced
+    /// file's 4:2:0 chroma per field (`InterlacedChroma.perField`) and, since I4 (§14), the window offers its field views.
+    /// Published on the same edges as `onSourceGeometry` (the scan is read from the same format description and the
+    /// file's first video packet, before the first frame) and `.notRead` at unload. Not part of the geometry: the libav
+    /// path clears that, and the field structure still holds there.
+    public var onSourceScan: ((SourceScan) -> Void)?
 
     nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
     private var videoRenderer: AVSampleBufferVideoRenderer?
@@ -1230,7 +1230,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // file that never declared one, which is a worse failure than the padding it removes, and
         // a stale `pasp` would follow the next file into its exported filename.
         onSourceGeometry?(0, 0, .undeclared, .undeclared)
-        onSourceScan?(false)
+        onSourceScan?(.notRead)
     }
 
     /// Publish the frame size of a LIVE (non-file) source into this deck.
@@ -1846,7 +1846,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                               MediaInspector.cleanAperture(for: fmt),
                               MediaInspector.pixelAspect(for: fmt))
             // Interlaced I3: the field structure, at the same point, read as the Inspector reads it (I1).
-            onSourceScan?(InterlacedChroma.perField(FileScanProbe.resolve(url: url, formatDescription: fmt, mxf: false)))
+            onSourceScan?(FileScanProbe.resolve(url: url, formatDescription: fmt, mxf: false))
             // DNxHR can't decode through VideoToolbox; route it to libav. Its real
             // range (DNxHR/MXF ACLR) comes from libav's color_range, applied in
             // beginLibavReading — overriding the often-untagged AVFoundation read.
@@ -1873,7 +1873,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
             // be published for the same reason the nil codes are.
             onSourceGeometry?(0, 0, .undeclared, .undeclared)
-            onSourceScan?(false)
+            onSourceScan?(.notRead)
             adoptFileChroma(FileChromaResolver.resolve(.unknown, basis: "no format description",
                                                        force420: false, forceReason: ""))
         }
@@ -2434,8 +2434,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 onSourceGeometry?(0, 0, .undeclared, .undeclared)
                 // Interlaced I3: the field structure is not geometry and survives the decode, so it is restated here
                 // from this path's own reading (as `applyLibavMetadata` reads it).
-                onSourceScan?(InterlacedChroma.perField(FileScanProbe.resolve(
-                    url: url, formatDescription: libavFileFormatDescription, mxf: url.pathExtension.lowercased() == "mxf")))
+                onSourceScan?(FileScanProbe.resolve(
+                    url: url, formatDescription: libavFileFormatDescription, mxf: url.pathExtension.lowercased() == "mxf"))
                 // MXF: AVFoundation is blind to the container, so the UI facts
                 // (duration/size/fps/color/codec) come from libav. .mov-DNx already
                 // has them from AVFoundation (videoTrack set) — leave those untouched.

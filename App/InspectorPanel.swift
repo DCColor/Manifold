@@ -1,10 +1,13 @@
 import SwiftUI
 import ManifoldCore
+import FileScan   // FieldView — the Window View row (interlaced I4)
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
     let metadata: VideoMetadata?
     @ObservedObject var engine: FrameEngine
+    /// This window's chrome, for the Window View row (interlaced I4).
+    @ObservedObject var chrome: WindowChrome
 
     /// Range as displayed: the file's tag, annotated when the user is asserting
     /// an override (honest that it's an assertion, not read from the file).
@@ -103,6 +106,11 @@ struct InspectorPanel: View {
                 // Progressive or interlaced, the field order, and the source that said so; a container that
                 // disagrees with the bitstream is named after it (docs/INTERLACED_FINDINGS.md §10, I1).
                 MetadataRow(label: "Scan", value: m.scanString, isFact: m.scanIsStated)
+                // Interlaced I4 (docs/INTERLACED_FINDINGS.md §14.2 decision 9): how this window shows the fields, while the
+                // file offers the views. Display only, and the row says so.
+                if chrome.fieldViewOffered {
+                    MetadataRow(label: "Window View", value: chrome.fieldView.inspectorText(chrome.fieldOrder))
+                }
                 if let tc = m.startTimecode {
                     MetadataRow(label: "Start TC", value: tc)
                 }

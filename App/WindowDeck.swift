@@ -76,6 +76,7 @@ import ManifoldCore
 import StreamBookmarkModel
 import ColorimetryModel   // SourceChroma — the file's chroma to the renderer (Stage 3b S2)
 import ShortcutRegistry   // ShortcutID — the window's shortcut handlers (docs/SHORTCUTS_AUDIT.md §4.4)
+import FileScan   // SourceScan, FieldView — the window's field view (interlaced I4)
 
 // MARK: - Exclusive devices
 
@@ -251,7 +252,14 @@ final class WindowDeck: ObservableObject {
     ///
     /// NOT `@Published`, for the reason the class header gives about `engine`/`renderer`: it is
     /// written from `updateNSView`, which can land inside a SwiftUI update pass.
-    fileprivate(set) weak var chrome: WindowChrome?
+    fileprivate(set) weak var chrome: WindowChrome? {
+        // Interlaced I4: a scan that arrived before the chrome did is applied when it arrives. Deferred a turn: this is
+        // written from `updateNSView`, and the apply writes `@Published` chrome state.
+        didSet {
+            guard chrome !== oldValue, chrome != nil, let scan = lastSourceScan else { return }
+            DispatchQueue.main.async { [weak self] in self?.noteSourceScan(scan) }
+        }
+    }
 
     /// What this window does for each shortcut it answers (docs/SHORTCUTS_AUDIT.md §4.4). The registry says which
     /// key; this says what happens and whether it can happen now. Registered by this window's `ContentView` on
@@ -397,6 +405,8 @@ final class WindowDeck: ObservableObject {
         // mode, so an absent marker is the right answer during that gap rather than a guess.
         // Colour S2: during a hold the title says what is being compared, in place of the Bypass
         // marker (the picture is then NOT in the chosen mode). Both come back on release.
+        // Interlaced I4: a field view, " — Field 1 (display only)", whatever the display transform (docs/INTERLACED_FINDINGS.md §14).
+        if chrome?.fieldViewOffered == true, let fields = chrome?.fieldView.titleSuffix { title += " — " + fields }
         if let held = chrome?.heldDisplayTransform { return title + " — COMPARING: " + held.compareLabel }
         return chrome?.displayTransform == .bypass ? title + " — Bypass" : title
     }
@@ -435,6 +445,37 @@ final class WindowDeck: ObservableObject {
             renderer?.sourceColorStateChanged()
         }
     }
+
+    /// Interlaced I4: the file the current scan describes, so a scan for a different file (or none) is a source change.
+    private var fieldViewSourceURL: URL?
+    /// The last scan the engine published for this window (`.notRead` after an unload). The chain readout's Fields row.
+    private(set) var lastSourceScan: SourceScan?
+
+    /// Interlaced I4 (docs/INTERLACED_FINDINGS.md §14): the engine published this window's scan (at load, restated on the
+    /// libav path, `.notRead` at unload). Says whether the field views are offered and against which field order, and
+    /// **returns the view to Weave on every source change** (§14.2 decision 5), so a view never carries over to a file
+    /// nobody chose it for. The renderer is told from here and from `DeckRegistry.setFieldView`, nowhere else.
+    func noteSourceScan(_ scan: SourceScan) {
+        lastSourceScan = scan
+        guard let chrome else { return }
+        let url = scan == .notRead ? nil : engine?.currentURL
+        let offered = FieldView.offered(scan)
+        let sourceChanged = url == nil || url != fieldViewSourceURL
+        fieldViewSourceURL = url
+        if chrome.fieldViewOffered != offered { chrome.fieldViewOffered = offered }
+        if chrome.fieldOrder != scan.fieldOrder { chrome.fieldOrder = scan.fieldOrder }
+        if (sourceChanged || !offered), chrome.fieldView != .weave {
+            print("[FIELDS] the source changed — the window returns to Weave")
+            chrome.fieldView = .weave
+        }
+        renderer?.setFieldView(chrome.fieldView, order: scan.fieldOrder)
+        DisplayTransformMenuState.shared.setNeedsRefresh()
+        NotificationCenter.default.post(name: Self.fieldViewDidChange, object: self)
+        applyWindowTitle()
+    }
+
+    /// Posted (object: the deck) when this window's field view, or whether it is offered, may have changed.
+    static let fieldViewDidChange = Notification.Name("WindowDeck.fieldViewDidChange")
 
     /// Colour S6, L3: this window shows a source — a file, or a live stream it owns. **Not** "the renderer has
     /// colour codes": an untagged file and a cleared deck both hold nil codes. With no source the chain readout
@@ -843,6 +884,24 @@ final class DeckRegistry {
         deck.applyWindowTitle()
     }
 
+    /// ── THE ONE MUTATOR FOR A WINDOW'S FIELD VIEW (interlaced I4, docs/INTERLACED_FINDINGS.md §3, §14) ──────────────
+    ///
+    /// `setDisplayTransform`'s shape and its reason: writes the owning `WindowChrome` and forwards to that deck's renderer,
+    /// so the menu check, the pulldown and the picture cannot disagree. A direct write to `chrome.fieldView` would move the
+    /// control and NOT the picture. The only other writer is the deck's source-change reset (`noteSourceScan`).
+    /// - Parameter deck: the window; nil means the key deck (the Color menu).
+    func setFieldView(_ view: FieldView, on deck: WindowDeck? = nil) {
+        guard let deck = deck ?? keyDeck, let chrome = deck.chrome else { return }
+        // Offered only for a woven interlaced file (§14.2 decision 4); anything else stays Weave.
+        let view = chrome.fieldViewOffered ? view : .weave
+        guard chrome.fieldView != view else { return }
+        chrome.fieldView = view
+        deck.renderer?.setFieldView(view, order: chrome.fieldOrder)
+        DisplayTransformMenuState.shared.setNeedsRefresh()
+        NotificationCenter.default.post(name: WindowDeck.fieldViewDidChange, object: deck)
+        deck.applyWindowTitle()
+    }
+
     // MARK: - Opening a file
 
     /// ── THE ONE PLACE A USER-INITIATED OPEN DECIDES WHICH WINDOW GETS THE FILE ──────────────
@@ -1090,8 +1149,10 @@ final class DeckRegistry {
                                         aperture: aperture, pixelAspect: pixelAspect)
         }
         // INTERLACED I3: the file's field structure, same edges, same destination (per-field 4:2:0 chroma).
-        engine.onSourceScan = { [weak renderer] perField in
-            renderer?.setSourceInterlaced(perField)
+        // I4: the deck too, for the window's field views (docs/INTERLACED_FINDINGS.md §14).
+        engine.onSourceScan = { [weak renderer, weak deck] scan in
+            renderer?.setSourceInterlaced(InterlacedChroma.perField(scan))
+            deck?.noteSourceScan(scan)
         }
         // THE SCRUB SEAM'S DESTINATION — per-window, same shape and same site as the three above.
         // The engine's coalescer has already applied the delivery-side token check; this is the

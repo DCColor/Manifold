@@ -162,7 +162,7 @@ held back until after release, and the numbered defect entries follow.
            to no LUT, and back), the words in every state, no source, P1 (16 files byte-identical to HEAD), defaults
            and gates all pass.
          - **One miss, not L3's code:** the title's base name after a stream (below).
-     - ✅ **FIXED 2026-10-14, commit `<to be filled in>`.** ~~**Window title keeps a departed file's name** (found in L3, 2026-10-14; not fixed).~~ `WindowDeck.displayName`
+     - ✅ **FIXED 2026-10-14, commit `ce38f4b`.** ~~**Window title keeps a departed file's name** (found in L3, 2026-10-14; not fixed).~~ `WindowDeck.displayName`
        reads `engine.metadata`, which nothing clears. After a live takeover the title still names the file: while
        the stream plays, and after it ends, when the window has no source. The Window menu and Mission Control
        then name a file that is not loaded. Measured: `patches-1-1-1-prores.mov — LUT swap_rb_3d_33.cube` during
@@ -291,6 +291,14 @@ held back until after release, and the numbered defect entries follow.
      chroma, or hand `420v` to the renderer as files do.
    - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
      Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
+     **Built and run unattended 2026-10-27, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §14). Color ▸
+     Fields and a control-bar pulldown, offered for woven interlaced files only; every non-Weave view labelled display only
+     (badge, title, chain Fields row, Inspector Window View row). Field 1 / Field 2 byte-exact to a per-field reference on 25
+     files, markers right on TFF and BFF; Deinterlace within 1 ULP (exact against the GPU's round-toward-zero). Exports,
+     scopes, SDI read-back and the SDI loop byte-identical to HEAD in every view (5 files × 4 views, 0 different, late = 0
+     dropped = 0); the 24-file progressive set identical to HEAD; +0.03 ms GPU a frame. 641 / 641 tests, the same 12
+     warnings. Two misses fixed in the run (a Weave log line at load; "0i" for a moment in the chain). Open: Robbie's
+     by-hand checklist (§14.6) and decisions 1–10 (§14.2).
    - **Not in 1.0:** I5 (true bob at field rate) and I6 (interlaced streams, including NDI's built-in
      deinterlace). SD interlaced (480i/576i) is out of scope.
    - **Open, read-only, later:** whether XDCAM HD422 and AVC-Intra MXF already play through AVFoundation
@@ -1325,6 +1333,11 @@ to send Export Diagnostics for a sync problem.
     Export Frame for Support… writes its set into that folder under the suggested name instead of opening the save
     panel, which Accessibility cannot drive (`MANIFOLD_DIAG_EXPORT_PATH`'s reason). `exportFrameForSupport` in
     `App/MetalVideoRenderer.swift`, `#if DEBUG`.
+  - **`MANIFOLD_DISPLAY_READBACK=1`** (launch environment, added 2026-10-27 with I4): Help ▸ Export Frame for Support…
+    also writes `<name>.display.rgba16f` and `<name>.display.json`, the texture the window's display copy sampled (the
+    field view), with a `[FIELDS] display read-back` line. It is how I4 measured the window without screenshots.
+    `displayReadbackEnabled` and `readableDisplaySource` in `App/MetalVideoRenderer.swift`, `#if DEBUG`
+    (`INTERLACED_FINDINGS.md` §14.2 decision 10).
   - **`MANIFOLD_FORCE_CHROMA_420=1`** (launch environment, never `defaults`): every path that would carry
     4:2:2 or 4:4:4 converts to `x420` instead, and the chain readout names the switch. It is how the
     fallback (P10) is tested on a Mac that never needs it.
@@ -1390,12 +1403,13 @@ to send Export Diagnostics for a sync problem.
     (overwriting, `<scope>.rgba` + `.json`) for data-level comparison between builds. `App/ScopePerf.swift` and one-line
     `ScopePerf.count` / `ScopePerf.published` calls in the scope models, `MetalVideoRenderer`, and the counted views'
     bodies and `updateNSView`s, all `#if DEBUG`. Off, one Bool test per call.
-- **Gating:** all eleven `#if DEBUG` (ten, plus `MANIFOLD_FRAME_EXPORT_DIR`, since the v210 dump ships): absent
+- **Gating:** all eleven `#if DEBUG` (ten, plus `MANIFOLD_FRAME_EXPORT_DIR`, since the v210 dump ships), and
+  `MANIFOLD_DISPLAY_READBACK` (I4, 2026-10-27; the count of eleven not re-audited): absent
   from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
 - **Cost when present:** the dump only runs on ⌃⌥E; the switch is one environment read at launch; the
   bench only on its menu item; the stats line one flag test per selected frame when off.
-- **Remove** all eleven before ship, or keep the dump and the stats line as Profile telemetry by decision.
+- **Remove** all eleven and `MANIFOLD_DISPLAY_READBACK` before ship, or keep the dump and the stats line as Profile telemetry by decision.
 
 ---
 
@@ -2635,7 +2649,7 @@ nothing.
 
 ---
 
-## ✅ FIXED 2026-10-27 (commit `<commit — to be filled in>`) — PRE-EXISTING, ALL BUILDS — every window's scopes recompute on any other window's file open; per-file cost in one window was already flat
+## ✅ FIXED 2026-10-27 (commit `16b6a63`) — PRE-EXISTING, ALL BUILDS — every window's scopes recompute on any other window's file open; per-file cost in one window was already flat
 
 **Fixed 2026-10-27** (unattended; Profile builds; HEAD = `100aa4f`, its own `.build-cc` build copied to the scratchpad
 before any rebuild). Predictions, written before any build: `build/file-leak/predictions.md`. Drivers, logs, heap
@@ -2817,7 +2831,7 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
     reads six settings).
   - Opening files one after another in one window, both builds publish more scope images per open the more files have
     been opened (5, 11, 16, 25 … 74 per open over 12 files, equal in HEAD and tree). Not chased. **Answered and fixed
-    2026-10-27** (the entry above, commit `<commit — to be filled in>`): it was not one window. `open -a` gave each
+    2026-10-27** (the entry above, commit `16b6a63`): it was not one window. `open -a` gave each
     file its own window, and every window's scopes re-sampled on every defaults write in the process.
   - Defaults: the drivers wrote nothing (tray and slots from launch arguments). The 74 `NSWindow Frame …` keys the runs
     added were read and deleted one by one; the domain is dictionary-equal to the snapshot (licence keys stripped from
@@ -3860,7 +3874,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Window display options (I4) built and run 2026-10-27, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §14): Weave, Field 1 / Field 2 and Deinterlace in the window only, labelled display only; output, scopes and export byte-identical to HEAD in every view; open: the by-hand checklist (§14.6). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).

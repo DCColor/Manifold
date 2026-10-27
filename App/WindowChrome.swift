@@ -1,4 +1,5 @@
 import SwiftUI
+import FileScan   // FieldView — the window's field view (interlaced I4)
 
 /// PER-WINDOW chrome state: the arrangement of everything that surrounds the picture.
 ///
@@ -186,6 +187,18 @@ final class WindowChrome: ObservableObject {
 
     /// What the picture is actually being drawn with: the held mode during a hold, else the chosen.
     var effectiveDisplayTransform: DisplayTransformMode { heldDisplayTransform ?? displayTransform }
+
+    /// ── INTERLACED I4: HOW THIS WINDOW SHOWS A WOVEN INTERLACED PICTURE (docs/INTERLACED_FINDINGS.md §3, §14) ──
+    ///
+    /// NOT PERSISTED, for `displayTransform`'s reason (§7 decision 5): every window opens in Weave, and every source change
+    /// returns it there (`WindowDeck.noteSourceScan`), so a field view never carries over to a file nobody chose it for.
+    /// Written only by `DeckRegistry.setFieldView` and that reset, both of which forward it to the renderer. Display only.
+    @Published var fieldView: FieldView = .weave
+
+    /// Whether this window's source offers the views (`FieldView.offered`: a woven interlaced file) and the field order
+    /// they are read against. Written by `WindowDeck.noteSourceScan` on every scan the engine publishes.
+    @Published var fieldViewOffered = false
+    @Published var fieldOrder: FieldOrder?
 
     /// Overlay (floating auto-hide HUD) vs docked (fixed bar). Stored per window like the rest —
     /// but see `adoptExternalControlMode` below: it has no per-window control surface YET, so today

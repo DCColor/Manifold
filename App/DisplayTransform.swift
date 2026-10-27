@@ -24,6 +24,7 @@
 
 import SwiftUI
 import ShortcutRegistry
+import FileScan   // FieldView — the Color menu's Fields items (interlaced I4)
 
 /// What the display path does with the decoded picture on its way to the screen.
 ///
@@ -135,6 +136,10 @@ final class DisplayTransformMenuState: ObservableObject {
     /// menu is dead until the key window has a source — the same rule `RasterMenuState` applies.
     @Published private(set) var enabled = false
 
+    /// Interlaced I4: the key window's field view, and whether its source offers the views (else the items are disabled).
+    @Published private(set) var fieldView: FieldView?
+    @Published private(set) var fieldsOffered = false
+
     private var refreshQueued = false
 
     private init() {}
@@ -156,6 +161,10 @@ final class DisplayTransformMenuState: ObservableObject {
         let newEnabled = (deck?.engine?.displaySize != nil)
         if current != newCurrent { current = newCurrent }
         if enabled != newEnabled { enabled = newEnabled }
+        let newFieldView = deck?.chrome?.fieldView
+        let newFieldsOffered = deck?.chrome?.fieldViewOffered ?? false
+        if fieldView != newFieldView { fieldView = newFieldView }
+        if fieldsOffered != newFieldsOffered { fieldsOffered = newFieldsOffered }
     }
 }
 
@@ -206,7 +215,28 @@ struct DisplayTransformCommands: Commands {
             Divider()
             ShortcutMenuItem(id: .cycleInterpretation, registry: shortcuts)
             ShortcutMenuItem(id: .resetInterpretation, registry: shortcuts)
+            // Interlaced I4 (docs/INTERLACED_FINDINGS.md §14): the key window's field view. Disabled unless its source is a
+            // woven interlaced file. No default key (§14.2 decision 8).
+            Divider()
+            Menu("Fields") {
+                ForEach(FieldView.allCases, id: \.self) { view in
+                    Toggle(view == .weave ? "Weave" : "\(view.menuTitle) (Display Only)", isOn: fieldBinding(for: view))
+                        .disabled(!state.fieldsOffered)
+                }
+            }
+            .disabled(!state.fieldsOffered)
         }
+    }
+
+    /// The Fields items' radio binding: the mirror on get, `DeckRegistry.setFieldView` on set, as `binding(for:)` does.
+    private func fieldBinding(for view: FieldView) -> Binding<Bool> {
+        Binding(
+            get: { state.fieldView == view },
+            set: { isOn in
+                guard isOn else { return }
+                DeckRegistry.shared.setFieldView(view)
+            }
+        )
     }
 
     /// Get compares against the mirror; set routes through the registry and never writes the

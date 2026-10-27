@@ -45,6 +45,19 @@ struct DisplayTransformControl: View {
 #if DEBUG
         let _ = ScopePerf.count("body.DisplayTransformControl")
 #endif
+        // Interlaced I4: the field-view control beside this one, only while the source offers it (a woven interlaced
+        // file), so every other source's control bar holds exactly what it did. Its own file and view (the header's reason).
+        // One HStack in both cases, so the transform item keeps its identity (and an open chain popover) when it changes.
+        HStack(spacing: 8) {
+            transformItem
+            if chrome.fieldViewOffered {
+                FieldViewControl(deck: deck, chrome: chrome)
+            }
+        }
+    }
+
+    /// The display-transform item itself: badge, pulldown and the chain popover.
+    private var transformItem: some View {
         HStack(spacing: 5) {
             // ⚠️ THE BADGE IS A SIBLING OF THE MENU, NOT ITS LABEL, AND THAT IS A MEASURED FIX.
             //
@@ -270,6 +283,10 @@ struct DisplayChainReadout: View {
                 row("LUT", Text(lut).foregroundColor(model.chain.lutApplied ? Self.assertion : .secondary))
             }
             row("Transform", model.chain.transform)
+            // Interlaced I4 (§4): after Transform, an interlaced source only.
+            if let fields = model.chain.fields {
+                row("Fields", fields)
+            }
             row("Display",   model.chain.display)
             row("Headroom",  model.chain.headroom)
             if let buffer = model.chain.buffer {
@@ -298,7 +315,9 @@ struct DisplayChainReadout: View {
             DisplayCalibrationSection(screen: model.currentScreen, applies: model.chain.calibrationApplies)
 
             Divider()
-            Text("Scopes are unaffected by this setting — they measure the file, not the display.")
+            Text(model.chain.fields == nil
+                 ? "Scopes are unaffected by this setting — they measure the file, not the display."
+                 : "Scopes are unaffected by these settings — they measure the file, not the display.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

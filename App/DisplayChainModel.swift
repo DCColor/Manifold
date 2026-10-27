@@ -25,6 +25,7 @@ import SwiftUI
 import CoreGraphics
 import ManifoldCore
 import ColorimetryModel   // ChromaReadout — the Chroma line (Stage 3b S1)
+import FileScan   // FieldView — the Fields row and the Source row's scan (interlaced I4)
 
 /// The three lines of the chain readout, plus the sentence underneath them.
 struct DisplayChain: Equatable {
@@ -58,6 +59,8 @@ struct DisplayChain: Equatable {
     /// The window's chosen mode is Reference, the only mode that reads the display's calibration: the calibration
     /// section is enabled only then (Robbie, 2026-10-24). The chosen mode, not a hold's.
     var calibrationApplies: Bool = false
+    /// Interlaced I4: the window's field view (docs/INTERLACED_FINDINGS.md §14). nil unless the source is interlaced.
+    var fields: String? = nil
 }
 
 @MainActor
@@ -146,6 +149,15 @@ final class DisplayChainModel: ObservableObject {
                 self.refresh()
             }
         })
+        // And the Fields row (interlaced I4): this deck's field view changed, or its source's scan did.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: WindowDeck.fieldViewDidChange, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let d = note.object as? WindowDeck, d === self.deck else { return }
+                self.refresh()
+            }
+        })
         // And the Buffer row: a push route activating, a raised cushion, the route released. Same
         // per-renderer filter.
         observers.append(NotificationCenter.default.addObserver(
@@ -191,6 +203,8 @@ final class DisplayChainModel: ObservableObject {
         // no source; the deck can (`hasSource`). Without it the line named the 709 defaults, and with a LUT stated
         // the scopes named the LUT's space, over no picture at all.
         let present = deck.hasSource
+        // Interlaced I4: the deck's scan, which an unload clears (`.notRead`); the file's metadata is never cleared.
+        let scan = present ? deck.lastSourceScan : nil
         if !present || (sourceCS == nil && pCode == nil && tCode == nil && mCode == nil) {
             sourceLine = "no source"
         } else {
@@ -230,7 +244,12 @@ final class DisplayChainModel: ObservableObject {
             let tier = provenance.label
                 + (provenance == .overridden ? deck.interpretationLabel.map { " (\($0))" } ?? "" : "")
 
-            sourceLine = "\(p) · \(t) · \(m) · \(range)"
+            // Interlaced I4 (§4): "1080i59.94 TFF · " first, for an interlaced file only; every other line is unchanged.
+            let scanPrefix = scan.flatMap { s in
+                s.chainPrefix(height: deck.engine?.metadata?.height ?? 0,
+                              fieldToken: (deck.engine?.metadata?.frameRate).map { SDIStandardRate.nearest(to: $0).fieldToken })
+            }.map { $0 + " · " } ?? ""
+            sourceLine = scanPrefix + "\(p) · \(t) · \(m) · \(range)"
                        + " — CICP \(pCode ?? 1)-\(tCode ?? 1)-\(mCode ?? 1)"
                        + " — \(tier)"
             if provenance == .overridden { overriddenWords = tier }
@@ -302,7 +321,8 @@ final class DisplayChainModel: ObservableObject {
                                 lut: deck.lut.readoutLine,
                                 overriddenWords: overriddenWords,
                                 lutApplied: deck.lut.isApplied,
-                                calibrationApplies: deck.chrome?.displayTransform == .reference)
+                                calibrationApplies: deck.chrome?.displayTransform == .reference,
+                                fields: Self.fieldsLine(scan: scan, chrome: deck.chrome))
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.
         // Colour S3: the Source and Tags lines in the log, once per change, so an unattended run reads
@@ -315,10 +335,21 @@ final class DisplayChainModel: ObservableObject {
         if next.lut != chain.lut {
             print("[CHAIN] LUT: " + (next.lut ?? "none"))
         }
+        if next.fields != chain.fields, let fields = next.fields {
+            print("[CHAIN] Fields: " + fields)
+        }
         if next.headroom != chain.headroom || next.display != chain.display {
             print("[CHAIN] Headroom: \(next.headroom)" + (screen.map { " on \"\($0.localizedName)\"" } ?? ""))
         }
         if next != chain { chain = next }
+    }
+
+    /// Interlaced I4: the Fields row. The view and what it does for a woven interlaced file; a field sequence says it has no
+    /// views; nil for anything not interlaced, so a progressive source's readout is unchanged.
+    private static func fieldsLine(scan: SourceScan?, chrome: WindowChrome?) -> String? {
+        guard let scan, scan.isInterlaced else { return nil }
+        guard FieldView.offered(scan) else { return "each picture is one field — shown as stored (no field views)" }
+        return (chrome?.fieldView ?? .weave).readout(scan.fieldOrder)
     }
 
     /// The screen this window is on — the display the readout's calibration section edits.

@@ -168,6 +168,10 @@ targets:
       # App/Live/LiveVideoDecoder and StreamColorimetry, for SRT and WHEP. Was H264SPSColor.
       - package: ManifoldCore
         product: SPSColor
+      # A file's scan and the window's field views (docs/INTERLACED_FINDINGS.md §10, §14) — a leaf target so `swift test`
+      # can pin which rows each view reads. Used by the renderer, WindowDeck and the field-view control (I4).
+      - package: ManifoldCore
+        product: FileScan
       # The ADTS frame walker — a leaf target so `swift test` can reach it. Used by
       # App/SRT/SRTAudioDecoder only.
       - package: ManifoldCore

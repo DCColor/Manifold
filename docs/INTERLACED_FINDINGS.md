@@ -598,3 +598,170 @@ carry the same filter** (route `vt`); they are not changed (BUGS.md, *8-bit H.26
 | G2 | Profile warnings: the same 11 as HEAD (clean builds) | **PASS** |
 | H1 | 14 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | **PASS** |
 | S1 | Streams: measured (13.1), not changed | as predicted |
+
+## 14. I4 — display options (files): scope, predictions, results
+
+**Written 2026-10-27 14:19 EDT, before any code change or build, against `16b6a63`** (the only uncommitted change is the
+three commit hashes filled into BUGS.md and RELEASE_NOTES.md). Predictions with their timestamp and hash:
+`build/interlaced-i4/predictions.md`, `predictions.timestamp`. Results follow. Nothing above this section was changed by I4.
+
+**Estimated run time: about 5½ h (band 4–8).** Model, renderer, shader and UI ~2 h; HEAD and tree Profile builds ~25 min
+(the HEAD build runs while the code is written); driver changes ~30 min; unattended runs ~1 h 15 min (about 25 interlaced
+files × 4 views and the 24-file progressive set on both builds, the SDI loop in each view, idle and playback cost); analysis
+and this record ~1 h. No attended steps; the by-hand checklist (14.6) is for Robbie afterwards.
+
+### 14.1 Scope: where the I4 brief and this document differ (the document wins)
+
+| Brief asked | This document says | I4 does |
+|---|---|---|
+| "The chain readout row" | §4: "1080i59.94 TFF" on the **Source** row, **and** a "Fields" row after Transform | Both |
+| Inspector shows scan, field order **and the active display option** | §4: the Inspector Scan row (I1); the mode is the chain readout's | The Scan row as I1 built it, plus a **Window View** row under it while a woven interlaced file is loaded (decision 9; the doc does not rule it out) |
+| Export and scopes measure the file as stored "unless the doc says otherwise" | The header: **scopes, SDI and export always measure the woven frame, never the display view**. §3: never deinterlace into the offscreen ring | All three read the offscreen ring, unchanged. The view is drawn into a separate display-only texture |
+| True bob unless the doc puts it in I4 | Decision 4 and §8: bob is **I5, after 1.0** | Not built. No conflict |
+| PAFF / MBAFF where decodable | §6, §10.6 finding 5: no free tool makes PAFF | MBAFF H.264 only; no PAFF fixture exists |
+| Window output by export or offscreen read-back | §3: the view goes into a separate texture between the offscreen pass and the display copy | That texture is read back (a DEBUG-only, launch-environment switch adds it to Export Frame for Support; decision 10). The drawable itself is not read back. The copy pass that scales the texture to the window is unchanged code |
+| — | §3: "No shortcut until the shortcut registry" | The registry exists now; no default key is given (decision 8) |
+| — | §3: a window-title suffix when not Weave | Built. The title bar is hidden, so in the window the label is a control-bar badge, as for Bypass (decision 7) |
+
+### 14.2 Decisions for Robbie
+
+Where the document leaves a choice open, the most conservative option was built (the picture as stored, fields woven,
+nothing hidden). Each can be changed later without touching the output path.
+
+1. **"Field 1" is the first field in time**, from the detected field order, and every label says which raster field that
+   is ("Field 1 — bottom field, first in time" on a BFF file). The alternative is SMPTE numbering, where field 1 is
+   always the top field. With no order stated, Field 1 is the top field and the label says the order is not stated.
+2. **Field 1 / Field 2 repeat each line of the chosen field** (stored samples only, no interpolation). The two views sit
+   half a field line apart vertically, as any line-doubled field does.
+3. **Deinterlace keeps Field 1 (first in time)** and fills the other field's lines with the average of the lines above and
+   below in the kept field (edges repeat the nearest line). It does not adapt to motion. Display only, one picture per frame.
+4. **The options are offered only for woven interlaced files** (I3's rule, `InterlacedChroma.perField`). Progressive and
+   unknown files, HEVC field sequences (each picture already one field) and live sources (I6) get no control. The Color
+   menu items are there but disabled.
+5. **Every source change resets the view to Weave** (a new file, an unload, a live takeover), so a field view never
+   carries over to a file nobody chose it for. Same reasoning as the display transform's reset (`WindowChrome`).
+6. **Not saved, per window, default Weave** (decision 5 of §7, as given).
+7. **The labels:** a yellow control-bar badge ("FIELD 1 · DISPLAY ONLY"), a title suffix (" — Field 1 (display only)") for
+   the Window menu and Mission Control, the chain readout's Fields row, the Inspector's Window View row, and a `[FIELDS]`
+   log line. **Nothing is drawn over the picture.** The badge hides with the overlay HUD, and full screen has no marker:
+   Bypass's accepted limit (COLOR_MANAGEMENT_FINDINGS.md §6.8).
+8. **No default keyboard shortcut.** The menu items are plain menu items, not registry entries.
+9. **The Inspector's Window View row** (above). Shown only while the options are offered.
+10. **The measurement read-back:** `MANIFOLD_DISPLAY_READBACK=1` (DEBUG builds only, launch environment) makes Export Frame
+    for Support also write `<name>.display.rgba16f` and `<name>.display.json`: the texture the display copy sampled. Unset,
+    the export is unchanged. Listed for pre-ship removal beside `MANIFOLD_FRAME_EXPORT_DIR`.
+
+### 14.3 Predictions
+
+Fixtures: I1's 16 files (ProRes TFF / BFF / 50 / PsF / both disagreeing files; DNxHD MXF TFF / BFF and `.mov`; H.264 MBAFF TFF / BFF;
+the HEVC field sequence), I2's 8 marker files (TFF, BFF, 50, 60, DNxHD MXF, H.264 MBAFF, 1440×1080, the halved file), I3's
+6 sharp files. Progressive set: I1's 20 control files, the progressive ProRes control and I3's three progressive probes (24).
+Every export is at frame 0, paused. "Per-field reference": computed from the same export's woven `.rgba16f` by 14.2's rules,
+outside the app.
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| W1 | **Weave, the default**, every interlaced fixture: `.rgba16f`, `.v210`, `.v210.json` byte-identical to HEAD; PNG pixels and ICC equal; the display read-back equals the `.rgba16f` (the display copy samples the offscreen itself); no field pass runs (no `[FIELDS]` line at load) | every file, every byte | any byte |
+| F1 | **Field 1 / Field 2**: the display read-back equals the per-field reference, byte for byte, every offered fixture | 100 % of bytes | any byte |
+| F2 | **Which field, by the markers** (TFF, BFF, 50, 60, DNxHD, H.264, 1440): in Field 1 every row of the band reads picture N with a valid check pattern, in Field 2 N + 1; on the BFF file Field 1 comes from the odd (bottom) rows. Deinterlace reads N on every row | every row, every file | any row |
+| F3 | **Deinterlace**: the kept field's rows byte-identical to the woven frame; the filled rows within 1 half-float ULP of the float32 mean of their two neighbours | max ≤ 1 ULP; ≥ 99.99 % exact | otherwise |
+| F4 | **Labels**, per view, read by Accessibility and the log: badge, title suffix, Color menu check, chain `[CHAIN] Fields:` line, Inspector Window View row; Weave shows no badge and no suffix | exact words | any miss |
+| R1 | **Chain Source row** begins "1080i59.94 TFF" / "1080i59.94 BFF" / "1080i50 TFF" / "1080i60 TFF"; the 1440 file reads "1080i59.94 TFF"; the halved file "1080i59.94 TFF"; the HEVC field sequence "field sequence, TFF". Inspector Scan rows as I1/I2 | exact | any miss |
+| S1 | **Output untouched by the view**: in Field 1, Field 2 and Deinterlace, every fixture's `.rgba16f`, `.v210`, `.v210.json` and PNG byte-identical to its own Weave export and to HEAD's | every file, every view | any byte |
+| S2 | **SDI loop, paused**, five fixtures (marker TFF, BFF, 1440, DNxHD MXF, sharp H.264 TFF) in each of the four views: every received frame equals HEAD's bridge read-back (`[SDI-DUMP]`) of the same file; mode `1080i59.94` | 0 different frames | any |
+| S3 | **SDI loop, playing**, marker TFF and BFF in Field 1 and Deinterlace (15 s): fields in temporal order as I2's T1 / T2 (TFF: 0 swapped; BFF: untouched, top N+1 / bottom N); card `late=0 dropped=0` | as stated | any swap, late or drop |
+| P7 | **Scopes** (§9 P7): waveform, parade, vectorscope and CIE images (`MANIFOLD_SCOPE_DUMP_DIR`) byte-identical across the four views and to HEAD's, paused at frame 0; a view change publishes no scope image | identical, no publish | any difference |
+| C1 | **Progressive set**, 24 files: exports byte-identical to HEAD (`.rgba16f`, `.v210`, `.v210.json`, PNG pixels); no field control in the window (Accessibility), the Color menu's field items disabled; no `[FIELDS]` or `[CHAIN] Fields` line; `[CHAIN] Source` lines identical to HEAD's | 24 / 24 | any |
+| C2 | **HEVC field sequence**: not offered (no control, items disabled); exports byte-identical to HEAD | as stated | otherwise |
+| T | **Playback** (window, no output), marker TFF in each view, 10 s: Manifold's `[RENDER-PERF]` late and dropped counts 0, the same as Weave | 0 | any |
+| I | **Cost**: paused and idle for 30 s in Field 1, the display link stops as in Weave; CPU within 0.5 points of Weave. Playing, the GPU time per frame rises by ≤ 0.05 ms (one 1080 compute pass); scope publishes per second equal to Weave's (±1). Weave: no change from HEAD | as stated | otherwise |
+| L | **Logs**: on the progressive set every line identical to HEAD's, apart from launch and quit timing as in §10.6 L; on interlaced files the only additions are `[FIELDS]` lines, `[CHAIN] Fields` lines and the "1080i…" prefix on `[CHAIN] Source` | as stated | any other change |
+| G | `swift test`: all pass, 633 plus the new tests. Profile warnings: the same 11 as HEAD (clean builds, paths and lines normalised) | as stated | any failure or new warning |
+| D | Defaults: the domain dictionary-equal to the snapshot after the runs (window-frame keys read, then deleted, stopping at the first failure); `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | equal | any difference |
+
+### 14.4 Results
+
+Run unattended 2026-10-27, 14:19–16:33 EDT (**about 2¼ h against the 5½ h estimate**, below the 4 h end of the band).
+Every measured pixel number is from the export's `.rgba16f` / `.v210` and the DEBUG display read-back, never from the screen;
+no screenshots. Analysis: `build/interlaced-i4/analyze.py` (`an-interlaced.txt`, `an-progressive.txt`, `an-cie.txt`,
+`an-confirm.txt`); per-field reference `scripts/interlaced/i4cmp.cpp`.
+
+| # | Result | Verdict |
+|---|---|---|
+| W1 | 26 interlaced files, Weave: `.rgba16f`, `.v210`, `.v210.json`, PNG byte-identical to HEAD; display read-back = the `.rgba16f` on all 26. **But** every interlaced load and unload logged `[FIELDS] window view → WEAVE` and queued one redundant redraw: the renderer's setter treated a field-order change as a view change. Fixed (`setFieldView` parks the order without a log, redraw or wake while the view stays Weave); the confirmation pass on the final build logs no `[FIELDS]` line at load and stays byte-identical to HEAD | **MISS, fixed** (pixels passed throughout) |
+| F1 | Field 1 and Field 2 on all 25 offered files: display read-back = per-field reference, **100 % of halves, 0 ULP** (TFF, BFF, 50, 60, PsF, DNxHD MXF and `.mov`, H.264 MBAFF TFF / BFF, 1440×1080, both disagreeing files, the sharp set) | **PASS** |
+| F2 | 7 marker files: Field 1 reads N and Field 2 N + 1 on every band row, check pattern intact on all; BFF Field 1 from the odd rows; Deinterlace N on every row | **PASS** |
+| F3 | Deinterlace: kept rows byte-identical; filled rows max **1 ULP** from the round-to-nearest mean, 98.62–100 % of halves exact. **100 % exact against a round-toward-zero reference** on every file: the GPU's float → half store rounds toward zero | **MISS** on the ≥ 99.99 % band (the prediction assumed round-to-nearest); max ≤ 1 ULP held. No change |
+| F4 | Per view, by Accessibility: badge "FIELD 1 · DISPLAY ONLY" etc., title suffix " — Field 1 (display only)", the Color ▸ Fields check, the control "Fields: Field 1", Inspector Window View "Field 1 — bottom field, first in time (display only)" on BFF; Weave none of them; `[CHAIN] Fields:` lines name the view, field and order and say DISPLAY ONLY | **PASS** |
+| R1 | `[CHAIN] Source` prefixes: 1080i59.94 TFF / BFF, 1080i50 TFF, 1080i60 TFF, 1440 file "1080i59.94 TFF", HEVC "field sequence, TFF". **But** 22 transient lines read "0i TFF": the scan arrives before the metadata's height. Fixed (`chainPrefix` says "interlaced, TFF" until the height is known; unit-tested); confirmed on the final build | **MISS, fixed** |
+| S1 | All 25 offered files in Field 1, Field 2, Deinterlace: `.rgba16f`, `.v210`, `.v210.json`, PNG byte-identical to the file's Weave export and to HEAD | **PASS** |
+| S2 | SDI loop (8K Pro, device 0, SDI input locked; probe read SDI after every capture), paused, 5 fixtures × 4 views: every `[SDI-DUMP]` read-back byte-identical to HEAD's for the same file; every received frame = the read-back (126–131 per run, **0 different**); mode 1080i59.94 'Hi59', dominance upper; late = 0 dropped = 0 on all 29 output stops | **PASS** |
+| S3 | SDI loop playing 15 s, marker TFF and BFF in Field 1 and Deinterlace (I2's `marks.py`): 0 swapped, 0 broken, 0 skipped; TFF top N / bottom N+1, BFF untouched top N+1 / bottom N; **no repeated frame while playing** (the ~200 repeats each run counts are the hold on the 10 s clip's last frame, fields 598/599); late = 0 dropped = 0 | **PASS** |
+| P7 | Waveform, parade, vectorscope (and CIE, waveform, parade in a second pass) byte-identical across the four views and to HEAD on every file. **A view change does re-publish the scopes once** (sequence + 1): the redraw re-samples the unchanged offscreen frame | **MISS** on "no publish" (images identical). No change: one recompute per user action |
+| C1 | 24 progressive files: exports and scopes byte-identical to HEAD; choosing a view changes nothing (display = woven, no badge, suffix or check); no `[FIELDS]` line except the DEBUG read-back's own; `[CHAIN] Source` lines identical to HEAD's (HEAD logs one more "no source" at quit, timing). The Fields **items** are disabled; the Fields submenu's own AXEnabled reads true (SwiftUI reports a submenu enabled while its items are disabled) | **PASS** |
+| C2 | HEVC field sequence: not offered (items disabled, no control, badge or suffix, display = woven); exports = HEAD; chain "field sequence, TFF" and Fields "each picture is one field — shown as stored (no field views)" | **PASS** |
+| T | Window playback, marker TFF, 10 s per view, one launch per view: 30–31 frames presented every second in all four (as Weave and HEAD), tick max ≤ 9.36 ms while playing. `[RENDER-PERF]` has no late / dropped counter on the window path, so the prediction's metric does not exist; judged on frames presented, and on the card's late = 0 dropped = 0 (S2, S3) | **PASS** (metric restated) |
+| I | Paused: the display link stops ~62 ticks after a view change, as after a Weave redraw; CPU 0.03 / 0.04 / 0.13 / 0.04 % (Weave / Field 1 / Field 2 / Deinterlace; HEAD Weave 0.05 %). Playing: GPU 0.087 / 0.116 / 0.113 / 0.114 ms a frame (HEAD Weave 0.085): **+0.03 ms**; scope publishes 30 / 30 / 30 a second in every view (vectorscope 29 once in Deinterlace) | **PASS** |
+| L | Logs, normalised for timing, window numbers and pids: no line other than `[FIELDS]`, `[CHAIN] Fields` and the Source prefix differs from HEAD's. The `CVDisplayLinkStart → -6660` recovery appears in both builds' runs (BUGS.md, known) | **PASS** |
+| G | `swift test` **641 / 641** (633 + 8). Clean Profile builds: **12** warnings on HEAD and on the tree after normalising, identical sets (the prediction's "11" was taken from the I3 record; which line is new since then was not traced) | **PASS** (count restated) |
+| D | Defaults: 46 `NSWindow Frame` keys added by the runs, each read then deleted (`set -e`); the domain is then dictionary-equal to the snapshot; `streamBookmarks` 18c6da5dbe73c5e4 unchanged; licence keys present before and after (3, values never read out), never written; `showTray` false throughout (launch argument only) | **PASS** |
+
+### 14.5 Findings
+
+1. **The multi-window driver trap.** `open -a` gives each file its own window, and Color / Help act on the key window; the first
+   full run therefore exported the first file's window again and again. The driver now closes every window after each file
+   (AX close button) and warns on a second window. The first run's results were discarded; I3's exports were checked and
+   were not affected.
+2. **The GPU rounds toward zero** storing float to half (F3). The deinterlace is exact against that rounding; nothing to fix.
+3. **A view change re-publishes the scopes once** (P7), with identical images.
+4. **The renderer logged Weave at every load** (W1) and **the chain said "0i TFF" for a moment** (R1); both fixed and re-run.
+5. **SwiftUI's submenu AXEnabled** stays true while its items are disabled; the items are what grey out. The checklist asks
+   Robbie to confirm it reads as disabled.
+6. **`predictions.md` says "Written … 14:25"**; its hash and `predictions.timestamp` (14:19:26) were taken before any change,
+   and this document's header was corrected to 14:19. The copy was left as hashed.
+7. **The analysis scripts had three bugs of their own**, found and fixed before any result was taken from them: a two-space
+   regex in the marker decode, "offered" read from the submenu flag (finding 5), and the field order read from the
+   disagreement warning on `prores-disagree-fielbff` (whose resolved order is TFF, from the ProRes header).
+
+### 14.6 By-hand checklist for Robbie
+
+Unattended runs read the view's texture, not the screen. These checks need eyes. Do the HDR and by-eye checks on the
+**LG**, and use the ASUS only for pixel values. Fixtures: `build/interlaced-fixtures/i2/` (markers) and `i3/` (sharp).
+
+1. **Open `mark-prores-1080i5994-tff.mov`.** The control bar shows a second pulldown, **Weave**, beside the display-transform
+   one. Open a progressive file: the pulldown is gone, and Color ▸ Fields' items are greyed. (Their submenu is not greyed;
+   finding 5. Is that acceptable?)
+2. **Field 1, then Field 2** (from the pulldown, or Color ▸ Fields). The yellow badge reads "FIELD 1 · DISPLAY ONLY". At 100 %
+   the counter's edges show stair-steps two lines tall (line repeat), with no comb. Field 2 shows the next picture number
+   and sits half a field line lower. The waveform does not move. In the Window menu, the window's name ends
+   "— Field 1 (display only)".
+3. **BFF** (`mark-prores-1080i5994-bff.mov`): Field 1 shows the *lower* of the two numbers, and the Inspector's Window View row
+   says "bottom field, first in time". Step frames in Field 1: the counter goes up by 2 each step on both files.
+4. **Deinterlace** on `h264-sharp-1080i5994-tff.mov` and the moving `prores-1080i5994-tff.mov`: no combing at any window size,
+   and vertical detail softer than Weave (one field's lines). Judge whether this is the deinterlace you want for 1.0
+   (decision 3).
+5. **The chain readout** (pulldown ▸ Show Transform Chain…): Source begins "1080i59.94 TFF". A **Fields** row after Transform
+   names the view and says DISPLAY ONLY, and the footnote says "these settings".
+6. **Open another file** while in Field 1: the window returns to Weave (decision 5). Is that what you want?
+7. **DeckLink output on** in each view: the reference monitor shows the same woven 1080i59.94 picture in all four. The TFF
+   counter steps once per field. The BFF file judders, with the warning. Nothing on the monitor changes with the view.
+8. **Full screen and the auto-hiding HUD:** with the HUD hidden there is no field marker on screen (Bypass's limit). Decide
+   whether a field view needs a marker drawn over the picture (decision 7).
+9. **Decisions 1–10** (14.2): especially 1 (Field 1 = first in time, not SMPTE's top field) and 8 (no default shortcut).
+
+### 14.7 What changed
+
+- `Packages/ManifoldCore/Sources/FileScan/FieldView.swift` (new): the four views, which field each shows, every label, the
+  shader mode, and `SourceScan.chainPrefix`. Tests: `Tests/FileScanTests/FieldViewTests.swift` (8).
+- `FrameEngine.onSourceScan` passes the resolved `SourceScan` (`.notRead` at unload) instead of a Bool; the deck forwards
+  `perField` to the renderer as before (I3) and takes the scan for I4.
+- `App/PassthroughShader.metal`: `fieldViewKernel` (line repeat / deinterlace) into a display-only texture.
+- `App/MetalVideoRenderer.swift`: `setFieldView` (main → render under `refreshLock`), the field pass between the offscreen
+  encode and the display copy / Reference pass (Weave dispatches nothing: HEAD's path), and the DEBUG display read-back
+  (`MANIFOLD_DISPLAY_READBACK`). The offscreen ring, scopes, v210 convert and export are untouched.
+- `App/WindowChrome.swift`, `WindowDeck.swift`: per-window view state (not saved), the reset to Weave on every source change,
+  `DeckRegistry.setFieldView` (the one mutator), and the title suffix.
+- `App/DisplayTransform.swift` (Color ▸ Fields), `App/FieldViewControl.swift` (new: badge and pulldown),
+  `App/DisplayTransformControl.swift`, `App/DisplayChainModel.swift` (Source prefix, Fields row), `App/InspectorPanel.swift`
+  (Window View row), `App/ContentView.swift`, `project.yml` (the app links FileScan).
+- `scripts/interlaced/i4cmp.cpp` (new): the per-field reference and marker decode used for F1–F3.

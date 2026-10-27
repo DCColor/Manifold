@@ -517,6 +517,47 @@ fragment half4 displayReferenceFragment(DisplayCopyVertexOut in [[stage_in]],
     return half4(half3(outRGB), half(c.a));
 }
 
+// ── THE WINDOW'S FIELD VIEW — interlaced I4, docs/INTERLACED_FINDINGS.md §3, §14 ──────────────────────────────────
+//
+// DISPLAY ONLY. Reads the woven offscreen and writes a SEPARATE texture, which the display copy (or Reference) then samples
+// in place of the offscreen. The scopes, the DeckLink v210 convert and the export read the offscreen ring, which this never
+// writes. Weave never dispatches it: the display copy samples the offscreen itself, exactly as before I4.
+//
+// `FieldView.rows` (FileScan) states the rule and its tests pin it; this restates it. Rows are the raster's: parity 0 is the
+// top field (even rows), 1 the bottom.
+//   mode 1 — one field, each of its lines repeated: row (y & ~1) | parity, clamped to the field's last row.
+//   mode 2 — deinterlace: the kept field's rows as stored; each other row the mean of the kept rows above and below, an
+//            edge row repeating its one neighbour.
+struct FieldViewParams {
+    uint mode;      // 1 one field line-repeated, 2 deinterlace (0, Weave, is never dispatched)
+    uint parity;    // the shown or kept field: 0 top, 1 bottom
+    uint pad0, pad1;
+};
+
+kernel void fieldViewKernel(texture2d<float, access::read>  woven [[texture(0)]],
+                            texture2d<float, access::write> view  [[texture(1)]],
+                            constant FieldViewParams& p [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    uint w = woven.get_width(), h = woven.get_height();
+    if (gid.x >= w || gid.y >= h) return;
+    uint y = gid.y;
+    // The field's last row: h − 1 when it has the field's parity, else h − 2.
+    uint last = ((h - 1) & 1u) == p.parity ? h - 1 : h - 2;
+    float4 c;
+    if (p.mode == 1) {
+        c = woven.read(uint2(gid.x, min((y & ~1u) | p.parity, last)));
+    } else if ((y & 1u) == p.parity) {
+        c = woven.read(gid);
+    } else if (y == 0) {
+        c = woven.read(uint2(gid.x, 1));
+    } else if (y + 1 > last) {
+        c = woven.read(uint2(gid.x, y - 1));
+    } else {
+        c = (woven.read(uint2(gid.x, y - 1)) + woven.read(uint2(gid.x, y + 1))) * 0.5;
+    }
+    view.write(c, gid);
+}
+
 // MARK: - GPU scopes (Phase 1 prototype: luma waveform)
 
 // Uniforms for waveformKernel. Mirrors WaveformParams in MetalVideoRenderer.swift
