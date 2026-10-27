@@ -598,7 +598,25 @@ final class WaveformScopeModel: ObservableObject {
     /// drive Preferences.objectWillChange — so we observe UserDefaults.didChangeNotification
     /// (posted AFTER the write, so the re-sample reads the NEW value). Coalesced by the
     /// existing gate; no separate throttle. Active only while the scope is visible.
+    ///
+    /// ⚠️ THE NOTIFICATION SAYS "SOME DEFAULT CHANGED", NOT WHICH, AND IT IS PROCESS-WIDE. Every window's
+    /// scopes hear every write: a window frame autosaved, a recent file noted, another window's file
+    /// opened. Re-sampling on each one made every paused window recompute and republish its scopes
+    /// on every other window's open — ~5 times per open per window, so the Nth window's open cost
+    /// ~5N computes per scope (BUGS.md, 2026-10-27, "scope publishes grow with each file opened").
+    /// So the observer re-samples only when something the last sample was built from has changed
+    /// (`sampleInputs`), or when there is no trace to keep.
     private var prefsObserver: AnyCancellable?
+
+    /// Everything a sample is built from apart from the frame itself: the preferences
+    /// `startSample` snapshots, the histogram width, and the renderer's picture matrix (the
+    /// kernel's Kr/Kb). A new frame arrives through `frameRendered`, not here.
+    private var sampleInputs: [AnyHashable] {
+        [Preferences.shared.waveformIntensity, Preferences.shared.globalScopeIntensity,
+         Preferences.shared.waveformTraceColorHex, columns, renderer?.pictureMatrixCode]
+    }
+    /// `sampleInputs` as of the last sample issued.
+    private var sampledWith: [AnyHashable]?
 
     /// Process EVERY source row (full-res). Cheap on the GPU (the kernel is the fast part)
     /// and yields a denser, more accurate trace, especially for thin features (fine text,
@@ -615,8 +633,14 @@ final class WaveformScopeModel: ObservableObject {
             prefsObserver = NotificationCenter.default
                 .publisher(for: UserDefaults.didChangeNotification)
                 .receive(on: DispatchQueue.main)   // deliver on main; value is already written
-                .sink { [weak self] _ in self?.requestSample() }
+                .sink { [weak self] _ in self?.defaultsChanged() }
         }
+        requestSample()
+    }
+
+    /// A default changed somewhere in the process: re-sample only if it was one of ours (see `prefsObserver`).
+    private func defaultsChanged() {
+        guard image == nil || sampleInputs != sampledWith else { return }
         requestSample()
     }
 
@@ -689,7 +713,7 @@ final class WaveformScopeModel: ObservableObject {
         }
         // If no compute was issued (no frame yet / setup failed), the completion will never
         // fire — release the gate so the next request can try again.
-        if !issued { sampling = false }
+        if !issued { sampling = false } else { sampledWith = sampleInputs }
         #if DEBUG
         if issued { ScopePerf.count("compute.wf") }
         #endif

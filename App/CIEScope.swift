@@ -206,7 +206,15 @@ final class CIEScopeModel: ObservableObject {
     /// flight can't republish the old plot after the panel is blanked. Reset when a genuinely new
     /// sample cycle begins (startSample), so a new source's frames draw normally.
     private var cleared = false
+    /// Paused re-sample on a default changing — see WaveformScopeModel, including why it re-samples only when
+    /// `sampleInputs` changed.
     private var prefsObserver: AnyCancellable?
+    /// What a sample is built from apart from the frame: no preference, but the kernel's mode and the renderer's
+    /// picture primaries and transfer — see WaveformScopeModel.
+    private var sampleInputs: [AnyHashable] {
+        [plane, renderer?.cieUseUV, renderer?.picturePrimariesCode, renderer?.pictureTransferCode]
+    }
+    private var sampledWith: [AnyHashable]?
 
     func start() {
         active = true
@@ -214,8 +222,13 @@ final class CIEScopeModel: ObservableObject {
             prefsObserver = NotificationCenter.default
                 .publisher(for: UserDefaults.didChangeNotification)
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in self?.requestSample() }
+                .sink { [weak self] _ in self?.defaultsChanged() }
         }
+        requestSample()
+    }
+
+    private func defaultsChanged() {
+        guard image == nil || sampleInputs != sampledWith else { return }
         requestSample()
     }
 
@@ -277,7 +290,7 @@ final class CIEScopeModel: ObservableObject {
                 self.finishSample()
             }
         }
-        if !issued { sampling = false }
+        if !issued { sampling = false } else { sampledWith = sampleInputs }
         #if DEBUG
         if issued { ScopePerf.count("compute.cie") }
         #endif

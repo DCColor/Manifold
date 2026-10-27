@@ -56,8 +56,15 @@ final class ParadeScopeModel: ObservableObject {
     /// flight can't republish the old trace after the panel is blanked. Reset when a genuinely new
     /// sample cycle begins (startSample), so a new source's frames draw normally.
     private var cleared = false
-    /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel.
+    /// Live pref-coupling (paused re-sample on a scope-pref change) — see WaveformScopeModel, including why it
+    /// re-samples only when `sampleInputs` changed.
     private var prefsObserver: AnyCancellable?
+    /// What a sample is built from apart from the frame (the parade kernel takes no matrix) — see WaveformScopeModel.
+    private var sampleInputs: [AnyHashable] {
+        [Preferences.shared.paradeIntensity, Preferences.shared.globalScopeIntensity,
+         Preferences.shared.paradeMonochrome, Preferences.shared.paradeMonoColorHex, columnWidth]
+    }
+    private var sampledWith: [AnyHashable]?
 
     /// Process EVERY row (full-res) — cheap on the GPU, like the waveform.
     private let gpuRowStride = 1
@@ -71,8 +78,13 @@ final class ParadeScopeModel: ObservableObject {
             prefsObserver = NotificationCenter.default
                 .publisher(for: UserDefaults.didChangeNotification)
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in self?.requestSample() }
+                .sink { [weak self] _ in self?.defaultsChanged() }
         }
+        requestSample()
+    }
+
+    private func defaultsChanged() {
+        guard image == nil || sampleInputs != sampledWith else { return }
         requestSample()
     }
 
@@ -146,7 +158,7 @@ final class ParadeScopeModel: ObservableObject {
                 self.finishSample()
             }
         }
-        if !issued { sampling = false }
+        if !issued { sampling = false } else { sampledWith = sampleInputs }
         #if DEBUG
         if issued { ScopePerf.count("compute.parade") }
         #endif

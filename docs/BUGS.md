@@ -2635,7 +2635,88 @@ nothing.
 
 ---
 
-## ✅ FIXED 2026-10-27 (commit `<commit — to be filled in>`) — PRE-EXISTING, ALL BUILDS — while playing with the scopes tray open, each scope update redraws the whole window
+## ✅ FIXED 2026-10-27 (commit `<commit — to be filled in>`) — PRE-EXISTING, ALL BUILDS — every window's scopes recompute on any other window's file open; per-file cost in one window was already flat
+
+**Fixed 2026-10-27** (unattended; Profile builds; HEAD = `100aa4f`, its own `.build-cc` build copied to the scratchpad
+before any rebuild). Predictions, written before any build: `build/file-leak/predictions.md`. Drivers, logs, heap
+censuses: `build/file-leak/`. Item: `100aa4f`'s note "scope publishes grow with each file opened in a window".
+
+- **Measured, one window** (the item as worded): 20 opens in one window via File ▸ Open Recent (10 APFS clones of
+  `manifold-sync-23.976p.mov`, cycled twice; the window count was checked at every file and stayed 1), each file paused
+  3.5 s then played 6 s. Two sets: S1 waveform + parade + CIE; S2 vectorscope + meters + waveform with the Inspector
+  open. Per file: `[SCOPE-PERF]` publishes and computes, process and main-thread CPU, `footprint`, thread count,
+  `[PLAYBACK-STATS]`. At files 1, 5, 10 and 20: a per-class heap census (`heap`, read-only).
+  **HEAD is already flat in one window**:
+  - Open burst 1 publish per scope at every file after the first (2 at file 1). Playing: 24 publishes/s per scope at
+    every file. `late = 0`, `dropped = 0` in all 40 files.
+  - CPU playing: S1 31.6 % at file 1, 34.0 % mean over files 2–20, 34.5 % at file 20; S2 33.1 / 33.4 / 33.4 %.
+  - Footprint +11 / +12 MB over 20 files, levelling off from about file 9 (slope 0.25–0.29 MB per file, files 5–20).
+    Malloc heap flat in S1 (45.5 → 45.7 MB).
+  - Census, file 1 → 20: `FrameEngine` 1, `FileFrameSource` 1, `VTVideoDecoder` 2, `AVAssetReader` 2, `AVPlayer`,
+    `AVPlayerItem`, `AVSampleBufferAudioRenderer`, `AVSampleBufferRenderSynchronizer` 1 each, `__NSObserver` 426
+    (431 with meters and Inspector), Combine `AnyCancellable` 71, `NSTimer` 4–8: all constant. Threads 31–35.
+  - `heap` counts `dispatch_source_t` blocks rising ~21 per file (373 → 767), but every live source, described one by
+    one through `lldb` (`po`, batch, attach-print-detach), fell (361 → 336 over 10 files); the extra blocks print as
+    empty objects at consecutive 128-byte addresses. Read as freed memory still carrying the class pointer, not live
+    sources. The live ones all belong to the current file's CoreMedia objects (audio queue, `PlayabilityMonitorQueue`,
+    memory pools).
+- **Cause of the note's numbers: windows, not files.** `100aa4f`'s export driver opened each file with `open -a`.
+  `ContentView.onOpenURL` re-uses only an EMPTY window (`ContentView.swift`, the `.onOpenURL` block), so every open
+  after the first made a new window: 12 "files in one window" were 12 windows. Reproduced at HEAD, 10 files by `open -a`:
+  the open burst per scope was 2, 6, 10, 16, 21, 27, 31, 36, 41, 46 — about 5 per window already open. Each of the
+  four image scope models re-sampled on **every** `UserDefaults.didChangeNotification` in the process
+  (`WaveformScope.swift`, `ParadeScope.swift`, `VectorscopeScope.swift`, `CIEScope.swift`, the `prefsObserver` sink).
+  So every paused window recomputed and republished every scope on each defaults write another window's open made:
+  about five per open (inferred from the burst; the writes were not enumerated, the new window's frame autosave is
+  one).
+- **Fix:** the observer re-samples only when something the last sample was built from has changed, or when the scope
+  has no trace. Each model keeps `sampleInputs`: the preferences `startSample` snapshots, the histogram width or
+  plane, and the renderer state its kernel reads (waveform, vectorscope: picture matrix; CIE: `cieUseUV`, picture
+  primaries and transfer; the parade kernel reads none). `sampledWith` is recorded when a sample is issued. A real
+  scope preference change still re-samples a paused frame; a new frame still comes through `frameRendered`. The trace
+  computation is unchanged.
+- **Investigated, not changed: the Inspector.** With the Inspector open (S2, and S3: S1's scopes + Inspector), SwiftUI's
+  internal Observation registrar states grow ~110–130 per file (175 → 1333 over 10 files, ~85 KB per file; malloc
+  heap S2 49.4 → 52.2 MB at HEAD, 47.8 → 50.8 MB in the tree). Not per file: four play/pause cycles in one file grew
+  them the same way (155 → 608). Nothing releases them while the panel is open (40 s idle: 608 → 608); closing the
+  Inspector does (→ 40), every time. No app object grows with them (the app has no `@Observable` type; the key paths in
+  the census are SwiftUI's own). Tried and reverted: `.id(engine.currentURL)` on the panel (one panel per file) did
+  not change the growth (174 → 1337). The cause inside SwiftUI is UNKNOWN. Bounded by the panel's lifetime and within
+  this item's memory band; a candidate for its own item.
+- **Other per-file attachments, checked** (step 3): the audio meter (S2, S4: `NSTimer` count and Observation states
+  constant; its open burst varies 6–46 with the previous file's peak-hold decay, no trend), the chain readout and the
+  scope colour feed (`__NSObserver` constant), captions (`captions.clear()` on every `currentURL` change), the file
+  watcher (one timer, reused, `SourceFileWatcher.startTimer`), the engine's clock observer (installed once,
+  `FrameEngine.installTimeObserverIfNeeded`). **DeckLink output state: not exercised** (enabling output is a persisted
+  setting; no defaults were written). `DeckLinkService` is a process-wide singleton, so it is not per file; per-file
+  behaviour with output enabled is UNKNOWN.
+- **Predictions** (`build/file-leak/predictions.md`):
+
+  | # | Prediction | Result |
+  |---|---|---|
+  | R1 | HEAD, one window, Open Recent: burst at file 20 within ±2 of file 1; playing publishes = frame rate ±1 | **PASS**: 1 vs 2 per scope; 23.8–24.2/s every file |
+  | R2 | HEAD, `open -a`: burst grows ≥ 3× from window 2 to window 12 | **PASS** (10 windows: 6 → 46) |
+  | L1 | Tree, one window: publishes = frame rate ±1 at files 1, 5, 10, 20; burst at 20 within ±2 of 1 | **PASS** (S1, S2) |
+  | L2 | Tree: footprint at file 20 ≤ file 1 + 60 MB; slope files 5–20 ≤ 2 MB per file | **PASS**: S1 +16 MB, 0.58; S2 +5 MB, 0.24 |
+  | L3 | Tree: CPU at file 20 within ±4 points of file 1 | **PASS**: S1 33.2 → 35.2; S2 33.1 → 32.9 |
+  | L4 | Tree: live counts constant across files (engine, decoders, observers, timers, meter, readout, Inspector, captions, DeckLink) | **PASS except the Inspector** (above); DeckLink not exercised |
+  | L5 | Tree, `open -a`: no compute in paused windows on another's open; the opener's burst does not grow with N | **PASS**: 2, 1, 1, 2, 2, 1, 1, 1, 1, 1 (HEAD 2 … 46) |
+  | D1 | Paused scope images, 20 control files × waveform, parade, vectorscope, CIE: identical to HEAD | **PASS** 80 / 80 (one launch per file, both builds) |
+  | E1 | Export Frame for Support…, 20 control files: identical to HEAD | **PASS** 20 / 20, every output |
+  | P1 | `late = 0`, `dropped = 0`, both builds | **PASS**, every playing window of every run |
+  | G1 | `swift test` | **PASS** 633 / 633 |
+  | G2 | Profile clean-build warnings | **PASS**: the same 11 + the AppIntents line |
+  | H1 | Defaults: drivers write nothing; added keys read then deleted; final domain equals the snapshot | **PASS**, see below |
+
+- **Defaults:** the drivers wrote nothing (tray and slots from launch arguments; the Inspector is `@State`). The 105
+  `NSWindow Frame …` keys the runs added were read and deleted one by one, stopping at the first failure; the key set
+  equals the snapshot (licence keys stripped, presence only: 3 present before and after, never read out or written).
+  One value differs: `NSOSPLastRootDirectory`, the open panel's folder bookmark, re-encoded by AppKit for the same
+  folder (`/Volumes/DCCOLOR/TEST FLIP`). Left as is. File ▸ Open Recent now lists the control-set files, as it did
+  before this run.
+- **Not measured:** live sources (the item is about files); more than 10 windows; DeckLink output enabled.
+
+## ✅ FIXED 2026-10-27 (commit `100aa4f`) — PRE-EXISTING, ALL BUILDS — while playing with the scopes tray open, each scope update redraws the whole window
 
 **Fixed 2026-10-27** (unattended; Profile builds; HEAD = `3c9d17a` + the DEBUG counters below, from a `git archive`;
 `diff -rq App` HEAD vs tree: only the fix's files). Predictions, written before any build of the fix, with an addendum
@@ -2735,7 +2816,9 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
     not on the trace path any more). `KeyedCanvas` would cover them if wanted; their inputs are wider (the vectorscope
     reads six settings).
   - Opening files one after another in one window, both builds publish more scope images per open the more files have
-    been opened (5, 11, 16, 25 … 74 per open over 12 files, equal in HEAD and tree). Not chased.
+    been opened (5, 11, 16, 25 … 74 per open over 12 files, equal in HEAD and tree). Not chased. **Answered and fixed
+    2026-10-27** (the entry above, commit `<commit — to be filled in>`): it was not one window. `open -a` gave each
+    file its own window, and every window's scopes re-sampled on every defaults write in the process.
   - Defaults: the drivers wrote nothing (tray and slots from launch arguments). The 74 `NSWindow Frame …` keys the runs
     added were read and deleted one by one; the domain is dictionary-equal to the snapshot (licence keys stripped from
     both). **Licence keys:** the first launch of a 3c9d17a-code build ran the P1 migration (`[LICENSE] removed
@@ -2804,7 +2887,7 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
 - **Not changed, noted:** while **playing** with the tray open, every scope publish still re-runs the whole
   `ContentView` body (the live SRT row above: 59 % tray on against 7.6 % off, nearly all on the main thread). The
   same mechanism as this entry, while playing. Not in this fix's scope. **Fixed 2026-10-27** (the entry above, commit
-  `<commit — to be filled in>`): live SRT with three scopes 50.5 → 33.2 %, main thread 36.7 → 6.3 %.
+  `100aa4f`): live SRT with three scopes 50.5 → 33.2 %, main thread 36.7 → 6.3 %.
 - **Answers to the open questions below:**
   - A paused window's display link now stops. The scopes were not recomputing while paused, at HEAD or now.
   - About 110 MB per window is the window's own buffers, not idle work, and is unchanged.
