@@ -73,3 +73,44 @@ struct FieldViewControl: View {
         )
     }
 }
+
+/// The on-picture marker (§14.8, Robbie's decision 7, 2026-10-27): the field view's name in the picture's top-trailing
+/// corner while a field view is on, so it is there in full screen and with the controls hidden, where the badge is not.
+///
+/// ⚠️ SWIFTUI, ON THE PICTURE SURFACE'S OVERLAY, NEVER METAL. ContentView attaches it beside the framing guides, whose bounds
+/// are the displayed picture rect; it is not in the HUD, so hiding the controls leaves it. Drawn over the drawable by the
+/// window server, it cannot reach the offscreen ring, the scopes, the v210 convert or the export.
+struct FieldViewMarker: View {
+    @ObservedObject var chrome: WindowChrome
+
+    private var marker: String? { chrome.fieldViewOffered ? chrome.fieldView.marker : nil }
+
+    var body: some View {
+        Group {
+            if let marker {
+                text(marker)
+            }
+        }
+        // One line per change, Field 1 → Field 2 included (the view's identity survives a text change, so onAppear
+        // would log only the first).
+        .onChange(of: marker) { _, new in
+            print(new.map { "[FIELDS] marker shown — \($0) (window only)" } ?? "[FIELDS] marker hidden")
+        }
+    }
+
+    private func text(_ marker: String) -> some View {
+        Text(marker)
+            .font(.system(size: 11, weight: .heavy, design: .rounded))
+            .foregroundStyle(Color.appYellow)
+            .fixedSize()
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(.black.opacity(0.55)))
+            .opacity(0.85)
+            .padding(12)
+            .allowsHitTesting(false)
+            .accessibilityLabel("Field view marker: \(marker)")
+            .accessibilityIdentifier("fieldViewMarker")
+            .accessibilityAddTraits(.isStaticText)
+    }
+}

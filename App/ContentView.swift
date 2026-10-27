@@ -1186,6 +1186,9 @@ struct ContentView: View {
                     CaptionOverlay(engine: engine, captions: captions)
                 }
             }
+            // Interlaced I4: the field-view marker, on the same picture-rect layer, so it stays with the picture in full
+            // screen and with the controls hidden. Nothing in Weave or for a source that offers no field views (§14.8).
+            .overlay(alignment: .topTrailing) { FieldViewMarker(chrome: chrome) }
 
             if hasSource {
                 // Full control surface for ANY active source (file OR NDI stream). Streaming is a

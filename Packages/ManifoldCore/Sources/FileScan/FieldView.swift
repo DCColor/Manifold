@@ -100,6 +100,8 @@ public enum FieldView: String, CaseIterable, Equatable, Sendable {
     /// The window-title suffix and the badge: nil for Weave.
     public var titleSuffix: String? { self == .weave ? nil : "\(menuTitle) (display only)" }
     public var badge: String? { self == .weave ? nil : "\(menuTitle.uppercased()) · DISPLAY ONLY" }
+    /// The on-picture marker (§14.8, Robbie's decision 7): the view's name alone, nil in Weave.
+    public var marker: String? { self == .weave ? nil : menuTitle.uppercased() }
 
     /// The `[FIELDS]` log label.
     public var logLabel: String {

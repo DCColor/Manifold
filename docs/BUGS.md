@@ -291,14 +291,19 @@ held back until after release, and the numbered defect entries follow.
      chroma, or hand `420v` to the renderer as files do.
    - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
      Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
-     **Built and run unattended 2026-10-27, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §14). Color ▸
+     **Built and run unattended 2026-10-27, commit `3f7daad`** (`INTERLACED_FINDINGS.md` §14). Color ▸
      Fields and a control-bar pulldown, offered for woven interlaced files only; every non-Weave view labelled display only
      (badge, title, chain Fields row, Inspector Window View row). Field 1 / Field 2 byte-exact to a per-field reference on 25
      files, markers right on TFF and BFF; Deinterlace within 1 ULP (exact against the GPU's round-toward-zero). Exports,
      scopes, SDI read-back and the SDI loop byte-identical to HEAD in every view (5 files × 4 views, 0 different, late = 0
      dropped = 0); the 24-file progressive set identical to HEAD; +0.03 ms GPU a frame. 641 / 641 tests, the same 12
-     warnings. Two misses fixed in the run (a Weave log line at load; "0i" for a moment in the chain). Open: Robbie's
-     by-hand checklist (§14.6) and decisions 1–10 (§14.2).
+     warnings. Two misses fixed in the run (a Weave log line at load; "0i" for a moment in the chain). Decisions 1–6 and
+     8–10 accepted by Robbie (2026-10-27), subject to his checklist. **Decision 7 changed (Robbie, 2026-10-27): an
+     on-picture marker** ("FIELD 1" in the app yellow, the picture's top-right corner) while a field view is on, kept in full
+     screen and with the controls hidden; built and run unattended 2026-10-27, commit `<commit — to be filled in>`
+     (§14.8). SwiftUI over the picture, never Metal: 800 export files, 200 display read-backs and 600 scope images
+     byte-identical to HEAD / the I4 run across all four views and the progressive set; SDI loop 0 different; 642 / 642
+     tests, the same 12 warnings. Open: Robbie's by-hand checklist (§14.6, items 10–11 for the marker).
    - **Not in 1.0:** I5 (true bob at field rate) and I6 (interlaced streams, including NDI's built-in
      deinterlace). SD interlaced (480i/576i) is out of scope.
    - **Open, read-only, later:** whether XDCAM HD422 and AVC-Intra MXF already play through AVFoundation
@@ -3874,7 +3879,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Window display options (I4) built and run 2026-10-27, commit `<commit — to be filled in>`** (`INTERLACED_FINDINGS.md` §14): Weave, Field 1 / Field 2 and Deinterlace in the window only, labelled display only; output, scopes and export byte-identical to HEAD in every view; open: the by-hand checklist (§14.6). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Window display options (I4) built and run 2026-10-27, commit `3f7daad`** (`INTERLACED_FINDINGS.md` §14): Weave, Field 1 / Field 2 and Deinterlace in the window only, labelled display only; output, scopes and export byte-identical to HEAD in every view; open: the by-hand checklist (§14.6). The on-picture marker (decision 7 changed): commit `<commit — to be filled in>` (§14.8). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).

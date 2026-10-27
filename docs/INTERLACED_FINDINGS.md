@@ -628,6 +628,10 @@ and this record ~1 h. No attended steps; the by-hand checklist (14.6) is for Rob
 Where the document leaves a choice open, the most conservative option was built (the picture as stored, fields woven,
 nothing hidden). Each can be changed later without touching the output path.
 
+**Robbie, 2026-10-27 (after `3f7daad`):** decisions 1–6 and 8–10 are **accepted, subject to his by-hand checklist tonight**
+(14.6). Decision 7 is **changed**: a field view also shows a small marker on the picture that stays visible in full screen
+and with the controls hidden (14.8).
+
 1. **"Field 1" is the first field in time**, from the detected field order, and every label says which raster field that
    is ("Field 1 — bottom field, first in time" on a BFF file). The alternative is SMPTE numbering, where field 1 is
    always the top field. With no order stated, Field 1 is the top field and the label says the order is not stated.
@@ -643,8 +647,9 @@ nothing hidden). Each can be changed later without touching the output path.
 6. **Not saved, per window, default Weave** (decision 5 of §7, as given).
 7. **The labels:** a yellow control-bar badge ("FIELD 1 · DISPLAY ONLY"), a title suffix (" — Field 1 (display only)") for
    the Window menu and Mission Control, the chain readout's Fields row, the Inspector's Window View row, and a `[FIELDS]`
-   log line. **Nothing is drawn over the picture.** The badge hides with the overlay HUD, and full screen has no marker:
-   Bypass's accepted limit (COLOR_MANAGEMENT_FINDINGS.md §6.8).
+   log line. ~~**Nothing is drawn over the picture.** The badge hides with the overlay HUD, and full screen has no marker:
+   Bypass's accepted limit (COLOR_MANAGEMENT_FINDINGS.md §6.8).~~ **Changed by Robbie, 2026-10-27:** a marker on the
+   picture as well, visible in full screen and with the controls hidden (14.8).
 8. **No default keyboard shortcut.** The menu items are plain menu items, not registry entries.
 9. **The Inspector's Window View row** (above). Shown only while the options are offered.
 10. **The measurement read-back:** `MANIFOLD_DISPLAY_READBACK=1` (DEBUG builds only, launch environment) makes Export Frame
@@ -681,7 +686,7 @@ outside the app.
 
 ### 14.4 Results
 
-Run unattended 2026-10-27, 14:19–16:33 EDT (**about 2¼ h against the 5½ h estimate**, below the 4 h end of the band).
+Run unattended 2026-10-27, 14:19–16:33 EDT; committed as `3f7daad` (**about 2¼ h against the 5½ h estimate**, below the 4 h end of the band).
 Every measured pixel number is from the export's `.rgba16f` / `.v210` and the DEBUG display read-back, never from the screen;
 no screenshots. Analysis: `build/interlaced-i4/analyze.py` (`an-interlaced.txt`, `an-progressive.txt`, `an-cie.txt`,
 `an-confirm.txt`); per-field reference `scripts/interlaced/i4cmp.cpp`.
@@ -745,8 +750,9 @@ Unattended runs read the view's texture, not the screen. These checks need eyes.
 6. **Open another file** while in Field 1: the window returns to Weave (decision 5). Is that what you want?
 7. **DeckLink output on** in each view: the reference monitor shows the same woven 1080i59.94 picture in all four. The TFF
    counter steps once per field. The BFF file judders, with the warning. Nothing on the monitor changes with the view.
-8. **Full screen and the auto-hiding HUD:** with the HUD hidden there is no field marker on screen (Bypass's limit). Decide
-   whether a field view needs a marker drawn over the picture (decision 7).
+8. ~~**Full screen and the auto-hiding HUD:** with the HUD hidden there is no field marker on screen (Bypass's limit). Decide
+   whether a field view needs a marker drawn over the picture (decision 7).~~ Decided: a marker; check it with 14.8's
+   items.
 9. **Decisions 1–10** (14.2): especially 1 (Field 1 = first in time, not SMPTE's top field) and 8 (no default shortcut).
 
 ### 14.7 What changed
@@ -765,3 +771,83 @@ Unattended runs read the view's texture, not the screen. These checks need eyes.
   `App/DisplayTransformControl.swift`, `App/DisplayChainModel.swift` (Source prefix, Fields row), `App/InspectorPanel.swift`
   (Window View row), `App/ContentView.swift`, `project.yml` (the app links FileScan).
 - `scripts/interlaced/i4cmp.cpp` (new): the per-field reference and marker decode used for F1–F3.
+
+### 14.8 Decision 7 changed: a marker on the picture
+
+**Robbie, 2026-10-27:** while Field 1, Field 2 or Deinterlace is on, a small, unobtrusive marker on the picture ("FIELD 1"
+in the app yellow, in a corner, readable but not distracting), visible in full screen and with the controls hidden. Never
+in Weave or on a progressive file. Window only: SDI / HDMI, scopes and export unchanged.
+
+**Written 2026-10-27 17:09 EDT, before any code change or build, against `3f7daad`** (the only uncommitted change is the
+commit hash filled into BUGS.md, RELEASE_NOTES.md and 14.4). Predictions: `build/interlaced-i4/marker/predictions.md`,
+hashed with this section.
+
+**Design.** A SwiftUI overlay on the aspect-fitted picture surface, the layer the framing guides and captions use (its
+bounds are the displayed picture rect, so it follows letterbox, pillarbox and scaling). It is not part of the auto-hiding
+HUD, so hiding the controls does not hide it, and full screen keeps the same content view. It is drawn by SwiftUI, never by
+Metal: nothing reaches the offscreen ring, the display texture, the drawable's sampled source, the v210 convert or the
+export. **Top-trailing corner of the picture**, 12 pt in: top-leading is where the window buttons and the raster-size notice
+sit, and the bottom is the HUD's and the captions'. The words are the view's name in capitals ("FIELD 1", "FIELD 2",
+"DEINTERLACE"), heavy rounded 11 pt, in the app yellow on a translucent black capsule, 85 % opacity, not clickable.
+**New decision for Robbie (11):** the corner, size and opacity; and an Inspector opened over the same corner covers the
+marker (the Inspector's Window View row says the same thing).
+
+**Estimated run time: about 2¼ h (band 1½–3½).** Code ~20 min; builds ~10 min; driver ~20 min; unattended runs ~55 min
+(the 26 interlaced and 24 progressive files in all four views, the marker states, two SDI loop runs, idle cost); analysis
+and this record ~30 min.
+
+**Reference.** HEAD's (`3f7daad`) pixels: its outputs were shown byte-identical to `16b6a63`'s in every view (14.4 S1, W1),
+so the tree is compared with the I4 run's HEAD exports (`head-interlaced`, `head-progressive`) and with the I4 run's own
+display read-backs and scope images (`tree-views`, `tree-progressive`; the two fixes made after those runs changed no pixel,
+confirmed in 14.4).
+
+| # | Prediction | Pass | Fail |
+|---|---|---|---|
+| K1 | **Shown when it should be**, by Accessibility: in Field 1, Field 2 and Deinterlace on every offered fixture, one marker reading exactly "FIELD 1" / "FIELD 2" / "DEINTERLACE", inside the window, in its top-right quarter | every file, every view | any miss |
+| K2 | **Never otherwise**: no marker in Weave (before and after the views), on any of the 24 progressive files in any view, on the HEVC field sequence, and after opening another file from a field view | 0 markers | any |
+| K3 | **Controls hidden**: Field 1 with the HUD unpinned and hidden (HUD element count back to its hidden value): the marker is still there, same text and frame | present | absent |
+| K4 | **Full screen** (View ▸ Enter Full Screen, AX click), Field 1: the marker is there, in the screen's top-right quarter; after leaving full screen, still there | present both | absent |
+| K5 | **Output, scopes and export unchanged**: all 26 interlaced files × 4 views and the 24 progressive files: `.rgba16f`, `.v210`, `.v210.json`, PNG byte-identical to HEAD's export; the display read-back byte-identical to the I4 run's for the same file and view; waveform, parade and vectorscope images byte-identical to the I4 run's | every byte | any byte |
+| K6 | **SDI loop**, marker TFF in Field 1 and BFF in Deinterlace, paused: read-back byte-identical to HEAD's (I4 run), every received frame = the read-back, late = 0 dropped = 0 | 0 different | any |
+| K7 | **Cost**: paused in Field 1 for 30 s the display link stops and CPU stays within 0.1 point of the I4 run's (0.04 %); the marker adds no `[RENDER-PERF]` work (it is not Metal) | as stated | otherwise |
+| K8 | **Logs**: one `[FIELDS] marker` line per marker shown or hidden, nothing else new | as stated | any other change |
+| G | `swift test` 641 plus the new marker test, all pass; the same 12 Profile warnings | as stated | any failure or new warning |
+| D | Defaults: dictionary-equal to the snapshot after the runs (frame keys read, then deleted, stopping at the first failure); `streamBookmarks` unchanged; licence keys stripped (presence only), never written | equal | any difference |
+
+### 14.8 Results
+
+Run unattended 2026-10-27, 17:09–18:14 EDT (**about 1 h against the 2¼ h estimate**, below the band). No screenshots: the
+marker is read by Accessibility (its text and frame), the pixels from the exports and the display read-back. Analysis:
+`build/interlaced-i4/marker/kan.py`, the states driver `marker/drv-marker.py`.
+
+| # | Result | Verdict |
+|---|---|---|
+| K1 | 25 offered files × Field 1, Field 2, Deinterlace (75 states): one marker each, text exactly "FIELD 1" / "FIELD 2" / "DEINTERLACE", in the window's top-right quarter (windowed: 12 pt in from the picture's top-right corner, e.g. x 914–970 in a window ending at 982, y 162 against its top 150) | **PASS** |
+| K2 | No marker in Weave (both before and after the views), on the 24 progressive files in any view (120 states), or on the HEVC field sequence. **Not run:** "after opening another file from a field view". Only a drop loads a file into an existing window, and the driver cannot drag; the reset itself is I4's (decision 5) and stays on the checklist (14.6 item 6) | **PASS** (one part not run) |
+| K3 | Field 1, controls unpinned and hidden (HUD elements 50 → 22, badge gone): the marker is still there, same text and frame | **PASS** |
+| K4 | Full screen (`AXFullScreen` true, window 3840 × 2160): the marker is 12 pt in from the picture's top-right corner (x 3607–3663; the scopes tray takes height, so the picture is pillarboxed), changes with the view, gone in Weave; after leaving full screen, still there. View ▸ Enter Full Screen clicked by Accessibility returned without effect; the window's own full-screen button worked (not investigated) | **PASS** |
+| K5 | 26 interlaced files × 4 views and 24 progressive files × 4 views: 800 output files (`.rgba16f`, `.v210`, `.v210.json`, PNG) byte-identical to HEAD's export, 200 display read-backs and 600 scope images byte-identical to the I4 run's. One file (`dnxhd-1080i5994-tff.mxf`) was re-run alone: on the full run, an Open panel came up as a second window when the file opened, so its Weave export was empty and its scope images were taken with the panel in front; re-run, it is byte-identical everywhere | **PASS** (after the re-run) |
+| K6 | SDI loop, paused: marker TFF in Field 1 and BFF in Deinterlace: read-backs byte-identical to HEAD's; 130 and 128 received frames = the read-back, 0 different; 1080i59.94 'Hi59', dominance upper; late = 0 dropped = 0; probe read SDI | **PASS** |
+| K7 | Paused in Field 1: the display link stopped as before; CPU 0.04 % (I4 run 0.04 %). Playing: GPU 0.11–0.13 ms a frame steady, the same as the I4 run (the marker is not Metal) | **PASS** |
+| K8 | `[FIELDS] marker shown — FIELD 1 (window only)` 75 times and `[FIELDS] marker hidden` 25 (one per change, Field 1 → Field 2 included); none on the progressive set; no other log line differs from the I4 run's apart from the two I4 fixes already in `3f7daad` | **PASS** |
+| G | `swift test` **642 / 642** (641 + 1); clean Profile build: the same 12 warnings | **PASS** |
+| D | 11 `NSWindow Frame` keys added, and **two keys changed** by the stray Open panel (K5): `NSNavPanelExpandedSizeForOpenMode` and `NSOSPLastRootDirectory`, the system open panel's own. Each was read and stashed (`marker/stash-*.txt`), then written back to the snapshot's value; the frame keys were read, then deleted; one `set -e` sequence. The domain is then dictionary-equal to the snapshot; `streamBookmarks` unchanged; licence keys present (3, values never read out), never written | **PASS** (after the restore) |
+
+**Findings.**
+1. **The Open panel during the run.** Where it came from was not established: it appeared as `open -a` handed the app its
+   file and closed with the window loop. Not seen in the I4 runs. It is why D had two changed keys.
+2. **An Inspector open over the top-right corner covers the marker** (the Inspector's Window View row says the same). In
+   the driver's runs the Inspector was open; Accessibility still lists a covered element, so whether they overlapped was
+   not measured. By eye: item 10 below.
+
+**What changed.** `FieldView.marker` (FileScan, + 1 test); `FieldViewMarker` in `App/FieldViewControl.swift`; one overlay
+line in `App/ContentView.swift`, on the picture surface beside the framing guides and captions. No Metal, renderer, output,
+scope or export code changed.
+
+**Added to the by-hand checklist (14.6):**
+
+10. **The marker** on `mark-prores-1080i5994-tff.mov` (on the LG, by eye): Field 1 shows "FIELD 1" in the picture's top-right
+    corner, small and in the app yellow. It stays when the controls hide and in full screen, and it's gone in Weave and on a
+    progressive file. Is it readable but not distracting, at fit and at 100 %, over bright and dark picture? With the
+    Inspector open, is it covered (decision 11)? Choose another corner, size or opacity if you want one.
+11. **Decision 11:** the marker's corner (top-trailing), size (11 pt heavy), opacity (85 %, on a 55 % black capsule).

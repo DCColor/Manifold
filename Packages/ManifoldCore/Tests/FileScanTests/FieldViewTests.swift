@@ -102,6 +102,14 @@ final class FieldViewTests: XCTestCase {
         XCTAssertEqual(FieldView.deinterlace.badge, "DEINTERLACE · DISPLAY ONLY")
     }
 
+    /// §14.8: the on-picture marker names every field view and is absent in Weave.
+    func testMarkerOnlyOutsideWeave() {
+        XCTAssertNil(FieldView.weave.marker)
+        XCTAssertEqual(FieldView.field1.marker, "FIELD 1")
+        XCTAssertEqual(FieldView.field2.marker, "FIELD 2")
+        XCTAssertEqual(FieldView.deinterlace.marker, "DEINTERLACE")
+    }
+
     func testChainPrefix() {
         XCTAssertEqual(scan(true).chainPrefix(height: 1080, fieldToken: "59.94"), "1080i59.94 TFF")
         XCTAssertEqual(scan(true, order: .bottomFirst).chainPrefix(height: 1080, fieldToken: "50"), "1080i50 BFF")
