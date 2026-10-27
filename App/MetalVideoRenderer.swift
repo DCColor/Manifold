@@ -3681,6 +3681,9 @@ final class MetalVideoRenderer {
             self.offscreenReadableChroma = frameChroma
             self.offscreenReadableOutput = frameOutput
             self.offscreenIndexLock.unlock()
+            #if DEBUG
+            ScopePerf.count("frames")
+            #endif
             self.onFrameRendered?()
             // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
             // The frame's SOURCE pts rides along so it can be published with the converted pixels.

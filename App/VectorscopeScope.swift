@@ -59,7 +59,13 @@ enum VectorscopeBoxAmplitude: String, CaseIterable, Identifiable {
 /// the GPU, only the tiny histogram is read back, and ScopeTrace paints the scatter. Render-coupled.
 final class VectorscopeScopeModel: ObservableObject {
 
-    @Published var image: CGImage?
+    /// The computed vectorscope trace image. Kept in `trace`, NOT `@Published` here, so a new image re-renders only the
+    /// `ScopeTraceLayer` that draws it, not this scope's header and controls (see `ScopeTraceImage`).
+    let trace = ScopeTraceImage()
+    var image: CGImage? {
+        get { trace.image }
+        set { trace.image = newValue }
+    }
     weak var renderer: MetalVideoRenderer?
 
     /// Source CICP codes, for the HEADER + GRATICULE only (the trace MATH reads matrixCode off the
@@ -302,10 +308,16 @@ final class VectorscopeScopeModel: ObservableObject {
             let img = self.buildVectorscopeTraceImage(histogram: hist, plane: p, gain: gain, color: color)
             DispatchQueue.main.async {
                 if self.active, !self.cleared, let img { self.image = img }
+                #if DEBUG
+                if self.active, !self.cleared, let img { ScopePerf.published("vs", img) }
+                #endif
                 self.finishSample()
             }
         }
         if !issued { sampling = false }
+        #if DEBUG
+        if issued { ScopePerf.count("compute.vs") }
+        #endif
     }
 
     /// Turn a plane×plane chroma histogram (layout hist[py*plane + px], Cb horizontal, Cr
@@ -424,6 +436,9 @@ struct VectorscopeScopeView: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.VectorscopeScopeView")
+#endif
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
@@ -467,7 +482,7 @@ struct VectorscopeScopeView: View {
 
                 ZStack {
                     Color.black
-                    if let img = model.image {
+                    ScopeTraceLayer(trace: model.trace) { img in
                         Image(decorative: img, scale: 1.0)
                             .resizable()
                             .interpolation(.none)

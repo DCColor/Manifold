@@ -17,6 +17,9 @@ struct InspectorPanel: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.InspectorPanel")
+#endif
         VStack(alignment: .leading, spacing: 0) {
             Text("Inspector")
                 .font(.system(.caption, design: .default).weight(.semibold))

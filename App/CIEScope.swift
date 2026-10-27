@@ -30,7 +30,13 @@ struct CIEPlaneBounds {
 /// intensity, and a detected-space header readout. Prefs wiring is a later unified pass.
 final class CIEScopeModel: ObservableObject {
 
-    @Published var image: CGImage?
+    /// The computed CIE scatter image. Kept in `trace`, NOT `@Published` here, so a new image re-renders only the
+    /// `ScopeTraceLayer` that draws it, not this scope's header and controls (see `ScopeTraceImage`).
+    let trace = ScopeTraceImage()
+    var image: CGImage? {
+        get { trace.image }
+        set { trace.image = newValue }
+    }
     weak var renderer: MetalVideoRenderer?
 
     /// Source space, appended to the header. Written ONLY by `ScopeColorFeed`, from the renderer:
@@ -265,10 +271,16 @@ final class CIEScopeModel: ObservableObject {
                                               gain: gain, dilation: dilation, color: color)
             DispatchQueue.main.async {
                 if self.active, !self.cleared, let img { self.image = img }
+                #if DEBUG
+                if self.active, !self.cleared, let img { ScopePerf.published("cie", img) }
+                #endif
                 self.finishSample()
             }
         }
         if !issued { sampling = false }
+        #if DEBUG
+        if issued { ScopePerf.count("compute.cie") }
+        #endif
     }
 
     /// Turn a planeW×planeH chromaticity histogram (vertical axis already flipped in-kernel) into
@@ -352,6 +364,9 @@ struct CIEScopeView: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.CIEScopeView")
+#endif
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
@@ -371,7 +386,7 @@ struct CIEScopeView: View {
 
                 ZStack {
                     Color.black
-                    if let img = model.image {
+                    ScopeTraceLayer(trace: model.trace) { img in
                         Image(decorative: img, scale: 1.0)
                             .resizable()
                             .interpolation(.none)

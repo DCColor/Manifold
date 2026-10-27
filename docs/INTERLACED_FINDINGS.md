@@ -517,7 +517,7 @@ Manifold's export:
    ask for `420v` on 8-bit 4:2:0 files and widen ×4 in the shader (the 8-bit path that exists for live sources). That
    changes the decode format, scrub and playback together, and the pictures of every 8-bit H.264 file, progressive ones
    included, which I3 must not. Recorded in BUGS.md as its own item. **Fixed for files 2026-10-26** (§13, commit
-   `<commit — to be filled in>`): 8-bit 4:2:0 files decode to `420v`; bleed 25 % → 0.000 %.
+   `3c9d17a`): 8-bit 4:2:0 files decode to `420v`; bleed 25 % → 0.000 %.
 2. **Apple's MPEG-2 decoder mixes the two fields' chroma on interlaced coding,** at either format. Manifold cannot undo
    it. A field-correct MPEG-2 needs another decoder (decision 7's libav question).
 3. **§11.3's H.264 luma max 76 and DNxHD max 9 were not Manifold.** Against FFmpeg's frame 0 widened ×4, HEAD's H.264
@@ -542,7 +542,7 @@ it is not met for 8-bit H.264 (item 1, fixable) or MPEG-2 (item 2, the decoder).
 
 **Written 2026-10-26 17:14 EDT, before any probe, code change or build, against `afce63d`.** Predictions with their
 timestamp and hash: `build/h264-chroma/predictions.md`, `predictions.timestamp`. Run unattended; no attended steps, no
-screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Commit `<commit — to be filled in>`.
+screenshots, no keystrokes; every app quit by a Quit event to the bundle path. Commit `3c9d17a`.
 Runs, logs and exports: `build/h264-chroma/`. **Estimated** 4½ h (band 3–6½). **Actual** about 1¼ h (17:14–17:20, then
 18:30–19:30), with a pause between (the Mac was needed) before the first probe or build.
 

@@ -15,8 +15,13 @@ let paradeDisplayRows = 512
 /// histogram is read back, and ScopeTrace composites the R|G|B image. Render-coupled sampling.
 final class ParadeScopeModel: ObservableObject {
 
-    /// The composited three-column parade image (R|G|B), published to the view.
-    @Published var image: CGImage?
+    /// The composited three-column parade image (R|G|B). Kept in `trace`, NOT `@Published` here, so a new image re-renders only the
+    /// `ScopeTraceLayer` that draws it, not this scope's header and controls (see `ScopeTraceImage`).
+    let trace = ScopeTraceImage()
+    var image: CGImage? {
+        get { trace.image }
+        set { trace.image = newValue }
+    }
 
     weak var renderer: MetalVideoRenderer?
 
@@ -135,10 +140,16 @@ final class ParadeScopeModel: ObservableObject {
                                                  gain: gain, mono: mono, monoColor: monoColor)
             DispatchQueue.main.async {
                 if self.active, !self.cleared, let img { self.image = img }
+                #if DEBUG
+                if self.active, !self.cleared, let img { ScopePerf.published("parade", img) }
+                #endif
                 self.finishSample()
             }
         }
         if !issued { sampling = false }
+        #if DEBUG
+        if issued { ScopePerf.count("compute.parade") }
+        #endif
     }
 
     /// Composite three per-channel value histograms (each colW*bins, layout
@@ -215,6 +226,9 @@ struct ParadeScopeView: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.ParadeScopeView")
+#endif
         GeometryReader { geo in
             VStack(spacing: 0) {
                 // Header strip: name (left) + intensity slider (right). Own band.
@@ -253,7 +267,7 @@ struct ParadeScopeView: View {
                 // Scope area below the header: trace + graticule, vertically inset.
                 ZStack {
                     Color.black
-                    if let img = model.image {
+                    ScopeTraceLayer(trace: model.trace) { img in
                         Image(decorative: img, scale: 1.0)
                             .resizable()
                             .interpolation(.none)
@@ -279,11 +293,13 @@ struct ParadeScopeView: View {
     private var graticule: some View {
         // The Canvas spans the FULL panel width (no leading padding): lines and separators are
         // inset by the gutters, but the labels anchor to the panel edge so they land in the gutter.
-        let g = gutters
-        return Canvas { ctx, size in
+        // Keyed, so a new trace does not redraw it: see `KeyedCanvas`.
+        let key = ValueGraticuleKey(active: activeScale, sdrScale: scopeScale, gutters: gutters, userLines: userLines)
+        let g = key.gutters
+        return KeyedCanvas(key: key) { ctx, size in
             // Transfer-aware value-axis graticule (same axis as waveform), spanning all 3 columns.
-            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale,
-                                     gutters: g, userLines: userLines)
+            drawActiveValueGraticule(ctx, size: size, active: key.active, sdrScale: key.sdrScale,
+                                     gutters: g, userLines: key.userLines)
             // Thin R|G|B column separators at 1/3 and 2/3 OF THE PLOT REGION — must track the
             // same inset as the trace image, or they'd drift off the channel boundaries.
             let x0 = g.leading, x1 = size.width - g.trailing
@@ -295,5 +311,6 @@ struct ParadeScopeView: View {
                 ctx.stroke(sep, with: .color(.white.opacity(0.18)), lineWidth: 0.5)
             }
         }
+        .equatable()
     }
 }

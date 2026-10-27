@@ -30,6 +30,9 @@ struct TransportScrubber: NSViewRepresentable {
     }
 
     func updateNSView(_ scrubber: PlayheadScrubber, context: Context) {
+        #if DEBUG
+        ScopePerf.count("update.TransportScrubber")
+        #endif
         scrubber.onValueChanged = onChange
         scrubber.onEditingChanged = onEditingChanged
         scrubber.style = style

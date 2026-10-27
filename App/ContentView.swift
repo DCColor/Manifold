@@ -41,6 +41,9 @@ struct ScopeSlotHeader: View {
     let selection: Binding<ScopeKind>?      // nil → plain label (no picker)
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.ScopeSlotHeader")
+#endif
         HStack(spacing: 3) {
             if let selection {
                 Menu {
@@ -257,6 +260,32 @@ private final class RendererStore: ObservableObject {
     let renderer: MetalVideoRenderer? = MetalVideoRenderer()
 }
 
+/// Owns this window's five scope models, WITHOUT making `ContentView` observe them.
+///
+/// ⚠️ A SCOPE PUBLISH MUST REDRAW ONLY THAT SCOPE'S VIEW. The models used to be `@StateObject`s of
+/// `ContentView`, and a `@StateObject` subscribes the view that declares it: every trace image a
+/// scope published (once per frame each) re-ran the whole window's body — the picture region, the
+/// control bar, the transport, the guides — and with it every OTHER scope's view. Measured
+/// 2026-10-27 at 23.976 fps, three scopes: 56 `ContentView` bodies a second, ~41 % of a core on the
+/// main thread (docs/BUGS.md, "while playing with the scopes tray open, each scope update redraws
+/// the whole window").
+///
+/// This store publishes nothing, so `ContentView` never re-renders because of it, and SwiftUI does
+/// not forward a nested object's changes. Each scope view still holds its model as `@ObservedObject`,
+/// so a publish invalidates that view and nothing else (and a new trace image only its
+/// `ScopeTraceLayer`, see `ScopeTraceImage`). Same `@StateObject` lifetime as before: one
+/// set of models per window, built once (see `RendererStore` for why a `@State` default would not do).
+///
+/// ContentView reads nothing from the models in its body. If it ever needs to, observe that one value
+/// in a small child view, never the model here.
+private final class ScopeModelStore: ObservableObject {
+    let waveform = WaveformScopeModel()
+    let parade = ParadeScopeModel()
+    let vectorscope = VectorscopeScopeModel()
+    let cie = CIEScopeModel()
+    let meter = AudioMeterModel()
+}
+
 #if DEBUG
 /// ⌃⌥H's `MANIFOLD_STREAM_DEBUG_BOOKMARK` list position (pre-ship removal, docs/BUGS.md).
 @MainActor enum DebugBookmarkCursor {
@@ -419,11 +448,13 @@ struct ContentView: View {
     @AppStorage("manifold.vectorscope.boxAmplitude") private var vectorscopeBoxAmplitude: VectorscopeBoxAmplitude = .percent75
     // The four scope models (one each, rendered wherever its kind is selected — duplicates share
     // the single model). A model samples/computes only while its kind is in the active set.
-    @StateObject private var waveformModel = WaveformScopeModel()
-    @StateObject private var paradeModel = ParadeScopeModel()
-    @StateObject private var vectorscopeModel = VectorscopeScopeModel()
-    @StateObject private var cieModel = CIEScopeModel()
-    @StateObject private var meterModel = AudioMeterModel()
+    // Held through `ScopeModelStore`, NOT as `@StateObject`s here: see that type for why.
+    @StateObject private var scopeModels = ScopeModelStore()
+    private var waveformModel: WaveformScopeModel { scopeModels.waveform }
+    private var paradeModel: ParadeScopeModel { scopeModels.parade }
+    private var vectorscopeModel: VectorscopeScopeModel { scopeModels.vectorscope }
+    private var cieModel: CIEScopeModel { scopeModels.cie }
+    private var meterModel: AudioMeterModel { scopeModels.meter }
     /// The ONLY writer of the four models' source colour fields — from this window's renderer, for
     /// every source. Bound in `.onAppear`; see ScopeColorFeed.swift and CLAUDE.md.
     @StateObject private var scopeColorFeed = ScopeColorFeed()
@@ -495,6 +526,9 @@ struct ContentView: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.ContentView")
+#endif
         // ══════════════════════════════════════════════════════════════════════════════════
         //  THE INVARIANT — CHROME NEVER REDUCES THE VIDEO'S SIZE.
         //

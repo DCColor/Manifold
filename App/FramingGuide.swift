@@ -69,6 +69,9 @@ struct GuideOverlay: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.FramingGuide")
+#endif
         Canvas { ctx, size in
             guard size.width > 0, size.height > 0 else { return }
             let vr = CGRect(origin: .zero, size: size)   // this view's bounds = video rect

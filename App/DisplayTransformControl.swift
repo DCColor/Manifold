@@ -42,6 +42,9 @@ struct DisplayTransformControl: View {
     private var isBypass: Bool { mode == .bypass }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.DisplayTransformControl")
+#endif
         HStack(spacing: 5) {
             // ⚠️ THE BADGE IS A SIBLING OF THE MENU, NOT ITS LABEL, AND THAT IS A MEASURED FIX.
             //
@@ -251,6 +254,9 @@ struct DisplayChainReadout: View {
     @ObservedObject var model: DisplayChainModel
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.DisplayChainReadout")
+#endif
         VStack(alignment: .leading, spacing: 10) {
             Text("Transform chain")
                 .font(.headline)

@@ -252,7 +252,15 @@ final class AudioMeterModel: ObservableObject {
         // stop dead for the duration of a live resize or a menu tracking loop.
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        #if DEBUG
+        if ScopePerf.enabled, perfObserver == nil {
+            perfObserver = objectWillChange.sink { _ in ScopePerf.count("pub.meter") }
+        }
+        #endif
     }
+    #if DEBUG
+    private var perfObserver: AnyCancellable?
+    #endif
 
     func stop() {
         guard active else { return }
@@ -293,6 +301,9 @@ final class AudioMeterModel: ObservableObject {
     // MARK: - Sampling
 
     private func tick() {
+        #if DEBUG
+        ScopePerf.count("meter.tick")
+        #endif
         let now = CACurrentMediaTime()
         let dt = max(0, min(now - lastTickHost, 0.25))   // clamp: a stalled main thread must not
         lastTickHost = now                               // teleport the ballistics
@@ -381,10 +392,12 @@ final class AudioMeterModel: ObservableObject {
     }
 
     /// ⚠️ EVERY TICK'S STATUS GOES THROUGH HERE, AND THE GUARD IS THE POINT. A `@Published` set publishes
-    /// whether or not the value changed, and this model is a `@StateObject` of `ContentView`, so an
+    /// whether or not the value changed. When this model was a `@StateObject` of `ContentView`, an
     /// unguarded `status = .paused` at 30 Hz re-ran the whole window's body, layout and SwiftUI's drawing
     /// while nothing on screen changed: ~25 % of a core per paused window with the tray open, and the
-    /// main thread full at 7 windows (docs/BUGS.md, 2026-10-24). Same rule as `roles` above.
+    /// main thread full at 7 windows (docs/BUGS.md, 2026-10-24). It now invalidates only the meter's own
+    /// view (`ScopeModelStore`, 2026-10-27), which still must not redraw at 30 Hz for nothing. Same rule
+    /// as `roles` above.
     private func setStatus(_ next: Status) {
         if status != next { status = next }
     }
@@ -494,6 +507,9 @@ struct AudioMeterScopeView: View {
     private let clipStripHeight: CGFloat = 7
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.AudioMeterScopeView")
+#endif
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {

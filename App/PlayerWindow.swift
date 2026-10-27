@@ -51,6 +51,9 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        #if DEBUG
+        ScopePerf.count("update.PlayerWindow")
+        #endif
         guard let window = nsView.window else { return }
 
         TrafficLights.setVisible(buttonsVisible, in: window)

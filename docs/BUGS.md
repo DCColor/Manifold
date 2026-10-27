@@ -252,7 +252,7 @@ held back until after release, and the numbered defect entries follow.
      for 8-bit H.264 or MPEG-2:** the decoder hands over chroma already mixed across fields (H.264 25 %, the next item;
      MPEG-2 fully, Apple's decoder). Sharp-fixture bleed 50 % → 25 % (H.264). **H.264 met since the next item:** bleed
      25 % → 0.000 %, P6 met against the file; MPEG-2 still not (the decoder).
-   - ✅ **FIXED for files 2026-10-26, commit `<commit — to be filled in>`.** ~~**8-bit H.264 files lose vertical chroma
+   - ✅ **FIXED for files 2026-10-26, commit `3c9d17a`.** ~~**8-bit H.264 files lose vertical chroma
      detail in the decode** (found in I3, 2026-10-26).~~ VideoToolbox's delivery of an 8-bit decode at x420, which
      every file decode asked for, filters chroma vertically by [1 6 1]/8. **Measured first, read-only**
      (`scripts/interlaced/vtplanes.swift`, `build/h264-chroma/measure/step1.txt`): frame 0 of 11 8-bit 4:2:0 files
@@ -1384,6 +1384,12 @@ to send Export Diagnostics for a sync problem.
     loads, presses each step through `FrameEngine.stepFrame(by:)` 1.5 s apart and writes the support export after each,
     because frame steps are key-only and the drivers send no keystrokes. `App/DebugStepHook.swift` and one call in
     `ContentView`'s `currentURL` observer, `#if DEBUG`.
+  - **`MANIFOLD_SCOPE_PERF=1`** and **`MANIFOLD_SCOPE_DUMP_DIR=<dir>`** (launch environment, added 2026-10-27, the
+    scope playback cost): a `[SCOPE-PERF]` line once a second counting frames rendered, each scope's computes and
+    publishes, and the body passes of the window's main views; and each published scope image written to `<dir>`
+    (overwriting, `<scope>.rgba` + `.json`) for data-level comparison between builds. `App/ScopePerf.swift` and one-line
+    `ScopePerf.count` / `ScopePerf.published` calls in the scope models, `MetalVideoRenderer`, and the counted views'
+    bodies and `updateNSView`s, all `#if DEBUG`. Off, one Bool test per call.
 - **Gating:** all eleven `#if DEBUG` (ten, plus `MANIFOLD_FRAME_EXPORT_DIR`, since the v210 dump ships): absent
   from Release, present in Profile. `FileChromaPolicy` itself
   ships (ManifoldCore cannot gate it) and is always false in Release, because the app's flag is.
@@ -2629,6 +2635,118 @@ nothing.
 
 ---
 
+## ✅ FIXED 2026-10-27 (commit `<commit — to be filled in>`) — PRE-EXISTING, ALL BUILDS — while playing with the scopes tray open, each scope update redraws the whole window
+
+**Fixed 2026-10-27** (unattended; Profile builds; HEAD = `3c9d17a` + the DEBUG counters below, from a `git archive`;
+`diff -rq App` HEAD vs tree: only the fix's files). Predictions, written before any build of the fix, with an addendum
+before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and summaries: `build/scope-perf/`.
+
+- **Rule (this item):** a scope update redraws only that scope's own view; nothing else in the window re-evaluates
+  because a scope changed. Scope compute runs at most once per new frame, and not at all while paused.
+- **Measured with** `[SCOPE-PERF]` (new, DEBUG, `MANIFOLD_SCOPE_PERF=1`; pre-ship list above): per second, frames
+  rendered, each scope's computes and publishes, and the body passes of `ContentView`, the five scope views and the
+  window's other main views. CPU from `ps` (process cputime; main thread from `ps -M`), GPU from `IOAccelerator`
+  "Device Utilization %". The SwiftUI Instruments template recorded nothing on attach, and its `--launch` started the
+  installed app instead of the build, so it was not used.
+- **Cause, ranked (HEAD, 3 × 15 s per run: 23.976, 29.97 and 59.94 ProRes sync clips; tray off, each scope alone in
+  all three slots, and two three-scope sets):**
+  1. **The five scope models were `@StateObject`s of `ContentView`** (`ContentView.swift`, formerly lines 425–429). A
+     `@StateObject` subscribes the view that declares it, so every trace image published (once per frame per scope)
+     and every meter tick (30 Hz, ~66 publishes) re-ran the whole window body. `ContentView` ran 10 bodies a second with
+     the tray off (`engine.currentTime`'s 10 Hz timecode, not a scope) and 10 + the publishes with it open: 34/s for one
+     scope at 23.976, 56/s for three, 127–146/s for three at 59.94. Each pass also re-ran every scope view in the tray
+     (one scope in three slots: 102 scope bodies a second at 23.976). Main thread 45 % at 23.976 with three scopes,
+     82–86 % at 59.94.
+  2. **Inside each scope view, every trace publish re-ran the whole scope view** (header, slider, colour picker, gear
+     menu) and **redrew its graticule Canvas**. A main-thread `sample` after fix 1 put the waveform and parade value
+     graticule (`drawHLGGraticule` and both `graticule` closures) at about a quarter of the main thread's active samples.
+  3. **Compute was already correct:** once per new frame per scope (equal to frames, every run, both builds), none
+     while paused (0 in every paused window).
+  4. Not in this item: the GPU kernels (parade and vectorscope 13–27 % GPU utilisation, waveform and CIE 2–4 %), and
+     the trace builds and SwiftUI's image preparation off the main thread (below).
+- **Fix, smallest first (three steps, each built and piloted before the next):**
+  1. `ScopeModelStore` (`ContentView.swift`): the five models are held by a `@StateObject` that publishes nothing, with
+     computed accessors, so no call site changed. `ContentView` no longer observes them; each scope view still does.
+  2. `KeyedCanvas` + `ValueGraticuleKey` (`WaveformScope.swift`): the waveform and parade graticule redraws only when
+     its inputs (ruler, SDR scale, gutters, user lines) or its size change. The drawing code is unchanged.
+  3. `ScopeTraceImage` / `ScopeTraceLayer` (`WaveformScope.swift`; the four image scopes): each model keeps its trace
+     image in its own small observable (`model.image` still reads and writes it), so a new trace re-renders only the
+     layer that draws it, with the scope's own image modifiers unchanged. The meters were not split: the bars are the
+     whole picture and change each tick.
+- **Measured, tree vs HEAD, playing, 15 s per run** (whole-process CPU, % of one core; main thread in brackets):
+
+  | Run | 23.976 HEAD | 23.976 tree | 29.97 HEAD | 29.97 tree | 59.94 HEAD | 59.94 tree |
+  |---|---|---|---|---|---|---|
+  | Tray off | 17.2 (11.2) | 18.1 (11.8) | 19.4 (12.2) | 19.0 (12.0) | 23.7 (12.0) | 23.2 (11.8) |
+  | Waveform ×3 | 41.0 (34.0) | 27.5 (18.0) | 46.5 (38.3) | 28.7 (18.1) | 69.0 (56.2) | 35.7 (18.2) |
+  | Parade ×3 | 40.8 (33.2) | 27.4 (17.2) | 46.3 (37.7) | 28.9 (17.0) | 69.1 (55.2) | 36.5 (17.3) |
+  | Vectorscope ×3 | 38.5 (33.1) | 26.3 (19.4) | 43.8 (37.6) | 27.4 (19.5) | 64.1 (54.6) | 32.6 (20.2) |
+  | CIE ×3 | 34.3 (28.5) | 25.1 (17.3) | 39.1 (32.5) | 26.2 (17.4) | 56.4 (46.4) | 32.0 (18.2) |
+  | Meters ×3 | 34.5 (31.1) | 25.5 (20.5) | 35.5 (31.5) | 24.4 (18.9) | 37.4 (31.2) | 26.7 (18.3) |
+  | Waveform + parade + CIE | 56.1 (45.0) | 31.7 (16.6) | 65.0 (52.4) | 34.1 (16.3) | 103.2 (81.5) | 43.6 (17.0) |
+  | Waveform + vectorscope + meters | 67.4 (60.1) | 30.3 (19.9) | 69.5 (60.8) | 32.1 (20.0) | 100.5 (86.1) | 37.8 (19.1) |
+
+  - **Body passes, tree, every playing run:** `ContentView` 10/s, its tray-off rate. Each scope view 10/s per slot (the
+    window's own passes), never its neighbours' rate. Per-frame redraws only in `ScopeTraceLayer` (3 × frames for three
+    slots, plus the window's passes where the image modifiers read the gutters), and the meters' own view at its tick.
+    `FramingGuide` and the scrubber at 10/s. Compute = frames per scope; 0 while paused.
+  - **Live SRT** (a local ffmpeg SRT listener looping the 23.976 H.264 sync clip, dialled through
+    `MANIFOLD_DEBUG_DIAL_URL`; not Cloudflare), waveform + parade + CIE, 20 s: HEAD 50.5–50.8 % (main 36.7–36.8 %),
+    tree 33.0–33.5 % (main 6.2–6.3 %), three runs each; tray off 6.7 / 8.0 %. Tree live: `ContentView` and the scope
+    views 0 passes a second, the three trace layers 72 (3 × 24). Meters live: 8.3 % both (the meter shows no level
+    for this stream in either build; not investigated).
+  - **Off the main thread the tree reads higher, and that is core placement, not more work** (Time Profiler, live, 10 s):
+    in HEAD every worker sample ran on P cores (the busy main thread kept them up); in the tree about half ran on E cores,
+    which take longer per unit of work. The trace builds' completion handlers: HEAD 492 ms all P; tree 376 ms P + 562 ms
+    E. SwiftUI's image preparation (`_SwiftUIProxyImage prepare` → `CA::Render::copy_image`, redrawing each trace
+    CGImage for Core Animation): HEAD 550 ms P; tree 647 P + 340 E. Same compute and publish counts in both.
+  - **Paused, tray open:** unchanged, 0.3–1.0 % (HEAD 0.3–1.0 %), every rate and set. No compute, no counted body.
+  - **Playback:** `late = 0`, `dropped = 0` in every `[PLAYBACK-STATS]` line of all 48 file runs. Live: every run of both
+    builds, tray off included, shows `dropped = 19` in its first second after connect (catch-up), then 0.
+  - **Scope pictures:** paused on the opening frame of each of the 20 control-set files (`build/interlaced-i1/control.txt`),
+    the published trace image of waveform, parade, vectorscope and CIE (`MANIFOLD_SCOPE_DUMP_DIR`): **80 / 80
+    byte-identical to HEAD**, none blank.
+  - **Pictures:** the same 20 files, Help ▸ Export Frame for Support…: `.rgba16f`, `.v210`, `.v210.json` byte-identical
+    and `.png` pixels identical, **20 / 20 files**. The window path is the same offscreen (no renderer code changed).
+  - `swift test` 633 / 633. Profile clean-build warnings: the same 11 as `3c9d17a`, plus the AppIntents line.
+- **Predictions** (`build/scope-perf/predictions.md`):
+
+  | # | Prediction | Result |
+  |---|---|---|
+  | C1 | Three scopes: whole-process CPU, tree ≤ 50 % of HEAD at every rate | **FAIL**: 4 of 6 pass (59.94: 42 % and 38 %; the meters set at 23.976 and 29.97: 45 %, 46 %); waveform + parade + CIE at 23.976 is 56.5 % of HEAD and at 29.97 52.5 %. The band was set on the whole process, which includes the unchanged ~17–24 % tray-off base; the main thread fell 45 → 16.6 % and 52 → 16.3 % |
+  | C2 | Each single scope and meters: tree ≤ 50 % of HEAD's excess over tray-off | **PASS**: worst 43 % (meters, 23.976); 23–41 % for the rest |
+  | C3 | Tray off within ±2 points | **PASS**: +0.9, −0.4, −0.5 |
+  | C4 | Live SRT, three scopes, tree ≤ 25 % | **FAIL**: 33.0–33.5 % (HEAD 50.5–50.8 %); main 36.7 → 6.3 %. The rest is off the main thread, half of it on E cores (above) |
+  | B1 | `ContentView` at its tray-off rate; scopes redraw only their own view | **PASS** (as reworded in the addendum: the per-frame redraw is `ScopeTraceLayer`) |
+  | B2 | Compute ≤ frames, 0 paused | **PASS**, both builds |
+  | D1 | Scope data 80 / 80 identical | **PASS** |
+  | P1 | Paused within ±1 point | **PASS** (within ±0.2) |
+  | P2 | late 0, dropped 0 | **PASS** for files (48 runs). Live: the first second after connect drops 19 in every run of both builds, tray off included |
+  | E1 | Exports 20 / 20 identical | **PASS** |
+  | G1 / G2 | Tests; warnings | **PASS** / **PASS** |
+  | H1 | Defaults | **PASS**, with the note below |
+
+- **Not changed, noted:**
+  - What is left costs about 6–14 points over tray-off playing (15–25 for three scopes): computing every frame, which
+    the rule allows, plus SwiftUI's re-render of each trace CGImage for Core Animation (`CA::Render::copy_image`,
+    vImage unpremultiply and convert). Producing the image in the format Core Animation wants, or setting it on a
+    layer directly, could remove the second. It touches the scope picture's colour path, so it needs its own check.
+  - The CIE and vectorscope graticules are plain Canvases and still redraw on the window's 10 passes a second (they are
+    not on the trace path any more). `KeyedCanvas` would cover them if wanted; their inputs are wider (the vectorscope
+    reads six settings).
+  - Opening files one after another in one window, both builds publish more scope images per open the more files have
+    been opened (5, 11, 16, 25 … 74 per open over 12 files, equal in HEAD and tree). Not chased.
+  - Defaults: the drivers wrote nothing (tray and slots from launch arguments). The 74 `NSWindow Frame …` keys the runs
+    added were read and deleted one by one; the domain is dictionary-equal to the snapshot (licence keys stripped from
+    both). **Licence keys:** the first launch of a 3c9d17a-code build ran the P1 migration (`[LICENSE] removed
+    license.email and license.machineId … (the Keychain record was read back and matches)`), and a tree launch at 00:40
+    logged the same removal again. The only thing that ran in between and could have written them back was the
+    installed `/Applications/Manifold.app` (0.8.4), which `xctrace --launch` started by name instead of the build.
+    One of its two processes ran; the other is still stopped (state T, never ran). The plist now holds
+    `license.activated`, `license.type` and `license.validated` only. Nothing was restored, per the P1 rule.
+
+---
+
 ## ✅ FIXED 2026-10-24 (commit `b418161`) — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
 
 **Fixed 2026-10-24** (idle-window session, measured against HEAD `72bb925`, Profile builds, sandboxed bookmarks).
@@ -2685,7 +2803,8 @@ nothing.
   - `swift test`: 612 / 612. Profile warnings, clean build: the same 12 as HEAD.
 - **Not changed, noted:** while **playing** with the tray open, every scope publish still re-runs the whole
   `ContentView` body (the live SRT row above: 59 % tray on against 7.6 % off, nearly all on the main thread). The
-  same mechanism as this entry, while playing. Not in this fix's scope.
+  same mechanism as this entry, while playing. Not in this fix's scope. **Fixed 2026-10-27** (the entry above, commit
+  `<commit — to be filled in>`): live SRT with three scopes 50.5 → 33.2 %, main thread 36.7 → 6.3 %.
 - **Answers to the open questions below:**
   - A paused window's display link now stops. The scopes were not recomputing while paused, at HEAD or now.
   - About 110 MB per window is the window's own buffers, not idle work, and is unchanged.
@@ -3658,7 +3777,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `<commit — to be filled in>`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
@@ -3735,7 +3854,7 @@ Streams are I6, after 1.0. The decisions:
 - 1080i50, 1080i59.94 and 1080i60 exist and are chosen for such files;
 - the card is verified on the reference monitor with the TFF and BFF fixtures (`INTERLACED_FINDINGS.md`
   P3–P5), and colour is field-correct (P6). P6: Manifold's part done in I3; 8-bit H.264 met since the decode-format fix
-  (release scope, *8-bit H.264 files lose vertical chroma detail in the decode*, commit `<commit — to be filled in>`);
+  (release scope, *8-bit H.264 files lose vertical chroma detail in the decode*, commit `3c9d17a`);
   MPEG-2 not
   (Apple's decoder).
 

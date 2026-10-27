@@ -42,6 +42,9 @@ struct CaptionOverlay: View {
     private static let bottomEdgeY: CGFloat = 0.95
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.CaptionOverlay")
+#endif
         GeometryReader { geo in
             // geo.size == the video rect (letterboxed), inherited from .aspectRatio(.fit).
             if let text = captions.cue(at: engine.currentTime), !text.isEmpty {

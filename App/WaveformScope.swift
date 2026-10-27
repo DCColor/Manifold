@@ -102,7 +102,7 @@ let scopePlotInset: CGFloat = 10
 // the plotted features), so their geometry is untouched.
 
 /// Horizontal insets of the plot region inside a value-axis scope panel.
-struct ScopePlotGutters {
+struct ScopePlotGutters: Equatable {
     /// Left label column (the primary ruler — every ruler labels the left edge).
     let leading: CGFloat
     /// Right label column — only HLG, whose secondary nits ruler labels the right edge.
@@ -540,8 +540,13 @@ let hlgNitsLevels: [Double] = [1, 10, 100, 203, 1000]
 /// back, and ScopeTrace builds the trace image. Render-coupled sampling (see frameRendered).
 final class WaveformScopeModel: ObservableObject {
 
-    /// The computed waveform trace image (green-on-black), published to the view.
-    @Published var image: CGImage?
+    /// The computed waveform trace (green-on-black) image. Kept in `trace`, NOT `@Published` here, so a new image re-renders only the
+    /// `ScopeTraceLayer` that draws it, not this scope's header and controls (see `ScopeTraceImage`).
+    let trace = ScopeTraceImage()
+    var image: CGImage? {
+        get { trace.image }
+        set { trace.image = newValue }
+    }
 
     /// Set by the owner when the scope is shown. Weak — the renderer outlives nothing here.
     weak var renderer: MetalVideoRenderer?
@@ -676,12 +681,18 @@ final class WaveformScopeModel: ObservableObject {
             let img = self.buildTraceImage(histogram: hist, scopeW: sw, bins: b, gain: gain, color: color)
             DispatchQueue.main.async {
                 if self.active, !self.cleared, let img { self.image = img }
+                #if DEBUG
+                if self.active, !self.cleared, let img { ScopePerf.published("wf", img) }
+                #endif
                 self.finishSample()
             }
         }
         // If no compute was issued (no frame yet / setup failed), the completion will never
         // fire — release the gate so the next request can try again.
         if !issued { sampling = false }
+        #if DEBUG
+        if issued { ScopePerf.count("compute.wf") }
+        #endif
     }
 
     /// Release the one-in-flight gate (main) and, if a frame arrived while this cycle was
@@ -767,6 +778,9 @@ struct WaveformScopeView: View {
     }
 
     var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.WaveformScopeView")
+#endif
         GeometryReader { geo in
             VStack(spacing: 0) {
                 // Header strip: name (left) + intensity slider (right). Own band.
@@ -810,7 +824,7 @@ struct WaveformScopeView: View {
                 // the top (max) and bottom (0) labels stay fully visible.
                 ZStack {
                     Color.black
-                    if let img = model.image {
+                    ScopeTraceLayer(trace: model.trace) { img in
                         // .none (nearest-neighbor): keeps the thin bright trace crisp
                         // against black. A smoothing filter (.low/.high) would blur the
                         // trace into the background and read softer — the wrong direction
@@ -842,11 +856,13 @@ struct WaveformScopeView: View {
     private var graticule: some View {
         // The Canvas spans the FULL panel width (no leading padding): the lines are inset by the
         // gutters, but the labels anchor to the panel edge so they land in the gutter.
-        let g = gutters
-        return Canvas { ctx, size in
-            drawActiveValueGraticule(ctx, size: size, active: activeScale, sdrScale: scopeScale,
-                                     gutters: g, userLines: userLines)
+        // Keyed, so a new trace does not redraw it: see `KeyedCanvas`.
+        let key = ValueGraticuleKey(active: activeScale, sdrScale: scopeScale, gutters: gutters, userLines: userLines)
+        return KeyedCanvas(key: key) { ctx, size in
+            drawActiveValueGraticule(ctx, size: size, active: key.active, sdrScale: key.sdrScale,
+                                     gutters: key.gutters, userLines: key.userLines)
         }
+        .equatable()
     }
 }
 
@@ -978,6 +994,62 @@ func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGu
         ctx.stroke(p, with: .color(.cyan.opacity(0.28)), lineWidth: 0.5)
         drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(nits))", trailing: true, opacity: 0.5)
     }
+}
+
+/// One scope's published trace image, in an object of its own.
+///
+/// ⚠️ A NEW TRACE MUST RE-RENDER ONLY THE IMAGE. The image is published once per frame. While it was a
+/// `@Published` field of the scope model, every publish re-ran the scope view's whole body — the header,
+/// its slider, colour picker and gear menu, and the graticule — to swap one picture (docs/BUGS.md,
+/// 2026-10-27). The model still owns the image (`model.image` reads and writes this), and the scope view
+/// observes the model for everything else; only `ScopeTraceLayer` observes this.
+final class ScopeTraceImage: ObservableObject {
+    @Published var image: CGImage?
+}
+
+/// Draws `trace`'s image through `content`, and is the only view that re-renders when it changes.
+/// `content` is the scope's own image modifiers, unchanged; nothing is drawn while there is no image.
+struct ScopeTraceLayer<Content: View>: View {
+    @ObservedObject var trace: ScopeTraceImage
+    @ViewBuilder let content: (CGImage) -> Content
+
+    var body: some View {
+#if DEBUG
+        let _ = ScopePerf.count("body.ScopeTraceLayer")
+#endif
+        if let img = trace.image { content(img) }
+    }
+}
+
+/// A `Canvas` that redraws when `key` changes, or when its size does — NOT on every body pass of the view
+/// that holds it. Used with `.equatable()`.
+///
+/// ⚠️ A SCOPE'S GRATICULE MUST NOT REDRAW BECAUSE SOMETHING ELSE IN ITS VIEW DID. A plain `Canvas` in a
+/// scope view's body re-runs its drawing on every pass of that body, although nothing it draws has
+/// changed. While the trace image was published through the scope view (once per frame), that made the
+/// value-axis rulers (PQ and HLG label every line) the largest app-side cost on the main thread while
+/// playing (docs/BUGS.md, 2026-10-27); the window's own passes (10 a second while playing) still reach it.
+///
+/// `key` must hold EVERY input `draw` reads apart from the size. An input left out of it is drawn stale
+/// until some other input changes. The drawing itself is unchanged: same function, same inputs.
+struct KeyedCanvas<Key: Equatable>: View, Equatable {
+    let key: Key
+    let draw: (inout GraphicsContext, CGSize) -> Void
+
+    static func == (a: Self, b: Self) -> Bool { a.key == b.key }
+
+    var body: some View {
+        Canvas { ctx, size in draw(&ctx, size) }
+    }
+}
+
+/// Everything `drawActiveValueGraticule` reads apart from the size: the `KeyedCanvas` key of the
+/// waveform's and the parade's graticules (the parade's column separators read only `gutters`).
+struct ValueGraticuleKey: Equatable {
+    let active: ActiveVerticalScale
+    let sdrScale: ScopeScale
+    let gutters: ScopePlotGutters
+    let userLines: [Double]
 }
 
 /// Draw the active transfer-aware graticule onto a value-axis scope. Dispatches on the RESOLVED

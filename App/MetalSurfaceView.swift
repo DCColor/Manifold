@@ -18,6 +18,9 @@ struct MetalSurfaceView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MetalHostView, context: Context) {
+        #if DEBUG
+        ScopePerf.count("update.MetalSurfaceView")
+        #endif
         nsView.renderer = renderer
         renderer.hostView = nsView
         renderer.metalLayer.frame = nsView.bounds
