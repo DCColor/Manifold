@@ -217,6 +217,74 @@ final class LicenseRecordSyncTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "license.email"))
     }
 
+    // MARK: Deactivation never deletes the record (adoption rule 6)
+
+    private func deactivate(cached: String?, read: (() -> RecordRead)? = nil,
+                            write w: ((String) -> Int32)? = nil) -> LicenseRecordSync.Deactivation {
+        LicenseRecordSync.deactivate(cachedMachineId: cached,
+                                     read: read ?? { self.readRecord() },
+                                     write: w ?? { self.write($0, "activationRecord") })
+    }
+
+    func testDeactivateKeepsTheIdAndClearsTheEmail() {
+        seedLicensedInstall()
+        XCTAssertEqual(deactivate(cached: "MID-1"), .rewritten)
+        let rec = readRecord().record
+        XCTAssertEqual(rec?.activated, false)
+        XCTAssertEqual(rec?.machineId, "MID-1")
+        XCTAssertEqual(rec?.email, "")
+        XCTAssertEqual(rec?.type, "")
+    }
+
+    func testDeactivateWithNoCachedIdReadsItFromTheRecord() {
+        // The case that used to DELETE the record: the id had not been read this launch.
+        seedLicensedInstall(recordMachineId: "MID-REC")
+        XCTAssertEqual(deactivate(cached: nil), .rewritten)
+        XCTAssertEqual(readRecord().record?.machineId, "MID-REC")
+    }
+
+    func testDeactivateRecordIdWinsOverTheCachedOne() {
+        seedLicensedInstall(recordMachineId: "MID-REC")
+        _ = deactivate(cached: "MID-OTHER")
+        XCTAssertEqual(readRecord().record?.machineId, "MID-REC")
+    }
+
+    func testDeactivateLeavesAnUnreadableRecordExactlyAsItWas() {
+        seedLicensedInstall()
+        let before = readString("activationRecord")
+        var writes = 0
+        let out = deactivate(cached: "MID-1", read: { .failed(-25293) }, write: { _ in writes += 1; return 0 })
+        guard case .leftInPlace(let reason) = out else { return XCTFail("expected leftInPlace, got \(out)") }
+        XCTAssertEqual(writes, 0, "never overwrite what could not be read")
+        XCTAssertEqual(readString("activationRecord"), before)
+        XCTAssertFalse(reason.contains("MID-1"))
+    }
+
+    func testDeactivateLeavesAnUndecodableRecordInPlace() {
+        XCTAssertEqual(write("not json", "activationRecord"), errSecSuccess)
+        guard case .leftInPlace = deactivate(cached: "MID-1") else { return XCTFail() }
+        XCTAssertEqual(readString("activationRecord"), "not json")
+    }
+
+    func testDeactivateLeavesTheRecordWhenTheRewriteFails() {
+        seedLicensedInstall()
+        let before = readString("activationRecord")
+        guard case .leftInPlace = deactivate(cached: "MID-1", write: { _ in -25299 }) else { return XCTFail() }
+        XCTAssertEqual(readString("activationRecord"), before, "the old record and its id survive")
+    }
+
+    func testDeactivateWithNothingStoredWritesNothing() {
+        var writes = 0
+        XCTAssertEqual(deactivate(cached: nil, write: { _ in writes += 1; return 0 }), .nothingStored)
+        XCTAssertEqual(writes, 0)
+    }
+
+    func testDeactivateRecreatesAMissingRecordFromTheCachedId() {
+        XCTAssertEqual(deactivate(cached: "MID-1"), .rewritten)
+        XCTAssertEqual(readRecord().record?.machineId, "MID-1")
+        XCTAssertEqual(readRecord().record?.activated, false)
+    }
+
     func testRecordRoundTripsAndToleratesUnknownFields() {
         let rec = ActivationRecord(activated: true, validated: false, email: "e", type: "beta", machineId: "m")
         XCTAssertEqual(ActivationRecord.decode(rec.encoded()!), rec)

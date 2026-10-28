@@ -198,6 +198,50 @@ public enum LicenseRecordSync {
         return out
     }
 
+    // MARK: - Deactivation
+
+    /// What `deactivate` did to the activation record.
+    public enum Deactivation: Equatable {
+        /// Rewritten unactivated: the machine id kept, the email and type cleared.
+        case rewritten
+        /// Not touched. The record (and the machine id in it) is exactly as it was.
+        case leftInPlace(reason: String)
+        /// There was no record and no machine id to keep.
+        case nothingStored
+    }
+
+    /// The record's half of a deactivation. The key is the caller's business.
+    ///
+    /// ⚠️ THIS NEVER DELETES THE RECORD. It is the only home of the machine id, and the server
+    /// still counts this machine after a deactivation, so losing the id makes the next activation
+    /// spend a second slot. An unreadable or undecodable record is left exactly as it is (adoption
+    /// rule 6: storage that exists but cannot be read is never overwritten), and so is one whose
+    /// rewrite fails. The record's id wins over `cachedMachineId`, as in `run`.
+    public static func deactivate(cachedMachineId: String?,
+                                  read: () -> RecordRead,
+                                  write: (String) -> Int32) -> Deactivation {
+        let machineId: String
+        switch read() {
+        case .failed(let status):
+            return .leftInPlace(reason: "the activation record could not be read (OSStatus \(status))")
+        case .absent:
+            guard let cached = nonEmpty(cachedMachineId) else { return .nothingStored }
+            machineId = cached
+        case .found(let record):
+            machineId = nonEmpty(record.machineId) ?? nonEmpty(cachedMachineId) ?? ""
+        }
+        let kept = ActivationRecord(activated: false, validated: false, email: "", type: "",
+                                    machineId: machineId)
+        guard let json = kept.encoded() else {
+            return .leftInPlace(reason: "the unactivated record could not be encoded")
+        }
+        let status = write(json)
+        guard status == 0 else {
+            return .leftInPlace(reason: "the unactivated record could not be written (OSStatus \(status))")
+        }
+        return .rewritten
+    }
+
     // MARK: - Helpers
 
     private static func nonEmpty(_ s: String?) -> String? {

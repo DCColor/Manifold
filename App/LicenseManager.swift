@@ -553,17 +553,21 @@ enum LicenseKeychain {
             LicenseRecordSync.run(
                 defaults: UserDefaults.standard,
                 current: current,
-                read: {
-                    switch KeychainStore.license.read(account) {
-                    case .found(let json):
-                        return ActivationRecord.decode(json).map(RecordRead.found) ?? .failed(errSecDecode)
-                    case .absent:
-                        return .absent
-                    case .failed(let status):
-                        return .failed(status)
-                    }
-                },
+                read: { readRecord(account) },
                 write: { KeychainStore.license.write($0, for: account) })
+        }
+    }
+
+    /// The activation record, three ways. An item that is there and does not decode is `.failed`
+    /// (`errSecDecode`), never `.absent`: absence would invite a caller to overwrite it.
+    static func readRecord(_ account: String) -> RecordRead {
+        switch KeychainStore.license.read(account) {
+        case .found(let json):
+            return ActivationRecord.decode(json).map(RecordRead.found) ?? .failed(errSecDecode)
+        case .absent:
+            return .absent
+        case .failed(let status):
+            return .failed(status)
         }
     }
 }
@@ -962,18 +966,18 @@ final class LicenseManager: ObservableObject {
     func deactivate() {
         // The key goes; bootstrap's key-first order then restores nothing.
         KeychainStore.license.delete(kStoredKey)
-        // ⚠️ THE RECORD IS REWRITTEN, NOT DELETED, WHEN THE MACHINE ID IS KNOWN (privacy P1). The
-        // plist used to keep the machine id across a deactivation, so re-activating reused this
-        // machine's slot (the server still counts it). With the plist gone, deleting the record
-        // would mint a new id on re-activation and spend a second slot. The record kept is
-        // unactivated and carries no email.
-        if let id = machineIdCache, !id.isEmpty,
-           let json = ActivationRecord(activated: false, validated: false, email: "", type: "",
-                                       machineId: id).encoded(),
-           KeychainStore.license.write(json, for: kActivationRecord) == errSecSuccess {
-            // kept, unactivated
-        } else {
-            KeychainStore.license.delete(kActivationRecord)
+        // ⚠️ THE RECORD IS NEVER DELETED (privacy P1, adoption rule 6). It is the only home of the
+        // machine id, and the server still counts this machine, so deleting it would make
+        // re-activation mint a new id and spend a second slot. It is rewritten unactivated, with
+        // no email; when it cannot be read or rewritten it is left exactly as it was. This used to
+        // delete it whenever the id had not been read this launch, or the rewrite failed.
+        let account = kActivationRecord
+        let outcome = LicenseRecordSync.deactivate(
+            cachedMachineId: machineIdCache,
+            read: { LicenseKeychain.readRecord(account) },
+            write: { KeychainStore.license.write($0, for: account) })
+        if case .leftInPlace(let reason) = outcome {
+            NSLog("[LICENSE] ⚠️ activation record left in place on deactivation: %@", reason)
         }
         setActivated(false)
         setValidated(false)
