@@ -200,3 +200,20 @@ Session results:
 - **The sync clip arrives with its flash ~78 ms after its beep** in OBS's own timestamps, on both profiles. Cause on
   the OBS side not established.
 - **Profiles left unchanged.** Results: `COLOR_MANAGEMENT_FINDINGS.md` §6.10, *Stage 3b S5 and Stage 6 — results*.
+
+## SRT Local 2 and MediaMTX Local: stream 8-bit chroma session, 2026-10-28 16:31–16:58 (Robbie, attended)
+
+Checked before the session against both rows (read-only: `basic.ini` without secret lines, `streamEncoder.json`, the
+service type only; both unchanged since 2026-10-09) and afterwards against OBS's log `2026-10-28 15-21-55.txt`.
+**Both match.** Neither profile was changed.
+- **SRT Local 2:** VT H.264 in hardware, `CBR`, `bitrate 6000`, `keyint 1 (s)`, `profile main`; NV12, Rec. 709/Partial,
+  24000/1001; CoreAudio AAC 320, 48 kHz.
+- **MediaMTX Local:** the same video block; its unstored bitrate came out as **CBR 6000** (flag 3, for this session);
+  FFmpeg libopus 160, stereo.
+- **New scene "Chroma 8"** in the collection "Untitled" (scenes are global; no profile touched): one Media source,
+  "Media 4", `build/stream-chroma/chroma8-1080p2997.mov` (8-bit H.264 4:2:0, 1920×1080, 29.97, 60 s, BT.709 limited,
+  tagged: SMPTE HD bars, red/blue stripes at 4 / 8 / 16-row periods, fine coloured text, a frame counter; made by
+  `build/stream-chroma/gen-clip.sh`), looping, transform reset. Played in the 23.976 canvas, so the counter skips.
+- The SRT push serves SRT readers only: MediaMTX 1.21.1 refuses a WebRTC (WHEP) reader of an AAC publish
+  (`codecs not supported by client`). WHEP tests use MediaMTX Local (Opus).
+- Results: `BUGS.md`, *FIXED for 8-bit H.264 streams (SRT, WHEP) 2026-10-28*.

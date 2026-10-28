@@ -119,13 +119,37 @@ public enum ChromaSubsampling: Int, Comparable, Sendable, CaseIterable {
 
     /// What a live decoder asks VideoToolbox for (Stage 3b S3/S4): the SPS's own chroma, in its 10-bit
     /// biplanar carrier. `x420` when there is no SPS chroma to go by (none yet, unreadable, or 4:0:0) —
-    /// which is what every live decode requested before S3, so a 4:2:0 stream (every WHEP stream) asks
-    /// for exactly what it always did. `force420` is the DEBUG switch (`MANIFOLD_FORCE_CHROMA_420`).
-    public static func liveDecodeRequest(chromaFormatIdc idc: Int?, force420: Bool) -> OSType {
+    /// which is what every live decode requested before S3. `force420` is the DEBUG switch
+    /// (`MANIFOLD_FORCE_CHROMA_420`).
+    ///
+    /// `eightBit`: the SPS says 8 bits and the stream is one this rule covers (H.264; the decoder decides). An 8-bit
+    /// 4:2:0 SPS asks for `420v` (`eightBitCarrier420`), as an 8-bit 4:2:0 file does: VideoToolbox's `x420` delivery
+    /// filters 8-bit chroma vertically by [1 6 1]/8, and so does the promote's 420v → x420 transfer (measured;
+    /// docs/BUGS.md, *8-bit H.264 / HEVC streams lose vertical chroma detail in the decode*). Forcing 4:2:0 changes
+    /// nothing for a 4:2:0 stream, as for a file.
+    public static func liveDecodeRequest(chromaFormatIdc idc: Int?, eightBit: Bool = false, force420: Bool) -> OSType {
+        if eightBit, idc == 1 { return eightBitCarrier420 }
         guard !force420, let idc, let chroma = ChromaSubsampling(chromaFormatIdc: idc) else {
             return ChromaSubsampling.c420.carrierPixelFormat
         }
         return chroma.carrierPixelFormat
+    }
+
+    /// What a live decoder asks for, in order, when the session will not start at `liveDecodeRequest`'s answer:
+    /// `420v` falls back to `x420` (what every 8-bit stream got before), then VideoToolbox's native format (nil),
+    /// which the transport's promote converts. Every other request goes straight to native, as it always did.
+    public static func liveDecodeAttempts(_ preferred: OSType) -> [OSType?] {
+        preferred == eightBitCarrier420 ? [preferred, c420.carrierPixelFormat, nil] : [preferred, nil]
+    }
+
+    /// The 8-bit fallback: the decoder asked for `420v` and handed over something else, so the picture carries
+    /// VideoToolbox's vertically filtered chroma. nil when nothing was lost. The words go in the stream's banner.
+    public static func liveEightBitFallback(requested: OSType, delivered: OSType) -> String? {
+        guard requested == eightBitCarrier420, delivered != eightBitCarrier420 else { return nil }
+        let reason = "VideoToolbox delivered \(ChromaReadout.fourCC(delivered)) instead of "
+            + "\(ChromaReadout.fourCC(requested)); decoded at x420, which softens vertical color detail"
+        return "This stream’s 8-bit color could not be decoded exactly (\(reason)). "
+            + "The picture, scopes, SDI output and frame export carry slightly softer vertical color detail."
     }
 }
 

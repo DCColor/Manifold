@@ -163,8 +163,15 @@ final class LiveVideoDecoder {
     // chroma rule). VideoToolbox's NATIVE 10-bit output for those is packed (p422 / p444), which Metal
     // cannot sample; asking for x422 / x444 costs the same and comes back directly (audit).
     // `ChromaSubsampling.liveDecodeRequest` is the rule, in the package, so its tests reach it.
+    //
+    // AN 8-BIT 4:2:0 H.264 STREAM ASKS FOR 420v, as an 8-bit 4:2:0 file has since 3c9d17a. VideoToolbox's x420
+    // delivery of an 8-bit decode filters chroma vertically by [1 6 1]/8, and so does a 420v → x420 promote; 420v is
+    // the decoder's own chroma (measured, docs/BUGS.md, *8-bit H.264 / HEVC streams lose vertical chroma detail in the
+    // decode*). The renderer samples it through its 8-bit path, exactly ×4, and both promotes pass it through. The
+    // block above is about x420 and stays true for every other stream. HEVC is not covered (unchanged, not run live).
     private var requestedPixelFormat: OSType {
         ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: spsChromaFormatIdc,
+                                            eightBit: codec == .h264 && spsEightBit,
                                             force420: MetalVideoRenderer.forceChroma420)
     }
 
@@ -209,6 +216,12 @@ final class LiveVideoDecoder {
     /// format needs a new session even when the old one would accept the format description: it
     /// would go on delivering the old format (a stream switching to 4:2:2 kept at x420). Decode queue.
     private var sessionRequestedPixelFormat: OSType = 0
+
+    /// Fires on the decode queue AT MOST ONCE per decoder, with the banner's words, when the session asked for
+    /// `420v` and a picture came out as something else (`ChromaSubsampling.liveEightBitFallback`): the stream plays
+    /// on, with VideoToolbox's vertically filtered chroma. Never silent (CLAUDE.md, the chroma rule).
+    var onEightBitFallback: ((String) -> Void)?
+    private var reportedEightBitFallback = false
 
     // MARK: - Codec
 
@@ -674,7 +687,7 @@ final class LiveVideoDecoder {
         usingHardwareDecoder = nil
         let preferred = requestedPixelFormat
         let preferredName = ChromaReadout.fourCC(preferred)
-        let chromaLabel = ChromaSubsampling(pixelFormat: preferred)?.label ?? "?"
+        let chromaLabel = ChromaSubsampling(sampledFormat: preferred)?.label ?? "?"
         let spsChroma = spsChromaFormatIdc.flatMap(ChromaSubsampling.init(chromaFormatIdc:))
         let forcedNote = MetalVideoRenderer.forceChroma420 && (spsChroma ?? .c420) > .c420
             ? " — the SPS says \(spsChroma?.label ?? "?"); \(MetalVideoRenderer.forceChroma420Reason)" : ""
@@ -704,7 +717,7 @@ final class LiveVideoDecoder {
         }
 
         var lastStatus: OSStatus = noErr
-        for requested in [preferred, nil] as [OSType?] {
+        for requested in ChromaSubsampling.liveDecodeAttempts(preferred) {
             var created: VTDecompressionSession?
             let status = VTDecompressionSessionCreate(allocator: kCFAllocatorDefault,
                                                       formatDescription: format,
@@ -747,15 +760,19 @@ final class LiveVideoDecoder {
                           [\(logTag)] WARNING: VT would not output \(preferredName) — using its native format, \
                           which the transport's promote converts. Hardware decode: \(hw).
                           """)
+                } else if let requested, requested != preferred {
+                    NSLog("[\(logTag)] WARNING: VT would not output %@ — requesting %@ instead; hardware decode: %@",
+                          preferredName, ChromaReadout.fourCC(requested), hw)
                 } else {
-                    NSLog("[\(logTag)] session created — requesting %@ output (10-bit %@)%@, hardware preferred; "
-                          + "hardware decode: %@", preferredName, chromaLabel, forcedNote, hw)
+                    NSLog("[\(logTag)] session created — requesting %@ output (%d-bit %@)%@, hardware preferred; "
+                          + "hardware decode: %@", preferredName, ChromaSubsampling.sampledBitDepth(preferred),
+                          chromaLabel, forcedNote, hw)
                 }
                 return
             }
             lastStatus = status
             NSLog("[\(logTag)] VTDecompressionSessionCreate failed (%d)%@", status,
-                  requested != nil ? " for \(preferredName) — retrying with VT's native format" : "")
+                  requested.map { " for \(ChromaReadout.fourCC($0)) — retrying" } ?? "")
         }
         reportUndecodable("VideoToolbox could not create a decoder for it (\(lastStatus))")
     }
@@ -837,6 +854,14 @@ final class LiveVideoDecoder {
         // The 8-bit flag, from the SPS this picture was decoded under. Stated both ways: VideoToolbox's
         // pool recycles buffers, and a recycled one may carry a previous stream's answer.
         SourceBitDepth.mark(pixelBuffer, eightBit: spsEightBit)
+
+        if !reportedEightBitFallback,
+           let banner = ChromaSubsampling.liveEightBitFallback(requested: sessionRequestedPixelFormat, delivered: format) {
+            reportedEightBitFallback = true
+            NSLog("[\(logTag)] 8-BIT FALLBACK — asked for 420v, VideoToolbox delivered %@; banner: %@",
+                  ChromaReadout.fourCC(format), banner)
+            onEightBitFallback?(banner)
+        }
 
         // Step 4: WHEPFrameRouter.deliver — promote → LiveClock → renderer.enqueue. Called
         // synchronously on this (decode) queue, which is the handoff contract the router

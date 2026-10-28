@@ -1485,6 +1485,7 @@ final class MetalVideoRenderer {
     /// RENDER THREAD only.
     private var playbackStatsLastNow: Double = -1
     private var playbackStats = (presented: 0, dropped: 0, late: 0, since: CFTimeInterval(0))
+    private var playbackStatsReportedFirst = false
 
     /// RENDER THREAD. Called once per selected frame.
     private func notePlaybackStats(pts: Double, dropped: Int, now: Double, prevNow: Double) {
@@ -1492,6 +1493,13 @@ final class MetalVideoRenderer {
         let step = now - prevNow
         // A seek moves the clock in one tick; a frame selected across it is not late.
         let continuous = step > 0 && step < 0.1
+        // The first picture this renderer shows, with the frames discarded unseen on the same tick: what the first
+        // line's `dropped` holds before anything was on screen (a live connect's catch-up; docs/BUGS.md).
+        if !playbackStatsReportedFirst {
+            playbackStatsReportedFirst = true
+            print(String(format: "[PLAYBACK-STATS] first picture pts=%.3f now=%.3f dropped-before-it=%d",
+                         pts, now, dropped))
+        }
         playbackStats.presented += 1
         playbackStats.dropped += dropped
         if continuous, pts <= prevNow { playbackStats.late += 1 }
@@ -3450,9 +3458,9 @@ final class MetalVideoRenderer {
         // shader's range-expansion constants are in the 10-bit domain to match (see the
         // kCodeMax block in PassthroughShader.metal). The gap is NOT negligible: the old
         // 8-bit constants left legal white ~4 codes low and put neutral chroma off zero,
-        // casting grays. The r8/rg8 branch is reached by one source: an 8-bit 4:2:0 FILE,
-        // decoded to 420v because VideoToolbox's x420 filters its chroma vertically
-        // (docs/BUGS.md). Such a buffer always takes the shader's 8-bit path (below), whose
+        // casting grays. The r8/rg8 branch is reached by an 8-bit 4:2:0 FILE and an 8-bit
+        // 4:2:0 H.264 STREAM (SRT, WHEP), decoded to 420v because VideoToolbox's x420 filters
+        // their chroma vertically (docs/BUGS.md). Such a buffer always takes the shader's 8-bit path (below), whose
         // `exactTimes4` maps an r8Unorm sample n/255 to exactly 4n in the 10-bit domain, so
         // the constants stay 10-bit.
         let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)

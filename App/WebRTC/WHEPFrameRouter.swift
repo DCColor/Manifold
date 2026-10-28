@@ -1072,14 +1072,20 @@ final class WHEPFrameRouter {
     /// only falls back to VT's native 8-bit choice if the session refuses it. When the request
     /// succeeds there is nothing to promote and the decoded buffer goes straight through, which is
     /// why this is `promoteIfNeeded` and not an unconditional conversion.
+    ///
+    /// A NO-OP for 420v too: an 8-bit 4:2:0 H.264 stream (every OBS WHIP stream) is decoded to it, and the renderer
+    /// samples it ×4 through its 8-bit path, as it does an 8-bit file's. Promoting it would put back the vertical
+    /// chroma filter the request avoids: the 420v → x420 transfer filters exactly as the decoder's x420 does
+    /// (measured, docs/BUGS.md, *8-bit H.264 / HEVC streams lose vertical chroma detail in the decode*).
     private func promoteIfNeeded(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         let sourceFormat = CVPixelBufferGetPixelFormatType(source)
         if sourceFormat == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            || sourceFormat == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange {
+            || sourceFormat == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
+            || sourceFormat == ChromaSubsampling.eightBitCarrier420 {
             if !reportedPromote {
                 reportedPromote = true
-                NSLog("[WHEP] decoded as %@ — already in the renderer's 10-bit domain, no promote needed",
-                      LiveVideoDecoder.formatName(sourceFormat))
+                NSLog("[WHEP] decoded as %@ — a format the renderer samples (%d-bit), no promote needed",
+                      LiveVideoDecoder.formatName(sourceFormat), ChromaSubsampling.sampledBitDepth(sourceFormat))
             }
             return source
         }

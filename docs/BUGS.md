@@ -281,14 +281,52 @@ held back until after release, and the numbered defect entries follow.
      export `.v210`, late = 0 dropped = 0 on all runs; scopes read the same offscreen. Playback of an 8-bit H.264
      1080p29.97 file with output on, 2 × 30 s each: CPU 19.2 % (HEAD) / 19.6 % (tree), GPU 0.091 ms a frame on both,
      late = 0 dropped = 0. 633 / 633 tests (631 + 2); the same 11 Profile warnings. Defaults restored to the snapshot.
-   - **8-bit H.264 / HEVC streams lose vertical chroma detail in the decode (found 2026-10-26; not fixed).** The same
-     filter, measured at the decoder: `LiveVideoDecoder` asks VideoToolbox for x420, and a `VTDecompressionSession`
-     with its attributes filters 8-bit chroma by [1 6 1]/8 exactly as the file routes did, exact at `420v`
-     (`build/h264-chroma/measure/step1.txt`, route `vt`). So SRT and WHEP 8-bit streams carry it; HLS (AVPlayer, x420)
-     by inference, not measured. **Not changed:** a stream fix changes the decoder request and the promote, and must be
-     run against a live non-Cloudflare server (CLAUDE.md), an OBS step that needs Robbie. Fix to decide: request
-     `420v` for an 8-bit 4:2:0 SPS (`ChromaSubsampling.liveDecodeRequest`) and measure whether the promote keeps the
-     chroma, or hand `420v` to the renderer as files do.
+   - ✅ **FIXED for 8-bit H.264 streams (SRT, WHEP) 2026-10-28, commit `<commit — to be filled in>`.** ~~**8-bit
+     H.264 / HEVC streams lose vertical chroma detail in the decode** (found 2026-10-26).~~ The same filter as files:
+     `LiveVideoDecoder` asked VideoToolbox for x420. **Measured first, offline** (`build/stream-chroma/tools/livedecode.swift`,
+     `measure/m1-vt-main-6000.txt`): an OBS-shaped stream (VT H.264 Main, 6 Mb/s, NV12, TS) through a session built as the
+     decoder builds it, 30 frames against FFmpeg ×4: x420 luma 0 after &~3, chroma max 188 / 214 codes (140 in the stripe
+     band); `420v` luma and chroma max 0, 100 %. **The promote does not keep it:** the promote's 420v → x420
+     `VTPixelTransferSession` gives exactly x420's filtered chroma, so `420v` must reach the renderer unpromoted.
+     **The fix:** `ChromaSubsampling.liveDecodeRequest(chromaFormatIdc:eightBit:force420:)` asks for `420v` when the SPS
+     is 8-bit 4:2:0 and the stream is H.264 (the decoder passes `codec == .h264 && spsEightBit`); both promotes pass `420v`
+     through (SRT by `ChromaSubsampling(sampledFormat:)`, WHEP by name), and the renderer takes it through the 8-bit path
+     files use. A session that refuses `420v` asks for x420, then native (`liveDecodeAttempts`); a picture that comes out
+     as anything but `420v` raises a banner once (`liveEightBitFallback`, the decoder's `onEightBitFallback`: SRT through
+     its chroma-fallback banner, WHEP through `lastError`) and the stream plays on. The fallback is unit-tested only: no
+     decoder here refuses `420v`. **Unchanged:** 10-bit, 4:2:2, 4:4:4 and HEVC streams (8-bit HEVC keeps x420 and the
+     filter; not run live with an 8-bit HEVC sender, so left out), HLS (AVPlayer), NDI, files.
+     **Proved** (`build/stream-chroma/`, predictions first, `predictions.md`), received frames (Help ▸ Export Frame for
+     Support) against FFmpeg's decode of the same stream recorded from MediaMTX, the frame found by exact luma:
+     | Sender, transport | tree: luma / chroma max (mean), rows ±2 | HEAD |
+     |---|---|---|
+     | OBS SRT Local 2 → MediaMTX, SRT | 0 / **1** (0.011), 1080 / 1080 | 0 / 116 (6.2), 825 / 1080 |
+     | OBS MediaMTX Local (WHIP) → MediaMTX, WHEP | 0 / **1** (0.011), 1080 / 1080 | 0 / 116 (6.2), 825 / 1080 |
+     | ffmpeg (VT H.264) → MediaMTX, SRT / WHEP | 0 / **1** (0.003 / 0.005–0.008), 1080 / 1080 | 0 / 159 (8.7), 824 / 1080 |
+     Three exports a run; offscreen `.rgba16f` within 0.32 code (HEAD 115.8). Chroma line `4:2:0 8-bit (420v) — native`
+     (SRT), `… — source chroma not stated` (WHEP, which states none, as at HEAD). 2 min each, both builds, both senders:
+     late = 0, nothing dropped after the first stats second except a sender-burst snap-to-live (next bullet). A/V,
+     `[AV-CONTENT]` beep − flash at the glass: SRT OBS −82.65 (tree) / −83.98 ms (HEAD); SRT ffmpeg −21.89 / −21.31;
+     WHEP ffmpeg +64.67 / +64.48 — within ±2 ms. WHEP with OBS moves per connection, not per build (below). Unchanged
+     streams, ffmpeg still pictures over SRT, HEAD vs tree: 10-bit H.264 and 8-bit 4:2:2 exports byte-identical; HEVC 8-
+     and 10-bit request x420 on both, and each export equals its own source picture in luma with the same chroma figures
+     (8-bit HEVC max 133, 10-bit max 1; x265 still pictures are not static, so not byte-compared). Files: the 20-file
+     control set + 9 8-bit H.264 / HEVC files, exports and paused waveform / parade / vectorscope / CIE dumps
+     byte-identical to HEAD (493 compared, 0 different). 742 / 742 tests (740 + 2); the same 14 Profile warnings (two
+     line numbers moved). Defaults restored to the snapshot.
+   - **Settled 2026-10-28: the "19 dropped in the first second after connect" (scope-perf, below) is harmless.** A DEBUG
+     `[PLAYBACK-STATS] first picture … dropped-before-it=N` line (pre-ship, with `[PLAYBACK-STATS]`) shows every one of them
+     is discarded on the tick that shows the FIRST picture, so none is ever seen missing: the start-up anchor's queue
+     catching up. With OBS as the sender over SRT through MediaMTX: 18–20; with the scope-perf ffmpeg listener: 18; ffmpeg
+     through MediaMTX: 9; WHEP: 0. Both builds. Separately, ffmpeg `-re` publishers into MediaMTX sometimes burst at start
+     (39 frames/s) and Manifold's snap-to-live flushes the overfill ~3.4 s in (`flushed 0.362s excess`, 10 frames), HEAD
+     and tree alike; OBS never did.
+   - **WHEP from OBS's WHIP via MediaMTX: the A/V offset in the stream varies per connection (found 2026-10-28; not a
+     Manifold change).** `[AV-CONTENT]` decoded beep − flash, four connections to one OBS WHIP push of the SYNC clip:
+     −82.9 / −75.3 ms (tree), −51.5 / −100.6 ms (HEAD); `[WHEP-SR]` first-pair Δ −34 / −69 ms. Manifold's own share
+     (glass − decoded) −24.3 on both HEAD runs and −24.6 / −16.2 on the tree's (that run's tick→glass 12.2 ms against
+     19.9). Not chased. Also: MediaMTX 1.21.1 refuses a WebRTC reader of an AAC publish outright (`skipping track 2
+     (MPEG-4 Audio)` → `closed: codecs not supported by client`), so WHEP tests need an Opus publisher (MediaMTX Local).
    - **I4 — on-screen display options:** Weave (default), Field 1 / Field 2, deinterlace at frame rate.
      Per window, not saved. Drawn after the scopes' tap, so scopes, SDI and export keep the original frame.
      **Built and run unattended 2026-10-27, commit `3f7daad`** (`INTERLACED_FINDINGS.md` §14). Color ▸
@@ -2854,7 +2892,8 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
     CGImage for Core Animation): HEAD 550 ms P; tree 647 P + 340 E. Same compute and publish counts in both.
   - **Paused, tray open:** unchanged, 0.3–1.0 % (HEAD 0.3–1.0 %), every rate and set. No compute, no counted body.
   - **Playback:** `late = 0`, `dropped = 0` in every `[PLAYBACK-STATS]` line of all 48 file runs. Live: every run of both
-    builds, tray off included, shows `dropped = 19` in its first second after connect (catch-up), then 0.
+    builds, tray off included, shows `dropped = 19` in its first second after connect (catch-up), then 0. **Settled 2026-10-28:** every one is discarded on the tick that shows the first picture, with
+    OBS and with ffmpeg senders: harmless (the I-series item *Settled 2026-10-28: the "19 dropped…"*).
   - **Scope pictures:** paused on the opening frame of each of the 20 control-set files (`build/interlaced-i1/control.txt`),
     the published trace image of waveform, parade, vectorscope and CIE (`MANIFOLD_SCOPE_DUMP_DIR`): **80 / 80
     byte-identical to HEAD**, none blank.

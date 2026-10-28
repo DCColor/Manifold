@@ -948,6 +948,9 @@ final class SRTFrameRouter {
         decoder.onUndecodable = { [weak self] why in self?.refuseUndecodable(why) }
         // Each new SPS's colour, on this thread, before the access unit carrying it is decoded.
         decoder.onSPSColor = { [weak self] sps in self?.noteSPSColor(sps) }
+        // An 8-bit 4:2:0 H.264 stream whose 420v request came back as something else: the banner, once, and the
+        // stream plays on (the decoder's `onEightBitFallback`). On this thread, like `stateChroma`'s banner.
+        decoder.onEightBitFallback = { [weak self] banner in self?.onChromaFallback?(banner) }
         self.decoder = decoder
         stateLock.withLock {
             statsDecoder = decoder
@@ -2501,19 +2504,22 @@ final class SRTFrameRouter {
     /// is carried to the output, and the shader takes it back to exactly ×4 (`SourceBitDepth`; §6.10,
     /// *8-bit sources mapped exactly ×4*).
     ///
-    /// A NO-OP for x420 / x422 / x444: the decoder REQUESTS the SPS's own carrier (Stage 3b S3) and only
-    /// falls back to VT's native choice if the session refuses it.
+    /// A NO-OP for x420 / x422 / x444, and for 420v (an 8-bit 4:2:0 H.264 stream): the decoder REQUESTS the
+    /// SPS's own carrier (Stage 3b S3) and only falls back to VT's native choice if the session refuses it.
     ///
     /// Before Stage 3b S3 the destination was always x420, so a High 4:2:2 stream was resampled to
     /// 4:2:0 here, silently (docs/BUGS.md). A format whose chroma `ChromaSubsampling(deliveredFormat:)`
     /// does not know still goes to x420, as it always did, and the Chroma line says the carried chroma.
     private func promoteIfNeeded(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         let sourceFormat = CVPixelBufferGetPixelFormatType(source)
-        if ChromaSubsampling(pixelFormat: sourceFormat) != nil {
+        // `420v` too: an 8-bit 4:2:0 H.264 stream is decoded to it, and the renderer samples it ×4 through its 8-bit
+        // path, as it does an 8-bit file's. Promoting it would put back the vertical chroma filter the request avoids:
+        // the 420v → x420 transfer filters exactly as the decoder's x420 does (measured, docs/BUGS.md).
+        if ChromaSubsampling(sampledFormat: sourceFormat) != nil {
             if !reportedPromote {
                 reportedPromote = true
-                NSLog("[SRT] decoded as %@ — already in the renderer's 10-bit domain, no promote needed",
-                      LiveVideoDecoder.formatName(sourceFormat))
+                NSLog("[SRT] decoded as %@ — a format the renderer samples (%d-bit), no promote needed",
+                      LiveVideoDecoder.formatName(sourceFormat), ChromaSubsampling.sampledBitDepth(sourceFormat))
             }
             return source
         }
@@ -2596,7 +2602,7 @@ final class SRTFrameRouter {
         var reason: String?
         var lost: (source: ChromaSubsampling, carried: ChromaSubsampling)?
         if case .declared(let declared) = sourceChroma,
-           let carriedChroma = ChromaSubsampling(pixelFormat: carried), carriedChroma < declared {
+           let carriedChroma = ChromaSubsampling(sampledFormat: carried), carriedChroma < declared {
             lost = (declared, carriedChroma)
             reason = MetalVideoRenderer.forceChroma420
                 ? MetalVideoRenderer.forceChroma420Reason

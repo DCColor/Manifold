@@ -113,8 +113,8 @@ final class ChromaFormatTests: XCTestCase {
 
     // MARK: - Live decode (Stage 3b S3/S4)
 
-    /// The request follows the SPS's chroma. A 4:2:0 SPS — every WHEP stream — asks for x420, exactly
-    /// what every live decode asked for before S3, so WHEP's decode is unchanged.
+    /// The request follows the SPS's chroma. A 4:2:0 SPS that is not 8-bit H.264 asks for x420, exactly
+    /// what every live decode asked for before S3 (the 8-bit case is the next test).
     func testLiveDecodeRequestFollowsTheSPS() {
         XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 1, force420: false), x420)
         XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 2, force420: false), x422)
@@ -127,6 +127,36 @@ final class ChromaFormatTests: XCTestCase {
         for idc in [1, 2, 3] {
             XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: idc, force420: true), x420)
         }
+    }
+
+    /// An 8-bit 4:2:0 H.264 stream asks for `420v`, as an 8-bit 4:2:0 file does (docs/BUGS.md, *8-bit H.264 / HEVC
+    /// streams lose vertical chroma detail in the decode*): only that one. 8-bit 4:2:2 / 4:4:4 keep their 10-bit
+    /// carrier, an unread SPS stays x420, and forcing 4:2:0 changes nothing for a 4:2:0 stream.
+    func testEightBitFourTwoZeroStreamAsksForTheEightBitCarrier() {
+        let v420 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 1, eightBit: true, force420: false), v420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 1, eightBit: true, force420: true), v420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 1, eightBit: false, force420: false), x420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 2, eightBit: true, force420: false), x422)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 3, eightBit: true, force420: false), x444)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 2, eightBit: true, force420: true), x420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: nil, eightBit: true, force420: false), x420)
+        XCTAssertEqual(ChromaSubsampling.liveDecodeRequest(chromaFormatIdc: 0, eightBit: true, force420: false), x420)
+    }
+
+    /// `420v` refused falls back to x420 (the request every 8-bit stream had before), then native; every other
+    /// request goes straight to native, as before. Only a 420v request that came back as something else is a loss.
+    func testTheEightBitRequestFallsBackToTenBitWithABanner() {
+        let v420 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        XCTAssertEqual(ChromaSubsampling.liveDecodeAttempts(v420), [v420, x420, nil])
+        for pf in [x420, x422, x444] { XCTAssertEqual(ChromaSubsampling.liveDecodeAttempts(pf), [pf, nil]) }
+        XCTAssertNil(ChromaSubsampling.liveEightBitFallback(requested: v420, delivered: v420))
+        XCTAssertNil(ChromaSubsampling.liveEightBitFallback(requested: x420, delivered: x420))
+        XCTAssertNil(ChromaSubsampling.liveEightBitFallback(requested: x422, delivered: x420))
+        XCTAssertEqual(ChromaSubsampling.liveEightBitFallback(requested: v420, delivered: x420),
+                       "This stream’s 8-bit color could not be decoded exactly (VideoToolbox delivered x420 instead "
+                       + "of 420v; decoded at x420, which softens vertical color detail). The picture, scopes, SDI "
+                       + "output and frame export carry slightly softer vertical color detail.")
     }
 
     /// The promote keeps the chroma a decoder delivered: 8-bit, packed and 16-bit formats map to their

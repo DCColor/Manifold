@@ -246,6 +246,15 @@ final class WHEPClient: ObservableObject {
         decoder.onSPSColor = { sps in
             WHEPFrameRouter.shared.noteSPSColor(sps)
         }
+        // An 8-bit 4:2:0 stream whose 420v request came back as something else (the decoder's `onEightBitFallback`):
+        // the banner, once, and the stream plays on, as SRT's chroma fallback does. Main for the published state,
+        // and only while this decoder is still the connection's.
+        decoder.onEightBitFallback = { [weak self, weak decoder] banner in
+            DispatchQueue.main.async {
+                guard let self, let decoder, self.decoder === decoder else { return }
+                self.lastError = banner
+            }
+        }
         // The decoder fires this on session.decodeQueue when it needs an IDR it does not have:
         // no format description yet, the startup keyframe gate still closed, or — the case this
         // wiring is really for — a mid-stream decode failure that just re-armed that gate
