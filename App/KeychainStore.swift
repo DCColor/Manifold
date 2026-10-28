@@ -10,6 +10,7 @@
 import Foundation
 import Security
 import StreamBookmarkModel // StreamSecretStore — privacy P2
+import LicenseRecord // LicenseItemIO — the license client port
 
 /// The outcome of a Keychain read. THREE CASES, NOT TWO, AND THAT IS THE ENTIRE POINT OF THIS TYPE.
 ///
@@ -147,6 +148,34 @@ struct KeychainStore {
     /// `LicenseManager.ActivationRecord` for why that mattered.
     static let license = KeychainStore(service: "tools.graviton.manifold.license")
 
+    /// The licence KEY and ACTIVATION RECORD (`storedLicenseKey`, `activationRecord`): `license`, except
+    /// in a DEBUG build launched with `MANIFOLD_LICENSE_HARNESS=<name>`, which redirects them to
+    /// `tools.graviton.manifold.license.harness.<name>` so the live licence tests never read or write
+    /// the real licence (Robbie, 2026-10-28, D8).
+    ///
+    /// ⚠️ THE TRIAL CLOCK IS NEVER REDIRECTED. It stays on `license`, through `TrialManager`. Profile is
+    /// the default configuration and carries `DEBUG=1`, so this redirect ships in tester builds; a
+    /// redirected trial clock would be a fresh trial for anyone who sets the variable. Redirected, a
+    /// build sees no licence and the real trial — nothing it could not see by deactivating.
+    static let licenseItems: KeychainStore = {
+        #if DEBUG
+        if let name = licenseHarnessName { return KeychainStore(service: "tools.graviton.manifold.license.harness.\(name)") }
+        #endif
+        return license
+    }()
+
+    /// True when `licenseItems` is the harness service. The preferences plist is then not consulted
+    /// either: its legacy licence values belong to the real install.
+    static var licenseItemsRedirected: Bool { licenseItems.service != license.service }
+
+    #if DEBUG
+    private static let licenseHarnessName: String? = {
+        guard let raw = ProcessInfo.processInfo.environment["MANIFOLD_LICENSE_HARNESS"] else { return nil }
+        let name = raw.filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        return name.isEmpty ? nil : name
+    }()
+    #endif
+
     /// Stream secrets: one item per saved bookmark, keyed by the bookmark's UUID. Before privacy P2
     /// the item held the SRT passphrase alone; since P2 it holds the whole secret, the URL and the
     /// passphrase (`StreamSecret`). See `StreamBookmarkStore`, which owns the write and the matching
@@ -224,13 +253,30 @@ struct KeychainStore {
 
     // MARK: - Delete
 
-    func delete(_ account: String) {
+    /// Returns the raw `OSStatus`; `errSecItemNotFound` means there was nothing to delete.
+    @discardableResult
+    func delete(_ account: String) -> OSStatus {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(query as CFDictionary)
+        return SecItemDelete(query as CFDictionary)
+    }
+
+    /// This service's items as the license client's store reaches them (`LicenseRecordStore`).
+    var itemIO: LicenseItemIO {
+        let store = self
+        return LicenseItemIO(
+            read: { account in
+                switch store.read(account) {
+                case .found(let value): return .found(value)
+                case .absent: return .absent
+                case .failed(let status): return .failed(status)
+                }
+            },
+            write: { value, account in store.write(value, for: account) },
+            delete: { account in store.delete(account) })
     }
 }
 

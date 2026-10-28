@@ -210,6 +210,10 @@ targets:
       # scratch Keychain service. Used by App/LicenseManager.swift only.
       - package: ManifoldCore
         product: LicenseRecord
+      # The Graviton license client, ported from Graviton-Releases shared/license.js — a leaf target
+      # so `swift test` runs the port of tests/license.test.js. Used by App/LicenseManager.swift.
+      - package: ManifoldCore
+        product: LicenseClient
       # ── VENDORED libav, EMBEDDED AS SHARED LIBRARIES (ThirdParty/ffmpeg) ──────────────────
       #
       # ⚠️ THESE ENTRIES EXIST FOR A LICENCE REASON, NOT A TECHNICAL ONE. Manifold links FFmpeg,

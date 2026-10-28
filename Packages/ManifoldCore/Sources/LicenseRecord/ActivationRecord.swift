@@ -14,6 +14,10 @@ import Foundation
 /// the licensee's email and licence type for display, and the machine id the server's machine
 /// limit counts.
 ///
+/// ⚠️ SINCE THE LICENSE CLIENT PORT THIS IS THE RECORD'S OLD SHAPE, NOT ITS WHOLE CONTENT. The record
+/// as written holds the client's fields too (`LicenseRecordStore`); these five, and `v`, are the ones
+/// 0.8.4 decodes, mirrored on every write. Nothing in the app reads the record through this type.
+///
 /// ⚠️ THE KEY REMAINS THE AUTHORITY, NOT THIS RECORD. This record is unsigned — it is our own
 /// bookkeeping, and anyone who can write it can write `activated: true`. It is trusted for
 /// `machineId` and for display fields only. Whether the user is LICENSED is decided by

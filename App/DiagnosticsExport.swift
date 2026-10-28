@@ -57,7 +57,6 @@
 import AppKit
 import Combine
 import Foundation
-import CryptoKit
 import ManifoldCore   // ManifoldCoreBuild — the package reporting its OWN telemetry state
 import PrivacyRedaction // DiagnosticsRedaction — the scrub, moved to the package in privacy P1
 import LicenseRecord    // LicenseRecordSync — the legacy plist keys, reported by presence only
@@ -609,12 +608,12 @@ enum DiagnosticsRedactor {
 /// conditions that look identical from the outside — genuinely unlicensed, on an expired trial,
 /// and licensed-but-unreadable — were indistinguishable to us as well as to them.
 ///
-/// ⚠️ WHAT IS DELIBERATELY NOT HERE: the licence key, and the email in full. `DiagnosticsRedactor`
-/// has no rule for either — it matches credentials by their surrounding syntax (`passphrase=`,
-/// `Bearer …`) and an `MNFL-…` key on a line of its own would sail straight through. So the key
-/// is reduced to a SHA-256 prefix, which is enough to tell two testers' keys apart and to confirm
-/// the same key across two of one tester's reports, and cannot be activated with. The email is
-/// masked to its first character and domain, which is enough to match against a support thread.
+/// ⚠️ WHAT IS DELIBERATELY NOT HERE: the licence key, the email and the machine ID, in ANY form —
+/// PRESENCE ONLY (Robbie, 2026-10-28, D6; Graviton: never log the key, email or machine ID).
+/// `DiagnosticsRedactor` has no rule for any of them — it matches credentials by their surrounding
+/// syntax (`passphrase=`, `Bearer …`) and an `MNFL-…` key on a line of its own would sail straight
+/// through. Earlier versions wrote a masked email (first character and domain) and a SHA-256 prefix
+/// of the key; both are gone.
 enum LicenseContext {
     @MainActor
     static func lines() -> [String] {
@@ -624,7 +623,8 @@ enum LicenseContext {
         out.append("  activated flag : \(mgr.licenseActivated)")
         out.append("  validated flag : \(mgr.licenseValidated)")
         out.append("  type           : \(mgr.licenseType.display)")
-        out.append("  account        : \(mask(mgr.email))")
+        out.append("  pending flag   : \(mgr.pending)")
+        out.append("  account email  : \(mgr.email.isEmpty ? "absent" : "present")")
         out.append("  trial          : active=\(mgr.trial.active) remaining=\(mgr.trial.daysRemaining)d "
                  + "expired=\(mgr.trial.expired) unreadable=\(mgr.trial.unreadable)")
 
@@ -659,32 +659,19 @@ enum LicenseContext {
         return out
     }
 
-    /// Presence without disclosure. For the key account it also carries a short fingerprint so two
-    /// reports can be compared; the fingerprint is a hash prefix and is not reversible.
+    /// Presence without disclosure: absent, present, or refused. Never the value, never a hash of it.
+    /// The key and the record are read where the licence keeps them (`licenseItems`); the trial
+    /// clock is always on the real service.
     private static func presence(_ account: String) -> String {
-        switch KeychainStore.license.read(account) {
+        let store = account.hasPrefix("trial.") ? KeychainStore.license : KeychainStore.licenseItems
+        switch store.read(account) {
         case .absent:
             return "absent"
         case .failed(let status):
             return "REFUSED (\(keychainStatusDescription(status)))"
-        case .found(let value):
-            guard account == "storedLicenseKey" else { return "present" }
-            return "present (fingerprint \(fingerprint(value)))"
+        case .found:
+            return "present"
         }
-    }
-
-    private static func fingerprint(_ s: String) -> String {
-        let digest = SHA256.hash(data: Data(s.utf8))
-        return digest.compactMap { String(format: "%02x", $0) }.joined().prefix(12).description
-    }
-
-    /// `robbie@dccolor.com` -> `r***@dccolor.com`. Enough to match a support thread, not enough to
-    /// be the address itself.
-    private static func mask(_ email: String) -> String {
-        guard !email.isEmpty else { return "(none)" }
-        let parts = email.split(separator: "@", maxSplits: 1)
-        guard parts.count == 2, let first = parts[0].first else { return "(masked)" }
-        return "\(first)***@\(parts[1])"
     }
 }
 

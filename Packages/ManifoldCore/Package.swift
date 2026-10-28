@@ -59,7 +59,10 @@ let package = Package(
         .library(name: "PrivacyRedaction", targets: ["PrivacyRedaction"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
         // one-way move of the licence email and machine id out of the preferences plist (privacy P1).
-        .library(name: "LicenseRecord", targets: ["LicenseRecord"])
+        .library(name: "LicenseRecord", targets: ["LicenseRecord"]),
+        // Linked by the APP target directly (project.yml): the Graviton license client, ported from
+        // Graviton-Releases shared/license.js (Ed25519 keys, /activate and /validate, the hardware ID).
+        .library(name: "LicenseClient", targets: ["LicenseClient"])
     ],
     targets: [
         // Clang module exposing the vendored static libav headers to Swift. Only
@@ -533,8 +536,28 @@ let package = Package(
         // `license.machineId` out of the preferences plist (docs/PRIVACY_AUDIT.md, stage P1). Foundation
         // only. The tests run the migration against a SCRATCH Keychain service and a SCRATCH defaults
         // suite — never the real licence items.
+        // The Graviton license client: a port of Graviton-Releases shared/license.js, which the
+        // Electron apps share and Manifold cannot `require`. Foundation, CryptoKit and IOKit only, and
+        // NO LOGGING CALL anywhere in it (a test scans the sources). The tests are the port of
+        // Graviton-Releases tests/license.test.js, with a scripted transport and a generated keypair.
+        .target(
+            name: "LicenseClient",
+            path: "Sources/LicenseClient",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "LicenseClientTests",
+            dependencies: ["LicenseClient"],
+            path: "Tests/LicenseClientTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .target(
             name: "LicenseRecord",
+            dependencies: ["LicenseClient"],
             path: "Sources/LicenseRecord",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
@@ -542,7 +565,7 @@ let package = Package(
         ),
         .testTarget(
             name: "LicenseRecordTests",
-            dependencies: ["LicenseRecord"],
+            dependencies: ["LicenseRecord", "LicenseClient"],
             path: "Tests/LicenseRecordTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)

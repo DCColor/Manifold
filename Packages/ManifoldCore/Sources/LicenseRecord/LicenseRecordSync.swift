@@ -1,23 +1,22 @@
 //
 //  LicenseRecordSync.swift
-//  LicenseRecord — bring the Keychain activation record up to date, then (and only then) remove
-//  the licence email and machine id from the preferences plist.
+//  LicenseRecord — move the licence email and machine id out of the preferences plist, into the
+//  Keychain activation record, and only then remove them from the plist.
 //
-//  Privacy stage P1 (docs/PRIVACY_AUDIT.md). The rules, in the order they bind:
+//  Privacy stage P1 (docs/PRIVACY_AUDIT.md). Since the license client port it does only that move:
+//  the record is the client's storage (`LicenseRecordStore`), every write goes through its merge,
+//  and nothing here mints a machine id — the client derives one from the hardware, once, when an
+//  install that never had one activates (Graviton adoption: apps stop minting). The rules:
 //
-//   1. A LICENSED USER MUST NEVER BE DE-ACTIVATED BY THIS. Nothing here touches the stored key,
-//      `license.activated`, `license.validated` or `license.type`, and nothing here deletes a
-//      Keychain item. Licensing is decided by the signed key every launch; this only moves two
-//      display/bookkeeping values from one store to another.
+//   1. A LICENSED USER MUST NEVER BE DE-ACTIVATED BY THIS. It writes only the record's `machineId`
+//      and `email` (or the client's `licenseMachineId`), never the key or any licence state.
 //   2. A plist value is removed ONLY after the record has been READ BACK from the Keychain and
 //      holds the same value. Written-successfully is not enough; read-back-and-equal is.
 //   3. If the Keychain read fails, the plist is left exactly as it is, and the outcome says so.
 //
-//  Synchronous on purpose: the app runs it on its dedicated Keychain queue (`LicenseKeychain`),
-//  where blocking on `securityd` harms nobody, and the tests run it inline.
-//
 
 import Foundation
+import LicenseClient
 
 /// The two things the migration does to the preferences plist: read a string, remove a key.
 /// `UserDefaults` is the real one; the tests use an in-memory store, because a scratch
@@ -32,48 +31,19 @@ extension UserDefaults: LegacyLicenseStore {}
 
 public enum LicenseRecordSync {
 
-    /// The two plist keys this stage retires. Read by the migration, removed by the migration,
-    /// and written by nothing.
+    /// The two plist keys P1 retires. Read by the migration and the store, removed by the
+    /// migration, written by nothing.
     public static let legacyEmailKey = "license.email"
     public static let legacyMachineIdKey = "license.machineId"
 
     /// What a run did. `log` lines carry NO email and NO machine id — they say what happened to
     /// which key and why, which is all a diagnostics export needs.
     public struct Outcome: Equatable {
-        /// The machine id to use from now on: the record's, else the legacy plist value, else
-        /// nil (the caller mints one when it needs one). Never minted here unless `licensed`.
-        public var machineId: String?
-        /// The record as read back after any write — the display source for the email.
-        public var record: ActivationRecord?
         public var removedKeys: [String] = []
         public var keptKeys: [String] = []
         public var log: [String] = []
         /// True when a Keychain read or write failed. Nothing was removed.
         public var keychainFailed = false
-    }
-
-    /// What the licence manager knows when it calls this.
-    public struct Current {
-        /// The stored key verified this launch (or activation just succeeded).
-        public var licensed: Bool
-        public var validated: Bool
-        /// From the verified key's payload. Ignored unless `licensed`.
-        public var email: String
-        public var type: String
-        /// Activation is about to send the machine id to the server: make sure there IS one, and
-        /// that it is in the Keychain BEFORE the request goes out. If the server registers this
-        /// machine and the reply is lost, the retry must present the same id, or it spends a
-        /// second machine slot. (The plist used to do this job, by accident, from first access.)
-        public var reserveMachineId: Bool
-
-        public init(licensed: Bool, validated: Bool = false, email: String = "", type: String = "",
-                    reserveMachineId: Bool = false) {
-            self.licensed = licensed
-            self.validated = validated
-            self.email = email
-            self.type = type
-            self.reserveMachineId = reserveMachineId
-        }
     }
 
     /// Reads the legacy plist values. Empty strings count as present: they are still keys in the
@@ -82,99 +52,69 @@ public enum LicenseRecordSync {
         (defaults.string(forKey: legacyEmailKey), defaults.string(forKey: legacyMachineIdKey))
     }
 
-    /// One pass. `read` and `write` reach the `activationRecord` account of the licence Keychain
-    /// service; `write` returns an OSStatus (0 = errSecSuccess). `mint` makes a new machine id,
-    /// used only for a licensed install that has none anywhere (what the app always did).
-    public static func run(defaults: LegacyLicenseStore,
-                           current: Current,
-                           read: () -> RecordRead,
-                           write: (String) -> Int32,
-                           mint: () -> String = { UUID().uuidString }) -> Outcome {
+    /// One pass. Makes no Keychain round trip when the plist holds neither key.
+    public static func run(defaults: LegacyLicenseStore, store: LicenseRecordStore) -> Outcome {
         var out = Outcome()
         let legacy = legacyValues(in: defaults)
-        let legacyPresent = legacy.email != nil || legacy.machineId != nil
+        guard legacy.email != nil || legacy.machineId != nil else { return out }
 
-        // Nothing to move and nothing to keep current: an unlicensed install with a clean plist
-        // makes no Keychain round trip at all, as before.
-        guard current.licensed || current.reserveMachineId || legacyPresent else { return out }
-
-        // ── 1. Read what is there. ──
-        let existingRead = read()
-        if case .failed(let status) = existingRead {
-            out.keychainFailed = true
-            out.machineId = nonEmpty(legacy.machineId)
-            out.keptKeys = presentKeys(legacy)
-            out.log.append("activation record unreadable (OSStatus \(status)) — "
-                           + keptLine(out.keptKeys, reason: "the Keychain could not be read"))
-            return out
+        // ── 1. Read the record as stored. ──
+        let existing: LicenseFields
+        do {
+            existing = try store.readRecordFields() ?? [:]
+        } catch let error as LicenseStoreError {
+            return kept(out, legacy, "activation record unreadable (OSStatus \(error.status))",
+                        reason: "the Keychain could not be read")
+        } catch {
+            return kept(out, legacy, "activation record unreadable", reason: "the Keychain could not be read")
         }
-        let existing = existingRead.record
 
-        // ── 2. The machine id: the record wins, then the legacy plist value. ──
-        var machineId = nonEmpty(existing?.machineId) ?? nonEmpty(legacy.machineId)
-        if machineId == nil && (current.licensed || current.reserveMachineId) { machineId = mint() }
-        out.machineId = machineId
-        if let recordId = nonEmpty(existing?.machineId), let plistId = nonEmpty(legacy.machineId),
-           recordId != plistId {
+        // ── 2. Carry each value the record lacks. The record's id wins over the plist's. ──
+        var patch: LicenseFields = [:]
+        let recordId = LicenseRecordStore.nonEmpty(existing["licenseMachineId"])
+            ?? LicenseRecordStore.nonEmpty(existing["machineId"])
+        if recordId == nil, let id = legacy.machineId, !id.isEmpty {
+            patch["licenseMachineId"] = .string(id)
+        } else if let recordId, let id = legacy.machineId, !id.isEmpty, id != recordId {
             out.log.append("the Keychain record and the preferences plist hold DIFFERENT machine ids — "
                            + "the Keychain's is used")
         }
-
-        // ── 3. What the record should say. ──
-        let desired: ActivationRecord?
-        if current.licensed {
-            desired = ActivationRecord(activated: true, validated: current.validated,
-                                       email: current.email, type: current.type,
-                                       machineId: machineId ?? "")
-        } else if existing == nil || nonEmpty(existing?.machineId) == nil {
-            // Not licensed, and no usable record: carry the legacy values into one, unactivated,
-            // so the machine id outlives the plist key and a later activation reuses its slot.
-            desired = ActivationRecord(activated: false, validated: false,
-                                       email: existing?.email ?? legacy.email ?? "",
-                                       type: existing?.type ?? "",
-                                       machineId: machineId ?? "")
-        } else {
-            desired = nil   // not licensed, record already holds a machine id: leave it alone
+        let recordEmail = LicenseRecordStore.nonEmpty(existing["licenseEmail"])
+            ?? LicenseRecordStore.nonEmpty(existing["email"])
+        if recordEmail == nil, existing["licenseEmail"] == nil, let email = legacy.email, !email.isEmpty {
+            patch["email"] = .string(email)
         }
 
-        // ── 4. Write if it differs. ──
-        if let desired, !(existing.map { $0.sameStoredFacts(as: desired) } ?? false) {
-            guard let json = desired.encoded() else {
-                out.keychainFailed = true
+        if !patch.isEmpty {
+            do {
+                try store.writeSync(patch)
+            } catch let error as LicenseStoreError {
+                return kept(out, legacy, "activation record write failed (OSStatus \(error.status))",
+                            reason: "nothing was written")
+            } catch {
+                return kept(out, legacy, "activation record write failed", reason: "nothing was written")
+            }
+            out.log.append("activation record \(existing.isEmpty ? "created" : "updated") in the Keychain")
+        }
+
+        // ── 3. Read it BACK. Only what is read back may justify removing a plist value. ──
+        let back: LicenseFields
+        do {
+            guard let fields = try store.readRecordFields() else {
                 out.keptKeys = presentKeys(legacy)
-                out.log.append("could not encode the activation record — "
-                               + keptLine(out.keptKeys, reason: "nothing was written"))
+                out.log.append(keptLine(out.keptKeys, reason: "the read-back found no record"))
                 return out
             }
-            let status = write(json)
-            guard status == 0 else {
-                out.keychainFailed = true
-                out.keptKeys = presentKeys(legacy)
-                out.log.append("activation record write failed (OSStatus \(status)) — "
-                               + keptLine(out.keptKeys, reason: "nothing was written"))
-                return out
-            }
-            out.log.append("activation record \(existing == nil ? "created" : "updated") in the Keychain")
+            back = fields
+        } catch let error as LicenseStoreError {
+            return kept(out, legacy, nil, reason: "the read-back failed (OSStatus \(error.status))")
+        } catch {
+            return kept(out, legacy, nil, reason: "the read-back failed")
         }
 
-        // ── 5. Read it BACK. Only what is read back may justify removing a plist value. ──
-        let back = read()
-        guard case .found(let record) = back else {
-            out.keychainFailed = { if case .failed = back { return true }; return false }()
-            out.keptKeys = presentKeys(legacy)
-            if legacyPresent {
-                let why: String
-                if case .failed(let s) = back { why = "the read-back failed (OSStatus \(s))" }
-                else { why = "the read-back found no record" }
-                out.log.append(keptLine(out.keptKeys, reason: why))
-            }
-            return out
-        }
-        out.record = record
-
-        // ── 6. Remove each plist value the record now holds. ──
+        // ── 4. Remove each plist value the record now holds. ──
         if let email = legacy.email {
-            if email.isEmpty || email == record.email {
+            if email.isEmpty || email == back["email"]?.stringValue || email == back["licenseEmail"]?.stringValue {
                 defaults.removeObject(forKey: legacyEmailKey)
                 out.removedKeys.append(legacyEmailKey)
             } else {
@@ -183,7 +123,7 @@ public enum LicenseRecordSync {
             }
         }
         if let id = legacy.machineId {
-            if id.isEmpty || id == record.machineId {
+            if id.isEmpty || id == back["machineId"]?.stringValue || id == back["licenseMachineId"]?.stringValue {
                 defaults.removeObject(forKey: legacyMachineIdKey)
                 out.removedKeys.append(legacyMachineIdKey)
             } else {
@@ -198,55 +138,16 @@ public enum LicenseRecordSync {
         return out
     }
 
-    // MARK: - Deactivation
-
-    /// What `deactivate` did to the activation record.
-    public enum Deactivation: Equatable {
-        /// Rewritten unactivated: the machine id kept, the email and type cleared.
-        case rewritten
-        /// Not touched. The record (and the machine id in it) is exactly as it was.
-        case leftInPlace(reason: String)
-        /// There was no record and no machine id to keep.
-        case nothingStored
-    }
-
-    /// The record's half of a deactivation. The key is the caller's business.
-    ///
-    /// ⚠️ THIS NEVER DELETES THE RECORD. It is the only home of the machine id, and the server
-    /// still counts this machine after a deactivation, so losing the id makes the next activation
-    /// spend a second slot. An unreadable or undecodable record is left exactly as it is (adoption
-    /// rule 6: storage that exists but cannot be read is never overwritten), and so is one whose
-    /// rewrite fails. The record's id wins over `cachedMachineId`, as in `run`.
-    public static func deactivate(cachedMachineId: String?,
-                                  read: () -> RecordRead,
-                                  write: (String) -> Int32) -> Deactivation {
-        let machineId: String
-        switch read() {
-        case .failed(let status):
-            return .leftInPlace(reason: "the activation record could not be read (OSStatus \(status))")
-        case .absent:
-            guard let cached = nonEmpty(cachedMachineId) else { return .nothingStored }
-            machineId = cached
-        case .found(let record):
-            machineId = nonEmpty(record.machineId) ?? nonEmpty(cachedMachineId) ?? ""
-        }
-        let kept = ActivationRecord(activated: false, validated: false, email: "", type: "",
-                                    machineId: machineId)
-        guard let json = kept.encoded() else {
-            return .leftInPlace(reason: "the unactivated record could not be encoded")
-        }
-        let status = write(json)
-        guard status == 0 else {
-            return .leftInPlace(reason: "the unactivated record could not be written (OSStatus \(status))")
-        }
-        return .rewritten
-    }
-
     // MARK: - Helpers
 
-    private static func nonEmpty(_ s: String?) -> String? {
-        guard let s, !s.isEmpty else { return nil }
-        return s
+    private static func kept(_ base: Outcome, _ legacy: (email: String?, machineId: String?),
+                             _ what: String?, reason: String) -> Outcome {
+        var out = base
+        out.keychainFailed = true
+        out.keptKeys = presentKeys(legacy)
+        let line = keptLine(out.keptKeys, reason: reason)
+        out.log.append(what.map { "\($0) — \(line)" } ?? line)
+        return out
     }
 
     private static func presentKeys(_ legacy: (email: String?, machineId: String?)) -> [String] {

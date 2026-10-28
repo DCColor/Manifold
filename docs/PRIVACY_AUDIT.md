@@ -105,9 +105,9 @@ entitlement is `com.apple.security.cs.disable-library-validation` (`App/Manifold
 
 | Key | Holds | Status |
 |---|---|---|
-| `license.email` | The licensee's full email (`LicenseManager.swift:606`) | **P1**: no longer written; removed once the Keychain record reads back equal |
-| `license.machineId` | Random UUID sent to the licence server (`:610`, `:661`) | **P1**: as above |
-| `license.activated`, `license.validated`, `license.type` | Licence state flags and type | unchanged |
+| `license.email` | The licensee's full email (0.8.4 `LicenseManager.swift:783`) | **P1**: no longer written; removed once the Keychain record reads back equal (`LicenseRecordSync.swift`) |
+| `license.machineId` | Random UUID sent to the licence server (0.8.4 `:610`, `:660-661`) | **P1**: as above |
+| `license.activated`, `license.validated`, `license.type` | Licence state flags and type | **License client port**: no longer written or read; left in place (0.8.4 does not need them) |
 | `streamBookmarks` | Saved streams: `id`, `name`, `type`, `audioOffsetMs`, `colorOverride`, and since P2 `address` (`scheme://host[:port]`) and `secretRef` (the Keychain account), with `urlString` empty (`StreamBookmark.swift`). Before P2 `urlString` held the whole URL but the passphrase, and a WHEP/HLS path or SRT `streamid` can be the stream key | **P2**: the URL and passphrase are in the Keychain; existing entries move at launch, each only after its item reads back equal |
 | `recentLUTs` | Up to 10 entries: absolute `.cube` path, plain bookmark, output space (`InterpretationLUT.swift:286`, `:300`) | unchanged |
 | `exportFolderBookmark` | Security-scoped bookmark to the chosen export folder (`Preferences.swift:195`, `:204`) | unchanged |
@@ -121,10 +121,13 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   synchronizable, so nothing goes to iCloud.
 - **Service `tools.graviton.manifold.license`:**
   - `storedLicenseKey`: the signed `MNFL-…` key.
-  - `activationRecord`: JSON `{activated, validated, email, type, machineId, v}`. **P1:** this is the
-    only home of the email and the machine id. Activation reserves the machine id here before
-    calling the server; deactivation keeps an unactivated record (machine id, no email) so that
-    re-activating reuses the machine slot.
+  - `activationRecord`: JSON. **P1:** the only home of the email and the machine id. **Since the
+    license client port** it holds every field the client writes (`licenseActivated`,
+    `licenseMachineId`, `licenseMachineIdSource`, `licenseLastValidatedAt`, the pending fields, …)
+    beside the five 0.8.4 reads (`activated, validated, email, type, machineId`, and `v`, now 2),
+    which mirror them (`LicenseRecordStore.swift`). The machine id is written before every
+    activation request and never cleared; deactivation clears the email and type and keeps the id,
+    so re-activating reuses the machine slot. A record that cannot be read is never overwritten.
   - `trial.firstLaunch`, `trial.lastSeen`, `trial.voided`: these deliberately outlive the app
     (`LicenseManager.swift:84-85`).
 - **Service `tools.graviton.manifold.streams`:** one item per bookmark UUID. **P2:** the item holds
@@ -216,8 +219,8 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 | Request | Endpoint | Details | When |
 |---|---|---|---|
 | Update check | GET `https://releases.graviton.tools/manifold/manifest` | No body | Every launch, and from the menu. No opt-out (`UpdateChecker.swift:17`) |
-| Activate | POST `https://license.graviton.tools/manifold/activate` | `{"key","machineId"}`, 12 s timeout | When a key is entered |
-| Validate | POST `…/manifold/validate` | Same | **Every launch** with a verified key (**later**, item 7) |
+| Activate | POST `https://license.graviton.tools/manifold/activate` | `{"key","machineId","version","platform":"darwin"}`, 15 s | When a key is entered; **every launch** while an offline activation is pending |
+| Validate | POST `…/manifold/validate` | `{"key","version"}`, 8 s | At most every 7 days from the last success; every launch while locked |
 
 - Every request carries the default User-Agent (app, build, CFNetwork and Darwin versions) and the
   user's IP address.
@@ -277,16 +280,24 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 
 ---
 
-## 8. Licensing compared with the shared client (item 7, later)
+## 8. Licensing compared with the shared client (item 7)
 
-| Rule | Shared client | Manifold |
+**Done: Manifold runs a port of the shared client** (`Packages/ManifoldCore/Sources/LicenseClient`,
+2026-10-28), so every rule below is the shared client's. Its tests are the port of
+Graviton-Releases `tests/license.test.js`. The column on the right is what 0.8.4 did, and what
+installed copies do until they update.
+
+| Rule | Shared client (Manifold since the port) | 0.8.4 |
 |---|---|---|
 | Validation interval | At most every 7 days from the last success | Every launch |
 | No offline lockout | Yes | Yes |
-| Lock only on `revoked` | Yes | `revoked` or `invalid_key` (`LicenseManager.swift:1018`); revocation is not persisted |
+| Lock only on `revoked` (and a signed expiry, offline) | Yes; persisted; offline while locked stays locked | `revoked` or `invalid_key`; not persisted (the next launch reset it from the signature); signed expiry never checked |
 | Offline activation | Pending, retried every launch, locks on `max_machines` | Rejected; no pending state |
-| Deactivation local only | Yes | Yes (P1: it keeps the machine id in an unactivated record) |
-| Machine id | SHA-256 of the hardware UUID, 32 hex | Random UUID — Keychain-only since P1 |
+| Deactivation local only | Yes; keeps the machine id | Yes; deleted the record (and, in P1 builds before the D7 fix, could delete it when the id had not been read) |
+| Machine id | Existing installs keep their stored UUID; new installs SHA-256 of IOPlatformUUID, 32 hex | Random UUID |
+| Request bodies | `version` on both; `platform: darwin` on activate; no machine id on validate | `{key, machineId}` on both |
+| Messages | The shared client's, with the worker's real machine counts | Own wording; "maximum of 4" hardcoded |
+| Diagnostics | Presence only for key, email and record | Masked email and a key fingerprint |
 
 ---
 

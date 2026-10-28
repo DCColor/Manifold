@@ -85,6 +85,11 @@ bullet.
 - Your license email and machine ID are kept only in the macOS Keychain, no longer in Manifold's preferences file. They move there by themselves the first time this version opens.
 - Saved streams are now kept in the macOS Keychain in full: the address, with any stream key or token in it, and the passphrase. Manifold's preferences file keeps only each stream's name and server. Your saved streams move there by themselves the first time this version opens.
 - When you edit a saved stream, its address stays hidden unless you click Show saved URL. Leave the field blank to keep the saved address.
+- Licensing now works exactly as it does in every other Graviton app. Manifold checks your license with the license server at most once a week instead of at every launch, and never locks you out for being offline.
+- You can activate without an internet connection. Manifold works straight away and finishes registering your Mac the next time it can reach the license server.
+- A new activation identifies your Mac by its hardware, so reinstalling Manifold or macOS doesn't use up another of your license's activations. Macs already activated keep the activation they have.
+- Activation messages say how many of your license's activations are in use, and a license that can no longer be used says so instead of showing the trial screen.
+- Diagnostics reports no longer include any part of your license email or license key.
 - Manifold no longer saves its license, update-check and stream-connection requests in a disk cache, and removes the cache earlier versions left behind.
 - NDI only starts looking for sources on your network when you open the NDI source list or connect to a source, not when Manifold opens.
 - The display chain readout marks a color override, and a LUT that is on, in the same amber as the Color control.
