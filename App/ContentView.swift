@@ -921,7 +921,7 @@ struct ContentView: View {
         // Calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.10), opened from the A/V menu. A host
         // view with its own sheet, so this body does not grow (it is at the type-checker's limit).
         .background(CalibrationSheetHost(model: deck.calibration, offset: deck.audioOffset))
-        // Manifold ▸ Export Diagnostics…. Hosted here because the menu command lives in the App
+        // Help ▸ Export Diagnostics…. Hosted here because the menu command lives in the App
         // scene, which has no window to present on; the exporter singleton is the seam between them.
         .sheet(isPresented: $diagnostics.isPresenting) {
             DiagnosticsPromptSheet()

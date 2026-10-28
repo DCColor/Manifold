@@ -266,9 +266,6 @@ struct ManifoldApp: App {
                         NSWorkspace.shared.open(ProVideoWorkflow.downloadURL)
                     }
                 }
-                // In the app menu and NOT behind a debug gate: the people who need it are the
-                // testers, and they are on whichever configuration we shipped them.
-                Button("Export Diagnostics…") { DiagnosticsExporter.shared.begin() }
             }
             // Help ▸ Download Sync Clips… — the free sync clips for calibration mode
             // (docs/AUDIO_RESAMPLER_DESIGN.md §19.10). Opens the one download link in the browser;
@@ -277,8 +274,13 @@ struct ManifoldApp: App {
             CommandGroup(after: .help) {
                 Button("Keyboard Shortcuts…") { openWindow(id: KeyboardShortcutsScene.windowID) }
                 Button("Download Sync Clips…") { SyncClipLibrary.openDownload() }
-                // The frame's diagnostic set, for support (Robbie, 2026-10-24). Not gated: it ships, and the release
-                // gate's debug switch must not hide it. Never part of Export Diagnostics (`exportFrameForSupport`).
+                // The two support exports, together under one separator (Robbie, 2026-10-28; Export Diagnostics… was
+                // the app menu's last item until then). `MenuKeyAudit.supportGroup` holds them to this order. Neither
+                // is gated: the people who need them are the testers, on whichever configuration we shipped them, and
+                // the release gate's debug switch must not hide them.
+                Divider()
+                Button("Export Diagnostics…") { DiagnosticsExporter.shared.begin() }
+                // The frame's diagnostic set (Robbie, 2026-10-24). Never part of Export Diagnostics (`exportFrameForSupport`).
                 ShortcutMenuItem(id: .exportFrameForSupport, registry: shortcuts)
             }
             // ⌘O, in the File menu directly under New Window (`.newItem` is that group), where a

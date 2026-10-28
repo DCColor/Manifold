@@ -303,6 +303,7 @@ reached it, and no window had opened. The probe now logs the app's appearance at
    turn light. Is the stream sheet right dark (decision 6)?
 4. Keyboard Shortcuts, one shortcut changed: the dot is the highlight colour, its tooltip and the legend read as above. In
    light, a yellow dot on white is faint (about 1.3:1): say if it should use the darker text variant there.
+   **Decided 2026-10-28 (Robbie): yes.** The dot is `Color.appYellowText` (BUGS.md, *Small fixes*).
 
 **Decisions.** 6. The stream sheet (and the other sheets on the player window: Export Diagnostics, Get Flip) are dark with
 the window. 7. ⌥⌘S is the Finder's sidebar key; Manifold keeps it for Scopes by overriding SwiftUI's hidden item. Moving

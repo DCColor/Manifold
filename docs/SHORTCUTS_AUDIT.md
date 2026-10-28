@@ -44,7 +44,7 @@ exist. Their exact key equivalents on this build were not read off a running app
 | ⌘4 | View ▸ 25% | `RasterSize.swift:122` | key window | no |
 | ⌘0 | View ▸ Fit to Screen | `RasterSize.swift:123` | key window | no |
 | none | Color ▸ As macOS Shows It / Reference (BT.1886) / Bypass | `DisplayTransform.swift:190-197`, titles `:80-82` | key window | no |
-| none | About, Check for Updates…, License…, Install NDI Runtime…, Download Pro Video Formats…, Export Diagnostics…, Help ▸ Download Sync Clips… | `ManifoldApp.swift:166-233` | app | no |
+| none | About, Check for Updates…, License…, Install NDI Runtime…, Download Pro Video Formats…, Export Diagnostics…, Help ▸ Download Sync Clips… (Export Diagnostics… moved to Help after this audit, 2026-10-28: Help ▸ Export Diagnostics…, grouped with Export Frame for Support… under one separator; still no registry entry and no key, held there by `MenuKeyAudit.supportGroup`) | `ManifoldApp.swift:166-233` | app | no |
 | ⌃⌥A | Debug ▸ NDI Audio Tone Test (cycles off / 0 dBFS / −6 dBFS) | `ManifoldApp.swift:410` | app | yes: `#if DEBUG` **and** `DebugMenuGate` (`:288`, gate `:341-375`) |
 | ⌃⌥⇧B | Debug ▸ Chroma Scrub Bench | `ManifoldApp.swift:433` | key deck | yes, same gate |
 | none | Debug ▸ Renderer Input, Desktop Audio Lead, Resampler Ratio, Force Video Jump (×2), Record NDI Audio to WAV | `ManifoldApp.swift:473-546` | app | yes, same gate |

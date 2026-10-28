@@ -447,7 +447,7 @@ If nothing has settled after two minutes, press **Stop**, check the sender, and 
 If sync is still wrong, or something here doesn't match what you see:
 
 1. Leave Manifold running, and don't quit it.
-2. Choose **Manifold ▸ Export Diagnostics…** and save the file.
+2. Choose **Help ▸ Export Diagnostics…** and save the file.
 3. Send it to us with:
    - what you were sending from (encoder and version), and its output frame rate;
    - the server and connection type (Cloudflare SRT, Cloudflare WHEP, MediaMTX, NDI, HLS);
@@ -459,7 +459,7 @@ If sync is still wrong, or something here doesn't match what you see:
 Stream keys, passphrases and the private part of each stream address are removed from the file.
 The server's name stays, so we can tell which service you were using.
 
-[Screenshot: Manifold ▸ Export Diagnostics… — NEW CAPTURE NEEDED]
+[Screenshot: Help ▸ Export Diagnostics… — NEW CAPTURE NEEDED]
 
 ---
 
@@ -501,6 +501,9 @@ scope's item 3).
     says to use Bypass.
   - The readout names the LUT's output space only when it isn't Same as Source.
 - ⚑ **Export Frame for Support** (Robbie, 2026-10-24). Where: Help ▸ Export Frame for Support….
+  - **Both support exports are in Help**, together under one separator: Export Diagnostics… (text about the session)
+    then Export Frame for Support… (the picture). Export Diagnostics… was in the Manifold menu until 2026-10-28; older
+    screenshots and tester notes show it there. File keeps only the ordinary Export Frame.
   - **What it writes**, after a save panel (the suggested name is the date and time, never the source's name):
     - `.png`: the frame, as Export Frame writes it;
     - `.v210`: exactly what goes to SDI for this frame, the same conversion the DeckLink output uses, so it can be
@@ -643,4 +646,4 @@ reads `.mp4`.
 | OBS Media Source properties, Loop on | — | **new capture** |
 | OBS Settings ▸ Video, FPS 23.976 | — | **new capture** |
 | Resolve timeline, loop on, video output settings | — | **new capture** |
-| Manifold ▸ Export Diagnostics… | — | **new capture** |
+| Help ▸ Export Diagnostics… (with Export Frame for Support… below it) | — | **new capture** |

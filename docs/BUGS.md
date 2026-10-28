@@ -347,7 +347,7 @@ held back until after release, and the numbered defect entries follow.
      to HEAD. Defaults restored to the snapshot. **Not measured:** the on-screen colour of each use (no screenshots);
      open: Robbie's by-hand checklist (§8) and decisions (§7).
    ✅ **Checklist fixes (Robbie, 2026-10-27, evening).** Built and run unattended 2026-10-27, commit
-   `<commit — to be filled in>` (`SETTINGS_REDESIGN.md` §9; base `2a1b090`):
+   `bc735c3` (`SETTINGS_REDESIGN.md` §9; base `2a1b090`):
    - **⌥⌘S / View ▸ Show/Hide Scopes**: SwiftUI's hidden Toggle Sidebar (`toggleSidebar:`, ⌥⌘S) shared the key, and
      from the first menu click on, ours had none (HEAD: 10 / 40 samples over 5 launches). `MenuKeyKeeper` keeps each
      registry key on its item and off any other (tree 40 / 40, in-app audit 0 problems in 266 passes). New tests: the
@@ -359,6 +359,27 @@ held back until after release, and the numbered defect entries follow.
    - **Keyboard Shortcuts**: the legend and the dot's tooltip name the highlight-colour dot.
    - Pictures, scopes, exports and the SDI loop byte-identical to HEAD: see §9.1. 654 / 654 tests. Open: Robbie's
      by-eye list (§9.1) and decisions 6–7.
+   ✅ **Small fixes (Robbie, 2026-10-28).** Built and run unattended 2026-10-28, commit `<commit — to be filled in>`
+   (base `bc735c3`; predictions and drivers in `build/fixes-1028/`):
+   - **Help ▸ Export Diagnostics…**, grouped with Export Frame for Support… under one separator (Help: Keyboard
+     Shortcuts…, Download Sync Clips…, —, Export Diagnostics…, Export Frame for Support…). It was the app menu's last
+     item at `bc735c3`, not File's (`ManifoldApp.swift:271` there; the user guide said Manifold ▸). File's only export
+     was and is Export Frame. It has no registry entry and no key, and none was added (that would make it rebindable);
+     instead `MenuKeyAudit.supportGroup` holds the two to Help, in order, under one separator, in no other menu, and
+     `MenuItemSnapshot` now records whether an item follows a separator. AX menu dumps, `bc735c3` vs tree: the move and
+     nothing else (every other item, key and modifier equal); the sheet opened from Help by AX click and closed by
+     Cancel; the in-app audit 0 problems in 22 passes (10 HEAD, 12 tree).
+   - **Keyboard Shortcuts' customised dot** is `Color.appYellowText`: #645A00 in light (6.99:1 on white, was 1.3:1),
+     #FFE600 in dark (`testAppYellowTextVariant`). No `Color.appYellow` is left in a window that follows the system
+     (Settings, Keyboard Shortcuts, About; code). The player window is unchanged. **Not measured:** the dot on screen
+     (no screenshots; no row is customised on this install). Legend unchanged by AX.
+   - Control set 216 / 216 files byte-identical to `bc735c3`, 36 / 36 in light appearance. SDI: the frames Manifold
+     sent (v210 dumps, both interlaced fixtures) byte-identical to `bc735c3`'s and to 2026-10-27's; late = 0
+     dropped = 0. **Not measured: the loop on the wire.** The capture input locked to a 2160p23.98 signal, not
+     Manifold's 1080i59.94, on both builds (every frame `sizeMismatch`; 2026-10-27 the same driver read 1080i59.94
+     and 0 different). Something else was feeding that input; the cabling was not touched. 655 / 655 tests (+1);
+     13 warnings, identical to `bc735c3`'s. Defaults dictionary-equal to the snapshot after deleting 10 window-frame
+     keys; licence keys present (3), never read or written.
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
    `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row

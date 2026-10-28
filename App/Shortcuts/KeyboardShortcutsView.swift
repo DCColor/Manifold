@@ -118,9 +118,13 @@ struct KeyboardShortcutsView: View {
     /// The mark on a row whose key differs from Manifold's default, and in the legend that explains it: the app's
     /// highlight colour (Settings ▸ General ▸ Highlight color; yellow by default). It was the system accent colour until
     /// 2026-10-25, orange on Robbie's Mac, which is what the 2026-10-24 notes describe.
+    ///
+    /// `Color.appYellowText`, not `Color.appYellow` (Robbie, 2026-10-28): this window follows the system appearance, and
+    /// the highlight is 1.3:1 on white at the default. The text variant is the highlight in dark and its darker rule
+    /// (`AppYellow.textOnLight`, #645A00 for the default, 6.99:1 on white) in light, as Settings uses.
     private var customizedDot: some View {
         Circle()
-            .fill(Color.appYellow)
+            .fill(Color.appYellowText)
             .frame(width: 6, height: 6)
     }
 

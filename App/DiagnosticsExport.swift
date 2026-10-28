@@ -2,7 +2,7 @@
 //  DiagnosticsExport.swift
 //  Manifold
 //
-//  Manifold ▸ Export Diagnostics… — one plain .txt a tester can email us.
+//  Help ▸ Export Diagnostics… — one plain .txt a tester can email us. (The app menu until 2026-10-28.)
 //
 //  ── THE PROBLEM THIS SOLVES ────────────────────────────────────────────────────────────
 //
