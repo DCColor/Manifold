@@ -2190,7 +2190,10 @@ struct ContentView: View {
         // disconnect somebody else's. `activeLiveSource` is ownership-scoped, so the lit-green
         // state and the "click to stop" copy describe THIS window's stream, never another's.
         let arbitrated = !deck.gate.deviceControlsEnabled
-        let mine = (activeLiveSource == .ndi)
+        // GREEN EXACTLY WHILE THIS WINDOW'S LIVE SOURCE IS CONNECTED, whichever transport (green = live; Robbie,
+        // 2026-10-27). Was `== .ndi`, so an SRT, WHEP or HLS stream never lit it (checklist item 2). `activeLiveSource`
+        // is the same predicate `hasSource` and the Disconnect item use: connected, and this window's.
+        let mine = activeLiveSource != nil
         return HStack(spacing: 2) {
             Button { toggleStreaming() } label: {
                 Image(systemName: "antenna.radiowaves.left.and.right")
@@ -2198,7 +2201,8 @@ struct ContentView: View {
             .foregroundStyle(mine ? Color.green : .white.opacity(arbitrated ? 0.35 : 0.9))
             .help(arbitrated ? (deck.gate.reason ?? "Streaming is in another window")
                   : mine
-                  ? "Streaming — \(ndi.connectedSourceName ?? "NDI") — " + keys.helpText("click to stop", .disconnectLive)
+                  ? "Streaming — \(DeckRegistry.shared.liveLabel(for: deck) ?? activeLiveSource?.displayLabel ?? "live") — "
+                    + keys.helpText("click to stop", .disconnectLive)
                   : "Streaming — local mode; click to connect the first NDI source, or use the menu to pick")
 
             Menu {

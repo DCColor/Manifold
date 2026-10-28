@@ -57,6 +57,9 @@ struct ManifoldApp: App {
         // `ContentView` can take no more modifiers (§6.7); see Shortcuts/ShortcutCenter.swift.
         MainActor.assumeIsolated { ShortcutCenter.shared.install() }
         #if DEBUG
+        MainActor.assumeIsolated { AppearanceProbe.startIfAsked() }
+        #endif
+        #if DEBUG
         // ⚠️ THE ONLY THING THAT TURNS [LIVECLOCK] ON, AND IT IS `#if DEBUG` ON PURPOSE.
         //
         // ManifoldCore cannot gate its own telemetry at compile time: `MANIFOLD_TELEMETRY` is
@@ -152,6 +155,14 @@ struct ManifoldApp: App {
         WindowGroup {
             ContentView()
                 .frame(minWidth: 720, minHeight: 460)
+                // THE PLAYER WINDOW IS ALWAYS DARK (Robbie, 2026-10-27), as QuickTime's and Resolve's are: the control bar,
+                // its pulldowns, its popovers (the chain readout, the guides panel) and the on-picture overlays, so in the
+                // system's light appearance none of them turns light and the highlight stays the highlight (the text
+                // variant's light branch is never reached here). SwiftUI's own setting, because SwiftUI owns the window's
+                // appearance: MEASURED, `NSWindow.appearance = .darkAqua` set at bind time read back nil and Aqua once the
+                // scene settled. Settings, Keyboard Shortcuts and About are other scenes and follow the system. Chrome only:
+                // the picture is Metal's, and its bytes do not depend on the window's appearance (docs/SETTINGS_REDESIGN.md §9).
+                .preferredColorScheme(.dark)
                 // `.onOpenURL` MOVED DOWN INTO ContentView, because it needs an engine and this
                 // scope no longer has one. SwiftUI delivers an opened URL to a window in the
                 // group, and the modifier now sits on the view that owns that window's deck — so
@@ -182,6 +193,11 @@ struct ManifoldApp: App {
             // menu, and leaving the stock item in place alongside ours would put two About entries
             // there. The stock panel reads the same bundle keys this one does, so nothing is lost
             // by taking the slot — what is gained is the attributions the stock panel cannot show.
+            // NO SIDEBAR COMMANDS: no window here has a sidebar. This takes SwiftUI's hidden Toggle Sidebar out of the View
+            // menu, but NOT out of the menu bar: MEASURED, SwiftUI keeps a hidden one (`toggleSidebar:`, ⌥⌘S, the Finder's
+            // sidebar key) in the Help menu instead. `MenuKeyKeeper` (Shortcuts/ShortcutCenter.swift) is what keeps ⌥⌘S on
+            // Show/Hide Scopes (Robbie's checklist item 1, 2026-10-27).
+            CommandGroup(replacing: .sidebar) { }
             CommandGroup(replacing: .appInfo) {
                 Button("About Manifold") { openWindow(id: AboutScene.windowID) }
                 // Directly under About, where macOS apps conventionally put it. Runs the SAME check

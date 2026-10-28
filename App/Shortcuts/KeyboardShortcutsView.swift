@@ -115,7 +115,9 @@ struct KeyboardShortcutsView: View {
         }
     }
 
-    /// The mark on a row whose key differs from Manifold's default, and in the legend that explains it.
+    /// The mark on a row whose key differs from Manifold's default, and in the legend that explains it: the app's
+    /// highlight colour (Settings ▸ General ▸ Highlight color; yellow by default). It was the system accent colour until
+    /// 2026-10-25, orange on Robbie's Mac, which is what the 2026-10-24 notes describe.
     private var customizedDot: some View {
         Circle()
             .fill(Color.appYellow)
@@ -129,7 +131,7 @@ struct KeyboardShortcutsView: View {
                 // The dot's legend (Robbie, 2026-10-24: the dot alone did not say "customized").
                 HStack(spacing: 5) {
                     customizedDot
-                    Text("Customized: differs from Manifold’s default. The arrow resets it.")
+                    Text("Customized (the dot, in the highlight color): differs from Manifold’s default. The arrow resets it.")
                 }
                 .accessibilityElement(children: .combine)
             }
@@ -155,8 +157,8 @@ struct KeyboardShortcutsView: View {
                 Spacer()
                 if registry.isCustomised(def.id) {
                     customizedDot
-                        .help("Customized")
-                        .accessibilityLabel("Customized")
+                        .help("Customized: differs from Manifold’s default")
+                        .accessibilityLabel("Customized: differs from Manifold’s default")
                 }
                 keyChip(def)
                 if registry.isCustomised(def.id) {

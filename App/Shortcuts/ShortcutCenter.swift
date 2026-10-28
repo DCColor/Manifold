@@ -102,6 +102,27 @@ final class ShortcutCenter: KeyDispatchHost {
         let enders: [(Notification.Name, String)] = [(NSWindow.didResignKeyNotification, "window not key"),
                                                      (NSApplication.didResignActiveNotification, "app not active"),
                                                      (NSMenu.didBeginTrackingNotification, "a menu opened")]
+        MenuKeyKeeper.shared.start(registry: registry)
+        #if DEBUG
+        // `MANIFOLD_MENU_AUDIT=1`: the menu bar judged against the registry every 3 s (`MenuKeyAudit`), one line a pass.
+        if ProcessInfo.processInfo.environment["MANIFOLD_MENU_AUDIT"] == "1" {
+            var pass = 0
+            Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+                MainActor.assumeIsolated {
+                    guard let bar = NSApp.mainMenu else { return }
+                    pass += 1
+                    let items = MenuItemSnapshot.all(in: bar)
+                    let problems = MenuKeyAudit.audit(items, registry: ShortcutCenter.shared.registry)
+                    // The item Robbie's checklist found without its key, every instance of it, as the menu bar holds it.
+                    let scopes = items.filter { $0.title == "Show/Hide Scopes" }
+                        .map { "\($0.menu) key '\($0.keyEquivalent)' mods \($0.modifiers)\($0.isHidden ? " hidden" : "")" }
+                    NSLog("[MENU-AUDIT] pass %d: %d items, %d problem(s)%@ · Show/Hide Scopes: %@", pass, items.count, problems.count,
+                          problems.isEmpty ? "" : " — " + problems.map(\.description).joined(separator: "; "),
+                          scopes.joined(separator: " | "))
+                }
+            }
+        }
+        #endif
         for (name, reason) in enders {
             observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated { ShortcutCenter.shared.dispatcher.reset(host: ShortcutCenter.shared, reason: reason) }
@@ -225,3 +246,85 @@ extension DisplayTransformMode {
     }
     static func forShortcut(_ id: ShortcutID) -> DisplayTransformMode? { allCases.first { $0.shortcutID == id } }
 }
+
+// MARK: - Menu keys
+
+/// KEEPS EVERY REGISTRY MENU ITEM'S KEY ON IT (Robbie's checklist item 1, 2026-10-27).
+///
+/// ⚠️ WHY APPKIT, AFTER SWIFTUI. SwiftUI builds a hidden "Toggle Sidebar" item (`toggleSidebar:`, ⌥⌘S — the Finder's
+/// sidebar key) into the menu bar of every app, and no `CommandGroup` removes it (replacing `.sidebar` only moved it from
+/// View to Help, measured). Two items with one key: on each rebuild SwiftUI gives the key to ONE of them, so on some
+/// launches Show/Hide Scopes came up with no key, its menu showed none, and ⌥⌘S went to the hidden item, which does
+/// nothing here. It is the key, not the item: Show/Hide Inspector moved to ⌥⌘S (argument domain) lost its key the same
+/// way, and Show/Hide Scopes moved to ⌥⌘X kept its own (measured).
+///
+/// So whenever SwiftUI adds or changes menu items, this puts each `.menu` action's registry key back on its item if it was
+/// left off, and takes that key off any OTHER item that holds it — an item that is not a registry action's, which can
+/// only be one SwiftUI or AppKit added. `MenuKeyAudit` judges the result (`MANIFOLD_MENU_AUDIT=1`, and the tests).
+@MainActor
+final class MenuKeyKeeper {
+    static let shared = MenuKeyKeeper()
+    private var registry: ShortcutRegistry?
+    private var observers: [NSObjectProtocol] = []
+    private var pending = false
+    private var logged: Set<String> = []
+
+    func start(registry: ShortcutRegistry) {
+        guard self.registry == nil else { return }
+        self.registry = registry
+        for name in [NSMenu.didAddItemNotification, NSMenu.didChangeItemNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { MenuKeyKeeper.shared.schedule() }
+            })
+        }
+        schedule()
+    }
+
+    /// One pass per run-loop turn, however many items SwiftUI touched in it.
+    private func schedule() {
+        guard !pending else { return }
+        pending = true
+        DispatchQueue.main.async { MainActor.assumeIsolated { MenuKeyKeeper.shared.keep() } }
+    }
+
+    private func keep() {
+        pending = false
+        guard let registry, let bar = NSApp.mainMenu else { return }
+        func items(_ menu: NSMenu) -> [NSMenuItem] { menu.items.flatMap { [$0] + ($0.submenu.map(items) ?? []) } }
+        var ours: [ObjectIdentifier] = []
+        var wants: [(item: NSMenuItem, key: String, mods: NSEvent.ModifierFlags, title: String)] = []
+        for def in registry.definitions where def.dispatch == .menu {
+            if let tier = def.debug, !registry.isDebugEnabled(tier) { continue }
+            guard let home = MenuKeyAudit.menuHomes[def.id],
+                  let top = bar.items.first(where: { $0.title == home })?.submenu,
+                  let item = items(top).first(where: { $0.title == def.title && !$0.isHidden }) else { continue }
+            ours.append(ObjectIdentifier(item))
+            guard let chord = registry.menuChord(for: def.id), let want = MenuKeyAudit.expected(chord) else { continue }
+            wants.append((item, want.key, want.modifiers, def.title))
+        }
+        let everything = items(bar)
+        for want in wants {
+            for other in everything where !ours.contains(ObjectIdentifier(other))
+                && other.keyEquivalent.lowercased() == want.key.lowercased()
+                && other.keyEquivalentModifierMask.intersection(MenuKeyAudit.relevant) == want.mods {
+                other.keyEquivalent = ""
+                note("'\(other.title)'\(other.isHidden ? " (hidden)" : "") had \(want.title)'s key; cleared")
+            }
+            // Case-insensitive, as `MenuKeyAudit` judges: only a key that is MISSING or different is put back; SwiftUI's
+            // own spelling of one it kept (⇧⌘D as "d" or "D") is left as SwiftUI set it.
+            if want.item.keyEquivalent.lowercased() != want.key.lowercased()
+                || want.item.keyEquivalentModifierMask.intersection(MenuKeyAudit.relevant) != want.mods {
+                want.item.keyEquivalent = want.key
+                want.item.keyEquivalentModifierMask = want.mods
+                note("'\(want.title)' had lost its key; put back")
+            }
+        }
+    }
+
+    /// Once per distinct event per launch: a rebuild repeats them, and the log should say it happened, not count it.
+    private func note(_ text: String) {
+        guard logged.insert(text).inserted else { return }
+        NSLog("[SHORTCUTS] menu key: %@", text)
+    }
+}
+

@@ -329,7 +329,7 @@ held back until after release, and the numbered defect entries follow.
    - **Not done, from the same notes, not in the brief:** scaling the control bar at small window sizes, and a
      resizable Settings window like the shortcuts window (the Settings window: done 2026-10-27, next entry).
    ✅ **Settings window redesign and the highlight colour (Robbie, 2026-10-27).** Built and run unattended 2026-10-27,
-   commit `<commit — to be filled in>` (`SETTINGS_REDESIGN.md`; base `a0474e2`):
+   commit `2a1b090` (`SETTINGS_REDESIGN.md`; base `a0474e2`):
    - Toolbar tabs: General, Files, Playback, Scopes & Guides, DeckLink Output, Sources, License, and Advanced
      (read-only debug switches) only with the Debug menu on. Why these and not the brief's list: §3. Opens 640 wide,
      resizable 560–1000; each pane at its content's height (328–830 pt). SwiftUI's Settings scene did neither, measured
@@ -346,6 +346,19 @@ held back until after release, and the numbered defect entries follow.
      (36 / 36 with a blue highlight); SDI loop 0 different, late = 0 dropped = 0. 647 / 647 tests; warnings identical
      to HEAD. Defaults restored to the snapshot. **Not measured:** the on-screen colour of each use (no screenshots);
      open: Robbie's by-hand checklist (§8) and decisions (§7).
+   ✅ **Checklist fixes (Robbie, 2026-10-27, evening).** Built and run unattended 2026-10-27, commit
+   `<commit — to be filled in>` (`SETTINGS_REDESIGN.md` §9; base `2a1b090`):
+   - **⌥⌘S / View ▸ Show/Hide Scopes**: SwiftUI's hidden Toggle Sidebar (`toggleSidebar:`, ⌥⌘S) shared the key, and
+     from the first menu click on, ours had none (HEAD: 10 / 40 samples over 5 launches). `MenuKeyKeeper` keeps each
+     registry key on its item and off any other (tree 40 / 40, in-app audit 0 problems in 266 passes). New tests: the
+     menu-bar audit (`MenuKeyAudit`) and every menu action's key through the dispatcher.
+   - **The stream button** is green exactly while this window's live source is connected, any transport (was NDI only).
+   - **The player window is always dark** (`.preferredColorScheme(.dark)`): control bar, pulldowns, popovers, overlays
+     and the window's sheets; Settings, Keyboard Shortcuts and About follow the system. The olive text variant is now
+     drawn nowhere.
+   - **Keyboard Shortcuts**: the legend and the dot's tooltip name the highlight-colour dot.
+   - Pictures, scopes, exports and the SDI loop byte-identical to HEAD: see §9.1. 654 / 654 tests. Open: Robbie's
+     by-eye list (§9.1) and decisions 6–7.
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
    `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row

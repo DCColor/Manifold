@@ -475,4 +475,44 @@ final class KeyDispatchTests: XCTestCase {
         XCTAssertTrue(down(kC, "с"))
         XCTAssertEqual(host.holds, ["begin color.holdCompare"])
     }
+
+    // MARK: Menu actions (2026-10-27, Robbie's checklist item 1)
+
+    /// Every `.menu` action's key goes where its menu item can take it: a ⌘ / ⌥ / ⌃ key passes the dispatcher untouched
+    /// (AppKit gives it to the item, whose key `MenuKeyAuditTests` checks), and a bare key is performed by the dispatcher
+    /// for that action and no other. ⌥⌘S is the Show/Hide Scopes case.
+    func testEveryMenuActionKeyReachesItsMenuItem() {
+        let us: [String: UInt16] = ["a": 0, "s": 1, "d": 2, "b": 11, "e": 14, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21,
+                                    "0": 29, "o": 31, "i": 34, "l": 37, "n": 45]
+        func flags(_ m: KeyModifiers) -> NSEvent.ModifierFlags {
+            var f: NSEvent.ModifierFlags = []
+            if m.contains(.command) { f.insert(.command) }; if m.contains(.option) { f.insert(.option) }
+            if m.contains(.control) { f.insert(.control) }; if m.contains(.shift) { f.insert(.shift) }
+            return f
+        }
+        let registry = ShortcutRegistry(store: ShortcutStore(defaults: defaults), layout: USKeyLayout(), debugTierEnabled: { _ in false })
+        var checked = 0
+        for def in registry.definitions where def.dispatch == .menu && def.debug == nil {
+            guard let chord = registry.chord(for: def.id) else { continue }
+            let code: UInt16, chars: String
+            switch chord.key {
+            case .character(let c):
+                guard let k = us[c] else { return XCTFail("no US key code for \(c) (\(def.id.rawValue))") }
+                code = k; chars = chord.modifiers.contains(.shift) ? c.uppercased() : c
+            case .code(let k):
+                code = k; chars = k == KeyCode.delete ? "\u{7F}" : ""
+            }
+            host.performed = []
+            let consumed = down(code, chars, flags(chord.modifiers))
+            _ = up(code, chars, flags(chord.modifiers))
+            if chord.isBare {
+                XCTAssertTrue(consumed, def.id.rawValue); XCTAssertEqual(host.performed, [def.id], def.id.rawValue)
+            } else {
+                XCTAssertFalse(consumed, "\(def.id.rawValue): the menu item must get it"); XCTAssertEqual(host.performed, [], def.id.rawValue)
+            }
+            checked += 1
+        }
+        XCTAssertEqual(checked, 21, "every keyed, non-debug menu action (24, less the 3 with no key)")
+        XCTAssertEqual(registry.chord(for: .scopesTray), .char("s", [.command, .option]))
+    }
 }

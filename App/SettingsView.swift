@@ -240,6 +240,9 @@ enum SettingsRefresh {
 // MARK: - Shared row helpers
 
 /// A row's explanation: caption size, secondary, under the row it explains (the Keyboard Shortcuts window's subtitle).
+///
+/// ⚠️ SETTINGS FOLLOWS THE SYSTEM APPEARANCE: highlight-coloured TEXT here is `Color.appYellowText` (the darker variant in
+/// light), never `Color.appYellow`, which is 1.3:1 on white at the default (docs/SETTINGS_REDESIGN.md §4).
 private struct SettingsCaption: View {
     let text: String
     var color: Color = .secondary

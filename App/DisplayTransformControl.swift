@@ -330,6 +330,8 @@ struct DisplayChainReadout: View {
     /// line and an applied LUT's line, so the readout marks what the face marks. The app's yellow since 2026-10-25;
     /// the popover follows the appearance, so in light it is the yellow's darker text variant (`AppYellow.textOnLightHex`,
     /// ≥ 4.5:1), as the amber it replaced had a darker light variant. Computed, not stored: it follows the highlight colour.
+    /// Since 2026-10-27 the player window is always dark (`WindowSizer.bind`), so this popover is too and this is the
+    /// highlight itself; the light branch stays for any surface that really is light.
     static var assertion: Color { Color.appYellowText }
 
     /// The Source line, its override words (when overridden) in the app's yellow.

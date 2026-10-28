@@ -124,7 +124,8 @@ the pane last shown in this launch. Manifold ▸ License… selects License, the
   `manifold.playhead.lineColor`, or the old default #FFE600, follows the highlight; any other stored colour is the user's
   customisation and stays the playhead's (`PlayheadStyle.followsHighlight`). Choosing Same as highlight keeps the stored
   colour, so Custom brings it back. This install: `manifold.playhead.lineColor` absent, so it follows.
-- **Light-appearance text** (the chain readout's override and LUT words): the rule replaces the hand-picked value. Keep the
+- **Light-appearance text** (the chain readout's override and LUT words, and the Settings window, which follows the
+  system appearance: any highlight-coloured text added there uses `Color.appYellowText`; none is drawn there today): the rule replaces the hand-picked value. Keep the
   hue and scale the three sRGB channels down together, 1/255 of the largest at a time, to the first value with ≥ 4.5:1
   against #D0D0D0 (the darkest light background it is drawn on); a colour already that dark is kept. For #FFE600 this gives
   #645A00, the value it replaces, so a default install draws exactly what it drew (`AppYellow.textOnLight`).
@@ -193,7 +194,9 @@ rebuilt and the Settings run repeated on it (same sizes, same panes).
 1. The tab set and names (§3): Files split from General; Scopes & Guides instead of Color & Display; Sources instead of
    Streams; License with no privacy rows.
 2. Width: opens 640, 560–1000. Scopes & Guides opens 830 tall; splitting it (Scopes / Guides) would bring it near 400 each.
-3. The near-green note's wording, its orange, and the hue band (100°–170°); the 4.5:1 rule for the light text variant.
+3. The near-green note's wording, its orange, and the hue band (100°–170°); the 4.5:1 rule for the light text variant,
+   which applies to the Settings window too (Robbie, 2026-10-27): it follows the system appearance, so highlight-coloured
+   text there must use the text variant. None is drawn there today (the near-green note is the system orange).
 4. Reopening Settings keeps the size and pane you left (finding 3), rather than snapping back to 640.
 5. The playhead inference: a stored #FFE600 counts as "never customised" and follows the highlight.
 
@@ -225,3 +228,82 @@ window position (an `NSColorPanel` key), as it did before.
    is back. Then set it how you want it.
 9. **Decisions** (§7): tab names and grouping (Files split from General; Scopes & Guides; Sources; License), the opening
    width, the near-green note's wording and its orange, the 4.5:1 text rule.
+
+## 9. Robbie's checklist results and the fixes (2026-10-27, evening)
+
+Four items from the by-hand checklist. Base `2a1b090`; reference build a `git archive` of it. Predictions:
+`build/fixes-1027/predictions.md` (21:30:14 EDT, sha256 `9dade109…b92c3`), written after the diagnosis of item 1 and the
+package audit's tests, before any app-side fix was built (the file says so).
+
+**1. View ▸ Show/Hide Scopes, ⌥⌘S.** Registry entry, menu item and dispatch were all right. The menu bar was not.
+SwiftUI builds a hidden "Toggle Sidebar" item (`toggleSidebar:`, ⌥⌘S, the Finder's sidebar key) into the menu bar.
+Two items with one key: on each rebuild of the menus SwiftUI gives the key to one of them. On HEAD the item had ⌥⌘S at
+launch and lost it at the first menu click, for the rest of the launch (5 launches out of 5; a DEBUG probe read
+the NSMenuItem's key `'s'` → `''`). With no key the menu shows none and ⌥⌘S goes to the hidden item, which does
+nothing. It is the key, not the item: Show/Hide Inspector moved to ⌥⌘S (argument domain) lost its key the same way, and
+Show/Hide Scopes moved to ⌥⌘X kept its own. `CommandGroup(replacing: .sidebar)` does not remove the hidden item: it moved
+from View to Help (measured). **Fix:** `MenuKeyKeeper` (`App/Shortcuts/ShortcutCenter.swift`). Whenever SwiftUI adds or
+changes menu items, it puts a registry action's key back on its item if it was left off, and takes that key off any
+other item holding it. Only an item that is not a registry action's can lose a key that way, and here that is only the
+hidden Toggle Sidebar. It logs each kind of change once a launch. **The test:**
+- `MenuKeyAudit` (ShortcutRegistry) judges a menu bar against the registry: every `.menu` action in its home menu, with
+  its key, and no other item holding it. `MenuKeyAuditTests` covers a clean bar, the hidden-sidebar collision, a lost
+  key, and a missing or misplaced item, plus the walker on a real `NSMenu`.
+- `KeyDispatchTests.testEveryMenuActionKeyReachesItsMenuItem`: every keyed menu action's key passes the dispatcher to its
+  menu item (⌘ / ⌥ / ⌃), or is performed by it (bare).
+- In the app, `MANIFOLD_MENU_AUDIT=1` (DEBUG) runs the audit on the real menu bar every 3 s.
+
+**2. The stream button.** It turned green only for NDI (`activeLiveSource == .ndi`), so SRT, WHEP and HLS never lit it.
+It is now green exactly while this window's live source is connected (`activeLiveSource != nil`, the predicate
+`hasSource` and Disconnect use), and its tooltip names the stream.
+
+**3. The player window is always dark.** `.preferredColorScheme(.dark)` on the player window's root view. The first
+attempt, `NSWindow.appearance = .darkAqua` at bind time, measured nil and Aqua once the scene settled: SwiftUI owns the
+window's appearance. **What follows the system:** Settings, Keyboard Shortcuts, About and the menu bar's menus.
+**What is dark:** the player window, its popovers (chain readout, guides), its control-bar pulldowns and its sheet (the
+stream sheet; see decision 6). **The olive text rule, re-checked:** the light text variant (`appYellowText`) is used only
+by the chain readout, which is now always dark. So it draws the highlight itself, and olive is drawn nowhere today. The
+rule stays for any highlight text on a surface that is really light (`SettingsView.swift`'s note).
+
+**4. The customised-shortcut dot.** It is drawn in the highlight colour (`Color.appYellow`); it was the system accent
+colour, orange on this Mac, until 2026-10-25, which is what the 2026-10-24 notes describe. The legend now reads
+"Customized (the dot, in the highlight color): differs from Manifold's default. The arrow resets it." The dot's tooltip
+and Accessibility label now read "Customized: differs from Manifold's default."
+
+### 9.1 Results
+
+| # | Result | Verdict |
+|---|---|---|
+| M1 | Tree, 5 launches × 8 samples around 3 menu clicks each: ⌥⌘S on Show/Hide Scopes in **40 / 40** (AX); the in-app audit 0 problems in 266 passes; the keeper cleared the hidden Toggle Sidebar's ⌥⌘S once a launch and changed nothing else. HEAD, same driver: **10 / 40**, the key gone from the first menu click on, in all 5 launches | **PASS** |
+| M2 | The menu item toggled the tray both ways on every click, tree (window 540 ↔ 1000 pt tall) | **PASS** |
+| L1 | Local HLS (`hls_chart_919` over `python3 -m http.server`), connected by Paste & Connect (AX value + press; session only, no bookmark): tree tooltip "Streaming — 127.0.0.1 — click to stop (⌥⌘Delete)", the green branch; HEAD with the same stream connected: "Streaming — local mode; …". **Not measured:** the tooltip after Disconnect, because the window returns to its empty state, which has no stream button | **PASS** (one part not applicable) |
+| A1 | App in light (`-NSRequiresAquaSystemAppearance YES`), DEBUG probe: player windows DarkAqua; chain-readout and guides popovers VibrantDark; the display-transform and streaming pulldowns (15 and 7 items) DarkAqua; Settings, Keyboard Shortcuts, About Aqua. The stream sheet is **DarkAqua**, not the predicted Aqua (it belongs to the player window). First attempt (window appearance at bind) read Aqua everywhere: replaced. HEAD has no probe; it sets no appearance (code) | **PASS** with the sheet as decision 6 |
+| A2 | System dark: every surface DarkAqua / VibrantDark, as before | **PASS** |
+| A3 | `appYellowText`'s only use is in the chain readout (`DisplayTransformControl.swift:283, 341`), now always dark | **PASS** |
+| K1 | Legend read by AX: "Customized (the dot, in the highlight color): differs from Manifold's default. The arrow resets it." The dot's tooltip by code (no row is customised on this install) | **PASS** |
+| P | Control set, HEAD `2a1b090` vs tree: **216 / 216** files byte-identical (24 each of PNG, `.rgba16f`, `.v210`, `.v210.json`; 48 display read-back files; 72 scope images); the app in light appearance on 4 files: **36 / 36** identical to HEAD | **PASS** |
+| S | SDI loop, paused, TFF and BFF fixtures in Weave: read-backs byte-identical to HEAD's (4 / 4 files); 129 and 128 received frames = the read-back, 0 different (HEAD 130 and 127, 0 different); late = 0 dropped = 0; probe read SDI after every capture | **PASS** |
+| G | `swift test` **654 / 654** (647 + 7: 6 audit, 1 dispatch). Clean Profile build: the same 13 warning locations as HEAD's (`WindowSizer.swift` is unchanged from HEAD; a stray blank line left by the first item-3 attempt was reverted, which moved two of its warnings by one line in the first count) | **PASS** |
+| D | My menu clicks wrote `showTray` and `manifold.raster.size` (window state, last writer wins), and the runs added 55 window-frame keys and changed 2: each read and stashed, the two keys and the changed frame keys written back to the snapshot's values, the added frame keys deleted, one `set -e` sequence. Domain then dictionary-equal to the snapshot (1 626 keys); licence keys present (3), never read or written; streamBookmarks `18c6da5d…` unchanged | **PASS** |
+
+**DEBUG hooks left in** (both off unless their environment variable is set): `MANIFOLD_MENU_AUDIT=1` (the menu-bar audit
+every 3 s) and `MANIFOLD_DEBUG_APPEARANCE=1` (`App/AppearanceProbe.swift`). The two temporary diagnosis probes (the View
+menu's keys every 3 s, and a `setKeyEquivalent:` trace) were removed.
+
+**A crash during the run, mine, fixed.** The DEBUG appearance probe read `NSApp` from `ManifoldApp.init`, before the
+application object exists. Launched with `MANIFOLD_DEBUG_APPEARANCE=1`, the tree build trapped at launch (implicitly
+unwrapped nil, `AppearanceProbe.startIfAsked`, report `Manifold-2026-10-27-230021.ips`). Only that environment variable
+reached it, and no window had opened. The probe now logs the app's appearance at its first sample, after launch.
+
+**By eye, for Robbie** (no screenshots were taken):
+1. ⌥⌘S on the keyboard, after opening and closing a few menus: the tray toggles, and the View menu shows ⌥⌘S.
+2. A stream connected (SRT, WHEP or HLS): the antenna button is green; local or disconnected, white.
+3. System Settings ▸ Appearance ▸ Light: the control bar, its pulldowns (display transform, Fields on an interlaced file),
+   the chain readout and the guides panel stay dark, and their yellow is #FFE600; Settings, Keyboard Shortcuts and About
+   turn light. Is the stream sheet right dark (decision 6)?
+4. Keyboard Shortcuts, one shortcut changed: the dot is the highlight colour, its tooltip and the legend read as above. In
+   light, a yellow dot on white is faint (about 1.3:1): say if it should use the darker text variant there.
+
+**Decisions.** 6. The stream sheet (and the other sheets on the player window: Export Diagnostics, Get Flip) are dark with
+the window. 7. ⌥⌘S is the Finder's sidebar key; Manifold keeps it for Scopes by overriding SwiftUI's hidden item. Moving
+Scopes to a key SwiftUI does not reserve would remove the need for the keeper.
