@@ -329,8 +329,8 @@ struct DisplayChainReadout: View {
     /// The Color control's colour, for the readout's text (LG session, 2026-10-22): an override's words on the Source
     /// line and an applied LUT's line, so the readout marks what the face marks. The app's yellow since 2026-10-25;
     /// the popover follows the appearance, so in light it is the yellow's darker text variant (`AppYellow.textOnLightHex`,
-    /// ≥ 4.5:1), as the amber it replaced had a darker light variant.
-    static let assertion = Color.appYellowText
+    /// ≥ 4.5:1), as the amber it replaced had a darker light variant. Computed, not stored: it follows the highlight colour.
+    static var assertion: Color { Color.appYellowText }
 
     /// The Source line, its override words (when overridden) in the app's yellow.
     private var sourceText: Text {

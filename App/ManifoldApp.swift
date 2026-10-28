@@ -27,6 +27,8 @@ struct ManifoldApp: App {
     // Opens the About scene below. `openWindow` and not `orderFrontStandardAboutPanel`, because the
     // standard panel cannot host the attributions — see AboutWindow.swift.
     @Environment(\.openWindow) private var openWindow
+    // Manifold ▸ License… opens Settings on its License pane.
+    @Environment(\.openSettings) private var openSettings
     // Every menu key below is the registry's; observing it re-evaluates the commands after a rebind, so the menus
     // show the new key without a relaunch.
     @ObservedObject private var shortcuts = ShortcutCenter.shared.registry
@@ -187,7 +189,7 @@ struct ManifoldApp: App {
                 // silence would be wrong, because the user asked.
                 Button("Check for Updates…") { UpdateChecker.shared.checkFromMenu() }
             }
-            // Discoverable path to the License state — opens Settings (⌘,), where the License section lives.
+            // Discoverable path to the License state — opens Settings (⌘,) on its License pane.
             // Keyboard Shortcuts… directly below Settings…, as well as in Help (Robbie, 2026-10-24). `before:
             // .systemServices` and not `after: .appSettings`: MEASURED, an `after: .appSettings` group lands ABOVE
             // Settings… (the License… group below does).
@@ -195,7 +197,12 @@ struct ManifoldApp: App {
                 Button("Keyboard Shortcuts…") { openWindow(id: KeyboardShortcutsScene.windowID) }
             }
             CommandGroup(after: .appSettings) {
-                SettingsLink { Text("License…") }
+                // Opens Settings on its License pane. A Button and not `SettingsLink`, because the pane has to be
+                // chosen first; the choice is in memory (`SettingsNavigation`), so this writes no preference.
+                Button("License…") {
+                    SettingsNavigation.shared.pane = .license
+                    openSettings()
+                }
                 // Downloads Vizrt's macOS NDI runtime installer. It is a DIRECT .pkg download,
                 // not a page: see NDIService.runtimeInstallURL, which is the single source of
                 // truth for the URL and carries the measured evidence for which link this has to
@@ -335,10 +342,13 @@ struct ManifoldApp: App {
             #endif
         }
 
-        // The standard macOS Settings window (⌘,).
+        // The standard macOS Settings window (⌘,): toolbar tabs (App/SettingsView.swift; docs/SETTINGS_REDESIGN.md).
+        // `.contentMinSize` states the intent but is not enough on its own: the Settings scene still clears the
+        // resizable flag, so `SettingsWindowFit` keeps the window resizable and sizes each pane (measured, §5).
         Settings {
             SettingsView()
         }
+        .windowResizability(.contentMinSize)
 
         // About Manifold. A single-instance `Window` rather than a `WindowGroup`: choosing About
         // twice should raise the window that is already open, not stack a second copy of it.

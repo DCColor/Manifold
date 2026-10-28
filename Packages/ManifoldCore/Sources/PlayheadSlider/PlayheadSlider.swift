@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 
 /// How the transport bar draws its playhead (2026-10-16). Testers said the round ball felt less
 /// accurate than a line, which is what an NLE draws: a ball covers 20 pt of timeline and says nothing
@@ -22,45 +23,171 @@ public enum PlayheadStyle: String, CaseIterable, Identifiable {
     /// every one gets this until someone picks Ball in Settings.
     public static let defaultStyle: PlayheadStyle = .line
 
-    /// The line's colour, as the app's usual 6-digit hex (see `ScopeColorCodec`).
+    /// The line's colour, as the app's usual 6-digit hex (see `ScopeColorCodec`). Since 2026-10-27 the
+    /// playhead's OVERRIDE of the highlight colour: read only when `followsHighlight` says it is not following.
     public static let colorDefaultsKey = "manifold.playhead.lineColor"
-    /// The app's yellow (`AppYellow`), which started here. A colour chosen in Settings changes the
-    /// playhead only; every other use of the yellow stays `AppYellow`.
+    /// The app's yellow (`AppYellow.hex`), which started here: the value this key's absence used to mean.
     public static let defaultColorHex = AppYellow.hex
+
+    /// "Playhead color: Same as highlight | Custom" (Robbie, 2026-10-27). Written only when the user picks one;
+    /// until then `followsHighlight` infers the choice from `colorDefaultsKey`, so no existing value is migrated.
+    public static let followsHighlightKey = "manifold.playhead.followsHighlight"
+
+    /// Whether the playhead takes the highlight colour. An explicit choice wins. Otherwise: no stored colour, or
+    /// the old default #FFE600 (what following looked like before the highlight existed), follows; any other
+    /// stored colour is a customisation and stays the playhead's own.
+    public static func followsHighlight(storedColor: String?, explicit: Bool?) -> Bool {
+        if let explicit { return explicit }
+        guard let stored = storedColor.flatMap(AppYellow.normalised) else { return true }
+        return stored == defaultColorHex
+    }
+
+    /// The playhead's colour, as hex: the highlight when following, otherwise the stored colour.
+    public static func lineHex(storedColor: String?, explicit: Bool?, highlight: String) -> String {
+        guard !followsHighlight(storedColor: storedColor, explicit: explicit),
+              let stored = storedColor.flatMap(AppYellow.normalised) else { return highlight }
+        return stored
+    }
 }
 
-/// THE APP'S ONE YELLOW (Robbie, 2026-10-25): the playhead's #FFE600, defined here and nowhere else. It
-/// marks something the user has turned on or asserted: the pin when pinned, the playhead's default, an
-/// override's and an applied LUT's words and readouts, the hold-to-compare badge, Loop when on. Green is
-/// kept for LIVE only (DeckLink output running, a connected stream). Nothing follows the macOS accent colour.
+/// THE APP'S ONE HIGHLIGHT COLOUR (Robbie, 2026-10-25; the user's since 2026-10-27): #FFE600 unless
+/// Settings ▸ General ▸ Highlight color says otherwise. It marks something the user has turned on or
+/// asserted: the pin when pinned, the playhead, an override's and an applied LUT's words and readouts, the
+/// hold-to-compare badge, the field-view marker, Loop when on. Green is kept for LIVE only (DeckLink
+/// output running, a connected stream), and no setting changes it. Nothing follows the macOS accent colour.
 ///
 /// A lemon rather than `systemYellow`, and not the system orange: amber is what a WARNING wears (the Bypass
 /// badge), and a yellow near it in hue would read as one more warning. #FFE600 sits at ~54°, systemOrange
 /// at ~36°.
+///
+/// Every use reads `AppHighlight.shared` (the stored choice); the constants here are the default.
 public enum AppYellow {
-    /// The app's usual 6-digit hex (see `ScopeColorCodec`).
+    /// The default, in the app's usual 6-digit hex (see `ScopeColorCodec`).
     public static let hex = "FFE600"
+    /// The highlight colour, as hex. Absent means `hex`.
+    public static let defaultsKey = "manifold.highlightColor"
 
     /// TEXT on a background that follows the appearance (the chain readout), in LIGHT appearance only (Robbie,
     /// 2026-10-26): #FFE600 is 1.3:1 on white. The same hue darkened to the first value with ≥ 4.5:1 against #D0D0D0,
     /// darker than a light popover: 6.99:1 on white, 5.92:1 on #ECECEC, 4.53:1 on #D0D0D0. Icons, the playhead, the
-    /// pin and Loop stay `hex` in both appearances, and so does text on the always-dark control bar.
+    /// pin and Loop stay the highlight in both appearances, and so does text on the always-dark control bar.
+    /// `textOnLight(_:)` derives it for any highlight; this is its value for the default.
     public static let textOnLightHex = "645A00"
 
-    /// sRGB, as `ScopeColorCodec` reads a hex, so every use draws what the playhead draws.
+    /// The default's colour. `AppHighlight.shared.nsColor` is the one every use draws.
     public static var nsColor: NSColor { srgb(hex) }
+    /// The default's text variant. `AppHighlight.shared.textNSColor` is the one every use draws.
+    public static var textNSColor: NSColor { textNSColor(for: hex) }
 
-    /// For text whose background follows the appearance: `hex` in dark, `textOnLightHex` in light.
-    public static var textNSColor: NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? srgb(hex) : srgb(textOnLightHex)
+    /// For text whose background follows the appearance: the colour in dark, `textOnLight` of it in light.
+    public static func textNSColor(for hex: String) -> NSColor {
+        let dark = srgb(hex), light = srgb(textOnLight(hex))
+        return NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
         }
     }
 
+    /// THE LIGHT-APPEARANCE TEXT RULE, for any highlight: keep the hue and scale the three sRGB channels down
+    /// together, a step of 1/255 on the largest at a time, to the first value with ≥ 4.5:1 (WCAG) against
+    /// #D0D0D0, the darkest light background it is drawn on. A colour that already has 4.5:1 is kept as it is.
+    /// For #FFE600 this gives #645A00, the hand-picked value it replaces.
+    public static func textOnLight(_ hex: String) -> String {
+        let c = rgb255(normalised(hex) ?? Self.hex)
+        let top = max(c.r, c.g, c.b)
+        guard top > 0 else { return encode(c) }
+        let background = luminance((208, 208, 208))
+        for n in stride(from: top, through: 0, by: -1) {
+            let k = Double(n) / Double(top)
+            let d = (r: Int((Double(c.r) * k).rounded()), g: Int((Double(c.g) * k).rounded()),
+                     b: Int((Double(c.b) * k).rounded()))
+            if (background + 0.05) / (luminance(d) + 0.05) >= 4.5 { return encode(d) }
+        }
+        return "000000"
+    }
+
+    /// Whether a highlight is close enough to the live green to be confused with it: hue within 100°–170°
+    /// (the system green is ~130°–135° in both appearances), saturation and brightness at least 0.3, so greys
+    /// and near-blacks are not "green". Settings shows a one-line note when it is.
+    public static func isNearLiveGreen(_ hex: String) -> Bool {
+        let c = rgb255(normalised(hex) ?? Self.hex)
+        let r = Double(c.r) / 255, g = Double(c.g) / 255, b = Double(c.b) / 255
+        let hi = max(r, g, b), lo = min(r, g, b), delta = hi - lo
+        guard hi >= 0.3, hi > 0, delta / hi >= 0.3 else { return false }
+        var hue: Double
+        if hi == r { hue = 60 * ((g - b) / delta) } else if hi == g { hue = 60 * ((b - r) / delta) + 120 }
+        else { hue = 60 * ((r - g) / delta) + 240 }
+        if hue < 0 { hue += 360 }
+        return (100...170).contains(hue)
+    }
+
+    /// Six hex digits, upper case, without a leading "#"; nil for anything else.
+    public static func normalised(_ hex: String) -> String? {
+        var s = hex.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, s.allSatisfy(\.isHexDigit) else { return nil }
+        return s.uppercased()
+    }
+
     static func srgb(_ hex: String) -> NSColor {
+        let c = rgb255(hex)
+        return NSColor(srgbRed: CGFloat(c.r) / 255, green: CGFloat(c.g) / 255, blue: CGFloat(c.b) / 255, alpha: 1)
+    }
+
+    private static func rgb255(_ hex: String) -> (r: Int, g: Int, b: Int) {
         let v = Int(hex, radix: 16) ?? 0
-        return NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
-                       blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+        return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+    }
+    private static func encode(_ c: (r: Int, g: Int, b: Int)) -> String { String(format: "%02X%02X%02X", c.r, c.g, c.b) }
+    private static func luminance(_ c: (r: Int, g: Int, b: Int)) -> Double {
+        func l(_ v: Int) -> Double { let v = Double(v) / 255; return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+        return 0.2126 * l(c.r) + 0.7152 * l(c.g) + 0.0722 * l(c.b)
+    }
+}
+
+/// The highlight colour as the app draws it: the stored choice (`AppYellow.defaultsKey`), observed, so every
+/// SwiftUI view that reads it during its body redraws when it changes. Settings writes it through `set`; a write to
+/// the key from anywhere else in the process is picked up from `UserDefaults.didChangeNotification`.
+///
+/// ⚠️ MAIN THREAD ONLY: it is read by view bodies and written by Settings.
+@Observable
+public final class AppHighlight {
+    public static let shared = AppHighlight(defaults: .standard)
+
+    /// Normalised hex; `AppYellow.hex` when the key is absent or not a colour.
+    public private(set) var hex: String
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private var observer: NSObjectProtocol?
+
+    public init(defaults: UserDefaults) {
+        self.defaults = defaults
+        hex = Self.read(defaults)
+        observer = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
+                                                          object: defaults, queue: .main) { [weak self] _ in
+            self?.reload()
+        }
+    }
+
+    deinit { observer.map(NotificationCenter.default.removeObserver) }
+
+    public var nsColor: NSColor { AppYellow.srgb(hex) }
+    public var textNSColor: NSColor { AppYellow.textNSColor(for: hex) }
+    public var isNearLiveGreen: Bool { AppYellow.isNearLiveGreen(hex) }
+
+    /// Stores a new highlight. Nothing is written unless it differs from what is stored.
+    public func set(_ newHex: String) {
+        guard let value = AppYellow.normalised(newHex), value != hex else { return }
+        defaults.set(value, forKey: AppYellow.defaultsKey)
+        hex = value
+    }
+
+    /// Re-reads the key; assigns only on a change, so an unrelated defaults write redraws nothing.
+    public func reload() {
+        let value = Self.read(defaults)
+        if value != hex { hex = value }
+    }
+
+    private static func read(_ defaults: UserDefaults) -> String {
+        defaults.string(forKey: AppYellow.defaultsKey).flatMap(AppYellow.normalised) ?? AppYellow.hex
     }
 }
 

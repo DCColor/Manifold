@@ -358,4 +358,92 @@ final class PlayheadSliderTests: XCTestCase {
             XCTAssertGreaterThanOrEqual((bg + 0.05) / (lum(light) + 0.05), 4.5, "on grey \(grey)")
         }
     }
+
+    /// The light text rule (Robbie, 2026-10-27): #645A00 for the default, and ≥ 4.5:1 on #D0D0D0 for any highlight, in the
+    /// highlight's own hue; a colour already that dark is kept.
+    func testTextOnLightRule() {
+        XCTAssertEqual(AppYellow.textOnLight(AppYellow.hex), AppYellow.textOnLightHex)
+        func lum(_ h: String) -> Double {
+            let v = Int(h, radix: 16)!
+            func l(_ c: Int) -> Double { let c = Double(c) / 255; return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+            return 0.2126 * l((v >> 16) & 0xFF) + 0.7152 * l((v >> 8) & 0xFF) + 0.0722 * l(v & 0xFF)
+        }
+        var n = 0
+        for r in stride(from: 0, through: 255, by: 51) { for g in stride(from: 0, through: 255, by: 51) { for b in stride(from: 0, through: 255, by: 51) {
+            let h = String(format: "%02X%02X%02X", r, g, b), t = AppYellow.textOnLight(h)
+            XCTAssertGreaterThanOrEqual((lum("D0D0D0") + 0.05) / (lum(t) + 0.05), 4.5, h)
+            let v = Int(t, radix: 16)!, tr = (v >> 16) & 0xFF, tg = (v >> 8) & 0xFF, tb = v & 0xFF
+            XCTAssertTrue(tr <= r && tg <= g && tb <= b, "never lighter: \(h) → \(t)")
+            if max(r, g, b) > 0, max(tr, tg, tb) > 20 {
+                let k = Double(max(tr, tg, tb)) / Double(max(r, g, b))
+                for (a, o) in [(tr, r), (tg, g), (tb, b)] { XCTAssertEqual(Double(a), Double(o) * k, accuracy: 1, "same hue: \(h) → \(t)") }
+            }
+            n += 1
+        }}}
+        XCTAssertEqual(n, 216)
+        XCTAssertEqual(AppYellow.textOnLight("202020"), "202020", "already dark enough: kept")
+    }
+
+    func testNearLiveGreen() {
+        for g in ["30D158", "28CD41", "00FF00", "34C759", "66FF99"] { XCTAssertTrue(AppYellow.isNearLiveGreen(g), g) }
+        for c in ["FFE600", "FF9500", "00A0FF", "FFFFFF", "808080", "1A3320", "FF00FF"] { XCTAssertFalse(AppYellow.isNearLiveGreen(c), c) }
+    }
+
+    func testNormalised() {
+        XCTAssertEqual(AppYellow.normalised("#ffe600"), "FFE600")
+        XCTAssertNil(AppYellow.normalised("FFE60"))
+        XCTAssertNil(AppYellow.normalised("GGGGGG"))
+        XCTAssertNil(AppYellow.normalised(""))
+    }
+
+    /// Existing installs keep what they had (Robbie, 2026-10-27): no stored playhead colour, or the old default, follows the
+    /// highlight; any other stored colour is the user's and stays as the override; an explicit choice wins.
+    func testPlayheadFollowsHighlight() {
+        XCTAssertEqual(PlayheadStyle.followsHighlightKey, "manifold.playhead.followsHighlight")
+        XCTAssertEqual(PlayheadStyle.colorDefaultsKey, "manifold.playhead.lineColor")
+        XCTAssertTrue(PlayheadStyle.followsHighlight(storedColor: nil, explicit: nil))
+        XCTAssertTrue(PlayheadStyle.followsHighlight(storedColor: "FFE600", explicit: nil))
+        XCTAssertTrue(PlayheadStyle.followsHighlight(storedColor: "ffe600", explicit: nil))
+        XCTAssertTrue(PlayheadStyle.followsHighlight(storedColor: "junk", explicit: nil))
+        XCTAssertFalse(PlayheadStyle.followsHighlight(storedColor: "FF0000", explicit: nil))
+        XCTAssertTrue(PlayheadStyle.followsHighlight(storedColor: "FF0000", explicit: true))
+        XCTAssertFalse(PlayheadStyle.followsHighlight(storedColor: nil, explicit: false))
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: nil, explicit: nil, highlight: "00A0FF"), "00A0FF")
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: "FFE600", explicit: nil, highlight: "00A0FF"), "00A0FF")
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: "FF0000", explicit: nil, highlight: "00A0FF"), "FF0000")
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: "FF0000", explicit: true, highlight: "00A0FF"), "00A0FF")
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: "FFE600", explicit: false, highlight: "00A0FF"), "FFE600",
+                       "Custom keeps a stored #FFE600")
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: nil, explicit: false, highlight: "00A0FF"), "00A0FF",
+                       "Custom with nothing stored yet shows the highlight")
+        // The default install draws exactly what it drew before.
+        XCTAssertEqual(PlayheadStyle.lineHex(storedColor: nil, explicit: nil, highlight: AppYellow.hex), "FFE600")
+    }
+
+    /// The store: the default when absent or malformed, the stored value otherwise, a write only on a change, and a write
+    /// from elsewhere picked up.
+    func testAppHighlightStore() {
+        let name = "PlayheadSliderTests.highlight.\(UUID().uuidString)"
+        let d = UserDefaults(suiteName: name)!
+        defer { d.removePersistentDomain(forName: name) }
+        let a = AppHighlight(defaults: d)
+        XCTAssertEqual(a.hex, "FFE600")
+        XCTAssertNil(d.object(forKey: AppYellow.defaultsKey), "reading writes nothing")
+        a.set("FFE600")
+        XCTAssertNil(d.object(forKey: AppYellow.defaultsKey), "the same value writes nothing")
+        a.set("#00a0ff")
+        XCTAssertEqual(a.hex, "00A0FF")
+        XCTAssertEqual(d.string(forKey: AppYellow.defaultsKey), "00A0FF")
+        a.set("nope")
+        XCTAssertEqual(a.hex, "00A0FF")
+        d.set("30D158", forKey: AppYellow.defaultsKey)
+        a.reload()
+        XCTAssertEqual(a.hex, "30D158")
+        XCTAssertTrue(a.isNearLiveGreen)
+        d.set("zz", forKey: AppYellow.defaultsKey)
+        a.reload()
+        XCTAssertEqual(a.hex, "FFE600")
+        let s = a.nsColor.usingColorSpace(.sRGB)!
+        XCTAssertEqual(s.greenComponent, 230.0 / 255, accuracy: 1e-6)
+    }
 }

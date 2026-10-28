@@ -2706,7 +2706,7 @@ struct ContentView: View {
                                    : (positionWhy ?? ""))
 
                 // THE PLAYHEAD. A `TransportScrubber`, not a `Slider`, so it can draw the playhead
-                // as a Ball or a Line (Settings ▸ Interface Options). Same contract as the Slider it
+                // as a Ball or a Line (Settings ▸ Playback). Same contract as the Slider it
                 // replaced — the value, the per-move setter, the editing bracket below are unchanged —
                 // and the Ball is that Slider's knob, byte for byte. See TransportScrubber.
                 TransportScrubber(

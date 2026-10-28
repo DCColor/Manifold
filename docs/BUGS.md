@@ -300,7 +300,7 @@ held back until after release, and the numbered defect entries follow.
      warnings. Two misses fixed in the run (a Weave log line at load; "0i" for a moment in the chain). Decisions 1–6 and
      8–10 accepted by Robbie (2026-10-27), subject to his checklist. **Decision 7 changed (Robbie, 2026-10-27): an
      on-picture marker** ("FIELD 1" in the app yellow, the picture's top-right corner) while a field view is on, kept in full
-     screen and with the controls hidden; built and run unattended 2026-10-27, commit `<commit — to be filled in>`
+     screen and with the controls hidden; built and run unattended 2026-10-27, commit `a0474e2`
      (§14.8). SwiftUI over the picture, never Metal: 800 export files, 200 display read-backs and 600 scope images
      byte-identical to HEAD / the I4 run across all four views and the progressive set; SDI loop 0 different; 642 / 642
      tests, the same 12 warnings. Open: Robbie's by-hand checklist (§14.6, items 10–11 for the marker).
@@ -327,7 +327,25 @@ held back until after release, and the numbered defect entries follow.
    - Keyboard Shortcuts… also in the app menu; the window's legend; the pin in the accent colour; the volume control
      no longer shakes.
    - **Not done, from the same notes, not in the brief:** scaling the control bar at small window sizes, and a
-     resizable Settings window like the shortcuts window.
+     resizable Settings window like the shortcuts window (the Settings window: done 2026-10-27, next entry).
+   ✅ **Settings window redesign and the highlight colour (Robbie, 2026-10-27).** Built and run unattended 2026-10-27,
+   commit `<commit — to be filled in>` (`SETTINGS_REDESIGN.md`; base `a0474e2`):
+   - Toolbar tabs: General, Files, Playback, Scopes & Guides, DeckLink Output, Sources, License, and Advanced
+     (read-only debug switches) only with the Debug menu on. Why these and not the brief's list: §3. Opens 640 wide,
+     resizable 560–1000; each pane at its content's height (328–830 pt). SwiftUI's Settings scene did neither, measured
+     (every pane 900 × 450, resize refused), so `SettingsWindowFit` sizes it (§5 finding 1). Manifold ▸ License… opens
+     on License. Keyboard Shortcuts stays its own window; General links to it.
+   - Every row kept with its key, default and reader (inventory §1, code map §2; Accessibility read of every pane).
+     Opening and browsing writes no preference (only `NSWindow Frame` keys, as at HEAD).
+   - **Highlight color** (`manifold.highlightColor`, default #FFE600) drives all 18 uses of the app yellow through one
+     observed store (`AppHighlight`); green for live is untouched. Playhead: *Same as highlight* | *Custom*
+     (`manifold.playhead.followsHighlight`, written only when chosen); an existing customised
+     `manifold.playhead.lineColor` stays the override, absent or #FFE600 follows. Light text variant by rule (≥ 4.5:1 on
+     #D0D0D0, same hue; #645A00 for the default). A one-line note when the highlight is near the live green.
+   - Pictures unchanged: 216 / 216 output, read-back and scope files byte-identical to HEAD on the 24-file control set
+     (36 / 36 with a blue highlight); SDI loop 0 different, late = 0 dropped = 0. 647 / 647 tests; warnings identical
+     to HEAD. Defaults restored to the snapshot. **Not measured:** the on-screen colour of each use (no screenshots);
+     open: Robbie's by-hand checklist (§8) and decisions (§7).
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
    `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row
@@ -3879,7 +3897,7 @@ The original report:
 
 ## ☐ OPEN 2026-10-09 — SCHEDULED FOR 1.0 (files) — interlaced sources: DeckLink Follow source picks a progressive mode (1080p29.97 for 1080i59.94)
 
-**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Window display options (I4) built and run 2026-10-27, commit `3f7daad`** (`INTERLACED_FINDINGS.md` §14): Weave, Field 1 / Field 2 and Deinterlace in the window only, labelled display only; output, scopes and export byte-identical to HEAD in every view; open: the by-hand checklist (§14.6). The on-picture marker (decision 7 changed): commit `<commit — to be filled in>` (§14.8). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
+**Status:** OPEN. Live: measured, not fixed (I6). Files: audited from the source 2026-10-09; detection (I1) built and run 2026-10-23, committed (`c9f0c97`); **the mode decision (I2) built and run on the SDI and HDMI loops 2026-10-25, commit `ca4d868`** (below). Open for files: the reference-monitor check (§9 P5, attended). **Window display options (I4) built and run 2026-10-27, commit `3f7daad`** (`INTERLACED_FINDINGS.md` §14): Weave, Field 1 / Field 2 and Deinterlace in the window only, labelled display only; output, scopes and export byte-identical to HEAD in every view; open: the by-hand checklist (§14.6). The on-picture marker (decision 7 changed): commit `a0474e2` (§14.8). **Per-field 4:2:0 colour (I3) built and run 2026-10-26, commit `afce63d`** (`INTERLACED_FINDINGS.md` §12): Manifold no longer mixes fields; P6 holds against the decoder's planes, and against the file for 8-bit H.264 since the decode-format fix (commit `3c9d17a`; bleed 25 % → 0.000 %, release scope, *8-bit H.264 files lose vertical chroma detail in the decode*); not for MPEG-2 (Apple's decoder mixes the fields).
 **Found:** §6.10 Stage 4, the 2× family. **Audit, plan and predictions:** `INTERLACED_FINDINGS.md`.
 
 **Decided (Robbie, 2026-10-09):** files and their SDI pass-through are in 1.0 (I1–I4, release scope item 2).
