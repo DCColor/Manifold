@@ -134,3 +134,6 @@ docs/mxf-fixtures/op1a/
 # 400 MB untracked folder in `git status` at the moment you are about to commit is exactly when
 # you least want to be reading past it. Covers .build-rel/ and the .build-cc* set above.
 .build-*/
+
+# Licence test harnesses and test keys (Graviton adoption rule 4). Output can contain keys.
+.harness/
