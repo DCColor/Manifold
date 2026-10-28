@@ -1541,7 +1541,7 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2 built and tested unattended 2026-10-23 (`3c5526d`), real install not yet migrated; the licensing port and Release builds to follow
+## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2 built and tested unattended 2026-10-23 (`3c5526d`), real install migrated automatically 2026-10-24; the licensing port and Release builds to follow
 
 **The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy
 policy, and the policy may not describe behaviour that has not shipped. Robbie split the fixes into
@@ -1768,6 +1768,36 @@ items.
 - **The edit-form decision** above.
 
 #### Attended: migrating the real install (for Robbie, morning) — about 20 minutes
+
+> **Superseded 2026-10-28: the real install was migrated automatically on 2026-10-24 at 16:06 local (20:06:07 UTC),
+> by the first ordinary launch of a P2 build (two minutes after `0a938f7`), not by this procedure. Nothing was
+> lost.** Found when 0.8.4 showed no saved passwords (it never shows one: `StreamBookmarksSheet.swift:339–347`
+> at `dd3984b`, the field starts blank by design). Checked read-only, presence only, values never read:
+> - **The list:** 7 entries (3 HLS, 2 SRT, 2 WHEP), all migrated (`urlString` empty, `secretRef` == id, `address`
+>   present); `streamBookmarks` `4466c076` → `7863ea21`. Every defaults snapshot to 2026-10-23 20:26 held
+>   `4466c076`, every one from 2026-10-25 17:52 on `7863ea21`.
+> - **The items** (`tools.graviton.manifold.streams`, attributes only): one per entry, 7 / 7, all last written in the
+>   same second, 2026-10-24 20:06:07 UTC. The two SRT items were created on 2026-09-21 (0.8.x passphrases) and
+>   rewritten then; the other five were created then. Nothing has modified them since (the test sessions, the
+>   licence live test and the stream-chroma runs of 2026-10-28 included), and the list hash has not moved since.
+> - **One orphan item**, referenced by no bookmark: created and last modified 2026-07-26, a pre-P2 passphrase of a
+>   stream deleted long ago. **Left in place** (deleting it gains nothing, and it is not provably unused).
+> - Which launch it was is UNKNOWN: `scripts/run.sh` overwrites `~/Desktop/manifold-run.log` at each launch, no
+>   `build/` log of that window has a `[STREAMS]` line, and the unified log keeps no Manifold lines.
+> - **Steps 1 and 2 below are moot.** Step 3's checks (connect each stream once, edit one) still apply.
+> - **0.8.4 cannot use migrated bookmarks:** it has no URL to dial; any save of its list drops `secretRef` and
+>   `address` (its `StreamBookmark` is id / name / urlString / type, `Preferences.swift:337–341` at `dd3984b`); and
+>   deleting a stream, or saving an edit to a non-SRT one, deletes the item that now holds the URL (`:812`, `:838`).
+>   Do not edit streams in 0.8.4. To use saved streams in 0.8.4 again, rollback B below.
+> - **Backup:** Robbie copied a pre-P2 snapshot to `~/ManifoldBackup/streams-pre-p2.plist`, outside Nextcloud
+>   (`streamBookmarks` present, `4466c076`, 7 entries with full URLs; checked by presence). `streamBookmarks` was then
+>   removed from all 108 `defaults*.plist` snapshots under `build/` (content otherwise identical, format kept,
+>   `plutil -lint` OK). Four other snapshot copies under `build/` still hold it: `colour-s7/run/stash-before-recentLUTs.plist`,
+>   `colour-s7/run/defaults-before.xml`, `colour-l4/polish-defaults-before.plist`, `colour-l4/fix-defaults-before.plist`.
+> - **Lesson: a launch-time migration runs on Robbie's real data in every development build.** Nothing gates it to a
+>   release, a signed build or an attended step, and the sandbox protects only runs that set it. So any future
+>   migration is planned as live from its first commit: backup, rollback and the read-back gate in place before the
+>   commit lands, and the commit itself treated as the migration of the real install.
 
 1. **Back up first, outside the Nextcloud tree** (and outside iCloud Desktop & Documents). An encrypted
    disk image in your home folder:
