@@ -285,7 +285,7 @@ held back until after release, and the numbered defect entries follow.
      export `.v210`, late = 0 dropped = 0 on all runs; scopes read the same offscreen. Playback of an 8-bit H.264
      1080p29.97 file with output on, 2 × 30 s each: CPU 19.2 % (HEAD) / 19.6 % (tree), GPU 0.091 ms a frame on both,
      late = 0 dropped = 0. 633 / 633 tests (631 + 2); the same 11 Profile warnings. Defaults restored to the snapshot.
-   - ✅ **FIXED for 8-bit H.264 streams (SRT, WHEP) 2026-10-28, commit `<commit — to be filled in>`.** ~~**8-bit
+   - ✅ **FIXED for 8-bit H.264 streams (SRT, WHEP) 2026-10-28, commit `a2b3b1d`.** ~~**8-bit
      H.264 / HEVC streams lose vertical chroma detail in the decode** (found 2026-10-26).~~ The same filter as files:
      `LiveVideoDecoder` asked VideoToolbox for x420. **Measured first, offline** (`build/stream-chroma/tools/livedecode.swift`,
      `measure/m1-vt-main-6000.txt`): an OBS-shaped stream (VT H.264 Main, 6 Mb/s, NV12, TS) through a session built as the
@@ -401,7 +401,7 @@ held back until after release, and the numbered defect entries follow.
    - **Keyboard Shortcuts**: the legend and the dot's tooltip name the highlight-colour dot.
    - Pictures, scopes, exports and the SDI loop byte-identical to HEAD: see §9.1. 654 / 654 tests. Open: Robbie's
      by-eye list (§9.1) and decisions 6–7.
-   ✅ **Small fixes (Robbie, 2026-10-28).** Built and run unattended 2026-10-28, commit `<commit — to be filled in>`
+   ✅ **Small fixes (Robbie, 2026-10-28).** Built and run unattended 2026-10-28, commit `3dead5d`
    (base `bc735c3`; predictions and drivers in `build/fixes-1028/`):
    - **Help ▸ Export Diagnostics…**, grouped with Export Frame for Support… under one separator (Help: Keyboard
      Shortcuts…, Download Sync Clips…, —, Export Diagnostics…, Export Frame for Support…). It was the app menu's last
@@ -466,7 +466,7 @@ held back until after release, and the numbered defect entries follow.
      `AXMenu` except to open the NDI flyout on purpose.
    - 750 / 750 tests (+8). 13 warning locations, identical to `6b286da`'s.
    ✅ **Guides layout and the P1 fallback (Robbie, 2026-10-29).** Built and run unattended 2026-10-29, commit
-   `<commit — to be filled in>` (base `cb7d8a1`; predictions and drivers in `build/p1-fallback-1029/`):
+   `304c954` (base `cb7d8a1`; predictions and drivers in `build/p1-fallback-1029/`):
    - **Guides popover:** Broadcast safe zones (toggle, Action, Title); separator; "Frame guide", one radio set: None
      (was Off), the Aspect rows 1.33 … 2.40 and then Custom with its W/H fields, the Social rows 9:16 … 3:2;
      separator; Social safe zones (toggle, Platform preset, Top, Bot). AX dump, tree vs `cb7d8a1`: that order, those
@@ -1439,7 +1439,14 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
 **Added 2026-10-01 (stage D, `AUDIO_RESAMPLER_DESIGN.md` §19.10).** ⚠️ ROBBIE TO CONFIRM BEFORE RELEASE.
 
 - **The constant:** `SyncClipLibrary.downloadURL` (App/Live/CalibrationMode.swift) =
-  `https://releases.graviton.tools/manifold/manifold-sync-clips-v1.zip`. Marked in the source.
+  `https://releases.graviton.tools/manifold/binaries/manifold-sync-clips-v1.zip`. Marked in the source.
+  **Moved under `binaries/` 2026-10-29 (Robbie, 0.9.0):** the old `…/manifold/manifold-sync-clips-v1.zip`
+  could never resolve, because the release Worker answers that depth only for manifest, version, the
+  platform keys and its passthroughs, and returned "Unknown endpoint" whatever R2 held. `binaries/` is a
+  passthrough to R2 key `manifold/binaries/<file>` (one path segment), served as
+  `application/octet-stream` with no `Content-Disposition`, so the browser saves it under the URL's
+  filename. Upload: `wrangler r2 object put graviton/manifold/binaries/manifold-sync-clips-v1.zip --file
+  <zip> --remote`, then `curl -sSI` that URL for HTTP 200.
 - **Opened by** A/V ▸ Download ProRes Sync Clips…, Help ▸ Download Sync Clips…, the calibration
   sheet's link and the "not included in this build" alert. In the browser; no in-app downloader.
 - **To do before release:** upload the zip to that path and open the link once from the shipped
@@ -1615,7 +1622,7 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (uncommitted); P2 built and tested unattended 2026-10-23 (`3c5526d`), real install migrated automatically 2026-10-24; the licensing port and Release builds to follow
+## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (`14e1ea5`); P2 built and tested unattended 2026-10-23 (`3c5526d`), real install migrated automatically 2026-10-24; the licensing port and Release builds to follow
 
 **The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy
 policy, and the policy may not describe behaviour that has not shipped. Robbie split the fixes into
@@ -2717,7 +2724,7 @@ defect, and that title was never written into this file.
 
 ---
 
-## ✅ FIXED 2026-10-21 (uncommitted; pending a real session) — PRE-EXISTING, ALL BUILDS — a malformed channel layout silences a 1- or 2-channel file, and the meters then say "NO AUDIO TRACK"
+## ✅ FIXED 2026-10-21 (`3f35328`; pending a real session) — PRE-EXISTING, ALL BUILDS — a malformed channel layout silences a 1- or 2-channel file, and the meters then say "NO AUDIO TRACK"
 
 **Found in the audio audit (Robbie, 2026-10-21)**, from Joey's 0.8.4 diagnostics and the client's file
 `TCMOP_NSS_Oriental_MKE_REF.mov` (ProRes 422 Proxy, `in24` LE stereo, 48 kHz).
@@ -2780,7 +2787,7 @@ defect, and that title was never written into this file.
 
 ---
 
-## ✅ FIXED 2026-10-21 (uncommitted; pending a real session) — PRE-EXISTING, ALL BUILDS — closing a window while its file is still loading leaves the audio playing with no window
+## ✅ FIXED 2026-10-21 (`3f35328`; pending a real session) — PRE-EXISTING, ALL BUILDS — closing a window while its file is still loading leaves the audio playing with no window
 
 **Found in the audio audit (Robbie, 2026-10-21)**; reported by Joey and the client on `Anthem 30 w GFX.mp4` and
 `Space Tech 30 w GFX.mp4`. Reproduced on HEAD `14e1ea5`, and heard (Robbie, 19:56).
@@ -3069,7 +3076,7 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
 
 ---
 
-## ✅ FIXED 2026-10-29 (commit `<commit — to be filled in>`) — PRE-EXISTING (P1) — the NDI watcher's fallback started discovery with no menu open
+## ✅ FIXED 2026-10-29 (commit `304c954`) — PRE-EXISTING (P1) — the NDI watcher's fallback started discovery with no menu open
 
 **Found** during the NDI flyout runs (`build/ndi-menu-1029/run-probe/app.log:209`, `6b286da` + the DEBUG probe, control
 bar): `[NDI] ⚠️ FALLBACK — the NDI submenu could not be watched` and `discovery requested` at 12:09:20, **19 s** after
@@ -3108,7 +3115,7 @@ sources…" until it is opened again in a key window. Not a privacy leak; a usab
 
 ---
 
-## ✅ FIXED 2026-10-29 (tooling only; no app code; not committed) — test drivers launched the installed 0.8.4
+## ✅ FIXED 2026-10-29 (tooling only; no app code; `6b286da`) — test drivers launched the installed 0.8.4
 
 **Found:** Robbie, 2026-10-29. **Effect:** the installed `/Applications/Manifold.app` (0.8.4) ran without anyone
 opening it, and rewrote `license.email` and `license.machineId` into the real plist after P1 builds had removed
@@ -3290,7 +3297,7 @@ Each step = `open -a`, pin the controls, then Export frame clicked by Accessibil
 
 ---
 
-## ✅ FIXED 2026-10-21 (uncommitted; pending a real session) — PRE-EXISTING, ALL BUILDS — a closed window's FrameEngine is never released
+## ✅ FIXED 2026-10-21 (`3f35328`; pending a real session) — PRE-EXISTING, ALL BUILDS — a closed window's FrameEngine is never released
 
 **Found in the audio audit (Robbie, 2026-10-21).**
 

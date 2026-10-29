@@ -39,7 +39,13 @@ enum SyncClipLibrary {
     /// and the sheet's link all open it in the browser; there is no in-app downloader (§19.9 Decisions
     /// 3). "v1" ties the zip to the current coded pattern (`SyncClips.patternVersion`): a changed
     /// pattern is a NEW v2 zip and a new constant, never a replaced v1 (§19.10).
-    static let downloadURL = URL(string: "https://releases.graviton.tools/manifold/manifold-sync-clips-v1.zip")!
+    ///
+    /// ⚠️ UNDER `binaries/`, BECAUSE THE RELEASE WORKER SERVES NOTHING ELSE AT THIS DEPTH. It answers
+    /// /manifold/<endpoint> only for manifest, version, the platform keys and the passthroughs
+    /// (binaries, current, archive, source); `/manifold/manifold-sync-clips-v1.zip` was "Unknown
+    /// endpoint" whatever was in R2 (2026-10-29). `binaries/` maps to R2 key
+    /// `manifold/binaries/<file>`, one path segment, as application/octet-stream.
+    static let downloadURL = URL(string: "https://releases.graviton.tools/manifold/binaries/manifold-sync-clips-v1.zip")!
 
     static let notBundledNote = "Sync clips aren’t included in this build."
 

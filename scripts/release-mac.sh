@@ -460,7 +460,13 @@ while IFS=$'\t' read -r label rate unit cycles master_cycles; do
     want_frames=$(( cycles * 120 * unit ))
     want_samples=$(( want_frames * 48000 * den / num ))
     (( want_frames * 48000 * den % num == 0 )) || die "${label}p: ${want_frames} frames is not a whole number of samples"
-    acodec=$(ffmpeg -hide_banner -i "$clip" 2>&1 | sed -n 's/.*Audio: \([a-z0-9_]*\).*/\1/p' | head -1)
+    # ⚠️ `ffmpeg -i` WITH NO OUTPUT EXITS 1 BY DESIGN ("At least one output file must be specified"),
+    # so it is CAPTURED with `|| true` and parsed afterwards. Piped straight into sed, pipefail made
+    # the assignment fail and `set -e` ended the release here with no message — measured 2026-10-29,
+    # the first run since this gate was added (`5a1eaf8`). The codec is asserted on the line below,
+    # so a probe that really failed still stops the release, with a message.
+    probe=$(ffmpeg -hide_banner -i "$clip" 2>&1 || true)
+    acodec=$(sed -n 's/.*Audio: \([a-z0-9_]*\).*/\1/p' <<<"$probe" | awk 'NR==1')
     [[ "$acodec" == pcm_s16le ]] || die "${label}p sync clip audio is '${acodec}', not pcm_s16le (it must loop sample-exactly)"
     got_samples=$(( $(ffmpeg -nostdin -v error -i "$clip" -map 0:a -f s16le -ac 1 - | wc -c) / 2 ))
     got_frames=$(ffmpeg -nostdin -hide_banner -i "$clip" -map 0:v -f null - 2>&1 | grep -oE 'frame= *[0-9]+' | tail -1 | tr -dc 0-9)
