@@ -472,8 +472,10 @@ void ManifoldH264DepacketizerSetPayloadType(ManifoldH264Depacketizer *depacketiz
 /// They are not independent of the render cushion. `recoveryWindowMs` is the time a missing
 /// packet is worth waiting for, and waiting is only free while the frame it belongs to has not
 /// been displayed — so the window must be sized against WHEPFrameRouter.targetDepth, not chosen
-/// beside it. Today both are 400 ms and they agree by coincidence rather than by construction;
-/// the preset work is what should make one derive from the other.
+/// beside it. They no longer agree: trial L1 (2026-10-28) lowered targetDepth to 300 ms and left this
+/// window at 400 ms, so a retransmit landing 300–400 ms late is "recovered" but shows as an underrun.
+/// None did in the trial (no loss on either server). The preset work is what should make one derive
+/// from the other.
 typedef struct {
     /// How long a declared-missing sequence number stays outstanding before it is written off as
     /// genuine loss. A packet arriving after its frame's display deadline is not a recovery in

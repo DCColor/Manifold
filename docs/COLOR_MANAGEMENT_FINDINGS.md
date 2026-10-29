@@ -5348,6 +5348,123 @@ window id; it showed only the picture (the readout was hidden) and was deleted. 
 scenes added to "Untitled" (HDR Wedge, Lines 422). **MediaMTX:** the running instance, not reconfigured. **Not
 committed.**
 
+#### Trials L1 and L2 — results, 2026-10-28 18:51 – 23:58 (attended, Robbie)
+
+**Decided before the runs (Robbie, 2026-10-28):** L3 stays out of 1.0 (post-1.0, after Stage 0b-2b's item (f), the
+deep-pyramid follow-up). L1 runs on local MediaMTX first, then one ABAB on Cloudflare; a local-only pass reports as
+inconclusive. L2 as planned (*Buffer policy*, above).
+
+**Method.**
+- **Build:** unsigned Profile (`.build-cc/latency-Profile`). Two DEBUG-only launch variables let one build run both
+  arms of a trial, each from connect: `MANIFOLD_WHEP_TARGET_DEPTH` and `MANIFOLD_NDI_AUDIO_LEAD`. The Debug lead
+  ladder gained 60 / 80 / 100 / 120 / 200 ms, stepped by an accessibility click on the menu item, never by a keystroke.
+- **ABAB:** default and target alternated on one continuous OBS stream, each arm a fresh launch, 8 min from connect,
+  the first 60 s excluded from scoring. One local 0.30 arm (B1) was quit 4 min early, by mistake, and made up with an
+  extra 0.30 arm (B3).
+- **Measured, per arm** (`build/latency-l1l2/`: logs, `*.score.txt`, `PROGRESS.md`):
+  - `[WHEP-JITTER]` underruns, worst deficit and "cushion needed";
+  - LiveClock video depth; the steering's audio low-water, holds, re-anchors and splices;
+  - `[AV-CONTENT]` per-pair A/V, both decoded and at the glass;
+  - a 2-min recording on the OBS Recorder instance (60 fps) for device A/V;
+  - Audio Hijack for the whole arm, scanned for dropouts (runs of exact digital silence ≥ 1 ms, 5 ms dips).
+- **Not measured: absolute glass-to-glass latency.** Screenshots are off-limits; the latency change is the
+  Buffer readout's, by construction.
+- **The A/V measure is Manifold's own contribution, glass − decoded, per pair.** The sender's content A/V wandered
+  −71…−129 ms within arms (the OBS media source looping, not a buffering step: OBS's log shows none), so absolute
+  glass and device medians are cross-checks only.
+
+**L1 — WHEP cushion 0.400 → 0.300.** OBS VT H.264 Main, 1 s keyframe, no B-frames, 23.976: "MediaMTX Local" to MediaMTX
+1.21.1 (Opus 160), then "WHIP Cloudflare" (Opus 256, CBR 6000, fresh sender, 42 ms OBS audio buffering).
+
+| arm | target | scored s | underruns | cushion needed | video low s | audio low ms | holds · re-anchors · splices | glass − decoded ms |
+|---|---|---|---|---|---|---|---|---|
+| A1 local | 0.40 | 423 | 0 | 0.000 | 0.363 | 345.8 | 0 · 0 · 0 | −23.96 |
+| B1 local | 0.30 | 174 | 0 | 0.000 | 0.289 | 238.4 | 0 · 0 · 0 | −24.30 |
+| A2 local | 0.40 | 445 | 0 | 0.000 | 0.387 | 314.5 | 0 · 0 · 0 | −24.25 |
+| B2 local | 0.30 | 447 | 0 | 0.000 | 0.288 | 212.3 | 0 · 0 · 0 | −24.29 |
+| B3 local | 0.30 | 440 | 0 | 0.000 | 0.287 | 212.9 | 0 · 0 · 0 | −23.57 |
+| C-A1 Cloudflare | 0.40 | 444 | 0 | 0.000 | 0.388 | 373.6 | 0 · 0 · 0 | −24.54 |
+| C-B1 Cloudflare | 0.30 | 444 | 0 | 0.000 | 0.262 | 203.4 | 0 · 0 · 0 | −24.06 |
+| C-A2 Cloudflare | 0.40 | 512 | 0 | 0.000 | 0.379 | 366.9 | 0 · 0 · 0 | −24.23 |
+| C-B2 Cloudflare | 0.30 | 443 | 0 | 0.000 | 0.287 | 254.9 | 0 · 0 · 0 | −24.61 |
+
+- **Against the bands:**
+  - underruns 0 (band 0);
+  - video low 0.262 s (band ≥ 0.15);
+  - audio low 203 ms (band ≥ 150, the last lead measured clean before L2);
+  - holds, re-anchors and splices 0;
+  - glass − decoded within 1.0 ms of the 0.40 arms (band ±2);
+  - Buffer readout 300 ms. Presented frame rate the same at both targets (enqueued 21.8–24.7/s).
+- **Cloudflare:** no packet gaps, no loss, no reordering. C-B1's low (22:30:39) was one arrival dip to 22 pictures/s.
+  C-A1 and C-A2 had the same dips at 0.40.
+- **Device A/V: inconclusive.** Device − glass over the same 2-min window moved with session time, not with the
+  arm: local +40.0 / +3.3 / −19.2 / −23.6 / −23.3 ms (A1, B1, A2, B2, B3); Cloudflare +27.8 / +32.3 / +13.7 / −1.3.
+  The Recorder's own audio buffering stayed at 128 ms throughout. The cause is in the measuring chain and UNKNOWN.
+  The SYNC clip also fails c12's 1 Hz grid gate (its beeps are not on a 1 s grid); pairing used every beep.
+- **Verdict: safe to lower. `WHEPFrameRouter.targetDepth` is 0.300** (tree, not committed). The comment records the
+  trial and the limits below; the snap threshold's comment now says ~0.5 s.
+- **Limits:**
+  1. **The Cloudflare path never ran late:** "cushion needed" stayed 0.000 s at both targets. The 2026-07-21
+     measurement that set 0.400, taken before NACK, saw lateness up to 162 ms, which would underrun at 0.300. The
+     buffer review's Cloudflare logs since NACK (video low 319 ms at 0.400 over 4.5 h, so ≤ 81 ms late) fit inside
+     0.300 with margin. If `[WHEP-JITTER]` ever reports "cushion needed" > 0.25 s on a real network, revisit.
+  2. **The NACK recovery window stays 400 ms** and no longer equals the cushion (`H264Depacketizer.h`). A
+     retransmit landing 300–400 ms late now counts as recovered but shows as an underrun; none did (no loss).
+  3. Device-level A/V inconclusive, as above.
+- **What this invalidates:** every absolute WHEP queue, stall and advance figure, which moves down 100 ms
+  (*What a cushion change does to everything else*, above). Relative A/V and calibration are unaffected.
+
+**L2 — NDI desktop-audio lead 0.250 → 0.200.** DistroAV 6.1.1 main output "OBS PGM", scene SYNC (canvas from the
+"NDI Bars (P2)" profile: 1080p 23.976, NV12 709); output on the Scarlett 18i20; Robbie listening throughout.
+
+| arm | lead | scored s | renderer queue ms | holds · re-anchors | input zero-runs (scored) | Audio Hijack dropouts | glass − decoded ms | by ear |
+|---|---|---|---|---|---|---|---|---|
+| N-A1 | 250 | 448 | 255.8–259.5 | 0 · 0 | 1 (9.5 ms) | 1 run, the input's | −59.63 | clean |
+| N-B1 | 200 | 445 | 205.9–209.4 | 0 · 0 | 0 | 0 | −59.76 | clean |
+| N-A2 | 250 | 450 | 254.9–259.4 | 0 · 0 | 0 | 0 | −59.63 | clean |
+| N-B2 | 200 | 445 | 205.9–209.4 | 0 · 0 | 0 | 0 | −59.72 | clean |
+
+- **N-A1's dropout** was `[NDI-ZERO] exact-zero run of 454 samples (9.5 ms) enqueued to the renderer`: it came from
+  FrameSync's output, and the renderer queue held 256.4 ms through it. Upstream, not the lead.
+- **Pictures skipped unseen:** 1 in each of N-A2 and N-B2, which does not depend on the lead.
+- **NDI's glass − decoded is about −60 ms**, against WHEP's −24, because NDI's picture hold and timestamps work
+  differently. NDI arms are compared only with each other.
+- **Device A/V:** device − glass +28.0 / +25.3 / +22.5 / +27.0 ms, so adjacent arms agree within 3 ms.
+- **Picture hold:** 283 → 233 ms.
+
+**The crackle threshold** (Debug ladder 40 → 150 ms, 60 s a rung, values not told to the listener; Audio Hijack
+scanned per rung):
+
+| lead | Scarlett: by ear | Scarlett: scan | built-in (Mac Studio Speakers): by ear | built-in: scan |
+|---|---|---|---|---|
+| 40 | crackly (twice, from connect) | 3 202 silent runs / 55 s | very crackly | 2 602 runs / 62 s |
+| 60 | borderline (very slight dropouts in the noise?) | 0 | a glitch or two | 1 run, 34 spikes, no input zero-run |
+| 80–150 | clean | 0 | clean | 0 |
+| 60, fresh connect | clean (one or two faint glitches?) | 0 over 193 s | — | — |
+
+- **Threshold:** Scarlett above 40, at most 60 ms; built-in output above 60, at most 80 ms.
+- **The scan is a crackle detector on both devices.** It matched the ear at every rung. The only exception was the
+  faint doubts on the Scarlett at 60 ms, which did not reach Manifold's output.
+- **The built-in output** was judged on its own small speaker in the machine room (the beeps were audible, the
+  hiss was not), plus the scan. Audio Hijack's output block was switched to the built-in output for that run.
+- Audio Hijack taps Manifold's output before the device, so a crackle made only inside a device's own path would
+  not show in the scan.
+- **Rule:** 200 must be ≥ threshold + 50 ms on both devices. It is ≥ 120 ms above both.
+- **Verdict: safe to lower. `NDIService.desktopAudioLeadDefault` is 0.200** (tree, not committed). Its doc comment
+  states the thresholds and drops the 40 ms argument (BUGS.md, the 2026-10-08 comment entry, now FIXED).
+- **Limits:** one Mac and two devices. Other interfaces and slower Macs are unmeasured; the 120 ms margin is for them.
+
+**Gates:** Profile build, no warnings in the touched files; `swift test` 742 / 742; `soaklog.test.mjs` 8 / 8.
+
+**Defaults:** exported before the first launch (1 634 keys after the licence keys and `streamBookmarks` were stripped;
+presence only). After the last quit, 17 run-added `NSWindow Frame` keys were deleted by name. The domain is
+dictionary-equal to the snapshot, apart from `playbackVolume` and `showTray`, which Robbie changed during the session
+and which were left as they are. `streamBookmarks` was never written. The Cloudflare bookmark was connected by Robbie
+from the menu, so no stream URL was read by the tooling.
+
+**Screenshots:** none. **OBS:** profiles unchanged; the sender was relaunched for Cloudflare and for NDI. **MediaMTX:**
+started for L1 with `scripts/soak/mediamtx-soak.yml`, stopped after. **Not committed.**
+
 ---
 
 ### 6.11 Remaining colour work for 1.0 — audit, decisions and staged plan, 2026-10-12

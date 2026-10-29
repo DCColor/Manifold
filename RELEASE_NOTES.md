@@ -60,6 +60,7 @@ bullet.
 
 ### Improved
 
+- Lower latency on live streams: WHEP plays 100 ms sooner and NDI 50 ms sooner, with sound and picture still in sync.
 - Settings has tabs (General, Files, Playback, Scopes & Guides, DeckLink Output, Sources, License) and can be resized. Each tab opens at the height of what it holds. Manifold ▸ License… opens the License tab. Your settings are unchanged.
 - Shortcuts are in the menus now, where you can see them, and some keys changed. Inspector: ⌘I (was I). Always Show Controls: ⌥⌘T (was Tab). Show/Hide Scopes: ⌥⌘S (was Control-Option-T). Export Frame: ⌥⌘E (was Control-Option-E). The display transforms are ⌥⌘1, ⌥⌘2 and ⌥⌘3. Every menu item shows its key, including N for Show/Hide File Name.
 - Changed since the previous test build: hold to compare is C (was D), Shift-C for Bypass (was Shift-D); Show/Hide Scopes is ⌥⌘S (was ⌘7). D and ⌘7 do nothing now.

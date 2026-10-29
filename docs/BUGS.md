@@ -24,10 +24,14 @@ held back until after release, and the numbered defect entries follow.
      defaults held for 1.0; Stage 0b-2a (the adaptive SRT cushion, the readout's Buffer row, the
      saved-advance check; `6132970`), then 0b-2b (the reorder term; built and run 2026-10-08, unattended
      and on Cloudflare SRT, `5d623af`: §6.10, *Stage 0b-2b — results* and *— attended*).
-   - **Trial L1 — WHEP cushion 0.30**, after 0b-2b (§6.10). Lowered only if it passes.
-   - **Trial L2 — NDI desktop-audio lead 0.20**, which also finds the audio renderer's crackle
-     threshold (between 40 and 150 ms of lead) on the Scarlett and the built-in output (§6.10).
-   - Trial L3 (SRT floor 0.20) is NOT in 1.0: it waits until after HEVC Stage 3.
+   - ✅ **Trial L1 — WHEP cushion 0.30: PASSED, lowered 0.400 → 0.300** (run 2026-10-28, attended; built,
+     not committed). Local MediaMTX then Cloudflare, ABAB: 0 underruns at 0.30, Manifold's own A/V unchanged,
+     100 ms less latency. Limits: the Cloudflare path never ran late that night, and device-level A/V was
+     inconclusive (§6.10, *Trials L1 and L2 — results*).
+   - ✅ **Trial L2 — NDI desktop-audio lead 0.20: PASSED, lowered 0.250 → 0.200** (same night; not committed).
+     Crackle threshold: Scarlett above 40, at most 60 ms; built-in output above 60, at most 80 ms (§6.10).
+   - Trial L3 (SRT floor 0.20) is NOT in 1.0 (re-confirmed, Robbie, 2026-10-28): post-1.0, after the
+     deep-pyramid follow-up to the reorder term (§6.10, Stage 0b-2b item (f)).
    - HEVC over SRT, Stages 1–6, including Stage 3b, now **"4:2:2 end to end"** (§6.10). Decided
      (Robbie, 2026-10-09): Stage 3b takes in the 4:2:2 file half of the interlaced work. 4:2:2 file
      sources decode to `x422`, scrub and playback together (the `x420` "TWO LOSSES" note in *feed the
@@ -1561,6 +1565,30 @@ stages on 2026-10-19:
   - Activation now reserves the machine id in the Keychain before calling `/activate`.
   - Deactivation keeps an unactivated record that holds the machine id and no email. Without it,
     re-activating would spend a second machine slot now that the plist no longer carries the id.
+  - **2026-10-28/29: both keys back in the plist, put there by 0.8.4. Checked read-only, presence only, values
+    never read; nothing changed.**
+    - The last P1 removal on record was 2026-10-27 00:40 (`[LICENSE] removed license.email and license.machineId …
+      read back and matches`). On 2026-10-28 a P1 build launched LICENSED at 12:00:47 and logged no legacy line,
+      so the keys were absent then. The next P1 launch, at 15:39:18, found both present
+      (`build/stream-chroma/r0/smoke-tree-srt/app.log`). P1 builds never write them, so the installed 0.8.4 wrote
+      them in that window, as on 2026-10-27 (the `xctrace --launch` case, below). Robbie opened 0.8.4 that day
+      (the P2 note, below: "Found when 0.8.4 showed no saved passwords"). The exact launch time is UNKNOWN.
+    - They stayed through every launch of the latency trials (2026-10-28 18:51–23:58): each launch had its licence
+      prompt Denied and logged `[LICENSE] state: KEYCHAIN UNREADABLE (OSStatus -128 …)` and `legacy license values
+      left in place … (license.email, license.machineId): the license could not be read from the Keychain`. That is
+      `LicenseRecordSync` behaving as specified.
+    - **The current build removes them on its next normal launch where the licence Keychain read is allowed**
+      (prompt Allowed, or a build that does not prompt), provided each value equals the activation record's
+      (`LicenseRecordSync.swift:116–133`). If 0.8.4 rewrote the same values, which is what 2026-10-27 showed,
+      that launch logs `removed license.email and license.machineId …`. If they differ, it logs `… kept in the
+      preferences plist: it differs from the Keychain record` and keeps them. Not verified: checking would mean
+      reading the Keychain.
+    - **Every 0.8.4 launch puts them back**, so this repeats until 0.8.4 is no longer opened on this Mac.
+    - Found, not explained: `/Applications/Manifold.app` reads `kMDItemLastUsedDate` 2026-10-28 23:58:05 local,
+      during the trials, 10 s before the trial build's last log line (23:58:15, its Quit event, addressed by bundle
+      path). No 0.8.4 process was running afterwards, and the unified log returned nothing for 23:57–23:59. What
+      touched it is UNKNOWN. A Quit event addressed by path may still resolve the bundle id through
+      LaunchServices; not tested.
 - **Network disk cache.**
   - The licence, update-check, WHEP and HLS-playlist requests go through `PrivateURLSession`
     (ephemeral, `urlCache = nil`).
@@ -4237,9 +4265,11 @@ H.264 (no B-frames) do not show it, which is why no earlier SRT measurement did.
 
 ---
 
-## ☐ OPEN 2026-10-08 — the NDI desktop-audio lead's doc comment still argues for 40 ms
+## ✅ FIXED 2026-10-28 (with trial L2; not committed) — the NDI desktop-audio lead's doc comment still argues for 40 ms
 
-**Status:** OPEN, comment only. **Found:** the 2026-10-08 buffer review.
+**Status:** FIXED in the tree with trial L2 (§6.10): the 40 ms paragraphs are gone. The comment now states the 200 ms
+default and the thresholds measured, and names 40 ms as the first value, which crackled.
+**Found:** the 2026-10-08 buffer review.
 
 - `NDIService.swift`, the doc comment on `desktopAudioLeadDefault` (lines ~829–837 at `d20ff96`)
   still opens with "40 ms, CHOSEN FROM THE PUMP'S OWN MEASURED BEHAVIOUR…" and the "is 40 ms audible as

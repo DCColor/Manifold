@@ -384,9 +384,23 @@ final class WHEPFrameRouter {
 
     // MARK: - Depth preset
     //
-    // 0.400 s — MEASURED AGAINST A LIVE FEED, NOT TAKEN FROM THE PRESET GRID.
+    // 0.300 s — LOWERED FROM 0.400 BY TRIAL L1, 2026-10-28. Both values were measured against live feeds.
     //
-    // ── THE MEASUREMENT ──────────────────────────────────────────────────────────────────────
+    // ── TRIAL L1, 2026-10-28 (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10) ─────────────────────────
+    //
+    // Local MediaMTX and Cloudflare WHEP, OBS VT H.264 at 23.976, no B-frames; 0.40 and 0.30 alternated
+    // on one stream, each from connect, ~7 min scored per arm (first 60 s excluded). At 0.30, on both
+    // servers: 0 underruns, worst deficit 0.000 s, cushion needed 0.000 s, 0 holds / re-anchors / splices;
+    // video depth low 0.262 s (one arrival dip to 22/s, which the 0.40 arms showed too), audio low-water
+    // 203 ms; Manifold's own A/V (glass − decoded) unchanged within 1 ms. Latency 100 ms lower.
+    //
+    // ⚠️ THE ONE CONDITION THE TRIAL DID NOT MEET: the July network below. Tonight's Cloudflare path never
+    // ran late at all (cushion needed 0.000 s at either value), and a 162 ms lateness against a 0.300
+    // target would underrun. The buffer review's Cloudflare logs since NACK (video low 319 ms at 0.400 over
+    // 4.5 h, i.e. ≤ 81 ms late) fit inside 0.300 with margin; the July figure, from before NACK, does not.
+    // If [WHEP-JITTER]'s "cushion needed" ever reports > 0.25 s on a real network, revisit this number.
+    //
+    // ── THE ORIGINAL MEASUREMENT (2026-07-21, before NACK) ────────────────────────────────────
     //
     // Live Cloudflare WHEP feed at 23.98 fps, on a VALID Profile build (-O for both Swift and C —
     // an earlier Debug-build measurement was invalidated and redone, which is why [BUILD] now
@@ -416,7 +430,24 @@ final class WHEPFrameRouter {
     // STARTUP == TARGET, deliberately and unchanged: the initial fill lands ON the setpoint
     // instead of draining to it at ±maxSlew — at 0.005/s a 0.2 s gap would take 40 s to close.
     // This one constant supplies both (see `activate`), so they cannot drift apart.
-    private static let targetDepth = 0.400
+    //
+    // TRIAL L1 (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10, *Defaults, and the trials that may lower them*):
+    // DEBUG builds read `MANIFOLD_WHEP_TARGET_DEPTH` (seconds, 0.15–1.0) at launch, so the default and the
+    // trial value run from ONE build, each from connect (startup == target), not stepped mid-session. An
+    // environment variable rather than a preference, so it cannot outlive the launch that asked for it.
+    // The default below is what ships.
+    private static let targetDepth: Double = {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["MANIFOLD_WHEP_TARGET_DEPTH"] {
+            if let value = Double(raw), (0.15...1.0).contains(value) {
+                NSLog("[WHEP] TRIAL OVERRIDE: targetDepth %.3fs from MANIFOLD_WHEP_TARGET_DEPTH (default 0.300)", value)
+                return value
+            }
+            NSLog("[WHEP] MANIFOLD_WHEP_TARGET_DEPTH=%@ ignored (not a number in 0.15–1.0); targetDepth 0.300", raw)
+        }
+        #endif
+        return 0.300
+    }()
 
     /// LiveClock's default rail, stated here as a named constant ONLY so the backlog accountant can
     /// compute its residual bound (residual is the integrated slew, so |residual| ≤ maxSlew × elapsed).
@@ -466,14 +497,14 @@ final class WHEPFrameRouter {
             // it before jumping. Conservative starting values — a missed snap costs latency, a
             // false snap costs a visible jump, and the second is the worse failure.
             snapEnabled: true,
-            // UNCHANGED at 0.2, but note the arithmetic moved with targetDepth: the snap fires
-            // above ~0.6 s (0.400 target + 0.2 threshold) rather than ~0.4 s. That is still the
+            // UNCHANGED at 0.2, but note the arithmetic moves with targetDepth: the snap fires
+            // above ~0.5 s (0.300 target + 0.2 threshold; ~0.6 s while the target was 0.400). That is still the
             // right shape — the threshold is "how far above target is a GROSS overfill the P-loop
             // cannot drain", which scales with the target rather than being an absolute depth — but
             // it does mean the buffer tolerates more absolute latency before snapping than it used
-            // to. Revisit if [WHEP-BACKLOG] ever shows a connect backlog sitting between 0.4 s and
-            // 0.6 s.
-            snapThreshold: 0.2,      // snap above ~0.6 s with a 0.4 s target
+            // to. Revisit if [WHEP-BACKLOG] ever shows a connect backlog sitting between 0.3 s and
+            // 0.5 s.
+            snapThreshold: 0.2,      // snap above ~0.5 s with a 0.3 s target
             snapDebounce: 0.75,      // sustained, not a burst
 
             // Headroom above the shallow file-path bound (12) so the control loop can correct a
@@ -764,7 +795,7 @@ final class WHEPFrameRouter {
     }
 
     /// The chain readout's Buffer row (decision 5, docs/COLOR_MANAGEMENT_FINDINGS.md §6.10). WHEP has no
-    /// transport buffer of its own to state and no automatic raise: "400 ms". MAIN.
+    /// transport buffer of its own to state and no automatic raise: "300 ms". MAIN.
     private func publishBufferReadout(clock: LiveClock, stepped: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let renderer else { return }

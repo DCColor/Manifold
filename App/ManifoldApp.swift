@@ -417,7 +417,7 @@ struct ManifoldApp: App {
 ///
 ///      Survives relaunch, works with an ordinary double-click launch, and is turned off with
 ///      `defaults delete`. This is the one for the case that has to keep working: somebody on
-///      different hardware checking whether the 250 ms desktop-audio lead is enough for THEIR
+///      different hardware checking whether the 200 ms desktop-audio lead is enough for THEIR
 ///      output device. That person is listening to a normally-launched app over a session, and
 ///      requiring them to run from Terminal to have the ladder would be friction on exactly the
 ///      workflow this gate is supposed to preserve. Same shape as
@@ -548,12 +548,12 @@ private struct NDIAudioGroupedCommand: View {
     }
 }
 
-/// Debug ▸ Desktop Audio Lead — cycles 40 / 150 / 300 / 400 / 600 ms, re-anchoring the timebase on
+/// Debug ▸ Desktop Audio Lead — cycles 40 / 60 / 80 / 100 / 120 / 150 / 200 / 250 / 300 / 400 / 600 ms, re-anchoring the timebase on
 /// the next pull rather than requiring a reconnect.
 ///
 /// This is the one that matters: the renderer reports
 /// `hasSufficientMediaDataForReliablePlaybackStart = NO` for entire sessions at 40 ms, while WHEP
-/// (400 ms) and SRT (250 ms) run clean through the same renderer. Watch `sufficientForStart` and
+/// (300 ms) and SRT (250 ms) run clean through the same renderer. Watch `sufficientForStart` and
 /// `queue` in the per-second `[NDI-AUDIO] renderer:` line as you step it.
 private struct NDIAudioLeadCommand: View {
     @ObservedObject private var ndi = NDIService.shared

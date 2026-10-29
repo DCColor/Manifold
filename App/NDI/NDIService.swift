@@ -845,25 +845,19 @@ final class NDIService: ObservableObject {
     /// way — that path reads the tap keyed to video PTS and never consults this timebase — and
     /// while the card owns audio the picture is not held at all.
     ///
-    /// 40 ms, CHOSEN FROM THE PUMP'S OWN MEASURED BEHAVIOUR rather than from feel: the pull period
-    /// measured ~10.9 ms against a nominal 10 ms, and the `[NDI-AUDIO]` trace's per-push deviation
-    /// ran +0.01..+1.02 ms over 72 s. 40 ms is ~4 pull periods of queue and ~40× the largest
-    /// deviation ever measured on that trace.
+    /// ── 200 ms: TRIAL L2, 2026-10-28 (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10) ───────────────────
     ///
-    /// ⚠️ THE ONE NUMBER HERE NOT SETTLED BY MEASUREMENT IS WHETHER 40 ms IS AUDIBLE AS LIP-SYNC.
-    /// It is inside the range usually quoted as tolerable for audio-late, but this has NOT been
-    /// confirmed by ear. If it reads late, lower it and expect the renderer to become more
-    /// sensitive to pump jitter; that trade is the whole content of this constant.
-    /// ── 250 ms: AN EVIDENCE-BACKED FLOOR, NOT A MEASURED OPTIMUM ─────────────────────────────
+    /// Lowered from 250 ms, its first value, which copied SRT's `targetDepth`. (The value before that,
+    /// 40 ms, was sized from the pump's jitter alone and crackled; see the note below the constant.)
     ///
-    /// It is SRT's `targetDepth` — the smallest lead anywhere in this app that is measured clean
-    /// through this same `AVSampleBufferAudioRenderer` — and it sits comfortably above the observed
-    /// threshold. It is chosen because it is defensible, not because it is minimal.
-    ///
-    /// ⚠️ THE TRUE THRESHOLD IS LOWER, AND IS NOT 291 ms. Measured on this machine with real
-    /// programme, reproducible in both directions: 40 ms crackly · **150 ms clean** · 300/400/600 ms
-    /// clean · back to 40 ms crackly again. So the boundary lies somewhere between 40 and 150 ms and
-    /// has not been narrowed further.
+    /// - **The crackle threshold, measured on this Mac** (Debug ladder 40 → 150 ms, 60 s a rung, by ear
+    ///   and by a dropout scan of Manifold's output; 60 ms also from a fresh connect on the Scarlett):
+    ///   Scarlett 18i20 above 40, at most 60 ms; built-in output above 60, at most 80 ms (one glitch
+    ///   at 60). 40 ms starves the renderer ~50 times a second on both.
+    /// - **200 vs 250, alternated on one OBS NDI stream** (~7.5 min scored per arm, Scarlett): clean by
+    ///   ear and 0 dropouts at both; queue held at the lead; Manifold's own A/V unchanged within 0.3 ms.
+    /// - 200 ms is ≥ 120 ms above the worse device's threshold: margin for slower Macs and other
+    ///   interfaces, which have not been measured. The picture hold, and so NDI's latency, is 50 ms lower.
     ///
     /// ⚠️ DO NOT DERIVE THIS FROM THE +291 ms RENDER-AHEAD THE HLS WORK MEASURED. That figure was
     /// the leading hypothesis for the mechanism and **150 ms being clean refutes it** — the
@@ -871,10 +865,10 @@ final class NDIService: ObservableObject {
     /// but it does not set the size of it, and presenting it as the explanation would be exactly the
     /// kind of confident mechanism-shaped claim this file has been bitten by three times already.
     ///
-    /// ⚠️ AND IT IS A PROPERTY OF THE OUTPUT DEVICE. 150 ms clean is one machine and one interface.
-    /// Keep the Debug lead ladder in the build: it is how this was found, and it is how the next
-    /// person on different hardware checks whether 250 ms is still enough.
-    private static let desktopAudioLeadDefault = 0.250
+    /// ⚠️ AND IT IS A PROPERTY OF THE OUTPUT DEVICE. The two thresholds above are one machine and two
+    /// devices. Keep the Debug lead ladder in the build: it is how this was found, and it is how the
+    /// next person on different hardware checks whether 200 ms is still enough.
+    private static let desktopAudioLeadDefault = 0.200
 
     /// ── ⚠️ 40 ms IS NOT ENOUGH — MEASURED, AND THE RENDERER HAD BEEN SAYING SO ───────────────
     ///
@@ -890,12 +884,31 @@ final class NDIService: ObservableObject {
     /// broken. **No adaptive loop is built on it**, and nothing should be: it is a constant, not a
     /// measurement.
     ///
-    /// For scale: WHEP runs a 400 ms lead (LiveClock's `targetDepth`) and SRT 250 ms, both clean
+    /// For scale: WHEP runs a 300 ms lead (LiveClock's `targetDepth`) and SRT 250 ms, both clean
     /// through this same renderer.
     ///
     /// RUNTIME-ADJUSTABLE so the threshold can be found in ONE session instead of one value per
     /// build — see `cycleDesktopAudioLead`. Read on the pump thread under `toneLock`.
-    private var desktopAudioLead = NDIService.desktopAudioLeadDefault
+    private var desktopAudioLead = NDIService.desktopAudioLeadInitial
+
+    /// The lead a session starts at. TRIAL L2 (docs/COLOR_MANAGEMENT_FINDINGS.md §6.10): DEBUG builds read
+    /// `MANIFOLD_NDI_AUDIO_LEAD` (seconds, 0.040–0.600) at launch, so the default and the trial value run
+    /// from one build, each from connect rather than re-anchored under a running queue. Not a preference,
+    /// so it cannot outlive the launch. The default above is what ships; only the trial may change it.
+    private static let desktopAudioLeadInitial: Double = {
+        #if DEBUG
+        if let raw = ProcessInfo.processInfo.environment["MANIFOLD_NDI_AUDIO_LEAD"] {
+            if let value = Double(raw), (0.040...0.600).contains(value) {
+                NSLog("[NDI-AUDIO] TRIAL OVERRIDE: desktop audio lead %.0f ms from MANIFOLD_NDI_AUDIO_LEAD (default %.0f ms)",
+                      value * 1000, desktopAudioLeadDefault * 1000)
+                return value
+            }
+            NSLog("[NDI-AUDIO] MANIFOLD_NDI_AUDIO_LEAD=%@ ignored (not a number in 0.040–0.600); lead %.0f ms",
+                  raw, desktopAudioLeadDefault * 1000)
+        }
+        #endif
+        return desktopAudioLeadDefault
+    }()
     /// Set on main when the lead changes; consumed by the pump, which re-anchors immediately.
     private var desktopAudioLeadChanged = false
 
@@ -918,9 +931,13 @@ final class NDIService: ObservableObject {
     private let toneLock = UnfairLock()
 
     /// The ladder the Debug menu steps through. Spans the two known-good live leads (SRT's 250 ms,
-    /// WHEP's 400 ms) and brackets the measured 291 ms render-ahead, with the current 40 ms at the
-    /// bottom so the first step reproduces today's behaviour exactly.
-    private static let desktopAudioLeadLadder = [0.040, 0.150, 0.250, 0.300, 0.400, 0.600]
+    /// WHEP's 300 ms since trial L1, 400 before) and brackets the measured 291 ms render-ahead, with 40 ms (the first value,
+    /// crackly) at the bottom.
+    ///
+    /// Trial L2 added 60–120 ms and 200 ms: the crackle threshold lies between 40 (crackly) and 150 (clean),
+    /// and 200 is the trial's target.
+    private static let desktopAudioLeadLadder = [0.040, 0.060, 0.080, 0.100, 0.120, 0.150, 0.200, 0.250,
+                                                 0.300, 0.400, 0.600]
 
     /// The routing hook: DeckLink output enabled AND the destination SDI. Called by WindowDeck
     /// beside `FrameEngine.setDeckLinkOwnsAudio`, with the same value. Main thread.
@@ -1064,14 +1081,14 @@ final class NDIService: ObservableObject {
         applyPictureDelay()
         NSLog("%@", String(format: "[NDI-AUDIO] desktop audio lead → %.0f ms (was %.0f ms) — "
                            + "re-anchoring the timebase on the next pull, no reconnect. For "
-                           + "reference: SRT runs 250 ms and WHEP 400 ms through this same renderer, "
+                           + "reference: SRT runs 250 ms and WHEP 300 ms through this same renderer, "
                            + "and this machine's audio device measured a +291 ms render-ahead. Watch "
                            + "sufficientForStart and queue in the next [NDI-AUDIO] renderer: line.",
                            next * 1000, previous * 1000))
     }
 
     @Published private(set) var audioLeadTitle =
-        String(format: "Desktop Audio Lead: %.0f ms", NDIService.desktopAudioLeadDefault * 1000)
+        String(format: "Desktop Audio Lead: %.0f ms", NDIService.desktopAudioLeadInitial * 1000)
 
     /// How far the timebase may sit from where it should be before an absolute re-anchor is worth
     /// the discontinuity it costs.
