@@ -1871,6 +1871,23 @@ items.
   read by the signed build without a prompt. The existing items carry `teamid:8UQ7MDM87B`
   (`KeychainStore.swift`). By the same mechanism an unsigned build's items would not. So the real
   migration should be done by a team-signed build.
+  - ✅ **Signed upgrade path PASSED, 2026-10-29 (Robbie, rehearsal on a Mac that had never had
+    Manifold).** Signed 0.8.4 (build 19) set up with a licence and an SRT bookmark with a passphrase,
+    then signed, notarized 0.9.0 (build 20) installed over it: no Keychain prompt, the licence kept
+    without re-entry, and the SRT bookmark carried over (P2 migration by the signed build) and
+    connected. This is the path testers take.
+  - ⚠️ **But on Robbie's own Mac the same signed build 20 prompts** (attended step 5, 2026-10-29): a
+    login-keychain password prompt for `tools.graviton.manifold.license` at launch. Denied; the
+    licence held, nothing written or cleared, as designed. Measured from the items' ACLs (`security
+    dump-keychain -a`, no secret data): every item carries `teamid:8UQ7MDM87B` in its partition list,
+    and build 20's designated requirement is identical to 0.8.4's. The prompt is the legacy
+    trusted-application list: `activationRecord` (last written 2026-10-28 19:39, the licence-port
+    test session) and six of the seven migrated stream items (written 2026-10-24 20:06 by P2's
+    migration in a dev Profile build) do not list the Developer ID requirement, so any signed build
+    is prompted for them. `storedLicenseKey`, both trial items and the July stream item, written by
+    signed builds, do list it. A dev/test build's writes on the real install leave items that the
+    shipped app cannot read silently. "Always Allow" on the prompt adds the Developer ID requirement
+    to that item; not done yet (Robbie's call).
 - **The edit-form decision** above.
 
 #### Attended: migrating the real install (for Robbie, morning) — about 20 minutes
