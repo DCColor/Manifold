@@ -7,6 +7,7 @@ import ManifoldCore
 import DisplayProviders
 import ColorimetryModel   // SourceColorimetry, ColorimetryOverride
 import PrivacyRedaction   // LogRedaction.ndiSourceName — the sending host is withheld from the log (privacy P1)
+import SourceListOrder    // how a poll is folded into the list shown (the NDI flyout jitter, 2026-10-29)
 
 /// STEP A: minimal NDI receive — prove NDI integrates and that frames reach Manifold's Metal
 /// display path. Discovery, a receiver on the first source found, a FrameSync pull on the display
@@ -148,6 +149,12 @@ final class NDIService: ObservableObject {
     /// from the first time the NDI source list is opened, never merely while a control is on
     /// screen. Empty reads "Searching for NDI sources…" in the picker, never a silent empty menu.
     /// Main-thread only (the refresh task hops to main to publish).
+    ///
+    /// ⚠️ WRITTEN ONLY THROUGH `publishDiscovered`, WHICH PUBLISHES ONLY A CHANGE. Every write re-renders
+    /// the app scene and every window's `ContentView` (both observe this service), and SwiftUI then re-applies
+    /// each item of an OPEN streaming menu under the pointer. Assigning every poll did that once a second
+    /// with nothing new: the NDI flyout jitter (measured 2026-10-29, docs/BUGS.md). And the rows keep their
+    /// places: an arrival goes at the end, never above the row being reached for (`SourceListOrder`).
     @Published private(set) var discoveredSources: [NDISource] = []
 
     /// The live source's EFFECTIVE colorimetry — what the buffers are actually tagged with, after
@@ -387,8 +394,8 @@ final class NDIService: ObservableObject {
         let available = NDIBridge.loadRuntime()
         runtimeAvailable = available
         runtimeVersion = available ? NDIBridge.runtimeVersion : nil
-        guard available else { discoveredSources = []; return }
-        discoveredSources = NDIBridge.refreshDiscoveredSources()   // immediate first pass (often empty)
+        guard available else { publishDiscovered([]); return }
+        publishDiscovered(NDIBridge.refreshDiscoveredSources())   // immediate first pass (often empty)
         discoveryTask = Task { @MainActor [weak self] in
             // The finder learns the network between polls; a light 1 s cadence tracks sources coming
             // and going without spinning. Ends when the last client leaves, the task is cancelled, or
@@ -396,7 +403,7 @@ final class NDIService: ObservableObject {
             while let self, self.discoveryClients > 0, !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1.0))
                 guard self.discoveryClients > 0, !Task.isCancelled else { break }
-                self.discoveredSources = NDIBridge.refreshDiscoveredSources()
+                self.publishDiscovered(NDIBridge.refreshDiscoveredSources())
             }
         }
     }
@@ -410,7 +417,20 @@ final class NDIService: ObservableObject {
         discoveryTask?.cancel()
         discoveryTask = nil
         NDIBridge.stopDiscovery()
-        discoveredSources = []
+        publishDiscovered([])
+    }
+
+    /// Fold a poll into the list shown and publish it only if that changed it: a source arrived, left, or
+    /// changed address. Rows keep their places and arrivals go at the end (`SourceListOrder`).
+    private func publishDiscovered(_ polled: [NDISource]) {
+        let next = SourceListOrder.merged(shown: discoveredSources, polled: polled, id: \.name)
+        let changed = SourceListOrder.changed(discoveredSources, next) { [$0.name, $0.url ?? ""] }
+        #if DEBUG
+        MainActor.assumeIsolated {   // main thread only, as every caller is
+            MenuProbe.log("discovery poll: \(polled.count) sources, " + (changed ? "CHANGED, published" : "unchanged, not published"))
+        }
+        #endif
+        if changed { discoveredSources = next }
     }
 
     // MARK: - Connect / disconnect (the toolbar control + ⌃⌥N/⌃⌥⇧N drive these)

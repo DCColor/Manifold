@@ -87,7 +87,7 @@ own rows when that pane is chosen.
 | General | **General**: Appearance (highlight), Windows (Controls, Raster size), Keyboard | |
 | — | **Files**: Opening Files (Open files in, default apps), Frame Export | General with these was 1 017 pt tall (measured, first run): taller than a pane should open. They are the file in, frame out cluster |
 | Playback | **Playback**: Autoplay, Playhead style and colour | |
-| Color & Display | **Scopes & Guides**: Scopes, Framing guides, Broadcast safe zones | No colour-management setting is app-wide: colour is per window in the Color menu by design. A tab called Color & Display would promise settings that are not there |
+| Color & Display | **Scopes & Guides**: Scopes, Framing guides, Broadcast safe zones (since 2026-10-29: Scopes, Broadcast safe zones, Framing guides, the guides popover's order; BUGS.md) | No colour-management setting is app-wide: colour is per window in the Color menu by design. A tab called Color & Display would promise settings that are not there |
 | DeckLink Output | **DeckLink Output**: device status, output settings | The DeckLink status row moved here from I/O and Runtimes |
 | Streams | **Sources**: NDI Runtime, Pro Video Formats | No stream setting is app-wide (bookmarks are their own sheet, overrides are per bookmark). What is left is what makes sources available |
 | Privacy & Licence | **License** | No privacy setting is stored (Include file names is per export, by design). "License": the app's strings are American English (BUGS.md pre-ship checklist) |

@@ -422,6 +422,48 @@ held back until after release, and the numbered defect entries follow.
      and 0 different). Something else was feeding that input; the cabling was not touched. 655 / 655 tests (+1);
      13 warnings, identical to `bc735c3`'s. Defaults dictionary-equal to the snapshot after deleting 10 window-frame
      keys; licence keys present (3), never read or written.
+   ✅ **NDI flyout and guides order (Robbie, 2026-10-29).** Built and run unattended 2026-10-29, commit
+   `<commit — to be filled in>` (base `6b286da`; predictions, drivers, the scratch NDI SDK sender and every log in
+   `build/ndi-menu-1029/`):
+   - **The NDI flyout jittered because the whole streaming menu was re-applied once a second, sources or not.**
+     `NDIService`'s discovery poll assigned `discoveredSources` every 1 s (`App/NDI/NDIService.swift:399` at
+     `6b286da`). Each assignment publishes, `ManifoldApp` (`@StateObject`, `ManifoldApp.swift:26`) and every
+     `ContentView` (`ContentView.swift:379`) observe the service, and SwiftUI then re-applied each item of the open
+     menu. Measured with the DEBUG probe (below), empty state "Connect Stream…", flyout open 12 s with nothing
+     arriving: 11 unchanged polls → 11 `ContentView: _ndi changed` → **154 parent-menu item changes** (`6b286da` +
+     probe). The control bar's chevron menu: 13 polls → 243 parent and 27 flyout item changes in 12 s. The submenu
+     was never replaced and never closed by it (0 and 0).
+   - **And an arrival moved the row under the pointer.** The SDK lists sources alphabetically, so a source that
+     arrives while the flyout is open can land above the row being reached for: "Aardvark" arriving under three open
+     rows moved **3 of 3** down one (`6b286da`).
+   - **Fix:** a poll is folded into the list shown (`SourceListOrder`, new ManifoldCore target, 8 tests): rows keep
+     their places, arrivals go at the end, departures leave, and nothing is published unless the membership, order
+     or an address changed. Tree, same runs: **0** item changes in the 12 quiet seconds (11 polls, 0 body passes);
+     Aardvark appended, **0 of 3** rows moved; an arrival re-applies the menu once (21 parent items, was 63).
+     ⌃⌥N (debug) now takes the first source SEEN rather than the SDK's first.
+   - **P1 kept:** discovery still starts only when the NDI flyout opens. Opening "Connect Stream…" alone for 3 s:
+     0 `discovery requested`, both builds.
+   - **Accessibility selection, 20 trials each** (open the menu, open NDI, a new source arrives 0.8 s later, aim at the
+     target for 300 ms, press the element aimed at; odd trials the new arrival, even an older source; verified by
+     `[NDI] connected to "… (<target>)"`): empty state **20 / 20** on the tree, and **20 / 20 on `6b286da` too**
+     (control bar on `6b286da`: 14 / 14 once discovery ran). AX re-finds elements and cannot reproduce a pointer losing
+     its row, so the selection count does not separate the builds; the re-apply count and the row moves do. **Not
+     measured:** a pointer. Robbie's by-eye check against OBS's NDI output is the one left.
+   - **Guides order:** the guides popover reads Broadcast safe zones (toggle, Action, Title), Off, Aspect (8), Social
+     (5), Custom, Social safe zones — each group's rows unchanged, separators between (AX dump, both builds). Settings ▸
+     Scopes & Guides: Scopes, Broadcast safe zones, Framing Guides (was Scopes, Framing Guides, Broadcast safe zones),
+     rows unchanged. The guides have no menu-bar home and no shortcut (no `CommandMenu`/`CommandGroup`, `ShortcutID`
+     or `MenuKeyAudit.menuHomes` entry), so the menu-bar audit and its tests had nothing to change. **Decide:** Off
+     stays with the crop rows, after Broadcast safe; Custom and the social safe zones stay after Social.
+   - Control set 216 / 216 files byte-identical to `6b286da` (24 files: exports, display read-backs, scope images).
+     SDI: the frames Manifold sent (v210 dumps, both interlaced fixtures) byte-identical; late = 0 dropped = 0.
+     **Not measured: the loop on the wire.** The capture input still locks to a 2160p23.98 signal (every frame
+     `sizeMismatch`, both builds), as on 2026-10-28. Defaults dictionary-equal to the snapshot after deleting 14
+     window-frame keys and writing one back; streamBookmarks unchanged; licence keys present (5), never read or written.
+   - **Driver note:** reading a submenu's AX children makes AppKit send it `menuWillOpen`, which the watcher counts
+     as the NDI list opening, so it starts discovery (as VoiceOver opening it would). The drivers never walk into an
+     `AXMenu` except to open the NDI flyout on purpose.
+   - 750 / 750 tests (+8). 13 warning locations, identical to `6b286da`'s.
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
    `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row
@@ -1292,6 +1334,11 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
   - `NDIMenuOpenWatcher` reads `MANIFOLD_DEBUG_NDI_WATCHER_DETACHED` (added 2026-10-19, privacy P1).
     When it is set, the watcher attaches to nothing, as if a macOS update had changed SwiftUI's menus,
     so the fallback (discovery on the parent menu opening, with a ⚠️ FALLBACK log line) can be tested.
+  - `MenuProbe` (`App/NDIMenuOpenWatcher.swift`) reads `MANIFOLD_DEBUG_NDI_MENU_PROBE` (added 2026-10-29, the NDI
+    flyout jitter). When it is `1`: an `[NDI-MENU]` line for every item added, removed or changed in a menu holding an
+    "NDI" submenu and in that submenu, for tracking start and end and the submenu opening and closing, and for each
+    discovery poll (`NDIService.publishDiscovered`); `ContentView` adds `_printChanges()`. Logs names with the host
+    withheld; writes nothing.
   - `ContentView`'s first window reads `MANIFOLD_DEBUG_DIAL_URL` (added 2026-10-23, SDI scaling follow-ups,
     approved by Robbie).
     - When it is set, the window dials that URL once, 2 s after it appears, through `connectToStreamURL` (WHEP,
@@ -2996,6 +3043,23 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
     installed `/Applications/Manifold.app` (0.8.4), which `xctrace --launch` started by name instead of the build.
     One of its two processes ran; the other is still stopped (state T, never ran). The plist now holds
     `license.activated`, `license.type` and `license.validated` only. Nothing was restored, per the P1 rule.
+
+---
+
+## ☐ OPEN 2026-10-29 — PRE-EXISTING (P1) — the NDI watcher's fallback can start discovery with no menu open
+
+**Found** during the NDI flyout runs (`build/ndi-menu-1029/run-probe/app.log:209`, `6b286da` + the DEBUG probe, control
+bar). `[NDI] ⚠️ FALLBACK — the NDI submenu could not be watched` and `discovery requested` were logged at 12:09:20.
+No menu was tracking: the last pass had ended 0.4 s before (`parent tracking ended`, 141.629), and the next began
+later. The watcher had attached on every pass in that run (`NDI submenu will open` logged through its proxy each
+time). Just before, the window had changed screen (`display change — window changed screen`).
+
+**Reading of the code, not measured further:** `ContentView.ndiSourceListItems`' `.onAppear` is the fallback's trigger
+because SwiftUI fires it when the PARENT menu is composed. It evidently also fires when the view is recomposed for
+other reasons. `checkNDISubmenuIsWatched` then asks `NDIMenuOpenWatcher.attachedForCurrentMenu()`, which is false
+whenever no tracking pass began in the last 2 s, so it reads "not watched" and starts discovery. Effect: mDNS
+discovery without the NDI list having been opened, which P1 exists to prevent. Not reproduced on purpose; the
+trigger is UNKNOWN beyond the screen change seen here. Not fixed: outside the 2026-10-29 brief.
 
 ---
 

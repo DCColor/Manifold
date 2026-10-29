@@ -57,6 +57,9 @@ let package = Package(
         .library(name: "ShortcutRegistry", targets: ["ShortcutRegistry"]),
         // Linked by the APP target directly (project.yml): log and diagnostics redaction (privacy P1).
         .library(name: "PrivacyRedaction", targets: ["PrivacyRedaction"]),
+        // Linked by the APP target directly (project.yml): the NDI source list's order and change test (the
+        // NDI flyout jitter, 2026-10-29).
+        .library(name: "SourceListOrder", targets: ["SourceListOrder"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
         // one-way move of the licence email and machine id out of the preferences plist (privacy P1).
         .library(name: "LicenseRecord", targets: ["LicenseRecord"]),
@@ -528,6 +531,24 @@ let package = Package(
             name: "PrivacyRedactionTests",
             dependencies: ["PrivacyRedaction"],
             path: "Tests/PrivacyRedactionTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // How a discovered-source list is shown while a menu holds it open: rows keep their places, arrivals go
+        // at the end, and a poll that finds the same sources publishes nothing (the NDI flyout jitter,
+        // docs/BUGS.md, 2026-10-29). Foundation-free, so `swift test` reaches it.
+        .target(
+            name: "SourceListOrder",
+            path: "Sources/SourceListOrder",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "SourceListOrderTests",
+            dependencies: ["SourceListOrder"],
+            path: "Tests/SourceListOrderTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

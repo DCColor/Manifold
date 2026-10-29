@@ -148,7 +148,7 @@ struct GuideOverlay: View {
 }
 
 /// Panel off the guides button — FRAMING DECISIONS ONLY (styling lives in Settings).
-/// Off / Aspect / Social / Custom for the crop; then a Safe Lines section.
+/// Broadcast safe zones; then Off / Aspect / Social / Custom for the crop; then the social safe lines.
 struct GuidesPanel: View {
     @AppStorage("guideMode") private var guideMode: GuideMode = .off
     @AppStorage("guideAspect") private var guideAspect = 2.39
@@ -165,6 +165,19 @@ struct GuidesPanel: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Framing Guides").font(.headline).padding(.bottom, 2)
 
+            // Broadcast safe first, then Aspect, then Social (Robbie, 2026-10-29). Settings ▸ Scopes & Guides
+            // lists its styling sections in the same order. Each group's rows are unchanged.
+            Toggle("Broadcast safe zones", isOn: $broadcastSafeOn)
+                .font(.caption)
+            HStack(spacing: 8) {
+                Text("Action").font(.caption2).foregroundStyle(.secondary)
+                percentField($broadcastActionPct)
+                Spacer()
+                Text("Title").font(.caption2).foregroundStyle(.secondary)
+                percentField($broadcastTitlePct)
+            }.disabled(!broadcastSafeOn)
+
+            Divider().padding(.vertical, 2)
             row(label: "Off", selected: guideMode == .off) { guideMode = .off }
 
             Divider().padding(.vertical, 2)
@@ -222,17 +235,6 @@ struct GuidesPanel: View {
                 Text("Bot").font(.caption2).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
                 Slider(value: $safeBottom, in: 0.5...1.0)
             }.disabled(!safeLinesOn)
-
-            Divider().padding(.vertical, 2)
-            Toggle("Broadcast safe zones", isOn: $broadcastSafeOn)
-                .font(.caption)
-            HStack(spacing: 8) {
-                Text("Action").font(.caption2).foregroundStyle(.secondary)
-                percentField($broadcastActionPct)
-                Spacer()
-                Text("Title").font(.caption2).foregroundStyle(.secondary)
-                percentField($broadcastTitlePct)
-            }.disabled(!broadcastSafeOn)
         }
         .padding(12)
         .frame(width: 280)

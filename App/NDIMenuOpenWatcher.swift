@@ -67,8 +67,14 @@ enum NDIMenuOpenWatcher {
             MainActor.assumeIsolated {
                 lastTrackingBegan = Date()
                 attachedInLastTracking = wrapNDISubmenus(in: menu)
+                #if DEBUG
+                MenuProbe.trackingBegan(menu)
+                #endif
             }
         }
+        #if DEBUG
+        MainActor.assumeIsolated { MenuProbe.install() }
+        #endif
     }
 
     /// Wraps every "NDI" submenu in `menu`. Returns whether at least one is now watched.
@@ -84,6 +90,9 @@ enum NDIMenuOpenWatcher {
             guard let submenu = item.submenu else { continue }
             if !(submenu.delegate is ForwardingMenuDelegate) {
                 let proxy = ForwardingMenuDelegate(original: submenu.delegate) {
+                    #if DEBUG
+                    MenuProbe.log("NDI submenu will open \(MenuProbe.id(submenu))")
+                    #endif
                     NotificationCenter.default.post(name: ndiSubmenuWillOpen, object: nil)
                 }
                 objc_setAssociatedObject(submenu, &proxyKey, proxy, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
@@ -95,6 +104,75 @@ enum NDIMenuOpenWatcher {
         return attached
     }
 }
+
+#if DEBUG
+/// `MANIFOLD_DEBUG_NDI_MENU_PROBE=1` (pre-ship removal, docs/BUGS.md): one `[NDI-MENU]` line for every item SwiftUI adds,
+/// removes or changes in a menu that holds an "NDI" submenu, or in that submenu, while it is tracking; for each tracking
+/// pass's start and end; and for each time the NDI item's submenu is a different `NSMenu` from the one wrapped (a flyout
+/// replaced under the pointer). `NDIService` adds one line per discovery poll, and `ContentView` its `_printChanges()`, so
+/// every menu change can be put beside what caused it. Measured the NDI flyout jitter (2026-10-29).
+@MainActor
+enum MenuProbe {
+    static let enabled = ProcessInfo.processInfo.environment["MANIFOLD_DEBUG_NDI_MENU_PROBE"] == "1"
+    private static var parents = NSHashTable<NSMenu>.weakObjects()
+    private static var submenus = NSHashTable<NSMenu>.weakObjects()
+    private static let t0 = CACurrentMediaTime()
+
+    static func id(_ menu: NSMenu) -> String { String(UInt(bitPattern: ObjectIdentifier(menu).hashValue), radix: 16) }
+
+    static func log(_ s: String) {
+        guard enabled else { return }
+        NSLog("[NDI-MENU] %.3f %@", CACurrentMediaTime() - t0, s)
+    }
+
+    static func install() {
+        guard enabled else { return }
+        setvbuf(stdout, nil, _IOLBF, 0)   // `_printChanges()` lines land in order with the NSLog lines
+        let center = NotificationCenter.default
+        for (name, what) in [(NSMenu.didAddItemNotification, "add"), (NSMenu.didRemoveItemNotification, "remove"),
+                             (NSMenu.didChangeItemNotification, "change")] {
+            center.addObserver(forName: name, object: nil, queue: nil) { note in
+                guard let menu = note.object as? NSMenu,
+                      let index = note.userInfo?["NSMenuItemIndex"] as? Int else { return }
+                MainActor.assumeIsolated { itemNote(menu, what, index) }
+            }
+        }
+        center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { note in
+            guard let menu = note.object as? NSMenu else { return }
+            MainActor.assumeIsolated {
+                if parents.contains(menu) { log("parent tracking ended \(id(menu))") }
+            }
+        }
+    }
+
+    static func trackingBegan(_ menu: NSMenu) {
+        guard enabled else { return }
+        for item in menu.items where item.title == NDIMenuOpenWatcher.submenuTitle {
+            guard let submenu = item.submenu else { continue }
+            parents.add(menu)
+            submenus.add(submenu)
+            log("parent tracking began \(id(menu)) items=\(menu.items.count); NDI submenu \(id(submenu)) "
+                + "items=\(submenu.items.map(\.title))")
+        }
+    }
+
+    private static func itemNote(_ menu: NSMenu, _ what: String, _ index: Int) {
+        let title = index < menu.items.count ? menu.items[index].title : "?"
+        if submenus.contains(menu) {
+            log("NDI submenu \(id(menu)) \(what) [\(index)] \"\(PrivacyLog.ndiSourceName(title))\" "
+                + "→ \(menu.items.count) items")
+        } else if parents.contains(menu) {
+            var line = "parent \(id(menu)) \(what) [\(index)] \"\(title)\" → \(menu.items.count) items"
+            if index < menu.items.count, menu.items[index].title == NDIMenuOpenWatcher.submenuTitle,
+               let sub = menu.items[index].submenu, !submenus.contains(sub) {
+                submenus.add(sub)
+                line += " — NDI SUBMENU REPLACED by \(id(sub))"
+            }
+            log(line)
+        }
+    }
+}
+#endif
 
 /// Adds `menuWillOpen(_:)`; forwards everything else to the delegate it wraps.
 private final class ForwardingMenuDelegate: NSObject, NSMenuDelegate {
@@ -110,6 +188,13 @@ private final class ForwardingMenuDelegate: NSObject, NSMenuDelegate {
         onWillOpen()
         original?.menuWillOpen?(menu)
     }
+
+    #if DEBUG
+    func menuDidClose(_ menu: NSMenu) {
+        MenuProbe.log("NDI submenu did close \(MenuProbe.id(menu))")
+        original?.menuDidClose?(menu)
+    }
+    #endif
 
     override func responds(to aSelector: Selector!) -> Bool {
         super.responds(to: aSelector) || (original?.responds(to: aSelector) ?? false)

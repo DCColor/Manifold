@@ -528,6 +528,7 @@ struct ContentView: View {
     var body: some View {
 #if DEBUG
         let _ = ScopePerf.count("body.ContentView")
+        let _ = MenuProbe.enabled ? Self._printChanges() : ()
 #endif
         // ══════════════════════════════════════════════════════════════════════════════════
         //  THE INVARIANT — CHROME NEVER REDUCES THE VIDEO'S SIZE.

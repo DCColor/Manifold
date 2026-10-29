@@ -531,6 +531,17 @@ private struct ScopesSettingsPane: View {
                 SettingsCaption("Each scope's own intensity and trace color are in its header, in the scopes tray.")
             }
 
+            // Broadcast safe, then the crop guide (Aspect), then the social safe zones: the guides popover's order
+            // (Robbie, 2026-10-29).
+            Section("Broadcast safe zones") {
+                ColorPicker("Broadcast safe zone color", selection: colorBinding($broadcastSafeHex))
+                Stepper("Broadcast safe zone width: \(Int(broadcastSafeWidth)) pt",
+                        value: $broadcastSafeWidth, in: 1...8, step: 1)
+                sliderRow("Broadcast safe zone opacity", $broadcastSafeOpacity, in: 0.0...1.0,
+                          readout: pct(broadcastSafeOpacity))
+                SettingsCaption("Action- and title-safe percentages are set in the framing guides popover.")
+            }
+
             Section("Framing Guides") {
                 // Crop guide
                 ColorPicker("Outside (darken) color", selection: colorBinding($guideDarkenHex))
@@ -545,15 +556,6 @@ private struct ScopesSettingsPane: View {
                         value: $safeLineWidth, in: 1...8, step: 1)
                 sliderRow("Social safe zone opacity", $safeLineOpacity, in: 0.0...1.0,
                           readout: pct(safeLineOpacity))
-            }
-
-            Section("Broadcast safe zones") {
-                ColorPicker("Broadcast safe zone color", selection: colorBinding($broadcastSafeHex))
-                Stepper("Broadcast safe zone width: \(Int(broadcastSafeWidth)) pt",
-                        value: $broadcastSafeWidth, in: 1...8, step: 1)
-                sliderRow("Broadcast safe zone opacity", $broadcastSafeOpacity, in: 0.0...1.0,
-                          readout: pct(broadcastSafeOpacity))
-                SettingsCaption("Action- and title-safe percentages are set in the framing guides popover.")
             }
         }
     }

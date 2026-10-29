@@ -205,6 +205,10 @@ targets:
       # can run every rule against real log lines. Used by DiagnosticsExport, WHEPClient, SRTClient, NDI.
       - package: ManifoldCore
         product: PrivacyRedaction
+      # The NDI source list's order and change test (the NDI flyout jitter, 2026-10-29) — a leaf target so
+      # `swift test` reaches it. Used by App/NDI/NDIService.swift only.
+      - package: ManifoldCore
+        product: SourceListOrder
       # The licence's Keychain activation record and the move of the email and machine id out of the
       # preferences plist (stage P1) — a leaf target so `swift test` can run the migration against a
       # scratch Keychain service. Used by App/LicenseManager.swift only.
