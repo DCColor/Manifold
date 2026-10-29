@@ -5401,7 +5401,7 @@ inconclusive. L2 as planned (*Buffer policy*, above).
   arm: local +40.0 / +3.3 / −19.2 / −23.6 / −23.3 ms (A1, B1, A2, B2, B3); Cloudflare +27.8 / +32.3 / +13.7 / −1.3.
   The Recorder's own audio buffering stayed at 128 ms throughout. The cause is in the measuring chain and UNKNOWN.
   The SYNC clip also fails c12's 1 Hz grid gate (its beeps are not on a 1 s grid); pairing used every beep.
-- **Verdict: safe to lower. `WHEPFrameRouter.targetDepth` is 0.300** (tree, not committed). The comment records the
+- **Verdict: safe to lower. `WHEPFrameRouter.targetDepth` is 0.300** (committed `8fa2aa1`). The comment records the
   trial and the limits below; the snap threshold's comment now says ~0.5 s.
 - **Limits:**
   1. **The Cloudflare path never ran late:** "cushion needed" stayed 0.000 s at both targets. The 2026-07-21
@@ -5450,7 +5450,7 @@ scanned per rung):
 - Audio Hijack taps Manifold's output before the device, so a crackle made only inside a device's own path would
   not show in the scan.
 - **Rule:** 200 must be ≥ threshold + 50 ms on both devices. It is ≥ 120 ms above both.
-- **Verdict: safe to lower. `NDIService.desktopAudioLeadDefault` is 0.200** (tree, not committed). Its doc comment
+- **Verdict: safe to lower. `NDIService.desktopAudioLeadDefault` is 0.200** (committed `8fa2aa1`). Its doc comment
   states the thresholds and drops the 40 ms argument (BUGS.md, the 2026-10-08 comment entry, now FIXED).
 - **Limits:** one Mac and two devices. Other interfaces and slower Macs are unmeasured; the 120 ms margin is for them.
 
@@ -5463,7 +5463,7 @@ and which were left as they are. `streamBookmarks` was never written. The Cloudf
 from the menu, so no stream URL was read by the tooling.
 
 **Screenshots:** none. **OBS:** profiles unchanged; the sender was relaunched for Cloudflare and for NDI. **MediaMTX:**
-started for L1 with `scripts/soak/mediamtx-soak.yml`, stopped after. **Not committed.**
+started for L1 with `scripts/soak/mediamtx-soak.yml`, stopped after. **Committed as `8fa2aa1`** (2026-10-29 00:09, Robbie).
 
 ---
 

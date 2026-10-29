@@ -59,10 +59,21 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   Delete a screenshot once what it shows is recorded in text.
 - Never send ⌘Q, or any keystroke, to quit or control an app. A keystroke (`System Events … keystroke`,
   `key code`) goes to whatever app is in front, not to the process named in the script: a ⌘Q meant for
-  Manifold quit VS Code mid-session (2026-10-19). Quit only with a Quit event addressed to the specific
-  built app, by bundle path (`osascript -e 'tell application "<path>/Manifold.app" to quit'`) or by PID.
-  Drive Manifold through accessibility clicks on named elements, never keystrokes. Close an open menu
-  with `perform action "AXCancel"` on that menu, not Escape: a Quit event waits while a menu is open.
+  Manifold quit VS Code mid-session (2026-10-19). Drive Manifold through accessibility clicks on named
+  elements, never keystrokes. Close an open menu with `perform action "AXCancel"` on that menu, not
+  Escape: a Quit event waits while a menu is open.
+- **Launch a build only by executing its binary directly, so the driver holds its PID. Quit it only by
+  that PID, through `scripts/manifold-proc.sh quit <pid>`.** The helper checks the PID is alive and is a
+  build from this tree, then sends a Quit event to that process alone. Open files in a running build with
+  `manifold-proc.sh open <pid> <file>`. Never address Manifold by name, path or bundle id: no `tell
+  application "…" to quit`, no `open -a` / `open -b`, no `xctrace --launch`, no `pkill`/`killall` by
+  name. Sent to a build that has already exited, a by-name or by-path Quit makes AppleScript launch the
+  app, and Launch Services can resolve it to the installed `/Applications/Manifold.app` (0.8.4). That
+  copy rewrites licence values in the real plist (2026-10-27, 2026-10-28; `docs/BUGS.md`, privacy P1).
+- **Guard every run:** `manifold-proc.sh guard` before and after. If any process of
+  `/Applications/Manifold.app` is running, stop and report it. Never quit it yourself.
+- **Tell Robbie before launching any build**, unless he has started an attended step that launches it:
+  a launched build takes focus, and his typing goes to it.
 
 ## Rules
 

@@ -24,11 +24,11 @@ held back until after release, and the numbered defect entries follow.
      defaults held for 1.0; Stage 0b-2a (the adaptive SRT cushion, the readout's Buffer row, the
      saved-advance check; `6132970`), then 0b-2b (the reorder term; built and run 2026-10-08, unattended
      and on Cloudflare SRT, `5d623af`: §6.10, *Stage 0b-2b — results* and *— attended*).
-   - ✅ **Trial L1 — WHEP cushion 0.30: PASSED, lowered 0.400 → 0.300** (run 2026-10-28, attended; built,
-     not committed). Local MediaMTX then Cloudflare, ABAB: 0 underruns at 0.30, Manifold's own A/V unchanged,
+   - ✅ **Trial L1 — WHEP cushion 0.30: PASSED, lowered 0.400 → 0.300** (run 2026-10-28, attended; committed
+     `8fa2aa1`). Local MediaMTX then Cloudflare, ABAB: 0 underruns at 0.30, Manifold's own A/V unchanged,
      100 ms less latency. Limits: the Cloudflare path never ran late that night, and device-level A/V was
      inconclusive (§6.10, *Trials L1 and L2 — results*).
-   - ✅ **Trial L2 — NDI desktop-audio lead 0.20: PASSED, lowered 0.250 → 0.200** (same night; not committed).
+   - ✅ **Trial L2 — NDI desktop-audio lead 0.20: PASSED, lowered 0.250 → 0.200** (same night; committed `8fa2aa1`).
      Crackle threshold: Scarlett above 40, at most 60 ms; built-in output above 60, at most 80 ms (§6.10).
    - Trial L3 (SRT floor 0.20) is NOT in 1.0 (re-confirmed, Robbie, 2026-10-28): post-1.0, after the
      deep-pyramid follow-up to the reorder term (§6.10, Stage 0b-2b item (f)).
@@ -1571,8 +1571,9 @@ stages on 2026-10-19:
       read back and matches`). On 2026-10-28 a P1 build launched LICENSED at 12:00:47 and logged no legacy line,
       so the keys were absent then. The next P1 launch, at 15:39:18, found both present
       (`build/stream-chroma/r0/smoke-tree-srt/app.log`). P1 builds never write them, so the installed 0.8.4 wrote
-      them in that window, as on 2026-10-27 (the `xctrace --launch` case, below). Robbie opened 0.8.4 that day
-      (the P2 note, below: "Found when 0.8.4 showed no saved passwords"). The exact launch time is UNKNOWN.
+      them in that window, as on 2026-10-27 (the `xctrace --launch` case, below). ~~Robbie opened 0.8.4 that day~~
+      **Corrected 2026-10-29 (Robbie):** he was not using 0.8.4 when the values were rewritten. A test driver started
+      it: *Test drivers launched the installed 0.8.4*, below. The exact launch time is UNKNOWN.
     - They stayed through every launch of the latency trials (2026-10-28 18:51–23:58): each launch had its licence
       prompt Denied and logged `[LICENSE] state: KEYCHAIN UNREADABLE (OSStatus -128 …)` and `legacy license values
       left in place … (license.email, license.machineId): the license could not be read from the Keychain`. That is
@@ -1584,11 +1585,11 @@ stages on 2026-10-19:
       preferences plist: it differs from the Keychain record` and keeps them. Not verified: checking would mean
       reading the Keychain.
     - **Every 0.8.4 launch puts them back**, so this repeats until 0.8.4 is no longer opened on this Mac.
-    - Found, not explained: `/Applications/Manifold.app` reads `kMDItemLastUsedDate` 2026-10-28 23:58:05 local,
-      during the trials, 10 s before the trial build's last log line (23:58:15, its Quit event, addressed by bundle
-      path). No 0.8.4 process was running afterwards, and the unified log returned nothing for 23:57–23:59. What
-      touched it is UNKNOWN. A Quit event addressed by path may still resolve the bundle id through
-      LaunchServices; not tested.
+    - `/Applications/Manifold.app` reads `kMDItemLastUsedDate` 2026-10-28 23:58:05 local, during the trials, 10 s
+      before the trial build's last log line (23:58:15). That build was quit by a Quit event addressed by bundle path.
+      No 0.8.4 process was running afterwards, and the unified log returned nothing for 23:57–23:59. **Attributed
+      2026-10-29 (Robbie) to the drivers' by-path and by-name Quit events**: *Test drivers launched the installed
+      0.8.4*, below. Which call at 23:58:05 did it is still UNKNOWN.
 - **Network disk cache.**
   - The licence, update-check, WHEP and HLS-playlist requests go through `PrivateURLSession`
     (ephemeral, `urlCache = nil`).
@@ -2998,6 +2999,65 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
 
 ---
 
+## ✅ FIXED 2026-10-29 (tooling only; no app code; not committed) — test drivers launched the installed 0.8.4
+
+**Found:** Robbie, 2026-10-29. **Effect:** the installed `/Applications/Manifold.app` (0.8.4) ran without anyone
+opening it, and rewrote `license.email` and `license.machineId` into the real plist after P1 builds had removed
+them (2026-10-27, 2026-10-28; privacy P1's licence item, above). It could have done anything else 0.8.4 does on
+launch, including saving the stream list without `secretRef` (the P2 note).
+
+**Cause.** Drivers addressed Manifold by name or path, which goes through Launch Services, with Launch Services
+holding only the `/Applications` copy:
+- `tell application "<path>" to quit`, sent after the build had already exited, makes AppleScript launch the app
+  in order to deliver the event. That can resolve to 0.8.4. Evidence: 0.8.4's last-used time, 23:58:05 on 10-28,
+  is 10 s before a driver's Quit.
+- `xctrace record --launch` started 0.8.4 by name on 2026-10-27 (the scope-perf entry, above).
+- `pkill -f 'MacOS/Manifold'` and `pkill -x Manifold` would kill 0.8.4 too.
+
+**Inventory, 2026-10-29.** `scripts/`, every driver under `build/` (`*.py`, `*.sh`, `*.mjs`, `*.applescript`), the
+Swift tools and `.harness/`:
+- `scripts/soak/repro/run.sh`: `tell application "Manifold" to quit` by name, then `pkill -TERM/-KILL -x Manifold`.
+- 42 `build/` drivers:
+  - 42 by-path Quit events;
+  - 36 `open -a '<app path>' <file>` (30 string-form, 6 list-form);
+  - one `open -a` launch with a file (`sdi-paused-fix/drv.py`, scenario F2);
+  - one `xctrace --launch` (`scope-perf/drv.py`, mode `swiftui-launch`);
+  - one `pkill -f 'MacOS/Manifold'` and one ⌘Q keystroke (`colour-s3/tools/s3drv.py`).
+- My own latency-trial launchers of 2026-10-28 quit by bundle path too (session scratch, not in the repo).
+
+**Fix.**
+- **`scripts/manifold-proc.sh`, the one helper:**
+  - `guard` lists any `/Applications/Manifold.app` process and exits 2, touching nothing.
+  - `check <pid>` passes only a live build from this tree: executable under the repo, ending
+    `Manifold.app/Contents/MacOS/Manifold`, never `/Applications`.
+  - `quit <pid>` sends, after `check`, a Quit event to that process only (`NSRunningApplication` `terminate`), then
+    waits. A PID that has exited is reported, and nothing is sent or launched.
+  - `open <pid> <file>`: after `check`, Launch Services with the exact bundle of that running PID. An `odoc`
+    addressed by PID was refused with −1743 (Automation consent). Its worst case is relaunching that same build,
+    never `/Applications`.
+- `run.sh`: guard before and after; quits the build's PID (the child of `caffeinate`).
+- Every `build/` driver: by-path Quits → `manifold-proc.sh quit <pid> --no-wait` (the driver's own poll and
+  SecurityAgent handling kept); `open -a` → `manifold-proc.sh open <pid>`; a guard before the run and at exit.
+  `pkill` and ⌘Q replaced (s3drv refuses if a Manifold is running).
+- **Disabled, with a refusal:** `scope-perf` `swiftui-launch` (the SwiftUI instrument needs `--launch`) and
+  `sdi-paused-fix` scenario F2. Both need a launch path that avoids Launch Services before they come back.
+- Originals: `build/manifold-proc-test/drivers-before-2026-10-29.tgz`. Every rewritten driver compiles. Rule in
+  `CLAUDE.md`, *Test environment*.
+
+**Verified 2026-10-29, one attended launch of the trial build** (Robbie was not told beforehand: a miss, now a
+`CLAUDE.md` rule; nothing he typed reached it, and the defaults show no change):
+- `check` passed for it, and refused a dead PID, a non-PID and OBS's PID (nothing sent to OBS).
+- `open` showed `wedge.mov` in its window.
+- `quit` ended it.
+- A second `quit` of the now-dead PID sent nothing.
+- `guard` was clean before and after.
+- Defaults: one run-added `NSWindow Frame` key, deleted by name; otherwise equal to the snapshot.
+
+**Not done:** a guard in `scripts/soak/go.sh`, `soak.mjs` and `devcheck.sh`. They launch the build directly and never
+quit it by name (go.sh runs it in the foreground; quitting Manifold ends the script), so they are not affected.
+
+---
+
 ## ✅ FIXED 2026-10-24 (commit `b418161`) — PRE-EXISTING (HEAD `3c5526d`) — every open window costs ~15 % CPU and ~85 MB while paused; at ~7 windows the app stops answering Accessibility in time
 
 **Fixed 2026-10-24** (idle-window session, measured against HEAD `72bb925`, Profile builds, sandboxed bookmarks).
@@ -4265,9 +4325,9 @@ H.264 (no B-frames) do not show it, which is why no earlier SRT measurement did.
 
 ---
 
-## ✅ FIXED 2026-10-28 (with trial L2; not committed) — the NDI desktop-audio lead's doc comment still argues for 40 ms
+## ✅ FIXED 2026-10-28 (with trial L2, commit `8fa2aa1`) — the NDI desktop-audio lead's doc comment still argues for 40 ms
 
-**Status:** FIXED in the tree with trial L2 (§6.10): the 40 ms paragraphs are gone. The comment now states the 200 ms
+**Status:** FIXED with trial L2 (`8fa2aa1`) (§6.10): the 40 ms paragraphs are gone. The comment now states the 200 ms
 default and the thresholds measured, and names 40 ms as the first value, which crackled.
 **Found:** the 2026-10-08 buffer review.
 

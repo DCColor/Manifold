@@ -34,12 +34,15 @@ LOG="$D/$LABEL.manifold.log"; FLOG="$D/$LABEL.ffmpeg.log"
 say_() { echo "$(date +%H:%M:%S) $*"; }
 deny() { osascript -e 'tell application "System Events" to if exists process "SecurityAgent" then tell process "SecurityAgent" to click button "Deny" of window 1' >/dev/null 2>&1; }
 
+PROC="$REPO/scripts/manifold-proc.sh"   # quit by pid only; never by name, path or bundle id (CLAUDE.md)
+"$PROC" guard || { say_ "the installed /Applications/Manifold.app is running — stop and report"; exit 2; }
 pgrep -x Manifold >/dev/null && { say_ "Manifold already running — abort"; exit 2; }
 lsof -nP -iUDP:9000 >/dev/null 2>&1 && { say_ "port 9000 busy — abort"; exit 2; }
 
 say_ "launch Manifold → $LOG"
 MANIFOLD_SRT_DEBUG_URL='srt://127.0.0.1:9000' caffeinate -dims "$APP" > "$LOG" 2>&1 &
-MPID=$!
+MPID=$!   # caffeinate's pid; the build is its child
+APPPID=""; for i in {1..50}; do APPPID=$(pgrep -P $MPID -x Manifold) && break; sleep 0.1; done
 # Deny licence prompts and wait for the app to be up (its first [LICENSE] or any 10 s of life).
 for i in {1..40}; do deny; sleep 1; grep -q "\[LICENSE\]" "$LOG" 2>/dev/null && [[ $i -ge 8 ]] && break; done
 for i in {1..5}; do deny; sleep 1; done
@@ -80,7 +83,7 @@ for attempt in 1 2 3; do
   for i in {1..20}; do sleep 1; grep -q "\[SRT\] transport up" "$LOG" && { up=1; break; }; done
   [[ $up == 1 ]] && break
 done
-[[ $up == 1 ]] || { say_ "no SRT connect — abort"; kill $FPID $MPID 2>/dev/null; exit 1; }
+[[ $up == 1 ]] || { say_ "no SRT connect — abort"; kill $FPID 2>/dev/null; [[ -n "$APPPID" ]] && "$PROC" quit "$APPPID" --timeout 15; exit 1; }
 say_ "connected"
 
 if [[ -n "${STALLS:-}" ]]; then
@@ -112,8 +115,9 @@ fi
 while kill -0 $FPID 2>/dev/null; do deny; sleep 5; done
 say_ "ffmpeg ended ($(tail -1 "$FLOG" 2>/dev/null))"
 sleep 20
-osascript -e 'tell application "Manifold" to quit' >/dev/null 2>&1; sleep 5; pkill -TERM -x Manifold 2>/dev/null
-for i in {1..10}; do pgrep -x Manifold >/dev/null || break; sleep 1; done
-pgrep -x Manifold >/dev/null && pkill -KILL -x Manifold
+if [[ -n "$APPPID" ]]; then
+  "$PROC" quit "$APPPID" --timeout 15 || { kill -0 "$APPPID" 2>/dev/null && { say_ "quit timed out — TERM to pid $APPPID only"; kill -TERM "$APPPID"; }; }
+fi
 [[ -n "${RPID:-}" ]] && { kill -TERM $RPID 2>/dev/null; sleep 1; }
+"$PROC" guard || say_ "⚠️ the installed /Applications/Manifold.app is running after the run — not touched; report it"
 say_ "done: $(grep -c '\[AV-LAG\]' "$LOG") [AV-LAG] lines"
