@@ -2370,9 +2370,11 @@ struct ContentView: View {
                 ndiSourceRows
             }
         }
-        // ⚠️ NOT THE TRIGGER — THE SAFETY NET. SwiftUI composes this when the PARENT menu opens, so
-        // `.onAppear` here is the moment to ask whether the submenu is being watched. If it is not,
-        // discovery starts now rather than never. See NDIMenuOpenWatcher.
+        // ⚠️ NOT THE TRIGGER — THE SAFETY NET. SwiftUI composes this as its menu opens (the empty state's
+        // parent; the control bar's NDI flyout), so `.onAppear` here is the moment to ask whether that menu
+        // is being watched. If it is not, discovery starts now rather than never. But it fires at other
+        // moments too, with no menu open (measured 2026-10-29: the window becoming key after a flyout was
+        // opened in it unkeyed), and those must start nothing. See `NDIMenuOpenWatcher.fallbackNeeded`.
         .onAppear { checkNDISubmenuIsWatched() }
     }
 
@@ -3101,12 +3103,23 @@ struct ContentView: View {
         ndi.startDiscovery()
     }
 
-    /// The fallback for `NDIMenuOpenWatcher`: called as the NDI list is composed (the parent menu
-    /// opening). Checked after the current event, so the menu's tracking notification has landed.
+    /// The fallback for `NDIMenuOpenWatcher`: called as the NDI list is composed. Checked 0.3 s later, so the
+    /// menu's tracking notification has landed; starts discovery only if a menu was open at the composition
+    /// and could not be watched (`fallbackNeeded`), never for a composition with no menu open (privacy P1).
     private func checkNDISubmenuIsWatched() {
+        let composedAt = CACurrentMediaTime()
+        #if DEBUG
+        MenuProbe.log("NDI list composed (.onAppear): key=\(deck.window?.isKeyWindow == true) held=\(ndiDiscoveryHeld)")
+        #endif
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let needed = NDIMenuOpenWatcher.fallbackNeeded(composedAt: composedAt)
+            #if DEBUG
+            MenuProbe.log("NDI list check +0.3 s: key=\(deck.window?.isKeyWindow == true) held=\(ndiDiscoveryHeld) "
+                          + "fallbackNeeded=\(needed)")
+            #endif
             guard deck.window?.isKeyWindow == true, !ndiDiscoveryHeld else { return }
-            guard !NDIMenuOpenWatcher.attachedForCurrentMenu() else { return }
+            // Only a menu that was OPEN when the list was composed, and could not be watched (privacy P1).
+            guard needed else { return }
             NSLog("[NDI] ⚠️ FALLBACK — the NDI submenu could not be watched (NDIMenuOpenWatcher did not "
                   + "attach); starting discovery now that the menu has opened, so NDI keeps working")
             requestNDIDiscovery()

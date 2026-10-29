@@ -25,10 +25,11 @@
 //  All of the above leans on SwiftUI internals: a submenu item titled "NDI" that has a submenu, and a
 //  delegate that tolerates being wrapped. A macOS update could change any of it, and the symptom
 //  would be silent — "Searching for NDI sources…" forever. So every tracking pass records whether it
-//  attached (`attachedForCurrentMenu`), and `ContentView.ndiSourceListItems` — whose content SwiftUI
-//  composes when the PARENT opens — checks it at that moment. Not attached means discovery starts
-//  then, on the parent opening, with a ⚠️ FALLBACK line in the log. That gives up the P1 refinement
-//  (picking a saved stream also starts discovery), never NDI itself.
+//  attached, and `ContentView.ndiSourceListItems` — whose content SwiftUI composes as the menu opens —
+//  asks `fallbackNeeded(composedAt:)` 0.3 s later. A menu that was open then and could not be watched
+//  means discovery starts, with a ⚠️ FALLBACK line in the log. That gives up the P1 refinement (picking
+//  a saved stream also starts discovery), never NDI itself. A composition with NO menu open starts
+//  nothing (the 2026-10-29 leak; see `fallbackNeeded`).
 //
 
 import AppKit
@@ -46,16 +47,33 @@ enum NDIMenuOpenWatcher {
     private static var installed = false
     private static var proxyKey: UInt8 = 0
 
-    /// When the last menu began tracking, and whether that pass found an "NDI" submenu and has it
-    /// wrapped. Main thread only.
-    @MainActor private static var lastTrackingBegan: Date?
-    @MainActor private static var attachedInLastTracking = false
+    /// The last menu tracking pass: when it began and ended, whether it found an "NDI" submenu and has it
+    /// wrapped, and whether it was a menu-bar menu (which never holds the NDI list). Main thread only.
+    private struct TrackingPass {
+        let menu: ObjectIdentifier
+        let began: CFTimeInterval
+        var ended: CFTimeInterval?
+        let attached: Bool
+        let inMenuBar: Bool
+    }
+    @MainActor private static var lastPass: TrackingPass?
 
-    /// True when the menu that is opening right now has its NDI submenu watched. Read by
-    /// `ContentView` as the NDI list is composed (the parent opening). False means: fall back.
-    @MainActor static func attachedForCurrentMenu() -> Bool {
-        guard let began = lastTrackingBegan, Date().timeIntervalSince(began) < 2 else { return false }
-        return attachedInLastTracking
+    /// Whether the NDI list composed at `composedAt` (`CACurrentMediaTime()`) needs the fallback: a menu was
+    /// tracking at that moment, it is not a menu-bar menu, and no "NDI" submenu in it is watched. Read by
+    /// `ContentView` 0.3 s after the list is composed.
+    ///
+    /// ⚠️ "NO MENU OPEN" IS NOT "A MENU WE COULD NOT WATCH" (privacy P1, fixed 2026-10-29). This used to ask whether
+    /// a menu had BEGUN tracking in the last 2 s and fall back when none had. But SwiftUI composes the list at other
+    /// moments too. Measured: open the control bar's NDI flyout while the window is not key (the watcher's
+    /// notification is then ignored, `ContentView`), and the list's `.onAppear` fires when the window next becomes
+    /// key, with no menu open. The old test read that as "not watched" and started discovery: the 2026-10-29 leak
+    /// (docs/BUGS.md). It also read a list first realized more than 2 s into a WATCHED pass (the control bar
+    /// composes it when the NDI flyout first opens, not when the parent does) as unwatched.
+    @MainActor static func fallbackNeeded(composedAt: CFTimeInterval) -> Bool {
+        guard let pass = lastPass, !pass.attached, !pass.inMenuBar else { return false }
+        // The pass was in progress at the composition: began before it (allowing for the order the two
+        // notifications land in) and had not ended by then.
+        return pass.began <= composedAt + 0.3 && (pass.ended.map { $0 >= composedAt } ?? true)
     }
 
     static func install() {
@@ -65,16 +83,35 @@ enum NDIMenuOpenWatcher {
                                                object: nil, queue: .main) { note in
             guard let menu = note.object as? NSMenu else { return }
             MainActor.assumeIsolated {
-                lastTrackingBegan = Date()
-                attachedInLastTracking = wrapNDISubmenus(in: menu)
+                lastPass = TrackingPass(menu: ObjectIdentifier(menu), began: CACurrentMediaTime(), ended: nil,
+                                        attached: wrapNDISubmenus(in: menu), inMenuBar: isInMenuBar(menu))
                 #if DEBUG
                 MenuProbe.trackingBegan(menu)
                 #endif
             }
         }
+        NotificationCenter.default.addObserver(forName: NSMenu.didEndTrackingNotification,
+                                               object: nil, queue: .main) { note in
+            guard let menu = note.object as? NSMenu else { return }
+            MainActor.assumeIsolated {
+                if lastPass?.menu == ObjectIdentifier(menu) { lastPass?.ended = CACurrentMediaTime() }
+            }
+        }
         #if DEBUG
         MainActor.assumeIsolated { MenuProbe.install() }
         #endif
+    }
+
+    /// Whether `menu` is the menu bar or one of its menus.
+    @MainActor
+    private static func isInMenuBar(_ menu: NSMenu) -> Bool {
+        guard let bar = NSApp.mainMenu else { return false }
+        var m: NSMenu? = menu
+        while let current = m {
+            if current === bar { return true }
+            m = current.supermenu
+        }
+        return false
     }
 
     /// Wraps every "NDI" submenu in `menu`. Returns whether at least one is now watched.
@@ -141,12 +178,31 @@ enum MenuProbe {
             guard let menu = note.object as? NSMenu else { return }
             MainActor.assumeIsolated {
                 if parents.contains(menu) { log("parent tracking ended \(id(menu))") }
+                else { log("menu tracking ended \(id(menu)) \"\(menu.title)\"") }
+            }
+        }
+        // What else happens around an NDI list composition (the P1 fallback trigger, 2026-10-29). Windows by pointer,
+        // never by title (a player window's title is the file name).
+        let windowNotes: [(Notification.Name, String)] = [
+            (NSWindow.didChangeScreenNotification, "changed screen"), (NSWindow.didBecomeKeyNotification, "became key"),
+            (NSWindow.didResignKeyNotification, "resigned key"), (NSWindow.willBeginSheetNotification, "will begin sheet"),
+            (NSWindow.didEndSheetNotification, "did end sheet"), (NSWindow.didChangeBackingPropertiesNotification,
+            "changed backing properties"), (NSWindow.didMoveNotification, "moved")]
+        for (name, what) in windowNotes {
+            center.addObserver(forName: name, object: nil, queue: .main) { note in
+                guard let window = note.object as? NSWindow else { return }
+                MainActor.assumeIsolated {
+                    log("window \(String(UInt(bitPattern: ObjectIdentifier(window).hashValue), radix: 16)) \(what)")
+                }
             }
         }
     }
 
     static func trackingBegan(_ menu: NSMenu) {
         guard enabled else { return }
+        if !menu.items.contains(where: { $0.title == NDIMenuOpenWatcher.submenuTitle && $0.submenu != nil }) {
+            log("menu tracking began \(id(menu)) \"\(menu.title)\" items=\(menu.items.count) (no NDI item)")
+        }
         for item in menu.items where item.title == NDIMenuOpenWatcher.submenuTitle {
             guard let submenu = item.submenu else { continue }
             parents.add(menu)

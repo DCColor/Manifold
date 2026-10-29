@@ -423,7 +423,7 @@ held back until after release, and the numbered defect entries follow.
      13 warnings, identical to `bc735c3`'s. Defaults dictionary-equal to the snapshot after deleting 10 window-frame
      keys; licence keys present (3), never read or written.
    ✅ **NDI flyout and guides order (Robbie, 2026-10-29).** Built and run unattended 2026-10-29, commit
-   `<commit — to be filled in>` (base `6b286da`; predictions, drivers, the scratch NDI SDK sender and every log in
+   `cb7d8a1` (base `6b286da`; predictions, drivers, the scratch NDI SDK sender and every log in
    `build/ndi-menu-1029/`):
    - **The NDI flyout jittered because the whole streaming menu was re-applied once a second, sources or not.**
      `NDIService`'s discovery poll assigned `discoveredSources` every 1 s (`App/NDI/NDIService.swift:399` at
@@ -453,8 +453,9 @@ held back until after release, and the numbered defect entries follow.
      (5), Custom, Social safe zones — each group's rows unchanged, separators between (AX dump, both builds). Settings ▸
      Scopes & Guides: Scopes, Broadcast safe zones, Framing Guides (was Scopes, Framing Guides, Broadcast safe zones),
      rows unchanged. The guides have no menu-bar home and no shortcut (no `CommandMenu`/`CommandGroup`, `ShortcutID`
-     or `MenuKeyAudit.menuHomes` entry), so the menu-bar audit and its tests had nothing to change. **Decide:** Off
-     stays with the crop rows, after Broadcast safe; Custom and the social safe zones stay after Social.
+     or `MenuKeyAudit.menuHomes` entry), so the menu-bar audit and its tests had nothing to change. ~~**Decide:** Off
+     stays with the crop rows, after Broadcast safe; Custom and the social safe zones stay after Social.~~ Decided by
+     Robbie the same day: the *Guides layout and the P1 fallback* item, below.
    - Control set 216 / 216 files byte-identical to `6b286da` (24 files: exports, display read-backs, scope images).
      SDI: the frames Manifold sent (v210 dumps, both interlaced fixtures) byte-identical; late = 0 dropped = 0.
      **Not measured: the loop on the wire.** The capture input still locks to a 2160p23.98 signal (every frame
@@ -464,6 +465,26 @@ held back until after release, and the numbered defect entries follow.
      as the NDI list opening, so it starts discovery (as VoiceOver opening it would). The drivers never walk into an
      `AXMenu` except to open the NDI flyout on purpose.
    - 750 / 750 tests (+8). 13 warning locations, identical to `6b286da`'s.
+   ✅ **Guides layout and the P1 fallback (Robbie, 2026-10-29).** Built and run unattended 2026-10-29, commit
+   `<commit — to be filled in>` (base `cb7d8a1`; predictions and drivers in `build/p1-fallback-1029/`):
+   - **Guides popover:** Broadcast safe zones (toggle, Action, Title); separator; "Frame guide", one radio set: None
+     (was Off), the Aspect rows 1.33 … 2.40 and then Custom with its W/H fields, the Social rows 9:16 … 3:2;
+     separator; Social safe zones (toggle, Platform preset, Top, Bot). AX dump, tree vs `cb7d8a1`: that order, those
+     labels, nothing else changed. Settings ▸ Scopes & Guides: Scopes, Broadcast safe zones, Frame guide (outside
+     colour and opacity, guide line colour and width), Social safe zones (colour, width, opacity), each row's wording
+     as before. Stored values unchanged (code: no `@AppStorage` key, default or `GuideMode` raw value changed; None is
+     `guideMode == .off`), so saved selections load. **Not measured:** that a saved selection shows selected; the
+     radio rows expose no state to AX (launches with `-guideMode aspect -guideAspect 1.85`, `… 0.5625`,
+     `-guideMode custom`, argument domain only, dumped identically). By eye on the LG.
+   - **P1:** the fallback no longer starts NDI discovery with no menu open (the FIXED entry *the NDI watcher's
+     fallback started discovery with no menu open*, below, has the trigger and the runs).
+   - Control set 216 / 216 files byte-identical to `cb7d8a1`; SDI frames sent (v210 dumps, both interlaced
+     fixtures) byte-identical, late = 0 dropped = 0; the wire not measured (the capture input still locks to
+     2160p23.98, every frame `sizeMismatch`). Defaults dictionary-equal to the snapshot after deleting 20 window-frame
+     keys and writing one back; streamBookmarks unchanged; licence keys present (5), never read or written.
+   - **Driver note:** a driver that closes every window before quitting (`drv.py`) leaves the next launch with no
+     window (SwiftUI restores none); the P1 drivers open one through File ▸ New Window when none appears.
+   - 750 / 750 tests. 13 warning locations, identical to `cb7d8a1`'s.
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
    `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row
@@ -1337,8 +1358,10 @@ timestamps" entry; `AUDIO_RESAMPLER_DESIGN.md` §18.11). **Widened 2026-10-11** 
   - `MenuProbe` (`App/NDIMenuOpenWatcher.swift`) reads `MANIFOLD_DEBUG_NDI_MENU_PROBE` (added 2026-10-29, the NDI
     flyout jitter). When it is `1`: an `[NDI-MENU]` line for every item added, removed or changed in a menu holding an
     "NDI" submenu and in that submenu, for tracking start and end and the submenu opening and closing, and for each
-    discovery poll (`NDIService.publishDiscovered`); `ContentView` adds `_printChanges()`. Logs names with the host
-    withheld; writes nothing.
+    discovery poll (`NDIService.publishDiscovered`); `ContentView` adds `_printChanges()`. Since the P1 fallback fix
+    (2026-10-29) also: every menu tracking pass, each window's screen, key, sheet and move events (by pointer, never
+    title), and each NDI list composition with the fallback's decision. Logs names with the host withheld; writes
+    nothing.
   - `ContentView`'s first window reads `MANIFOLD_DEBUG_DIAL_URL` (added 2026-10-23, SDI scaling follow-ups,
     approved by Robbie).
     - When it is set, the window dials that URL once, 2 s after it appears, through `connectToStreamURL` (WHEP,
@@ -3046,20 +3069,42 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
 
 ---
 
-## ☐ OPEN 2026-10-29 — PRE-EXISTING (P1) — the NDI watcher's fallback can start discovery with no menu open
+## ✅ FIXED 2026-10-29 (commit `<commit — to be filled in>`) — PRE-EXISTING (P1) — the NDI watcher's fallback started discovery with no menu open
 
 **Found** during the NDI flyout runs (`build/ndi-menu-1029/run-probe/app.log:209`, `6b286da` + the DEBUG probe, control
-bar). `[NDI] ⚠️ FALLBACK — the NDI submenu could not be watched` and `discovery requested` were logged at 12:09:20.
-No menu was tracking: the last pass had ended 0.4 s before (`parent tracking ended`, 141.629), and the next began
-later. The watcher had attached on every pass in that run (`NDI submenu will open` logged through its proxy each
-time). Just before, the window had changed screen (`display change — window changed screen`).
+bar): `[NDI] ⚠️ FALLBACK — the NDI submenu could not be watched` and `discovery requested` at 12:09:20, **19 s** after
+the last menu had closed (12:09:01.837; first read here as 0.4 s, wrongly). The window changing screen nearby was a
+red herring: those lines are the menu's own window, which changes screen every time a menu opens.
 
-**Reading of the code, not measured further:** `ContentView.ndiSourceListItems`' `.onAppear` is the fallback's trigger
-because SwiftUI fires it when the PARENT menu is composed. It evidently also fires when the view is recomposed for
-other reasons. `checkNDISubmenuIsWatched` then asks `NDIMenuOpenWatcher.attachedForCurrentMenu()`, which is false
-whenever no tracking pass began in the last 2 s, so it reads "not watched" and starts discovery. Effect: mDNS
-discovery without the NDI list having been opened, which P1 exists to prevent. Not reproduced on purpose; the
-trigger is UNKNOWN beyond the screen change seen here. Not fixed: outside the 2026-10-29 brief.
+**The trigger, reproduced** (`build/p1-fallback-1029/run-repro2-probe/app.log`, `cb7d8a1` + probe): the control bar's
+NDI flyout opened while the window is **not key** (81.767 `NDI submenu will open`; `ContentView` ignores the
+watcher's notification in a window that is not key, by design), then the window becoming key (87.051). At 87.061
+SwiftUI composed the NDI list, so its `.onAppear` fired with no menu open. 0.3 s later the fallback asked
+`attachedForCurrentMenu()`, which was false whenever no menu had BEGUN tracking in the last 2 s, so it read "no menu
+open" as "a menu we could not watch" and started discovery. The 2026-10-29 driver's trials 1–6 had exactly that
+shape: AX opened the flyout while Manifold was not the active app. A person can reach it by opening the chevron in
+a window that is not key.
+
+Measured on `cb7d8a1` + probe, none of these composes the list or starts discovery: 12 moves of the window between
+the LG and the ASUS, 16 menu-bar menu openings (File, View, Color, Help), 4 Export Diagnostics sheets (Cancel),
+2 Settings openings, 2 captions menus, launch, 8 opens of the streaming menus without the NDI flyout (held 0.5 s and
+3 s), and AX reads of a closed streaming menu (a closed SwiftUI menu exposes no AX menu at all). The list is composed
+once per menu: the empty state's at its first opening, the control bar's when its NDI flyout first opens.
+
+**Fix** (`NDIMenuOpenWatcher.fallbackNeeded(composedAt:)`): the watcher records the tracking pass itself (began,
+ended, whether its NDI submenu is watched, whether it is a menu-bar menu), and the fallback starts discovery only if
+the list was composed DURING a pass that is not a menu-bar menu and has no watched NDI submenu. A composition with no
+menu open starts nothing, and neither does a list first composed more than 2 s into a watched pass (the old window).
+
+**Verified on the tree** (`build/p1-fallback-1029/`): the repro (flyout opened unkeyed, window made key, 3× empty state,
+3× control bar): the list composed with no menu open, `key=true held=false`, `fallbackNeeded=false`; 0 FALLBACK, 0
+discovery. The whole list above (46 actions): 0 `discovery requested`, 0 FALLBACK; then opening the NDI list: 1.
+`MANIFOLD_DEBUG_NDI_WATCHER_DETACHED=1`: the first "Connect Stream…" opening logs FALLBACK and starts discovery, so
+the fallback still works; the moves, menus and sheets before it: 0.
+
+**Still open (pre-existing, not changed):** the NDI flyout opened in a window that is not key does not start
+discovery at all (the notification is answered by the key window only), so that list reads "Searching for NDI
+sources…" until it is opened again in a key window. Not a privacy leak; a usability gap.
 
 ---
 

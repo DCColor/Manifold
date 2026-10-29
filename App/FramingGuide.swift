@@ -148,7 +148,7 @@ struct GuideOverlay: View {
 }
 
 /// Panel off the guides button — FRAMING DECISIONS ONLY (styling lives in Settings).
-/// Broadcast safe zones; then Off / Aspect / Social / Custom for the crop; then the social safe lines.
+/// Broadcast safe zones; the frame guide (None, Aspect with Custom, Social: one radio set); the social safe zones.
 struct GuidesPanel: View {
     @AppStorage("guideMode") private var guideMode: GuideMode = .off
     @AppStorage("guideAspect") private var guideAspect = 2.39
@@ -165,8 +165,9 @@ struct GuidesPanel: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Framing Guides").font(.headline).padding(.bottom, 2)
 
-            // Broadcast safe first, then Aspect, then Social (Robbie, 2026-10-29). Settings ▸ Scopes & Guides
-            // lists its styling sections in the same order. Each group's rows are unchanged.
+            // Broadcast safe zones; the frame guide (one radio set: None, the Aspect rows with Custom, the Social
+            // rows); the social safe zones (Robbie, 2026-10-29). Settings ▸ Scopes & Guides uses the same order and
+            // names. Labels only: the stored values (`guideMode` off/aspect/custom, `guideAspect`, `customW/H`) are as before.
             Toggle("Broadcast safe zones", isOn: $broadcastSafeOn)
                 .font(.caption)
             HStack(spacing: 8) {
@@ -178,25 +179,15 @@ struct GuidesPanel: View {
             }.disabled(!broadcastSafeOn)
 
             Divider().padding(.vertical, 2)
-            row(label: "Off", selected: guideMode == .off) { guideMode = .off }
+            Text("Frame guide").font(.subheadline).padding(.bottom, 1)
+            row(label: "None", selected: guideMode == .off) { guideMode = .off }
 
-            Divider().padding(.vertical, 2)
-            Text("Aspect").font(.caption).foregroundStyle(.secondary)
+            Text("Aspect").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
             ForEach(cinemaGuides, id: \.ratio) { g in
                 row(label: g.label, selected: isAspectSelected(g.ratio)) {
                     guideAspect = g.ratio; guideMode = .aspect
                 }
             }
-
-            Divider().padding(.vertical, 2)
-            Text("Social").font(.caption).foregroundStyle(.secondary)
-            ForEach(socialGuides, id: \.ratio) { g in
-                row(label: g.label, selected: isAspectSelected(g.ratio)) {
-                    guideAspect = g.ratio; guideMode = .aspect
-                }
-            }
-
-            Divider().padding(.vertical, 2)
             HStack(spacing: 8) {
                 Button { guideMode = .custom } label: {
                     HStack(spacing: 8) {
@@ -214,6 +205,13 @@ struct GuidesPanel: View {
                 customField($customW)
                 Text("H").font(.caption).foregroundStyle(.secondary)
                 customField($customH)
+            }
+
+            Text("Social").font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+            ForEach(socialGuides, id: \.ratio) { g in
+                row(label: g.label, selected: isAspectSelected(g.ratio)) {
+                    guideAspect = g.ratio; guideMode = .aspect
+                }
             }
 
             Divider().padding(.vertical, 2)
