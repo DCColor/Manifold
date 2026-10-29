@@ -105,6 +105,9 @@ They are reproducible from the pins, but reproducing them takes real time.
 - [ ] All three `ThirdParty/` trees present and built
 - [ ] DeckLink SDK in `docs/`, NDI SDK installed
 - [ ] Decide `Profile` or `Release` — see the warning below
+- [ ] A release that legitimately grows the DMG past 150% of the previous one is published with
+      `RELEASE_ALLOW_SIZE_JUMP="<reason>"` (Graviton-Releases `DISTRIBUTION.md`, *Size check, and its
+      override*); 0.9.0 used it for the bundled sync clips (25.9 MB)
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
