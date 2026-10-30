@@ -486,7 +486,7 @@ held back until after release, and the numbered defect entries follow.
      window (SwiftUI restores none); the P1 drivers open one through File ▸ New Window when none appears.
    - 750 / 750 tests. 13 warning locations, identical to `cb7d8a1`'s.
    ☐ **iPhone clips open rotated or flipped; a vertical window can't be made small (Robbie, 2026-10-29, an hour after
-   0.9.0 build 20 was published).** Built 2026-10-29, commit _to be filled in_ (base `cfe4fd5`; predictions, fixtures,
+   0.9.0 build 20 was published).** Built 2026-10-29, commit `0f74e4a` (base `cfe4fd5`; predictions, fixtures,
    drivers and logs in `build/orient-1029/`). For 0.9.0 build 21. The defect, cause, fix and results are the entry
    *iPhone clips open rotated or flipped*, below. Status: all predictions run; every picture, SDI and unchanged-file
    check passed; two window predictions missed their bands (square and landscape stop at the window's 492-pt minimum
@@ -3099,7 +3099,7 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
 
 ---
 
-## ☐ FIX BUILT 2026-10-29 (commit _to be filled in_) — PRE-EXISTING since M1 — iPhone clips open rotated or flipped, and a vertical window can't be made smaller than 720 × 1280
+## ☐ FIX BUILT 2026-10-29 (commit `0f74e4a`) — PRE-EXISTING since M1 — iPhone clips open rotated or flipped, and a vertical window can't be made smaller than 720 × 1280
 
 **Reported** by Robbie on 2026-10-29, an hour after 0.9.0 build 20 was published. `IMG_9457.MOV` (an iPhone 14 Pro clip held
 upright) looked mirrored left to right and `IMG_5070.MOV` (iPhone 17 Pro) mirrored top to bottom. Confirmed by Robbie and
