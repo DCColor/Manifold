@@ -16,6 +16,7 @@ import SyncCalibration   // calibration mode's flash detector (docs/AUDIO_RESAMP
 import FrameQueuePolicy  // the paused-picture rules: which end a full queue trims, when the seek fallback may draw
 import LUTCube           // colour S6: the Interpretation LUT's tables (docs/COLOR_MANAGEMENT_FINDINGS.md §6.11)
 import FileScan          // interlaced I4: the window's field view (docs/INTERLACED_FINDINGS.md §14)
+import PictureGeometry   // a file's orientation, applied in the offscreen pass (docs/BUGS.md, iPhone clips, 2026-10-29)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
 // UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
@@ -52,6 +53,20 @@ private struct CropRect {
     var u1: Float
     var v1: Float
     static let identity = CropRect(u0: 0, v0: 0, u1: 1, v1: 1)
+}
+
+/// Matches the shader's PictureOrient struct (memory layout): `PictureOrientation.sampling`, bound to the offscreen pass's
+/// VERTEX stage at buffer(1). `.identity` (1 0 0 1) is what every unrotated file binds, and it reproduces the texture
+/// coordinates the pass computed before orientation existed, bit for bit.
+private struct PictureOrient {
+    var m00: Float
+    var m01: Float
+    var m10: Float
+    var m11: Float
+    init(_ o: PictureOrientation) {
+        let m = o.sampling
+        m00 = Float(m.m00); m01 = Float(m.m01); m10 = Float(m.m10); m11 = Float(m.m11)
+    }
 }
 
 /// Matches the shader's WaveformParams struct (memory layout). GPU waveform prototype.
@@ -943,8 +958,10 @@ final class MetalVideoRenderer {
             + " pri=\(tag(kCVImageBufferColorPrimariesKey))"
             + " mtx=\(tag(kCVImageBufferYCbCrMatrixKey))"
         let encW = source.encodedWidth, encH = source.encodedHeight
-        let expectedW = source.crop?.width ?? encW
-        let expectedH = source.crop?.height ?? encH
+        // The offscreen is the active picture TURNED: exchanged for a quarter turn.
+        let expected = source.orientation.displayedSize(width: source.crop?.width ?? encW,
+                                                        height: source.crop?.height ?? encH)
+        let expectedW = expected.width, expectedH = expected.height
         let key = "\(w)x\(h)/\(encW)x\(encH)/\(playback.width)x\(playback.height)/\(colour)"
         guard debugGeomReported.insert(key).inserted else { return }
 
@@ -1684,6 +1701,11 @@ final class MetalVideoRenderer {
     ///   * `crop` IS APPLIED. It sizes the offscreen and the offscreen pass samples it, which is
     ///     what puts the active picture — and only the active picture — in front of the scopes,
     ///     the v210 convert and the export.
+    ///   * `orientation` IS APPLIED (docs/BUGS.md, iPhone clips, 2026-10-29). Like the crop it is a fact about the
+    ///     PICTURE, not about the display: an iPhone clip stored 3840×2160 with a 90° turn IS a 2160×3840 picture, and
+    ///     its waveform, its export and its SDI frame are of that picture. So it sizes the offscreen (exchanged for a
+    ///     quarter turn) and the offscreen pass samples by it. The crop is in stored coordinates and is applied inside
+    ///     the turn.
     ///   * `pixelAspect` IS DELIBERATELY NEVER APPLIED. The desqueeze is a DISPLAY transform and
     ///     it stops at the drawable; the offscreen is source pixels and every consumer of it
     ///     means source pixels. This field exists so the frame export can WRITE THE RATIO INTO
@@ -1700,7 +1722,15 @@ final class MetalVideoRenderer {
         let encodedWidth: Int
         let encodedHeight: Int
         let crop: CleanApertureCrop?         // nil → nothing to crop; use the whole buffer
-        let pixelAspect: DeclaredPixelAspect // CARRIED, NEVER APPLIED — see above
+        let pixelAspect: DeclaredPixelAspect // CARRIED, NEVER APPLIED — see above. Of the STORED pixel.
+        let orientation: PictureOrientation  // APPLIED — see above
+
+        /// The pixel aspect of a DISPLAYED pixel: the stored one's, exchanged by a quarter turn. What the export writes
+        /// and what SDI placement desqueezes by, since both describe the offscreen, which is displayed pixels.
+        var displayedPixelAspect: DeclaredPixelAspect {
+            guard case .declared(let h, let v) = pixelAspect, orientation.swapsAxes else { return pixelAspect }
+            return .declared(horizontal: v, vertical: h)
+        }
     }
     /// Parked by `setSourceGeometry` (main), installed at the top of `performDisplayTick`.
     private var pendingGeometry: SourceGeometry?
@@ -2219,17 +2249,26 @@ final class MetalVideoRenderer {
     /// the user hits play.
     func setSourceGeometry(encodedWidth: Int, encodedHeight: Int,
                            aperture: DeclaredCleanAperture,
-                           pixelAspect: DeclaredPixelAspect) {
+                           pixelAspect: DeclaredPixelAspect,
+                           orientation: PictureOrientation = .identity) {
         let crop = CleanApertureCrop.resolve(encodedWidth: encodedWidth,
                                              encodedHeight: encodedHeight,
                                              aperture: aperture)
         let state = SourceGeometry(encodedWidth: encodedWidth, encodedHeight: encodedHeight,
-                                   crop: crop, pixelAspect: pixelAspect)
+                                   crop: crop, pixelAspect: pixelAspect, orientation: orientation)
         // A RE-ASSERT OF THE SAME GEOMETRY IS A NO-OP, like the colour state's. The metadata
         // observer is not the only caller and must not re-post what the load path already set.
         guard mainSourceGeometry != state else { return }
         mainSourceGeometry = state
-        deckLinkLock.lock(); deckLinkPixelAspect = pixelAspect.ratio; deckLinkLock.unlock()   // SDI placement (D6)
+        // SDI placement (D6) desqueezes the OFFSCREEN, which is displayed pixels: the turned pixel's aspect.
+        deckLinkLock.lock(); deckLinkPixelAspect = state.displayedPixelAspect.ratio; deckLinkLock.unlock()
+        // PERMANENT, one line per source that is turned (or whose matrix is refused, which the engine logs). Says what was
+        // applied, so a picture that looks wrong can be told from a file that says something else.
+        if !orientation.isIdentity {
+            let shown = orientation.displayedSize(width: crop?.width ?? encodedWidth, height: crop?.height ?? encodedHeight)
+            print("[ORIENT] \(orientation.logToken) (\(orientation.description)): stored "
+                + "\(encodedWidth)x\(encodedHeight) → displayed \(shown.width)x\(shown.height)")
+        }
 
         if let crop {
             // PERMANENT, AND REGISTERED IN `LogPartitioner.manifoldTags`. One line per source
@@ -3530,8 +3569,16 @@ final class MetalVideoRenderer {
         // THE ACTIVE PICTURE — the decoded buffer's dimensions minus the declared clean aperture,
         // and the size of everything downstream of this pass. Identical to the buffer on any
         // source that declares no cropping `clap`, which is nearly all of them.
-        let pictureW = crop?.width ?? width
-        let pictureH = crop?.height ?? height
+        // …TURNED BY THE FILE'S ORIENTATION, under the same encoded-size guard (a buffer that is not the declared raster
+        // is not the picture the matrix was declared for either). A quarter turn exchanges the offscreen's sides.
+        let orientation: PictureOrientation = {
+            guard let a = activeGeometry, a.encodedWidth == width, a.encodedHeight == height else { return .identity }
+            return a.orientation
+        }()
+        let shown = orientation.displayedSize(width: crop?.width ?? width, height: crop?.height ?? height)
+        let pictureW = shown.width
+        let pictureH = shown.height
+        var orient = PictureOrient(orientation)
         var cropRect = CropRect.identity
         if let crop {
             cropRect = CropRect(u0: Float(crop.x) / Float(width),
@@ -3633,6 +3680,8 @@ final class MetalVideoRenderer {
         // function's buffer argument must always have something at its index, and the identity
         // rect is the correct something for a source with no cropping `clap`.
         encoder.setVertexBytes(&cropRect, length: MemoryLayout<CropRect>.stride, index: 0)
+        // THE ORIENTATION, bound unconditionally for the same reason; identity for every unturned file.
+        encoder.setVertexBytes(&orient, length: MemoryLayout<PictureOrient>.stride, index: 1)
         encoder.setFragmentTexture(lumaTexture, index: 0)
         encoder.setFragmentTexture(chromaTexture, index: 1)
         encoder.setFragmentBytes(&params, length: MemoryLayout<ColorParams>.stride, index: 0)
@@ -5084,7 +5133,8 @@ final class MetalVideoRenderer {
         //
         // The FILENAME tag is gated differently and deliberately so: it is present only when the
         // frame actually needs a desqueeze, i.e. declared AND not square. See `filenameTag`.
-        let pixelAspect = mainSourceGeometry?.pixelAspect ?? .undeclared
+        // The DISPLAYED pixel's aspect: the export is of the offscreen, which a quarter turn has turned.
+        let pixelAspect = mainSourceGeometry?.displayedPixelAspect ?? .undeclared
         let parTag = pixelAspect.filenameTag
 
         // ⚠️ MEASURED, NOT ASSUMED, BECAUSE THE OBVIOUS KEYS DO NOT WORK.

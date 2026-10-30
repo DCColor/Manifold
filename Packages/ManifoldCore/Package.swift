@@ -60,6 +60,9 @@ let package = Package(
         // Linked by the APP target directly (project.yml): the NDI source list's order and change test (the
         // NDI flyout jitter, 2026-10-29).
         .library(name: "SourceListOrder", targets: ["SourceListOrder"]),
+        // Linked by the APP target directly (project.yml) and used by ManifoldCore: a file's picture orientation (the
+        // display matrix reduced to one of eight) and the player window's size solve (docs/BUGS.md, iPhone clips, 2026-10-29).
+        .library(name: "PictureGeometry", targets: ["PictureGeometry"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
         // one-way move of the licence email and machine id out of the preferences plist (privacy P1).
         .library(name: "LicenseRecord", targets: ["LicenseRecord"]),
@@ -553,6 +556,25 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // A file's orientation (QuickTime track matrix, AVFoundation `preferredTransform`, libav display matrix) as one
+        // of the eight axis-aligned transforms, with the sampling rule the offscreen pass applies; and the player
+        // window's size solve with its two floors (docs/BUGS.md, "iPhone clips open rotated or flipped", 2026-10-29).
+        // CoreGraphics types only, so `swift test` reaches both: the renderer and the sizer are app code.
+        .target(
+            name: "PictureGeometry",
+            path: "Sources/PictureGeometry",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "PictureGeometryTests",
+            dependencies: ["PictureGeometry"],
+            path: "Tests/PictureGeometryTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The licence's Keychain activation record and the migration that takes `license.email` and
         // `license.machineId` out of the preferences plist (docs/PRIVACY_AUDIT.md, stage P1). Foundation
         // only. The tests run the migration against a SCRATCH Keychain service and a SCRATCH defaults
@@ -596,7 +618,7 @@ let package = Package(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
-                           "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan"],
+                           "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

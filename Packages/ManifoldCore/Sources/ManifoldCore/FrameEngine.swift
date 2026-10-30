@@ -11,6 +11,7 @@ import ColorimetryModel   // SourceChroma — the chain readout's Chroma line (S
 import FileChroma
 import FrameGrid
 import FileScan        // InterlacedChroma — per-field 4:2:0 (I3)
+import PictureGeometry // the file's orientation (docs/BUGS.md, iPhone clips, 2026-10-29)
 // The file audio reader's output layout, and the size check a source's own layout must pass first.
 import AudioOutputLayout
 
@@ -277,10 +278,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// hand-off is the only route, and it is fired BEFORE the reader that produces the first
     /// frame exists.
     ///
-    /// `(0, 0, .undeclared, .undeclared)` on unload, for the same reason nil colour codes are
+    /// `(0, 0, .undeclared, .undeclared, .identity)` on unload, for the same reason nil colour codes are
     /// published there: a deck emptied by an unload must not crop the next source by the departed
-    /// file's aperture, nor tag its export with the departed file's squeeze.
-    public var onSourceGeometry: ((Int, Int, DeclaredCleanAperture, DeclaredPixelAspect) -> Void)?
+    /// file's aperture, nor tag its export with the departed file's squeeze, nor turn it by the departed file's matrix.
+    ///
+    /// The fifth value is the file's ORIENTATION (its track matrix or libav display matrix, reduced to one of eight;
+    /// `PictureOrientation`), which the renderer APPLIES in the offscreen pass (docs/BUGS.md, iPhone clips, 2026-10-29).
+    public var onSourceGeometry: ((Int, Int, DeclaredCleanAperture, DeclaredPixelAspect, PictureOrientation) -> Void)?
 
     /// Interlaced I3 (docs/INTERLACED_FINDINGS.md §8): the file's scan, so the renderer reconstructs a woven interlaced
     /// file's 4:2:0 chroma per field (`InterlacedChroma.perField`) and, since I4 (§14), the window offers its field views.
@@ -1229,7 +1233,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // …AND THE GEOMETRY WITH IT, same rule one line down: a stale crop would take 32 px off a
         // file that never declared one, which is a worse failure than the padding it removes, and
         // a stale `pasp` would follow the next file into its exported filename.
-        onSourceGeometry?(0, 0, .undeclared, .undeclared)
+        onSourceGeometry?(0, 0, .undeclared, .undeclared, .identity)
         onSourceScan?(.notRead)
     }
 
@@ -1807,6 +1811,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavFileFormatDescription = nil
         let videoFormats = try? await vTrack.load(.formatDescriptions)
         if loadAbandoned(generation, url, at: "the video format") { return }
+        // THE ORIENTATION, read here so it is published with the rest of the geometry, before `beginReading`.
+        let loadedTransform = try? await vTrack.load(.preferredTransform)
+        if loadAbandoned(generation, url, at: "the track matrix") { return }
+        let orientation = MediaInspector.orientation(for: loadedTransform ?? .identity, source: url.lastPathComponent)
         if let formats = videoFormats, let fmt = formats.first {
             sourceRange = MediaInspector.sourceColorRange(for: fmt)
             // ── THE DISPLAY'S COLOUR STATE, ESTABLISHED HERE AND NOT FROM `metadata` ─────────
@@ -1844,7 +1852,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             let encoded = CMVideoFormatDescriptionGetDimensions(fmt)
             onSourceGeometry?(Int(encoded.width), Int(encoded.height),
                               MediaInspector.cleanAperture(for: fmt),
-                              MediaInspector.pixelAspect(for: fmt))
+                              MediaInspector.pixelAspect(for: fmt), orientation)
             // Interlaced I3: the field structure, at the same point, read as the Inspector reads it (I1).
             onSourceScan?(FileScanProbe.resolve(url: url, formatDescription: fmt, mxf: false))
             // DNxHR can't decode through VideoToolbox; route it to libav. Its real
@@ -1872,7 +1880,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             onSourceColorNote?(nil)
             // NO FORMAT DESCRIPTION MEANS NEITHER ATOM IS DECLARED, which is an answer and must
             // be published for the same reason the nil codes are.
-            onSourceGeometry?(0, 0, .undeclared, .undeclared)
+            onSourceGeometry?(0, 0, .undeclared, .undeclared, .identity)
             onSourceScan?(.notRead)
             adoptFileChroma(FileChromaResolver.resolve(.unknown, basis: "no format description",
                                                        force420: false, forceReason: ""))
@@ -2088,9 +2096,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // therefore still draws squeezed. Stated here and on `displaySize` so the divergence is a
         // recorded decision rather than a latent one; `SRTFrameRouter` carries the same note for
         // the SRT path.
-        if info.width > 0, info.height > 0 { self.displaySize = CGSize(width: info.width, height: info.height) }
+        // Turned by the stream's display matrix, as the AVFoundation path's is by the track's.
+        let orientation = PictureOrientation.read(displayMatrix: info.displayMatrix ?? []).applied
+        let shown = orientation.displayedSize(width: info.width, height: info.height)
+        if info.width > 0, info.height > 0 { self.displaySize = CGSize(width: shown.width, height: shown.height) }
 
         var meta = VideoMetadata()
+        meta.orientation = orientation
         meta.fileName = url.lastPathComponent
         meta.container = url.pathExtension.uppercased()
         meta.codecName = info.codecName
@@ -2431,7 +2443,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 // so this is also the line that retracts it. The `pasp` goes with it: libav
                 // supplies its own sample aspect and this path does not read it, so claiming a
                 // declaration we have not read would be worse than claiming none.
-                onSourceGeometry?(0, 0, .undeclared, .undeclared)
+                //
+                // THE RASTER AND THE ORIENTATION ARE STATED, though (docs/BUGS.md, iPhone clips, 2026-10-29): libav's own
+                // display matrix, on the raster libav decodes to, so the renderer's encoded-size guard applies the turn
+                // to exactly these buffers. With no aperture declared, nothing is cropped, as before.
+                onSourceGeometry?(info.width, info.height, .undeclared, .undeclared,
+                                  MediaInspector.orientation(libavDisplayMatrix: info.displayMatrix,
+                                                             source: url.lastPathComponent))
                 // Interlaced I3: the field structure is not geometry and survives the decode, so it is restated here
                 // from this path's own reading (as `applyLibavMetadata` reads it).
                 onSourceScan?(FileScanProbe.resolve(

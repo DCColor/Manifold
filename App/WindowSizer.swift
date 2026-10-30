@@ -69,6 +69,7 @@
 
 import AppKit
 import Foundation
+import PictureGeometry   // WindowFit — the solve and its two floors (docs/BUGS.md, iPhone clips, 2026-10-29)
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
 //  THE INVARIANT — CHROME NEVER REDUCES THE VIDEO'S SIZE.
@@ -217,6 +218,18 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// frame and both deltas are pure pointer motion. Decide there, hold it, and no later event can
     /// feed our own correction back into the choice.
     private var liveResizeDrivenByHeight: Bool?
+
+    /// THE LAST SOLVE THIS FILE APPLIED, so a re-solve can keep the picture the user left. Since 2026-10-29 the picture
+    /// can be narrower than the window (`WindowFit`'s picture floor: a 9:16 picture shrunk to 320 × 569 sits in the
+    /// 720-pt window, pillarboxed), so "the window's width is the picture's width" is no longer true of every window,
+    /// and a chrome change that re-derived the picture from the window's width would blow a shrunk vertical picture
+    /// back up to 720 × 1280. `WindowFit.currentPictureWidth` reads this; it is the content width otherwise.
+    private var lastSolve: WindowFit.Solution?
+
+    /// Where a live resize started: content width and picture width at mouse-down. A WIDTH drag on a pillarboxed
+    /// picture moves the picture by the drag's delta (the window stays at its minimum until the picture reaches it),
+    /// so the size is continuous under the pointer instead of jumping from 320 to 720 wide at the first event.
+    private var liveResizeStart: (contentWidth: CGFloat, pictureWidth: CGFloat)?
 
     // MARK: - Delegate identity
 
@@ -374,11 +387,22 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         // undo the aspect — to recover the width the solver wants as its input. Both then go through
         // `constrainedContentSize`, so the minimums, the screen cap and ROUTE 2 apply identically to
         // the two branches and neither can bypass a clamp.
-        let width = drivenByHeight
-            ? (content.height - chromeHeight) * videoAspect
-            : content.width
+        //
+        // A HAND ON THE EDGE MAY SHRINK THE PICTURE TO THE PICTURE FLOOR (`WindowFit`, 2026-10-29): the 320-pt short
+        // side, below the window's 720-pt minimum width, pillarboxed. Every other path through here keeps the picture
+        // it is handed, which is what makes this file's own `setFrame` calls a no-op when they arrive back.
+        let width: CGFloat
+        if drivenByHeight {
+            width = (content.height - chromeHeight) * videoAspect
+        } else if let start = liveResizeStart, start.pictureWidth + 0.5 < start.contentWidth {
+            width = start.pictureWidth + (content.width - start.contentWidth)
+        } else if !sender.inLiveResize {
+            width = WindowFit.currentPictureWidth(contentWidth: content.width, last: lastSolve)
+        } else {
+            width = content.width
+        }
 
-        let fitted = constrainedContentSize(for: sender, contentWidth: width)
+        let fitted = constrainedContentSize(for: sender, contentWidth: width, floor: .picture)
         return sender.frameRect(forContentRect: NSRect(origin: sender.frame.origin,
                                                        size: fitted)).size
     }
@@ -421,11 +445,16 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// the same discipline `windowWillResize` follows above.
     func windowWillStartLiveResize(_ notification: Notification) {
         liveResizeDrivenByHeight = nil
+        if let window {
+            let w = window.contentRect(forFrameRect: window.frame).size.width
+            liveResizeStart = (w, WindowFit.currentPictureWidth(contentWidth: w, last: lastSolve))
+        }
         inner?.windowWillStartLiveResize?(notification)
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
         liveResizeDrivenByHeight = nil
+        liveResizeStart = nil
         inner?.windowDidEndLiveResize?(notification)
     }
 
@@ -444,7 +473,7 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         if !isApplyingProgrammaticResize { onUserResize?() }
 
         let content = window.contentRect(forFrameRect: proposed).size
-        let fitted = constrainedContentSize(for: window, contentWidth: content.width)
+        let fitted = constrainedContentSize(for: window, contentWidth: content.width, floor: .window)
         var frame = window.frameRect(forContentRect: NSRect(origin: proposed.origin, size: fitted))
         frame.origin.y = proposed.maxY - frame.height     // keep the top edge where zoom put it
         return frame
@@ -514,11 +543,18 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         // `sourceSize != nil` for the same reason `rasterContentWidth` insists on it: with no
         // picture there is no policy in force, so the ordinary answer below is the right one.
         if case .fitToScreen = raster, sourceSize != nil {
-            let smallestPicture = VideoBox.height(width: window.contentMinSize.width, aspect: aspect)
+            // A VERTICAL picture's smallest is the picture floor (2026-10-29): measured against the window's 720-pt
+            // minimum width, a 9:16 picture is 1280 tall and the tray would have no travel at all on a laptop. Every
+            // other shape keeps the window floor it always had.
+            let floor: WindowFit.Floor = aspect < 1 ? .picture : .window
+            let smallestPicture = VideoBox.height(
+                width: WindowFit.floorWidth(floor, aspect: aspect, minContent: window.contentMinSize), aspect: aspect)
             return max(maxContentHeight - smallestPicture, 0)
         }
 
-        var width = window.contentRect(forFrameRect: window.frame).size.width
+        // The PICTURE's width, which is the window's unless the picture is pillarboxed at the picture floor.
+        var width = WindowFit.currentPictureWidth(contentWidth: window.contentRect(forFrameRect: window.frame).size.width,
+                                                  last: lastSolve)
         if !hasSizedToSource, let sourceSize {
             // A RASTER POLICY STATES THE OPENING WIDTH EXACTLY, so it replaces the prediction rather
             // than being max()'d with it. `max` is right for the classic rule (which only ever
@@ -658,7 +694,7 @@ final class WindowSizer: NSObject, NSWindowDelegate {
             // no policy (`.automatic`, and therefore every fresh install) `sizeToSource` runs
             // exactly as it always has, so this arc changes nothing until someone asks it to.
             if let rasterWidth {
-                setContentSize(constrainedContentSize(for: window, contentWidth: rasterWidth),
+                setContentSize(constrainedContentSize(for: window, contentWidth: rasterWidth, floor: .window),
                                of: window)
                 window.center()
             } else {
@@ -675,7 +711,11 @@ final class WindowSizer: NSObject, NSWindowDelegate {
             // same statement, because a preset's width does not depend on the chrome either. The
             // one state where the two genuinely differ is `.fitToScreen`, which is defined in terms
             // of the chrome and therefore MUST re-solve when it changes.
-            applyConstraint(to: window, contentWidth: rasterWidth)
+            //
+            // THE FLOOR: a fresh size (a preset, or a new source's shape) fills the window's minimum width as it always
+            // did; a chrome change keeps the picture where the user left it, including below that width.
+            applyConstraint(to: window, contentWidth: rasterWidth,
+                            floor: (rasterWidth != nil || aspectChanged) ? .window : .picture)
         }
     }
 
@@ -694,7 +734,7 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         } else {
             width = 960
         }
-        setContentSize(constrainedContentSize(for: window, contentWidth: width), of: window)
+        setContentSize(constrainedContentSize(for: window, contentWidth: width, floor: .window), of: window)
         window.center()
     }
 
@@ -720,10 +760,10 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// about the window.
     private func sizeToSource(_ source: CGSize, in window: NSWindow) {
         guard let width = openingContentWidth(for: source, in: window) else {
-            applyConstraint(to: window)
+            applyConstraint(to: window, floor: .window)
             return
         }
-        setContentSize(constrainedContentSize(for: window, contentWidth: width), of: window)
+        setContentSize(constrainedContentSize(for: window, contentWidth: width, floor: .window), of: window)
         window.center()
     }
 
@@ -731,11 +771,13 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// from where the user put it rather than jumping.
     ///
     /// `contentWidth` is the raster policy's requested width, or nil to re-solve at the window's
-    /// CURRENT width — the two callers this file has always had (a chrome change, a shape change)
-    /// pass nil and are unchanged by the raster arc.
-    private func applyConstraint(to window: NSWindow, contentWidth: CGFloat? = nil) {
+    /// CURRENT PICTURE width — the two callers this file has always had (a chrome change, a shape change)
+    /// pass nil and are unchanged by the raster arc. The current picture is the window's width unless the last solve
+    /// pillarboxed it (`lastSolve`).
+    private func applyConstraint(to window: NSWindow, contentWidth: CGFloat? = nil, floor: WindowFit.Floor) {
         let current = window.contentRect(forFrameRect: window.frame).size
-        let fitted = constrainedContentSize(for: window, contentWidth: contentWidth ?? current.width)
+        let width = contentWidth ?? WindowFit.currentPictureWidth(contentWidth: current.width, last: lastSolve)
+        let fitted = constrainedContentSize(for: window, contentWidth: width, floor: floor)
         guard abs(fitted.width - current.width) > 0.5 || abs(fitted.height - current.height) > 0.5
         else { return }
 
@@ -782,49 +824,22 @@ final class WindowSizer: NSObject, NSWindowDelegate {
     /// Read `VideoBox`'s note above before editing this function. The two routes by which chrome is
     /// allowed to touch the geometry are marked below; there is no third, and the `assert` at the
     /// bottom is what says so at runtime.
-    private func constrainedContentSize(for window: NSWindow, contentWidth: CGFloat) -> NSSize {
-        let aspect = max(videoAspect, 0.01)
-        let chrome = max(chromeHeight, 0)
+    private func constrainedContentSize(for window: NSWindow, contentWidth: CGFloat, floor: WindowFit.Floor) -> NSSize {
+        // THE SOLVE ITSELF LIVES IN `WindowFit` (PictureGeometry) since 2026-10-29, so `swift test` can hold it to a
+        // laptop's screen. Same shape, same two routes for chrome (ROUTE 1: added; ROUTE 2: the screen cap), with two
+        // floors where it had one: see `WindowFit`'s header. Chrome reaches it only as the argument below.
         let minSize = window.contentMinSize
         let maxSize = maximumContentSize(for: window)
-
-        // ── ROUTE 2 — THE SCREEN CAP, AND THE ONLY PLACE CHROME MAY COST PICTURE ──────────
-        //
-        // A window must never grow beyond what the screen can show, so chrome is charged HERE,
-        // against the display's height, and converted into a WIDTH the picture may not exceed.
-        // Spending the cap as width rather than as height is what keeps the picture exactly
-        // on-shape while it shrinks — the window is smaller, the image is smaller, and no bar
-        // appears. This is the sole exception named in `VideoBox`'s header.
-        let heightBudget = max(maxSize.height - chrome, 1)
-        let widthBudget = max(min(maxSize.width, VideoBox.width(height: heightBudget, aspect: aspect)),
-                              minSize.width)
-
-        // ── THE PICTURE, SIZED WITHOUT REFERENCE TO CHROME ───────────────────────────────
-        var videoW = min(max(contentWidth, minSize.width), widthBudget)
-
-        // The window's own minimum height can exceed the constraint at this width. Honour it by
-        // GROWING the picture — never by shrinking it — so the surplus height is filled with
-        // picture rather than with a bar. `max(videoW, …)` is what makes that one-directional, and
-        // the budget clamp keeps the growth inside the screen cap.
-        if VideoBox.height(width: videoW, aspect: aspect) + chrome < minSize.height {
-            videoW = min(max(videoW, VideoBox.width(height: minSize.height - chrome, aspect: aspect)),
-                         widthBudget)
-        }
-
-        // ── ROUTE 1 — CHROME IS ADDED. THE OPERATOR IS `+`. ──────────────────────────────
-        let videoH = VideoBox.height(width: videoW, aspect: aspect)
-        // The outer `max` is the residual case the cap cannot solve: the screen cannot show even the
-        // smallest legal window, so the content is padded to the window's minimum and the picture
-        // pillarboxes inside a box it cannot fill. That is the honest outcome and the only one
-        // available — and it is a WINDOW-MINIMUM effect, not a chrome effect.
-        let contentH = max(videoH + chrome, minSize.height)
+        let solution = WindowFit.solve(pictureWidth: contentWidth, aspect: videoAspect, chrome: chromeHeight,
+                                       floor: floor, minContent: minSize, maxContent: maxSize)
+        lastSolve = solution
 
         #if DEBUG
-        assertChromeDidNotShrinkVideo(videoWidth: videoW, requestedWidth: contentWidth,
-                                      minWidth: minSize.width, maxWidth: maxSize.width,
-                                      widthBudget: widthBudget)
+        assertChromeDidNotShrinkVideo(videoWidth: solution.pictureWidth, requestedWidth: contentWidth,
+                                      minWidth: WindowFit.floorWidth(floor, aspect: videoAspect, minContent: minSize),
+                                      maxWidth: maxSize.width, widthBudget: solution.widthBudget)
         #endif
-        return NSSize(width: videoW.rounded(), height: contentH.rounded())
+        return solution.content
     }
 
     #if DEBUG

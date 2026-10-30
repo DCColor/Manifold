@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import AudioToolbox
 import ColorimetryModel   // ColorimetryTable — the CICP names (colour S3)
+import PictureGeometry    // the track matrix as one of eight (docs/BUGS.md, iPhone clips, 2026-10-29)
 
 /// Engine-agnostic asset inspection: reads "what a file IS" (metadata, timecode,
 /// display size) independent of how it's played. Shared by AVPlayerEngine and
@@ -36,6 +37,8 @@ public enum MediaInspector {
                 meta.pixelAspect = declaredPixelAspect(for: fmt)
                 meta.cleanAperture = declaredCleanAperture(for: fmt)
                 let transform = (try? await track.load(.preferredTransform)) ?? .identity
+                meta.orientation = PictureOrientation.read(a: transform.a, b: transform.b,
+                                                           c: transform.c, d: transform.d).applied
                 meta.displaySize = presentationSize(for: fmt, transform: transform)
                 meta.codecName = codecName(for: fmt)
                 let c = colorTags(for: fmt)
@@ -123,8 +126,36 @@ public enum MediaInspector {
         // that is wrong only for anamorphic files beats no shape at all (which is a 16:9 window
         // around whatever this is), but it cannot be reached by any file that decodes.
         guard let naturalSize = try? await track.load(.naturalSize) else { return nil }
-        let r = CGRect(origin: .zero, size: naturalSize).applying(transform)
-        return CGSize(width: abs(r.width), height: abs(r.height))
+        return turned(naturalSize, by: transform)
+    }
+
+    /// THE FILE'S ORIENTATION AS THE RENDERER APPLIES IT: the track matrix reduced to one of the eight
+    /// (`PictureOrientation`). A matrix that is not one of them is logged and drawn as stored. Manifold applies the
+    /// standard and guesses at nothing else; before 2026-10-29 no matrix was applied to the picture at all, only to the
+    /// window's shape (docs/BUGS.md, iPhone clips).
+    public static func orientation(for transform: CGAffineTransform, source: String) -> PictureOrientation {
+        log(PictureOrientation.read(a: transform.a, b: transform.b, c: transform.c, d: transform.d), source: source)
+    }
+
+    /// The same, from libav's `AV_PKT_DATA_DISPLAYMATRIX` (the libav path: MXF, DNx `.mov`, a routed `.mov`). nil (no
+    /// side data) is identity, as the AVFoundation path's absent matrix is.
+    public static func orientation(libavDisplayMatrix m: [Int32]?, source: String) -> PictureOrientation {
+        guard let m else { return .identity }
+        return log(PictureOrientation.read(displayMatrix: m), source: source)
+    }
+
+    private static func log(_ reading: PictureOrientation.Reading, source: String) -> PictureOrientation {
+        if case .notApplied(let why) = reading {
+            print("[ORIENT] ⚠️ \(source): \(why) — the picture is drawn as stored")
+        }
+        return reading.applied
+    }
+
+    /// A size turned by a matrix as the renderer turns the picture: exchanged by a quarter turn, unchanged otherwise
+    /// (including by a matrix that is not applied, so the window's shape and the picture always agree).
+    private static func turned(_ size: CGSize, by transform: CGAffineTransform) -> CGSize {
+        let o = PictureOrientation.read(a: transform.a, b: transform.b, c: transform.c, d: transform.d).applied
+        return o.swapsAxes ? CGSize(width: size.height, height: size.width) : size
     }
 
     /// Presentation dimensions with BOTH transforms applied, then the preferred transform (rotation).
@@ -134,8 +165,7 @@ public enum MediaInspector {
                                          transform: CGAffineTransform) -> CGSize {
         let pres = CMVideoFormatDescriptionGetPresentationDimensions(
             fmt, usePixelAspectRatio: true, useCleanAperture: true)
-        let r = CGRect(origin: .zero, size: pres).applying(transform)
-        return CGSize(width: abs(r.width), height: abs(r.height))
+        return turned(pres, by: transform)
     }
 
     /// The `pasp` atom as three states. ABSENT IS NOT 1:1 — see `DeclaredPixelAspect`.

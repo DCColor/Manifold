@@ -174,6 +174,18 @@ struct CropRect {
     float v1;  // bottom edge, normalized
 };
 
+// The file's ORIENTATION (its display matrix, reduced to one of the eight axis-aligned transforms by
+// `PictureOrientation`), as the sampling rule: for a displayed position o and the stored position s it shows, both
+// normalised to their own raster and centred, s = (m00·o.x + m01·o.y, m10·o.x + m11·o.y). Mirrors PictureOrient in
+// MetalVideoRenderer.swift. The identity (1 0 0 1) is what every unrotated file binds, and with it the arithmetic below
+// is exactly t (each step is exact in float for t ∈ {0, 1}), so those files render byte-for-byte what they did.
+struct PictureOrient {
+    float m00;
+    float m01;
+    float m10;
+    float m11;
+};
+
 // ── THE ONE PLACE THE CLEAN APERTURE IS APPLIED TO PIXELS ────────────────────────────────────
 //
 // The render target is the ACTIVE PICTURE (see `ensureOffscreenTexture`), and this remaps the
@@ -187,8 +199,17 @@ struct CropRect {
 // its size, so fragment `i` samples the centre of texel `x + i` and `filter::linear` returns that
 // texel unchanged. Chroma keeps the identical sample phase it had uncropped. See the resolver for
 // why the even grid is the whole of the constraint.
+//
+// ── AND THE ONE PLACE THE FILE'S ORIENTATION IS (docs/BUGS.md, iPhone clips, 2026-10-29) ─────
+//
+// Applied to the same quad, before the crop, so the offscreen holds the picture the right way up and every consumer
+// inherits it exactly as it inherits the crop: the window, the scopes, the v210 convert, both exports. A quarter turn
+// draws into an offscreen with width and height exchanged (`renderPixelBuffer`), and since a quarter turn maps pixel
+// centres onto pixel centres, the rotated picture is the unrotated one's pixels, permuted: still not a resample. The
+// crop rect is in STORED coordinates (it is the file's `clap`), which is why it is applied after the turn.
 vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]],
-                                   constant CropRect &crop [[buffer(0)]]) {
+                                   constant CropRect &crop [[buffer(0)]],
+                                   constant PictureOrient &orient [[buffer(1)]]) {
     float2 positions[4] = {
         float2(-1.0, -1.0),
         float2( 1.0, -1.0),
@@ -203,7 +224,8 @@ vertex VertexOut passthroughVertex(uint vertexID [[vertex_id]],
         float2(0.0, 0.0),
         float2(1.0, 0.0)
     };
-    float2 t = texCoords[vertexID];
+    float2 o = texCoords[vertexID] - 0.5;
+    float2 t = float2(orient.m00 * o.x + orient.m01 * o.y, orient.m10 * o.x + orient.m11 * o.y) + 0.5;
     VertexOut out;
     out.position = float4(positions[vertexID], 0.0, 1.0);
     out.texCoord = float2(mix(crop.u0, crop.u1, t.x), mix(crop.v0, crop.v1, t.y));

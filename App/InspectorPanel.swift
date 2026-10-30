@@ -1,6 +1,7 @@
 import SwiftUI
 import ManifoldCore
 import FileScan   // FieldView — the Window View row (interlaced I4)
+import PictureGeometry   // the Orientation row (docs/BUGS.md, iPhone clips, 2026-10-29)
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
@@ -63,6 +64,12 @@ struct InspectorPanel: View {
                 // clean aperture applied, pixel aspect ignored — which is ambiguous the moment a
                 // desqueeze exists, because the reader cannot tell which of the three it is.
                 MetadataRow(label: "Resolution", value: m.resolutionString)
+                // The file's matrix as APPLIED: "Rotated 90° clockwise" for an iPhone held upright. Resolution above stays
+                // the STORED raster; Display Size below is the turned one. Only when there is a turn: an unturned file
+                // has nothing to report, like an aperture that crops nothing.
+                if !m.orientation.isIdentity {
+                    MetadataRow(label: "Orientation", value: m.orientation.description)
+                }
                 // Only when it actually crops: a `clap` equal to the encoded raster declares that
                 // nothing is cropped, which is not news.
                 if m.cleanApertureCrops {

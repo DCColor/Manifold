@@ -209,6 +209,10 @@ targets:
       # `swift test` reaches it. Used by App/NDI/NDIService.swift only.
       - package: ManifoldCore
         product: SourceListOrder
+      # A file's picture orientation and the player window's size solve (docs/BUGS.md, iPhone clips, 2026-10-29) — a
+      # leaf target so `swift test` reaches both. Used by MetalVideoRenderer, WindowSizer and WindowDeck.
+      - package: ManifoldCore
+        product: PictureGeometry
       # The licence's Keychain activation record and the move of the email and machine id out of the
       # preferences plist (stage P1) — a leaf target so `swift test` can run the migration against a
       # scratch Keychain service. Used by App/LicenseManager.swift only.

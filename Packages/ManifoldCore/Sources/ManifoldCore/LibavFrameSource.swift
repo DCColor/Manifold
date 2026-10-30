@@ -89,6 +89,10 @@ public final class LibavFrameSource: @unchecked Sendable {
         public let videoFrameCount: Int?
         /// Which of the above `videoFrameCount` came from, for the `[STEP]` line.
         public let videoFrameCountBasis: String
+        /// The video stream's display matrix (`AV_PKT_DATA_DISPLAYMATRIX`, nine int32, 16.16): a `.mov`'s track matrix as
+        /// libav read it. nil when the stream carries none (MXF has no such field). The engine reduces it to a
+        /// `PictureOrientation`, which the renderer applies (docs/BUGS.md, iPhone clips, 2026-10-29).
+        public let displayMatrix: [Int32]?
     }
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
@@ -435,7 +439,18 @@ public final class LibavFrameSource: @unchecked Sendable {
             rangeAssumed: rangeAssumed,
             frameDuration: frameDuration,
             videoFrameCount: videoFrameCount,
-            videoFrameCountBasis: videoFrameCountBasis)
+            videoFrameCountBasis: videoFrameCountBasis,
+            displayMatrix: Self.displayMatrix(par))
+    }
+
+    /// The stream's display matrix from its coded side data, or nil. Read from the parameters, which is where the
+    /// demuxer puts it (FFmpeg 7+: `AVCodecParameters.coded_side_data`).
+    private static func displayMatrix(_ par: UnsafeMutablePointer<AVCodecParameters>) -> [Int32]? {
+        guard let sd = av_packet_side_data_get(par.pointee.coded_side_data, par.pointee.nb_coded_side_data,
+                                               AV_PKT_DATA_DISPLAYMATRIX),
+              sd.pointee.size >= 9 * MemoryLayout<Int32>.size, let data = sd.pointee.data
+        else { return nil }
+        return data.withMemoryRebound(to: Int32.self, capacity: 9) { Array(UnsafeBufferPointer(start: $0, count: 9)) }
     }
 
     /// Seek to `time` and arm the continuous decode pump for this session. The pump

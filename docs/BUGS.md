@@ -485,6 +485,12 @@ held back until after release, and the numbered defect entries follow.
    - **Driver note:** a driver that closes every window before quitting (`drv.py`) leaves the next launch with no
      window (SwiftUI restores none); the P1 drivers open one through File ▸ New Window when none appears.
    - 750 / 750 tests. 13 warning locations, identical to `cb7d8a1`'s.
+   ☐ **iPhone clips open rotated or flipped; a vertical window can't be made small (Robbie, 2026-10-29, an hour after
+   0.9.0 build 20 was published).** Built 2026-10-29, commit _to be filled in_ (base `cfe4fd5`; predictions, fixtures,
+   drivers and logs in `build/orient-1029/`). For 0.9.0 build 21. The defect, cause, fix and results are the entry
+   *iPhone clips open rotated or flipped*, below. Status: all predictions run; every picture, SDI and unchanged-file
+   check passed; two window predictions missed their bands (square and landscape stop at the window's 492-pt minimum
+   height, not the 320-pt short side). Not measured: a pointer drag.
    ✅ **UI wording and the support export (Robbie, 2026-10-24).** Built and run unattended 2026-10-24, commit
    `72bb925` (results in the session report; base `0a938f7`):
    - **LUT Outputs.** The Interpretation menu's *LUT Output Space* is now *LUT Outputs*; its first and default row
@@ -3090,6 +3096,117 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
     installed `/Applications/Manifold.app` (0.8.4), which `xctrace --launch` started by name instead of the build.
     One of its two processes ran; the other is still stopped (state T, never ran). The plist now holds
     `license.activated`, `license.type` and `license.validated` only. Nothing was restored, per the P1 rule.
+
+---
+
+## ☐ FIX BUILT 2026-10-29 (commit _to be filled in_) — PRE-EXISTING since M1 — iPhone clips open rotated or flipped, and a vertical window can't be made smaller than 720 × 1280
+
+**Reported** by Robbie on 2026-10-29, an hour after 0.9.0 build 20 was published. `IMG_9457.MOV` (an iPhone 14 Pro clip held
+upright) looked mirrored left to right and `IMG_5070.MOV` (iPhone 17 Pro) mirrored top to bottom. Confirmed by Robbie and
+Joey the same day: on a MacBook Air at 2048 × 1332 pt, `IMG_9457.MOV` opens at 720 × 1280 and can't be made smaller, so the
+window is taller than the visible screen.
+
+**Measured** (files read in place, never copied; exiftool, mediainfo, ffmpeg):
+
+| File | Track matrix | Stored | Codec | Colour | QuickTime shows |
+|---|---|---|---|---|---|
+| `IMG_9457.MOV` | `0 1 0 / -1 0 0 / 2160 0 1` (90° clockwise; ffmpeg "rotation of -90") | 3840 × 2160 | H.264 High@L5.1, 8-bit 4:2:0, 24 fps | Rec. 709, limited; no Dolby Vision | 2160 × 3840, upright |
+| `IMG_5070.MOV` | `-1 0 0 / 0 -1 0 / 1920 1080 1` (180°) | 1920 × 1080 | HEVC Main 10, 4:2:0, 119.95 fps | Rec. 2020 HLG, limited; Dolby Vision 8.4 (base layer HLG, RPU, no EL) | 1920 × 1080, upright |
+
+Neither is mirrored: both matrices have determinant +1. Both take the AVFoundation/VideoToolbox path
+(`MediaInspector.requiresLibavDecode` is DNx only). Dolby Vision 8.4 plays as its HLG base layer; nothing reads the RPU.
+
+**Cause: no matrix was ever applied to the picture, on any path.** The offscreen pass drew the decoded buffer at its stored
+raster (`passthroughVertex`; `ensureOffscreenTexture(width: pictureW, …)`), and only the WINDOW's shape was turned
+(`MediaInspector.presentationSize` → `ContentView.videoAspect`). So `IMG_9457` was its landscape raster squeezed sideways into a
+9:16 box (it reads as mirrored), and `IMG_5070` was upside down in a correct 16:9 box (it reads as flipped top to bottom). The
+scopes, Export Frame, Export Frame for Support and SDI read the offscreen, so all of them carried the stored raster. Present in
+0.8.4 (`dd3984b`: the same vertex shader and `presentationSize`); it dates from M1 (`6c9a106`, 2026-06-23). 0.8.4 was not run
+(the installed app is never launched).
+
+**The window: the picture could never be narrower than the window's minimum width.** `ContentView().frame(minWidth: 720,
+minHeight: 460)` (`ManifoldApp.swift`, the control bar's one row of controls, Step 2a `c0e679a`) is the window's
+`contentMinSize`, and `WindowSizer.constrainedContentSize` floored both the picture's width and the screen cap's width budget at
+it. A 9:16 picture was therefore at least 720 × 1280 on any screen, and the screen cap could not shrink it.
+
+**Fix.**
+
+1. **Orientation is applied once, in the offscreen pass,** beside the clean-aperture crop (`passthroughVertex`, buffer 1), so
+   the window, the four scopes, both exports and the v210 / SDI convert all get the turned picture. A quarter turn draws into
+   an offscreen with its sides exchanged. Quarter turns map pixel centres onto pixel centres, so this is a permutation, not a
+   resample. The matrix is reduced to one of the eight axis-aligned transforms (`PictureOrientation`, new `PictureGeometry`
+   target). Anything else (skew, 45°) is logged `[ORIENT] ⚠️ … drawn as stored` and not applied; the window's shape follows
+   the same reading, so the two can't disagree. Sources: AVFoundation's `preferredTransform`, and on the libav path
+   (MXF, DNx `.mov`, a routed `.mov`) libav's `AV_PKT_DATA_DISPLAYMATRIX`. Live sources carry none. The pixel aspect stays a
+   display transform; the export's `pHYs` and SDI's desqueeze use the turned pixel's aspect. One `[ORIENT]` line per turned
+   source. The identity binds `1 0 / 0 1`, which computes the old texture coordinates exactly.
+2. **Inspector:** Resolution stays the stored raster; a new **Orientation** row ("Rotated 90° clockwise", "Rotated 180°",
+   "Mirrored left to right", …) appears when there is a turn; Display Size is the turned raster.
+3. **Window: two floors and a screen cap that outranks both** (`WindowFit`, `PictureGeometry`; `WindowSizer` calls it).
+   A fresh size (a source opening, a raster preset, a new source's shape) still fills the window's 720-pt minimum width, so
+   landscape files open exactly as before. A hand resize may shrink the picture until its **shorter side is 320 pt**
+   (a 9:16 picture: 320 × 569). A picture over 2.25:1 stops at the window's minimum width instead. The window itself never
+   goes below 720 × 460, and a picture narrower than that is pillarboxed in it. A re-solve after a chrome change keeps the
+   picture the user left (`lastSolve`). The screen cap is no longer floored at 720, so a new window opens inside the visible
+   frame on any Mac laptop. On a 2048 × 1225 Air with the docked bar, `IMG_9457` opens at 653 × 1161 in a 720 × 1225 window.
+   A width drag on a pillarboxed picture moves the picture by the drag's delta, so it doesn't jump.
+   The window's 720-pt minimum width is the control bar's and is unchanged; making the bar wrap is not part of this fix.
+
+**Results so far** (2026-10-29):
+
+- `swift test`: **766 / 766** (+16: `PictureOrientationTests` 10, `WindowFitTests` 6). The orientation tests read the matrices
+  measured on both iPhone files and on every fixture, check the sampling rule against all eight transforms written out by
+  hand, and refuse 45°, skew, zero and NaN. The window tests put every shape (vertical, square, 16:9, 2.39) on a 2048 × 1332
+  Air with and without the Dock, with 0, 64 and 300 pt of chrome. They also check the floor for each shape, the 1920 × 550 ASUS,
+  and that above the window minimum the solve is the old one, size for size.
+- **Apple's reference, without launching Manifold** (`build/orient-1029/tools/main.swift`): AVAssetImageGenerator's frame with
+  the track transform, against the stored frame turned by each of the eight transforms through `PictureOrientation`'s own
+  sampling rule. The best match is the transform `PictureOrientation` reads, for `IMG_9457` (rot90cw, r = 1.000, margin 0.80),
+  `IMG_5070` (rot180cw, r = 1.000, margin 0.78) and all 12 H.264 and 4:4:4 HEVC fixtures (r = 1.000, margin 0.21; the first
+  fixtures, plain testsrc2, gave the right answer but only a 0.04 margin, being nearly symmetric top to bottom). AVFoundation
+  can't open the DNxHR fixtures (−11869), so the libav set has no Apple reference; it is checked against its H.264 twin.
+- Clean Profile build: succeeds; the same 13 warning locations as `cfe4fd5`.
+- **App runs** (unattended, after Robbie closed `/Applications/Manifold.app`; it was running at the first guard, PID 16283,
+  started 19:34 not by this session, and was not touched; guard clean before and after every run):
+  - **The picture matches Apple's, in the app.** Manifold's Export Frame for Support of `IMG_9457` is 2160 × 3840 and of
+    `IMG_5070` 1920 × 1080, and against AVAssetImageGenerator's displayed frame the identity wins (r = 0.998, 0.992; next
+    0.20, 0.21), as it does for all 12 H.264 and 4:4:4 HEVC fixtures. HEAD's exports of the same files are 3840 × 2160
+    and upside down: they match only once turned 90° and 180°.
+  - **Every orientation is an exact permutation, on both paths:** each fixture's export is its rot0 export permuted by the
+    matrix, 0 differing pixels in 15 / 15 (H.264 and 4:4:4 HEVC on AVFoundation, DNxHR on libav). A 4:4:4 file turned by
+    its matrix equals the same picture encoded already turned, byte for byte, in the export, the PNG, the v210 and all three
+    scope images (90°, 180°, mirror; the first 90° "baked" fixture was not an exact turn of its base in ffmpeg's own decode,
+    being converted to 4:4:4 after the transpose, and was rebuilt).
+  - **Inspector:** Resolution 3840 × 2160, Orientation "Rotated 90° clockwise", Display Size 2160 × 3840 (`IMG_9457`);
+    "Rotated 180°" (`IMG_5070`); the DNxHR fixtures read the same from libav; no Orientation row on the control files.
+  - **SDI:** `IMG_9457` goes out at 2160p24 as a vertical picture, 2160 × 3840 scaled to 1216 × 2160 at x = 1314
+    (centred on the v210 6-pixel grid), pillarboxed: borders 0 exceptions, the rectangle exact, within 1 code of the
+    scorer's own Lanczos-3 reference built from the turned export (`build/sdi-scaling` scorer). HEAD sent it native
+    3840 × 2160, sideways. `IMG_5070` goes out native, bit-exact to its own turned v210 conversion.
+  - **Unchanged:** the 24-file control set, 216 / 216 files byte-identical to `cfe4fd5` (exports, display read-backs, scope
+    images), with the same window frames at the drivers' 1400 × 900 placement (24 / 24). SDI frame #0 of the 1080 × 1920
+    and 1920 × 1080 scaling fixtures and both interlaced fixtures, 4 / 4 byte-identical to HEAD.
+  - **Window frames** against each screen's `visibleFrame`, read by Accessibility. LG (3840 × 2130 usable): `IMG_9457`
+    opens 959 × 1704, inside; resized by AX to 100 × 100 it stops at **720 × 569** (picture 320 × 569; HEAD 720 × 1280),
+    720 × 1029 with the tray open. Square stops at **720 × 492** (picture 492²), landscape at **875 × 492** (HEAD the same).
+    The window's real minimum height measures 492 pt, not the 460 in `ContentView`'s frame; the solve fills it with
+    picture, so a square or landscape picture never reaches the 320-pt short side (the prediction missed that; the rule
+    is as designed). ASUS (1920 × 550, the small screen): every window opened or reopened there, vertical, square,
+    landscape and both iPhone files, with and without the tray, is **inside**; on HEAD the vertical and square windows are
+    720 × 1280 and 720 × 720, outside.
+  - **Not fixed, pre-existing, identical on HEAD:** an Accessibility SIZE change keeps the window's origin, so a size the
+    sizer caps can still extend past the screen edge from where the window sits (landscape "height → 5000" from x = 960 on
+    the LG; 2–7 pt on the ASUS). New windows are not affected.
+  - **Not measured:** a pointer drag. Accessibility cannot make a live resize, so the drag-delta path for a pillarboxed
+    picture is untested; an AX width change from 720 × 569 jumps to 760 × 1351. The window as seen (no screenshots), and
+    HDR on the LG by eye.
+  - Defaults dictionary-equal to the snapshot after deleting 33 window-frame keys (read first); `streamBookmarks`
+    unchanged; licence keys present (3), never read or written.
+
+**Fixtures** (`build/orient-1029/mkfix.sh`, gitignored): one 640 × 360 encode per codec, rewrapped by stream copy with each
+matrix, so every orientation of a set carries byte-identical coded pixels. H.264 4:2:0 (AVFoundation), DNxHR HQ 4:2:2 (libav)
+and lossless 4:4:4 HEVC, at rot 0, 90, 180, 270, hflip and rot90 + hflip; three 4:4:4 HEVC files encoded already turned
+("baked"); and vertical, square and landscape shapes for the window checks.
 
 ---
 

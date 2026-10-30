@@ -1,6 +1,7 @@
 import Foundation
 import CoreMedia
 import FileScan
+import PictureGeometry
 
 public struct ChapterMarker: Equatable, Sendable {
     public var time: Double
@@ -358,6 +359,9 @@ public struct VideoMetadata: Equatable, Sendable {
     /// the file's declaration and the app's response to it side by side rather than one number that
     /// is quietly both.
     public var displaySize: CGSize?
+    /// What the file's matrix turns the stored raster into, as applied (`PictureOrientation`; identity for a matrix that
+    /// is not one of the eight, which is drawn as stored). `width`/`height` stay the STORED raster.
+    public var orientation: PictureOrientation = .identity
     public var frameRate: Double = 0
     /// Progressive or interlaced, the field order, and which source said so (docs/INTERLACED_FINDINGS.md §10,
     /// I1). THE place later stages read it from. `.notRead` until a producer reads the file.

@@ -1144,9 +1144,9 @@ final class DeckRegistry {
         // the same reason: this deck's engine describes this deck's file to this deck's renderer.
         // Fired from the same point in the load as the colour tags, which is what keeps it ahead
         // of the first frame.
-        engine.onSourceGeometry = { [weak renderer] encodedW, encodedH, aperture, pixelAspect in
+        engine.onSourceGeometry = { [weak renderer] encodedW, encodedH, aperture, pixelAspect, orientation in
             renderer?.setSourceGeometry(encodedWidth: encodedW, encodedHeight: encodedH,
-                                        aperture: aperture, pixelAspect: pixelAspect)
+                                        aperture: aperture, pixelAspect: pixelAspect, orientation: orientation)
         }
         // INTERLACED I3: the file's field structure, same edges, same destination (per-field 4:2:0 chroma).
         // I4: the deck too, for the window's field views (docs/INTERLACED_FINDINGS.md §14).
