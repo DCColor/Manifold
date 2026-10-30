@@ -1175,9 +1175,10 @@ final class MetalVideoRenderer {
         // construction, BEFORE any render thread exists: the state before any colour state arrives.
         //
         // ⚠️ IT VARIES SINCE 2026-10-30 (docs/HLG_MACOS_MODE_PLAN.md). As macOS Shows It hands an HLG
-        // picture to the system's HLG adjustment (`edrMetadata = .hlg`), and `.never` would block that,
+        // picture to the system's HLG adjustment (`edrMetadata = .hlg`, `.ifSupported`) and a PQ picture to
+        // its HDR10 tone map (`edrMetadata = .hdr10`, `.automatic`; §3.10c), and `.never` would block both,
         // so the render thread's colour-state install also writes this property, from
-        // `PendingColorState.toneMapMode`. `.never` everywhere else: Reference, Bypass, PQ, SDR.
+        // `PendingColorState.toneMapMode`. `.never` everywhere else: Reference, Bypass, SDR.
         metalLayer.toneMapMode = .never
 
         // Once per PROCESS, not once per renderer. Headroom is a property of the display, not of
@@ -1622,16 +1623,22 @@ final class MetalVideoRenderer {
         let lut: InterpretationLUTInstall?
         /// Colour S7 (D1). What a frame drawn under this state goes out with on the DeckLink output.
         let output: FrameOutputState
-        /// HLG in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md): the system's HLG adjustment, or nil. Installed with the
-        /// colorspace, so a frame is never presented under one and declared under the other. nil in every other case.
+        /// As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md): the system's HLG adjustment for an HLG picture (§3), its HDR10
+        /// tone map for a PQ picture (§3.10c), or nil. Installed with the colorspace, so a frame is never presented under
+        /// one and declared under the other. nil in every other case.
         let edrMetadata: CAEDRMetadata?
         /// `.never` except where `edrMetadata` is set: `.never` would block it (`CALayer.h`, "Never tone map contents").
+        /// `.ifSupported` with HLG, `.automatic` with HDR10 (each measured against the system's own result).
         let toneMapMode: CALayer.ToneMapMode
     }
     private var pendingColorState: PendingColorState?
     /// MAIN. True while the published colour state hands HLG to macOS's HLG adjustment (As macOS Shows It, HLG picture).
     /// The chain readout's verdict reads it; it says what was published, which the `[EDR]` read-back confirms on install.
     private(set) var hlgAdjustmentActive = false
+    /// MAIN. While the published colour state hands a PQ picture to macOS's HDR10 tone map (As macOS Shows It, §3.10c):
+    /// where its metadata came from, for the log and the `[EDR]` lines. nil otherwise. Read by the chain readout's verdict.
+    private(set) var pqToneMapMetadata: String?
+    var pqToneMapActive: Bool { pqToneMapMetadata != nil }
     /// RENDER THREAD ONLY. The LUT in force (`PendingColorState.lut`), or nil: the everyday pipeline.
     private var activeLUT: InterpretationLUTInstall?
     /// MAIN. The window's LUT, published with every colour state (decision 5: kept across source changes,
@@ -1914,9 +1921,9 @@ final class MetalVideoRenderer {
     /// path is conditional on it. Anything that makes `.os` compute rather than pass through has
     /// broken the guarantee.
     ///
-    /// The one exception, 2026-10-30 (docs/HLG_MACOS_MODE_PLAN.md): an HLG picture in `.os` also gets the system's HLG
-    /// adjustment (`edrMetadata`, `toneMapMode`). Its pixels are unchanged; only the layer's presentation metadata
-    /// differs. Every other picture in `.os` is installed exactly as before.
+    /// The two exceptions, 2026-10-30 (docs/HLG_MACOS_MODE_PLAN.md): an HLG picture in `.os` also gets the system's HLG
+    /// adjustment, and a PQ picture its HDR10 tone map (§3.10c) (`edrMetadata`, `toneMapMode`). Their pixels are
+    /// unchanged; only the layer's presentation metadata differs. Every SDR picture in `.os` is installed exactly as before.
     ///
     /// Colour S6, L2: THREE inputs now — the source, the mode, and the LUT. Everything published here that
     /// describes the picture comes from the PICTURE codes (`pictureDerivedColorSpace`, `pictureWantsEDR`, the
@@ -1938,7 +1945,32 @@ final class MetalVideoRenderer {
         // HLG in As macOS Shows It only (docs/HLG_MACOS_MODE_PLAN.md): the picture's transfer, not the source's, so a LUT
         // stated as HLG gets the adjustment and an HLG source under a LUT stated as 709 does not. Reference and Bypass
         // never get it: Reference transcodes HLG to PQ itself and does not tone-map (DECISION 2026-08-28, as amended).
-        let hlgAdjust = displayTransform == .os && pictureTransferCode == 18 && Self.hlgAdjustmentAvailable
+        let hlgAdjust = displayTransform == .os && pictureTransferCode == 18 && Self.edrMetadataAvailable
+        // PQ in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md §3.10c): the system's HDR10 tone map, `.automatic` + `hdr10`,
+        // measured to reproduce QuickTime Player at headroom 1.0 (ASUS, every grey bar) and 4.48 (LG, by eye). At ANY
+        // headroom: the compositor adapts to the display, so nothing here changes when the window moves or HDR is toggled.
+        // The picture's transfer, as for HLG. Reference and Bypass never get it: Reference is absolute, 1.0 = 100 nits.
+        let pqToneMap = displayTransform == .os && pictureTransferCode == 16 && Self.edrMetadataAvailable
+        // The source's mastering luminance, only when it describes the picture: a LUT's stated output is not the graded
+        // picture the metadata describes (as `OutputSignal` below). Otherwise the system defaults, which measured
+        // identical on screen to a file's 1000-nit mastering (§3.10c a).
+        let pqMastering = pqToneMap && !pictureStatedByLUT
+            ? sourceHDR10?.mastering.flatMap { $0.hasLuminance && $0.maxLuminance > $0.minLuminance ? $0 : nil } : nil
+        let edrMetadata: CAEDRMetadata?
+        let toneMapMode: CALayer.ToneMapMode
+        if hlgAdjust {
+            (edrMetadata, toneMapMode) = (CAEDRMetadata.hlg, .ifSupported)
+        } else if pqToneMap {
+            // `opticalOutputScale` 100 is the header's "1.0 = diffuse white of 100 nits" (`CAEDRMetadata.h`). On this
+            // PQ-encoded rgba16Float drawable 100, 203 and 10 000 measured byte-identical (§3.10b finding 4).
+            // ⚠️ `.automatic`, NOT `.ifSupported`: with the same metadata `.ifSupported` gives a different, darker curve,
+            // rejected in §3.8. `.automatic` with no metadata does not tone-map at all (§3.10b (a)).
+            (edrMetadata, toneMapMode) = (pqMastering.map {
+                CAEDRMetadata.hdr10(minLuminance: Float($0.minLuminance), maxLuminance: Float($0.maxLuminance), opticalOutputScale: 100)
+            } ?? CAEDRMetadata.hdr10(displayInfo: nil, contentInfo: nil, opticalOutputScale: 100), .automatic)
+        } else {
+            (edrMetadata, toneMapMode) = (nil, .never)
+        }
         switch displayTransform {
         case .os:
             installed = cs
@@ -1980,12 +2012,19 @@ final class MetalVideoRenderer {
                                               lut: interpretationLUT,
                                               output: FrameOutputState(signal: signal,
                                                                        v210MatrixCode: signal.sdiMatrixCode(pictureMatrix: pictureMatrixCode)),
-                                              edrMetadata: hlgAdjust ? CAEDRMetadata.hlg : nil,
-                                              toneMapMode: hlgAdjust ? .ifSupported : .never)
+                                              edrMetadata: edrMetadata, toneMapMode: toneMapMode)
         pendingRefresh = true
         refreshLock.unlock()
         wakeDisplayLink()
         hlgAdjustmentActive = hlgAdjust
+        let pqLine = !pqToneMap ? nil
+            : pqMastering.map { String(format: "mastering %g–%g nits, from the source", $0.minLuminance, $0.maxLuminance) }
+              ?? (pictureStatedByLUT ? "system defaults: the picture is a LUT's stated output"
+                                     : "system defaults: the source declares no mastering luminance")
+        if pqLine != pqToneMapMetadata {
+            pqToneMapMetadata = pqLine
+            if let pqLine { print("[EDR] PQ → macOS HDR10 tone map: toneMapMode automatic · hdr10 (\(pqLine)) — AS MACOS SHOWS IT") }
+        }
         deckLinkLock.lock(); deckLinkCurrentSignal = signal; deckLinkLock.unlock()
         if signal != pictureOutputSignal {
             pictureOutputSignal = signal
@@ -2064,15 +2103,17 @@ final class MetalVideoRenderer {
             + pictureLogSuffix)
         print("[EDR] EDRMetadata = "
             + (hlgAdjustmentActive ? "HLG (macOS HLG adjustment, follows display peak) · toneMapMode = ifSupported — AS MACOS SHOWS IT"
-                                   : "nil · toneMapMode = never"))
+               : pqToneMapMetadata.map { "HDR10 (\($0); macOS HDR10 tone map, follows display) · toneMapMode = automatic — AS MACOS SHOWS IT" }
+               ?? "nil · toneMapMode = never"))
     }
 
-    /// Whether HLG in As macOS Shows It can have macOS's HLG adjustment: `CAEDRMetadata.hlg` with `toneMapMode = .ifSupported`
+    /// Whether As macOS Shows It can hand HDR to the system: `CAEDRMetadata.hlg` with `toneMapMode = .ifSupported` for HLG
     /// (docs/HLG_MACOS_MODE_PLAN.md §3.6a, measured: `.never` blocks it, `.ifSupported` gives one conversion, equal to ColorSync's
-    /// HLG → SDR at headroom 1.0, and matched QuickTime by eye at headroom 4.48).
-    static let hlgAdjustmentAvailable: Bool = {
+    /// HLG → SDR at headroom 1.0, and matched QuickTime by eye at headroom 4.48), and `CAEDRMetadata.hdr10` with `.automatic`
+    /// for PQ (§3.10c, matched QuickTime on screen at 1.0 and by eye at 4.48).
+    static let edrMetadataAvailable: Bool = {
         guard CAEDRMetadata.isAvailable else {
-            print("[EDR] ⚠️ CAEDRMetadata unavailable — HLG in As macOS Shows It gets no HLG adjustment")
+            print("[EDR] ⚠️ CAEDRMetadata unavailable — HLG and PQ in As macOS Shows It get no system tone map")
             return false
         }
         return true
@@ -2191,9 +2232,9 @@ final class MetalVideoRenderer {
         resolvePictureCodes()
         publishColorState()
 
-        // NOTE: edrMetadata (CAEDRMetadata) is set for ONE case only, by `publishColorState`: an HLG
-        // picture in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md, 2026-10-30). Everything else,
-        // PQ included, displays from colorspace + the opt-in alone, as E3 established.
+        // NOTE: edrMetadata (CAEDRMetadata) is set for TWO cases only, by `publishColorState`: an HLG or a
+        // PQ picture in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md §3 and §3.10c, 2026-10-30). Everything
+        // else, Reference PQ included, displays from colorspace + the opt-in alone, as E3 established.
 
         // ── ⚠️ THREE TIERS OF LOGGING, BECAUSE THIS IS NO LONGER A ONCE-PER-SOURCE EVENT ────
         //

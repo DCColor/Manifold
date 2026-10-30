@@ -287,17 +287,20 @@ final class DisplayChainModel: ObservableObject {
         // ── THE VERDICT ─────────────────────────────────────────────────────────────────────
         var verdict: String?
         var converting = false
-        // HDR lines first (docs/HLG_MACOS_MODE_PLAN.md). In As macOS Shows It with the HLG adjustment on, macOS maps the
-        // picture to the display, so say that, and that the scopes do not follow it. In Reference, PQ and HLG are absolute
-        // display light, 1.0 = 100 nits (HLG transcoded to PQ, 0.9.1), so at a granted headroom of 1.0 everything above
-        // 100 nits clips. Said only when that is what the layer does: an HLG plan that refused is not transcoding.
+        // HDR lines first (docs/HLG_MACOS_MODE_PLAN.md). In As macOS Shows It with the HLG adjustment or the PQ HDR10 tone
+        // map on (§3.10c), macOS maps the picture to the display, so say that, and that the scopes do not follow it. In
+        // Reference, PQ and HLG are absolute display light, 1.0 = 100 nits (HLG transcoded to PQ, 0.9.1), so at a granted
+        // headroom of 1.0 everything above 100 nits clips. Said only when that is what the layer does: an HLG plan that
+        // refused is not transcoding.
         let transfer = present ? renderer?.pictureTransferCode : nil
         let headroom = renderer?.displayHeadroom
         let referenceAbsolute = mode == .reference
             && (transfer == 16 || (transfer == 18 && renderer?.referencePlan?.shader?.mode == 2))
+        let tier = renderer?.pictureStatedByLUT == true ? "LUT output" : (renderer?.sourceColorProvenance ?? .assumed).label
         if transfer == 18, mode == .os, renderer?.hlgAdjustmentActive == true {
-            let tier = renderer?.pictureStatedByLUT == true ? "LUT output" : (renderer?.sourceColorProvenance ?? .assumed).label
             verdict = "HLG (\(tier)) → macOS HLG adjustment · follows display brightness · scopes show the file"
+        } else if transfer == 16, mode == .os, renderer?.pqToneMapActive == true {
+            verdict = "PQ (\(tier)) → macOS HDR10 tone map · follows display · scopes show the file"
         } else if referenceAbsolute, let headroom, !headroom.isGranted {
             verdict = (headroom.isSDRMode ? "display in SDR mode" : "no headroom granted") + " · above 100 nits clips"
         // Colour S6, L2: the verdict compares what reaches the LAYER, which is the picture's colorspace (the

@@ -8,8 +8,9 @@
 //
 //  ── THE FIVE OUTCOMES ────────────────────────────────────────────────────────────────────────
 //
-//   PQ source                 → exactly OS: source colorspace, identity copy (§6.2: OS ≈ Reference
-//                               on HDR, because their profiles declare the transfer exactly).
+//   PQ source                 → source colorspace, identity copy, no tone map: absolute, 1.0 = 100 nits. The same
+//                               layer colorspace as OS, which since 2026-10-30 adds the system's HDR10 tone map
+//                               (docs/HLG_MACOS_MODE_PLAN.md §3.10c), so OS and Reference now differ on PQ too.
 //   HLG source                → transcoded to PQ in the shader (BT.2408, 1000 nits; mode 2), layer tagged
 //                               PQ as a PQ source is. Absolute: 1.0 = 100 nits, HLG 75 % = 203 nits (0.9.1).
 //   calibrated display, 709   → no colorspace, identity copy: the code values reach the display
@@ -68,12 +69,13 @@ struct ReferencePlan: Equatable {
         let cal = raw.sanitized
         let on = displayName.map { " on \"\($0)\"" } ?? ""
 
-        // PQ — Reference is OS.
+        // PQ — the source colorspace, identity copy, no tone map: absolute, 1.0 = 100 nits. Since 2026-10-30 As macOS
+        // Shows It differs: it hands PQ to the system's HDR10 tone map (docs/HLG_MACOS_MODE_PLAN.md §3.10c).
         if transferCode == 16 {
             return ReferencePlan(
                 layerColorSpace: cs, shader: nil,
-                summary: "Reference — PQ passed to macOS unchanged (on HDR, Reference = As macOS shows it)",
-                logLine: "[REFERENCE] PQ source\(on): identical to OS — source colorspace declared, identity copy")
+                summary: "Reference — PQ absolute, 1.0 = 100 nits, no tone map",
+                logLine: "[REFERENCE] PQ source\(on): absolute, no tone map — source colorspace declared, identity copy")
         }
         // HLG — transcoded to PQ per BT.2408 at 1000 nits, and the layer tagged PQ exactly as a PQ source is (0.9.1;
         // docs/HLG_MACOS_MODE_PLAN.md §6). Reference is absolute display light, 1.0 = 100 nits: HLG 75 % lands at 203 nits.
