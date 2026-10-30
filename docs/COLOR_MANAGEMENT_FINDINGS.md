@@ -8233,6 +8233,168 @@ The dropout's length depends on the change; item 2's flag does not alter it (t3 
 
 Every frame #0 dump has `23070cb`'s FNV-1a. Output `late=0 dropped=0` on every run.
 
+#### HLG on an SDR-mode display is far too bright — where HLG reference white lands, 2026-10-29 (read-only, measure only, not committed)
+
+**Report** (Robbie, 2026-10-29, build 21 at `53b4bee`, Mac Studio display in SDR mode): `IMG_5070` (iPhone 17 Pro, Rec.2020 ·
+HLG · 2020 matrix, limited, 10-bit HEVC; Dolby Vision 8.4 stripped to plain HLG as `/Volumes/DCCOLOR/IMG_5070_noDV.mov`). In
+Manifold the face, the white shirt and the sky are blown to white. Bypass looks right for HLG on SDR (a little flat and
+desaturated). QuickTime shows the file correctly, slightly more saturated, with or without the DV metadata.
+
+**Hypothesis put to the test:** Manifold anchors HLG at 100 nits = 1.0 instead of BT.2408's 75 % HLG = 203 nits = SDR white,
+which would put reference white near 2.03 and clip everything from mid skin tones up.
+
+**Verdict: REJECTED.** HLG 75 % lands at **1.0007** and PQ 203 nits at **1.0000**: the BT.2408 anchor, in both. The picture
+clips because **this clip's face, shirt and sky sit above BT.2408 reference white**, and on a display with headroom 1.0
+nothing above reference white is shown: the layer is not tone-mapped (BUGS.md, *DECISION 2026-08-28*). On an SDR display the
+display's ceiling *is* reference white, so "above the ceiling" covers most of an iPhone HLG exterior. The first open item below
+(not yet measured) is the one assumption this rests on.
+
+Method: no build was launched, no app was driven and nothing was captured from the screen. One frame at 4.5 s (also 2 s and 7 s)
+was decoded with ffmpeg (`-noautorotate`, raw `yuv420p10le`, turned 180° in the reader) into a scratch directory under
+`/private/tmp`, never beside the source. ColorSync's conversion was measured with throwaway Swift probes (`CGColor.converted`,
+`CGContext.draw` and `draw(_:in:by:options:)` into float contexts). AVFoundation's own conversions came from
+`AVAssetImageGenerator` on the file, read in place. macOS 26.5 SDK, this Mac.
+
+##### 1. The HLG path in each mode — what reaches the layer
+
+Shader and layer, the same in every mode up to the display stage:
+
+- Legal-range expansion in the 10-bit sample domain: `PassthroughShader.metal:54-58` (constants) and `:395-398`. Y′ code 721 →
+  (721 − 64) / 876 = **0.7500**. The 2020 matrix follows (`:401-404`). Nothing linearises HLG: the shader writes the
+  **HLG-encoded R′G′B′** unclamped to an `rgba16Float` target (`:429`; `MetalVideoRenderer.swift:239`, `:1110`).
+- The display stage is the identity copy (`displayCopyFragment`, `PassthroughShader.metal:481-485`) in OS and Bypass, and for
+  HLG in Reference too, because the plan gives no shader (`ReferencePlan.swift:67-74`).
+- The colorspace is built from the CICP codes by `CVImageBufferCreateColorSpaceFromAttachments` (`MetalVideoRenderer.swift:2400-2414`).
+  (9, 18, 9) gives `kCGColorSpaceITUR_2100_HLG`, an ICC v4 profile with `cicp` transfer 18 and **`lumi` = 203 cd/m²** (§3, the table).
+- EDR opt-in: `wantsExtendedDynamicRangeContent = true` for transfer 16 or 18 (`:2131`, `:2137`), installed in every mode
+  (`:1951`, written to the layer at `:3136-3137`).
+- `edrMetadata`: **not set**, deliberately (`:2142-2145`). `toneMapMode = .never` (`:1178`), and no `contentsHeadroom`, so the
+  drawable has unknown headroom and is excluded from tone mapping (`:1148-1158`; BUGS.md, *DECISION 2026-08-28*).
+
+| Mode | Layer colorspace | Shader | Value at the layer for HLG 75 % (neutral) | How macOS reads it |
+|---|---|---|---|---|
+| **As macOS Shows It** | `ITUR_2100_HLG` (`:1920-1921`) | identity | **0.7500**, HLG-encoded | ColorSync HLG → extended linear: **1.0007**, i.e. SDR white (table 2) |
+| **Reference** | the same object: `plan.layerColorSpace = cs` (`:1926-1937`; `ReferencePlan.swift:71`) | identity (shader nil) | **0.7500** | **identical to OS**, by design (`DisplayTransform.swift:55-58`, §6.2) |
+| **Bypass** | `nil` (`:1923-1924`) | identity | **0.7500** | not converted (§6.6): reaches the display as drive value 0.75 under the display's own response |
+
+##### 2. ColorSync's HLG and PQ anchors — measured
+
+`kCGColorSpaceITUR_2100_HLG` / `_PQ` → `kCGColorSpaceExtendedLinearITUR_2020` (1.0 = SDR white). `CGColor.converted`, a plain
+`CGContext.draw` and `draw(…, by: .none)` agree to four places:
+
+| Signal | E′ | → extended linear | BT.2100 by hand (Lw 1000, γ 1.2, ÷ 203) |
+|---|---|---|---|
+| HLG 50 % | 0.5000 | 0.2497 | 0.2497 |
+| **HLG 75 % (code 721)** | 0.7500 | **1.0007** | 1.0008 (203.2 nits) |
+| HLG code 755 (face, median) | 0.7888 | 1.2713 | 1.2714 |
+| HLG code 765 (sky) | 0.8002 | 1.3650 | |
+| HLG code 775 (face, 2 s frame) | 0.8116 | 1.4662 | |
+| HLG code 864 (shirt) | 0.9132 | 2.8012 | |
+| HLG 100 % (940) | 1.0000 | **4.9261** | 1000 / 203 = 4.9261 |
+| PQ 100 nits | 0.5081 | 0.4926 | 100 / 203 |
+| **PQ 203 nits** | 0.5807 | **1.0000** | |
+| PQ 1000 nits | 0.7518 | 4.9261 | |
+
+ColorSync is exactly BT.2100 HLG at a 1000-nit nominal peak with γ 1.2, divided by 203: the BT.2408 anchor. 4.9261 is
+`kCGDefaultHDRImageContentHeadroom`, the headroom the scrub overlay measured on 2026-08-27. The 100-nit hypothesis predicts
+2.03 at 75 %. Measured: 1.0007.
+
+Other CoreGraphics behaviours, recorded because they are the candidates for any later change:
+
+- **To a non-extended (SDR) destination** (`linearITUR_2020`), plain conversion anchors differently. **HLG 100 % → 1.0** and
+  75 % → 0.203, the same values ÷ 4.926.
+- **`.ituRecommended`** tone mapping to SDR (`linearITUR_2020`, target headroom 1 or 2, the same either way): 50 % → 0.096,
+  **75 % → 0.286**, face 755 → 0.345, sky 765 → 0.365, face 775 → 0.386, shirt 864 → 0.642, 100 % → 1.000 (linear). With
+  `kCGUse100nitsHLGOOTF`: 0.122 / 0.325 / 0.385 / 0.405 / 0.426 / 0.672 / 1.000. To an *extended* destination neither option
+  changes anything: values as in the table.
+- `.default` and `.referenceWhiteBased` returned `true` and wrote zeros into every context tried. **Inconclusive**, not a
+  result: they probably need a headroom-tagged image or a different set-up.
+
+##### 3. The real file — HLG Y′ codes (upright, 10-bit, legal)
+
+Patches picked on a 480 × 270 preview (deleted), at full resolution (x0–x1, y0–y1). Medians, with p5 / p95:
+
+| Patch | 2 s | **4.5 s** | 7 s | Cb / Cr at 4.5 s |
+|---|---|---|---|---|
+| face, cheek (800–880, 240–320) | 775 (482 / 830) | **755** (325 / 843) | 645 (341 / 861) | 491 / 565 |
+| face, forehead (820–880, 170–210) | 681 (427 / 854) | 676 (347 / 847) | 607 (240 / 856) | 486 / 548 |
+| shirt, chest above the logo (740–940, 480–528) | 868 (855 / 894) | **860** (742 / 896) | 862 (555 / 882) | 519 / 514 |
+| shirt, lower left (600–680, 760–900) | 563 (469 / 813) | 544 (342 / 809) | 597 (302 / 840) | 506 / 531 |
+| sky, top right (1200–1480, 20–100) | 772 (763 / 778) | **748** (739 / 760) | 784 (776 / 793) | 579 / 472 |
+
+BT.2408's 75 % reference white is **code 721**. Lit skin (755–775), the shirt (860–868) and the sky (748–784) are all above it.
+The skin's R′ is higher still: Y′ 755 with Cr 565 gives R′ ≈ 0.876, about 2.2 on the scale above. The frame's peak reaches 1023.
+
+**Where these land on a display with headroom 1.0** (in SDR mode the LG is at potential 1.0; measured, §6.11 S4, U1):
+
+| Pixel | E′ | OS = Reference: extended value → shown | Bypass: drive value (no conversion) | AVFoundation `.forceSDR` (encoded Y′) |
+|---|---|---|---|---|
+| HLG 75 % | 0.750 | 1.001 → **1.0 (SDR white)** | 0.750 | — |
+| face, cheek | 0.789 | 1.271 → **1.0, clipped** | 0.789 | **0.599** (p95 0.757) |
+| sky | 0.781–0.822 | 1.37–1.47 → **1.0, clipped** | 0.78–0.82 | **0.600** |
+| shirt, chest | 0.909–0.918 | ≈ 2.80 → **1.0, clipped** | 0.91 | **0.811** (p95 0.872) |
+
+The same frame through `AVAssetImageGenerator` `.matchSource` (a `kCGColorSpaceITUR_2100_HLG` image, headroom 4.926) drawn into
+extended linear 2020 with chroma included. Share of pixels at or above SDR white, i.e. what OS mode clips on a headroom-1.0
+display:
+
+| Patch | Median linear Y | ≥ 1.0 (clipped) |
+|---|---|---|
+| face, cheek | 1.408 | **65.4 %** |
+| face, forehead | 0.776 | 41.6 % |
+| shirt, chest | 2.801 | **96.9 %** |
+| shirt, lower left | 0.330 | 13.6 % |
+| sky | 1.388 | **100 %** |
+
+That is the report: face, shirt and sky to white. It is BT.2408-correct anchoring, followed by clipping at reference white.
+
+**Bypass** shows the HLG code values as drive values. Nothing clips below superwhite, but there is no OOTF and no 2020 → display
+primaries conversion. That is the "flat, desaturated" look, and it is HLG's SDR backward compatibility working as designed.
+
+##### 4. PQ — the same anchor, so no shared offset
+
+PQ 203 nits (E′ 0.5807) → **1.0000**. A PQ file has no anchoring bug either. It shares the *consequence*: on a headroom-1.0
+display, every PQ pixel above 203 nits clips to SDR white. This is the behaviour the 2026-08-28 decision accepted ("content
+above it clips, and that is deliberate", §6.2). HLG from a phone shows it more than graded PQ does, because the phone exposes
+skin above reference white.
+
+##### 5. What QuickTime / AVFoundation is evidently doing, and `CAEDRMetadata.HLGMetadata`
+
+- **AVFoundation's HLG → SDR conversion maps the HLG nominal peak to SDR white and compresses everything below it.**
+  `.forceSDR` output (half-float, colorspace nil, headroom 1.0): face Y′ 0.60, shirt 0.81, sky 0.60, peak 1.0, **0.0–0.1 %
+  of any patch clipped**. That is the shape of CoreGraphics' `.ituRecommended` HLG → SDR above: 75 % → 0.286 linear, about
+  0.59 encoded at γ 2.4. Under that conversion, **HLG reference white sits at roughly 0.29 of SDR white on an SDR display,
+  not at 1.0.** "QuickTime looks right" therefore means "reference white is moved down to make room for the highlights".
+  BT.2408 does not anchor this way; it is a display-adaptive tone map.
+- **Not measured:** whether QuickTime's *playback* on an SDR display equals `.forceSDR`. Both are AVFoundation, and the 2026-08-28
+  split showed `AVSampleBufferDisplayLayer` tone-maps, but the on-screen curve was not captured (no screenshots this session).
+  "Slightly more saturated" than Bypass fits a 2020 → display gamut conversion that Bypass does not do.
+- **`CAEDRMetadata.HLGMetadata`** (and `hlg(ambientViewingEnvironment:)`, macOS 14). The header (`CAEDRMetadata.h`, at the
+  `HLGMetadata` property) says the content is scene-referred, HLG-encoded, and *"the system will apply the OOTF based on peak
+  display brightness and ambient"*. The inverse-OETF requirement applies only to a *linear* layer colorspace. Manifold's layer
+  is HLG-encoded under `ITUR_2100_HLG`, so it qualifies without a shader change. The file carries an Ambient Viewing Environment
+  (314 lx, D65; ffmpeg side data), the Apple-capture default the header names. This is very likely the route AVFoundation uses,
+  and the nearest available match to QuickTime. **Not established** (each needs a launched build):
+  1. whether `toneMapMode = .never` (`MetalVideoRenderer.swift:1178`) overrides `EDRMetadata` on a CAMetalLayer;
+  2. whether, at headroom 1.0, it reproduces the `.forceSDR` numbers above;
+  3. what it does at headroom > 1.
+- **The decision this touches, stated plainly and not changed here.** The 2026-08-28 decision covers what happens *above the
+  display's ceiling*. Where reference white lands is already right: 1.0, per BT.2408 (table 2). An HLG OOTF that follows display
+  peak moves **every** level, reference white included, and it moves with headroom. That is reason 3 of the decision ("a
+  picture that changes when you nudge the brightness slider"), applied below the ceiling as well as above it. And Reference is
+  OS for HLG today (`ReferencePlan.swift:67-74`). So opting As macOS Shows It into `HLGMetadata` would, for the first time, make
+  OS and Reference differ on HLG, unless Reference follows. **Robbie's call.**
+
+##### Open
+
+1. **The on-screen CA conversion for HLG is inferred from ColorSync, not measured.** For PQ there is direct evidence that CA
+   uses the same anchor: PQ 0.58 shows as white once EDR is on (`MetalVideoRenderer.swift:2113-2118`). For HLG the
+   composited value was not captured. A window-only capture of a neutral HLG ramp in OS mode on the ASUS (SDR, pixel values
+   only) would settle it.
+2. **Which display, and its headroom in Robbie's session: UNKNOWN.** That run's `[EDR] headroom` line was not read. With HDR
+   off the LG measured potential 1.0 (U1). If the display had headroom above 1.0, the clip points move up by that factor.
+3. The CoreGraphics `.default` / `.referenceWhiteBased` results: inconclusive (above).
+
 ---
 
 ## 7. Open and unverified

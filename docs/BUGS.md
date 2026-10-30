@@ -3099,7 +3099,7 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
 
 ---
 
-## ☐ FIX BUILT 2026-10-29 (commit `0f74e4a`) — PRE-EXISTING since M1 — iPhone clips open rotated or flipped, and a vertical window can't be made smaller than 720 × 1280
+## ✅ FIXED 2026-10-29 (commit `0f74e4a`) — PRE-EXISTING since M1 — iPhone clips open rotated or flipped, and a vertical window can't be made smaller than 720 × 1280
 
 **Reported** by Robbie on 2026-10-29, an hour after 0.9.0 build 20 was published. `IMG_9457.MOV` (an iPhone 14 Pro clip held
 upright) looked mirrored left to right and `IMG_5070.MOV` (iPhone 17 Pro) mirrored top to bottom. Confirmed by Robbie and
@@ -3208,7 +3208,53 @@ matrix, so every orientation of a set carries byte-identical coded pixels. H.264
 and lossless 4:4:4 HEVC, at rot 0, 90, 180, 270, hflip and rot90 + hflip; three 4:4:4 HEVC files encoded already turned
 ("baked"); and vertical, square and landscape shapes for the window checks.
 
+Confirmed 2026-10-29 by Robbie on the MacBook Air (2048x1332): orientation correct, window resizes smaller.
+
 ---
+
+## ☐ OPEN 2026-10-29 — 0.9.1 — PRE-EXISTING — Narrow/vertical windows: control bar and resolution overlay layout
+
+**Seen** by Robbie on the MacBook Air (2048 × 1332) with `IMG_9457.MOV` (720 × 1280) at the window's minimum size, while
+confirming the rotation fix above.
+
+- **The control bar does not adapt to narrow widths.**
+- **The resolution text overlay is badly placed** at these aspects.
+
+Pre-existing; not caused by the build 21 fix (`0f74e4a`), which only made these narrow windows reachable on a small screen.
+Target: 0.9.1.
+
+---
+
+## ☐ OPEN 2026-10-29 — DECISION NEEDED, NOT A CODE DEFECT AS REPORTED — an iPhone HLG clip clips face, shirt and sky to white on an SDR-mode display; QuickTime does not
+
+**Reported** by Robbie on 2026-10-29 (build 21, `53b4bee`, display in SDR mode). `IMG_5070_noDV.mov` (iPhone 17 Pro HLG,
+Dolby Vision removed): face, white shirt and sky are blown to white in As macOS Shows It. Bypass looks right for HLG on SDR.
+QuickTime shows the file correctly.
+
+**Measured, read-only** (no build launched): `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *HLG on an SDR-mode display is far too
+bright*, 2026-10-29.
+
+- **The suspected anchoring bug is not there.** ColorSync maps HLG 75 % to **1.0007** and PQ 203 nits to **1.0000** in
+  extended linear (1.0 = SDR white). That is BT.2408, not 100 nits = 1.0, which would give 2.03. HLG 100 % → 4.926.
+- **The clip is real, and it comes from the content.** At 4.5 s the lit face reads Y′ 755 (1.27 × reference white), the sky
+  748–784 (≈ 1.37), and the shirt 860–868 (≈ 2.80). On a headroom-1.0 display, 65 % of the cheek patch, 97 % of the shirt patch
+  and 100 % of the sky patch are at or above SDR white, so they clip. The layer is not tone-mapped: `toneMapMode = .never`
+  (`MetalVideoRenderer.swift:1178`), no `edrMetadata` (`:2142`), unknown headroom. Reference is identical to OS for HLG
+  (`ReferencePlan.swift:67-74`). Bypass sends the codes unconverted, so nothing below superwhite clips.
+- **PQ has the same anchor** (no offset) and the same consequence above 203 nits on SDR.
+- **QuickTime moves reference white down.** AVFoundation's HLG → SDR (`.forceSDR`) gives face Y′ 0.60, shirt 0.81, sky 0.60,
+  peak at SDR white, 0 % clipped. That is the shape of CoreGraphics' ITU-recommended HLG → SDR (75 % → 0.29 linear).
+  `CAEDRMetadata.HLGMetadata` on the layer is the likely route to the same result. Not tried: its interaction with
+  `toneMapMode = .never`, and its numbers at headroom 1.0, are unmeasured.
+
+**Why this is a decision, not a fix.** *DECISION 2026-08-28* (below) covers what happens above the display's ceiling. Where
+reference white lands is already correct. On an SDR display the ceiling *is* reference white, so an iPhone HLG exterior is
+mostly "above the ceiling" and clips, exactly as that decision accepts. Matching QuickTime means a display-adaptive HLG OOTF.
+That OOTF moves reference white with headroom, which touches reason 3 of the decision, and it would make OS and Reference
+differ on HLG unless Reference follows. **Waiting on Robbie.** Nothing changed in code.
+
+**Still unmeasured:** the composited on-screen value for HLG (inferred from ColorSync; for PQ, CA is known to match), and the
+`[EDR] headroom` of the display in Robbie's session (UNKNOWN; the LG with HDR off measures 1.0).
 
 ## ✅ FIXED 2026-10-29 (commit `304c954`) — PRE-EXISTING (P1) — the NDI watcher's fallback started discovery with no menu open
 
