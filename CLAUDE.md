@@ -68,7 +68,7 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   `manifold-proc.sh open <pid> <file>`. Never address Manifold by name, path or bundle id: no `tell
   application "…" to quit`, no `open -a` / `open -b`, no `xctrace --launch`, no `pkill`/`killall` by
   name. Sent to a build that has already exited, a by-name or by-path Quit makes AppleScript launch the
-  app, and Launch Services can resolve it to the installed `/Applications/Manifold.app` (0.8.4). That
+  app, and Launch Services can resolve it to the installed `/Applications/Manifold.app`. That
   copy rewrites licence values in the real plist (2026-10-27, 2026-10-28; `docs/BUGS.md`, privacy P1).
 - **Guard every run:** `manifold-proc.sh guard` before and after. If any process of
   `/Applications/Manifold.app` is running, stop and report it. Never quit it yourself.

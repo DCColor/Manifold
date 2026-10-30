@@ -17,7 +17,7 @@
 # ⚠️ WHY (Robbie, 2026-10-29). `tell application "<path or name>" to quit`, `open -a`, `xctrace --launch` and
 # `pkill -x Manifold` all go through Launch Services or match by name. Sent to a build that has already exited,
 # a Quit event makes AppleScript LAUNCH the app to deliver it, and Launch Services may resolve the bundle id to
-# the installed /Applications/Manifold.app (0.8.4). That copy then rewrites licence values in the real plist
+# the installed /Applications/Manifold.app. That copy then rewrites licence values in the real plist
 # (2026-10-27, 2026-10-28; docs/BUGS.md, privacy P1). By pid there is nothing to resolve: a pid that has exited
 # is reported and left alone, and nothing is ever launched from here.
 set -u
