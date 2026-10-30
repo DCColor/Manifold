@@ -493,7 +493,7 @@ fragment half4 displayCopyFragment(DisplayCopyVertexOut in [[stage_in]],
 // DRAWABLE, so the scopes, the DeckLink v210 convert and the export (all of which read the offscreen)
 // never see it.
 //
-// Two modes, chosen on the CPU (`MetalVideoRenderer.referencePlan`):
+// Three modes, chosen on the CPU (`MetalVideoRenderer.referencePlan`):
 //
 //   0 — BT.1886 FOR A DISPLAY DESCRIBED BY ITS PROFILE. D = BT.1886 drive from Lb/Lw (normalised
 //       black-to-white), then encoded for the curve the DECLARED SOURCE profile carries:
@@ -505,16 +505,19 @@ fragment half4 displayCopyFragment(DisplayCopyVertexOut in [[stage_in]],
 //       The layer declares nothing (no conversion), and this converts the source primaries to 709 in
 //       2.4-linear light and re-encodes with 1/2.4. A 709 source on a calibrated display never comes
 //       here: it takes the identity copy, so its code values reach the display untouched.
+//   2 — HLG → PQ, BT.2408 AT 1000 NITS (0.9.1; docs/HLG_MACOS_MODE_PLAN.md §6). Inverse OETF, the BT.2100 OOTF
+//       (γ 1.2, Lw 1000) on the picture primaries' luminance, then PQ encode. The layer is tagged PQ, exactly as a
+//       PQ source is: Reference is absolute display light, 1.0 = 100 nits, and HLG 75 % lands at 203 nits.
 //
 // Sub-black clamps to 0 before any fractional power, so nothing can become NaN. Superwhite passes.
 struct ReferenceParams {
-    float a;            // BT.1886 a, Lw normalised to 1
-    float b;            // BT.1886 b
+    float a;            // BT.1886 a, Lw normalised to 1 (mode 2: nominal peak Lw, cd/m²)
+    float b;            // BT.1886 b (mode 2: system γ)
     float blackRatio;   // Lb / Lw
     float invGamma;     // 1 / γ of the declared source profile (mode 0)
-    uint  mode;         // 0 = BT.1886 for the profile, 1 = calibrated display, primaries → 709
+    uint  mode;         // 0 = BT.1886 for the profile, 1 = calibrated display, primaries → 709, 2 = HLG → PQ
     uint  pad0, pad1, pad2;
-    float4 row0;        // mode 1: source → Rec.709 linear matrix, rows (w unused)
+    float4 row0;        // mode 1: source → Rec.709 linear matrix, rows (w unused); mode 2: luminance weights (xyz)
     float4 row1;
     float4 row2;
 };
@@ -531,10 +534,22 @@ fragment half4 displayReferenceFragment(DisplayCopyVertexOut in [[stage_in]],
         float3 l = p.a * pow(max(v + p.b, 0.0), 2.4);
         float3 d = max((l - p.blackRatio) / (1.0 - p.blackRatio), 0.0);
         outRGB = pow(d, p.invGamma);
-    } else {
+    } else if (p.mode == 1) {
         float3 lin = pow(max(v, 0.0), 2.4);
         float3 lin709 = float3(dot(p.row0.xyz, lin), dot(p.row1.xyz, lin), dot(p.row2.xyz, lin));
         outRGB = pow(max(lin709, 0.0), 1.0 / 2.4);
+    } else {
+        // Mode 2: HLG → PQ, BT.2408 (docs/HLG_MACOS_MODE_PLAN.md §6). `HLGToPQ` in ColorimetryModel is the arbiter.
+        // a = nominal peak Lw (1000 cd/m²), b = system γ (1.2), row0.xyz = the picture primaries' luminance weights.
+        const float ha = 0.17883277, hb = 0.28466892, hc = 0.55991073;
+        float3 e = max(v, 0.0);
+        float3 scene = select((exp((e - hc) / ha) + hb) / 12.0, e * e / 3.0, e <= 0.5);
+        float ys = dot(p.row0.xyz, scene);
+        float3 nits = ys > 0.0 ? p.a * pow(ys, p.b - 1.0) * scene : float3(0.0);
+        const float m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
+        const float c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
+        float3 y = pow(clamp(nits / 10000.0, 0.0, 1.0), m1);
+        outRGB = pow((c1 + c2 * y) / (1.0 + c3 * y), m2);
     }
     return half4(half3(outRGB), half(c.a));
 }

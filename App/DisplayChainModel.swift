@@ -287,9 +287,22 @@ final class DisplayChainModel: ObservableObject {
         // ── THE VERDICT ─────────────────────────────────────────────────────────────────────
         var verdict: String?
         var converting = false
+        // HDR lines first (docs/HLG_MACOS_MODE_PLAN.md). In As macOS Shows It with the HLG adjustment on, macOS maps the
+        // picture to the display, so say that, and that the scopes do not follow it. In Reference, PQ and HLG are absolute
+        // display light, 1.0 = 100 nits (HLG transcoded to PQ, 0.9.1), so at a granted headroom of 1.0 everything above
+        // 100 nits clips. Said only when that is what the layer does: an HLG plan that refused is not transcoding.
+        let transfer = present ? renderer?.pictureTransferCode : nil
+        let headroom = renderer?.displayHeadroom
+        let referenceAbsolute = mode == .reference
+            && (transfer == 16 || (transfer == 18 && renderer?.referencePlan?.shader?.mode == 2))
+        if transfer == 18, mode == .os, renderer?.hlgAdjustmentActive == true {
+            let tier = renderer?.pictureStatedByLUT == true ? "LUT output" : (renderer?.sourceColorProvenance ?? .assumed).label
+            verdict = "HLG (\(tier)) → macOS HLG adjustment · follows display brightness · scopes show the file"
+        } else if referenceAbsolute, let headroom, !headroom.isGranted {
+            verdict = (headroom.isSDRMode ? "display in SDR mode" : "no headroom granted") + " · above 100 nits clips"
         // Colour S6, L2: the verdict compares what reaches the LAYER, which is the picture's colorspace (the
         // source's unless a LUT states its output). The Source line above stays the source's.
-        if mode == .os, present, let displayCurve, let pictureCS = renderer?.pictureDerivedColorSpace {
+        } else if mode == .os, present, let displayCurve, let pictureCS = renderer?.pictureDerivedColorSpace {
             let sourceCurve = ICCTransferCurve.parseRTRC(colorSpace: pictureCS)
             // ⚠️ NUMERIC, over [0,1] — never a comparison of ICC encodings. §6.5's probe made
             // exactly that mistake and reported "TRCs differ, A/B should be visible" for two
@@ -334,6 +347,10 @@ final class DisplayChainModel: ObservableObject {
         // which display the line now describes (S4's timing reads this line).
         if next.lut != chain.lut {
             print("[CHAIN] LUT: " + (next.lut ?? "none"))
+        }
+        // The verdict in the log too, so an unattended run reads the HLG lines (docs/HLG_MACOS_MODE_PLAN.md).
+        if next.verdict != chain.verdict {
+            print("[CHAIN] Verdict: " + (next.verdict ?? "none"))
         }
         if next.fields != chain.fields, let fields = next.fields {
             print("[CHAIN] Fields: " + fields)

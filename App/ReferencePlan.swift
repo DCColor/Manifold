@@ -6,10 +6,12 @@
 //  primaries conversion). A pure function of five facts, so the renderer, the chain readout and the
 //  log all describe the same decision, and none of them re-derives it.
 //
-//  ── THE FOUR OUTCOMES ────────────────────────────────────────────────────────────────────────
+//  ── THE FIVE OUTCOMES ────────────────────────────────────────────────────────────────────────
 //
-//   PQ / HLG source           → exactly OS: source colorspace, identity copy (§6.2: OS ≈ Reference
+//   PQ source                 → exactly OS: source colorspace, identity copy (§6.2: OS ≈ Reference
 //                               on HDR, because their profiles declare the transfer exactly).
+//   HLG source                → transcoded to PQ in the shader (BT.2408, 1000 nits; mode 2), layer tagged
+//                               PQ as a PQ source is. Absolute: 1.0 = 100 nits, HLG 75 % = 203 nits (0.9.1).
 //   calibrated display, 709   → no colorspace, identity copy: the code values reach the display
 //                               untouched and the display's own BT.1886 does the rest. Byte-for-byte
 //                               what Bypass sends, on purpose.
@@ -58,19 +60,39 @@ struct ReferencePlan: Equatable {
                 ?? (r.layerColorSpace == nil))
     }
 
+    /// - Parameter pqColorSpace: the PQ colorspace of the picture primaries, built by the renderer with the constructor every
+    ///   PQ source's layer comes from (`makeColorSpace`). Used only by the HLG arm; nil when the primaries cannot be tagged PQ.
     static func make(transferCode: Int?, primariesCode: Int?,
-                     sourceColorSpace cs: CGColorSpace,
+                     sourceColorSpace cs: CGColorSpace, pqColorSpace: CGColorSpace?,
                      calibration raw: DisplayCalibration, displayName: String?) -> ReferencePlan {
         let cal = raw.sanitized
         let on = displayName.map { " on \"\($0)\"" } ?? ""
 
-        // PQ / HLG — Reference is OS.
-        if transferCode == 16 || transferCode == 18 {
-            let curve = transferCode == 16 ? "PQ" : "HLG"
+        // PQ — Reference is OS.
+        if transferCode == 16 {
             return ReferencePlan(
                 layerColorSpace: cs, shader: nil,
-                summary: "Reference — \(curve) passed to macOS unchanged (on HDR, Reference = As macOS shows it)",
-                logLine: "[REFERENCE] \(curve) source\(on): identical to OS — source colorspace declared, identity copy")
+                summary: "Reference — PQ passed to macOS unchanged (on HDR, Reference = As macOS shows it)",
+                logLine: "[REFERENCE] PQ source\(on): identical to OS — source colorspace declared, identity copy")
+        }
+        // HLG — transcoded to PQ per BT.2408 at 1000 nits, and the layer tagged PQ exactly as a PQ source is (0.9.1;
+        // docs/HLG_MACOS_MODE_PLAN.md §6). Reference is absolute display light, 1.0 = 100 nits: HLG 75 % lands at 203 nits.
+        // Before 0.9.1 this arm declared the HLG colorspace with no shader, which CA shows as scene-linear ×12 with no OOTF.
+        if transferCode == 18 {
+            guard let pqColorSpace, let w = HLGToPQ.luminanceWeights(primariesCode: primariesCode) else {
+                let gamut = ColorPrimaries.resolve(primariesCode).name
+                return ReferencePlan(
+                    layerColorSpace: cs, shader: nil,
+                    summary: "Reference unavailable — HLG on \(gamut) primaries cannot be tagged PQ; shown untransformed",
+                    logLine: "[REFERENCE] ⚠️ refused\(on): HLG on \(gamut) primaries has no PQ layer colorspace — no transcode")
+            }
+            var p = ReferenceShaderParams(a: Float(HLGToPQ.nominalPeak), b: Float(HLGToPQ.systemGamma),
+                                          blackRatio: 0, invGamma: 1, mode: 2)
+            p.row0 = SIMD4(Float(w[0]), Float(w[1]), Float(w[2]), 0)
+            return ReferencePlan(
+                layerColorSpace: pqColorSpace, shader: p,
+                summary: "Reference — HLG transcoded to PQ (BT.2408, 1000 nits); absolute, 1.0 = 100 nits",
+                logLine: "[REFERENCE] HLG source\(on): BT.2408 HLG → PQ, Lw 1000, γ 1.2, layer tagged PQ")
         }
 
         // A display calibrated in its own hardware.

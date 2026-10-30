@@ -55,7 +55,9 @@ enum DisplayTransformMode: String, CaseIterable, Identifiable, Sendable {
     /// BT.1886 from this display's black and white (Lb 0 = exactly gamma 2.4), applied in a separate
     /// shader before today's source declaration — §6.11, decisions 1 and 2. On a display the user has
     /// declared calibrated to Rec.709 / BT.1886, the code values go out untouched with no colorspace
-    /// declared (wide-gamut primaries converted to 709 first). PQ and HLG: identical to `.os` (§6.2).
+    /// declared (wide-gamut primaries converted to 709 first). PQ and HLG are absolute display light, 1.0 = 100
+    /// nits: PQ is identical to `.os` (§6.2); HLG is transcoded to PQ in the shader (BT.2408, 1000 nits) and the
+    /// layer tagged PQ, where `.os` uses macOS's HLG adjustment (docs/HLG_MACOS_MODE_PLAN.md §6; 0.9.1).
     ///
     /// ⚠️ DESKTOP ONLY, like the other two: the scopes, SDI and export read the offscreen, upstream
     /// of the stage that applies it.

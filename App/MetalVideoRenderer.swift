@@ -1172,9 +1172,12 @@ final class MetalVideoRenderer {
         // If it turns out to be honoured, it becomes load-bearing — see the note in BUGS.md.
         //
         // macos(15.0) — at the deployment floor, no availability branch. Set HERE, on main, at
-        // construction, alongside the other one-time layer properties above and BEFORE any render
-        // thread exists — NOT in the per-source colour block, which is the render thread's and is
-        // reserved for state that varies by source. This does not vary.
+        // construction, BEFORE any render thread exists: the state before any colour state arrives.
+        //
+        // ⚠️ IT VARIES SINCE 2026-10-30 (docs/HLG_MACOS_MODE_PLAN.md). As macOS Shows It hands an HLG
+        // picture to the system's HLG adjustment (`edrMetadata = .hlg`), and `.never` would block that,
+        // so the render thread's colour-state install also writes this property, from
+        // `PendingColorState.toneMapMode`. `.never` everywhere else: Reference, Bypass, PQ, SDR.
         metalLayer.toneMapMode = .never
 
         // Once per PROCESS, not once per renderer. Headroom is a property of the display, not of
@@ -1619,8 +1622,16 @@ final class MetalVideoRenderer {
         let lut: InterpretationLUTInstall?
         /// Colour S7 (D1). What a frame drawn under this state goes out with on the DeckLink output.
         let output: FrameOutputState
+        /// HLG in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md): the system's HLG adjustment, or nil. Installed with the
+        /// colorspace, so a frame is never presented under one and declared under the other. nil in every other case.
+        let edrMetadata: CAEDRMetadata?
+        /// `.never` except where `edrMetadata` is set: `.never` would block it (`CALayer.h`, "Never tone map contents").
+        let toneMapMode: CALayer.ToneMapMode
     }
     private var pendingColorState: PendingColorState?
+    /// MAIN. True while the published colour state hands HLG to macOS's HLG adjustment (As macOS Shows It, HLG picture).
+    /// The chain readout's verdict reads it; it says what was published, which the `[EDR]` read-back confirms on install.
+    private(set) var hlgAdjustmentActive = false
     /// RENDER THREAD ONLY. The LUT in force (`PendingColorState.lut`), or nil: the everyday pipeline.
     private var activeLUT: InterpretationLUTInstall?
     /// MAIN. The window's LUT, published with every colour state (decision 5: kept across source changes,
@@ -1633,6 +1644,10 @@ final class MetalVideoRenderer {
     /// RENDER THREAD ONLY. The Reference shader parameters in force, installed from
     /// `pendingColorState` at the top of the tick, exactly like the layer's colorspace.
     private var activeReference: ReferenceShaderParams?
+    /// RENDER THREAD ONLY. The layer's `EDRMetadata` (set or not) and `toneMapMode` as last read back, so the read-back
+    /// line prints on a change only. `toneMapMode` nil until the first install.
+    private var activeEDRMetadataSet = false
+    private var activeToneMapMode: CALayer.ToneMapMode?
 
     /// Colour S2 — the key event that started or ended a hold, so the render thread can log when the
     /// first frame drawn in the new state actually reaches the glass. Main parks it with the colour state
@@ -1899,6 +1914,10 @@ final class MetalVideoRenderer {
     /// path is conditional on it. Anything that makes `.os` compute rather than pass through has
     /// broken the guarantee.
     ///
+    /// The one exception, 2026-10-30 (docs/HLG_MACOS_MODE_PLAN.md): an HLG picture in `.os` also gets the system's HLG
+    /// adjustment (`edrMetadata`, `toneMapMode`). Its pixels are unchanged; only the layer's presentation metadata
+    /// differs. Every other picture in `.os` is installed exactly as before.
+    ///
     /// Colour S6, L2: THREE inputs now — the source, the mode, and the LUT. Everything published here that
     /// describes the picture comes from the PICTURE codes (`pictureDerivedColorSpace`, `pictureWantsEDR`, the
     /// Reference plan); only the decode matrix comes from the SOURCE codes, because it decodes the source.
@@ -1916,6 +1935,10 @@ final class MetalVideoRenderer {
         // plausible candidate, is ruled out.
         let installed: CGColorSpace?
         var reference: ReferenceShaderParams? = nil
+        // HLG in As macOS Shows It only (docs/HLG_MACOS_MODE_PLAN.md): the picture's transfer, not the source's, so a LUT
+        // stated as HLG gets the adjustment and an HLG source under a LUT stated as 709 does not. Reference and Bypass
+        // never get it: Reference transcodes HLG to PQ itself and does not tone-map (DECISION 2026-08-28, as amended).
+        let hlgAdjust = displayTransform == .os && pictureTransferCode == 18 && Self.hlgAdjustmentAvailable
         switch displayTransform {
         case .os:
             installed = cs
@@ -1928,8 +1951,12 @@ final class MetalVideoRenderer {
             // reaches the display transform as it reaches everything else (§6.9 finding 11). Since L2 the
             // PICTURE codes: a LUT stated as PQ is planned as PQ.
             let screen = hostingScreen
+            // 0.9.1: an HLG picture is transcoded to PQ and its layer tagged PQ, built by the constructor every PQ source's
+            // layer comes from. Only for HLG, and only for primaries a PQ layer exists for (else the plan refuses).
+            let pq = pictureTransferCode == 18 && HLGToPQ.luminanceWeights(primariesCode: picturePrimariesCode) != nil
+                ? Self.makeColorSpace(primaries: picturePrimariesCode, transfer: 16, matrix: pictureMatrixCode) : nil
             let plan = ReferencePlan.make(transferCode: pictureTransferCode, primariesCode: picturePrimariesCode,
-                                          sourceColorSpace: cs,
+                                          sourceColorSpace: cs, pqColorSpace: pq,
                                           calibration: DisplayCalibrationStore.shared.calibration(for: screen),
                                           displayName: screen?.localizedName)
             if plan != referencePlan { print(plan.logLine) }
@@ -1952,10 +1979,13 @@ final class MetalVideoRenderer {
                                               reference: reference, decodeMatrix: decodeMatrix,
                                               lut: interpretationLUT,
                                               output: FrameOutputState(signal: signal,
-                                                                       v210MatrixCode: signal.sdiMatrixCode(pictureMatrix: pictureMatrixCode)))
+                                                                       v210MatrixCode: signal.sdiMatrixCode(pictureMatrix: pictureMatrixCode)),
+                                              edrMetadata: hlgAdjust ? CAEDRMetadata.hlg : nil,
+                                              toneMapMode: hlgAdjust ? .ifSupported : .never)
         pendingRefresh = true
         refreshLock.unlock()
         wakeDisplayLink()
+        hlgAdjustmentActive = hlgAdjust
         deckLinkLock.lock(); deckLinkCurrentSignal = signal; deckLinkLock.unlock()
         if signal != pictureOutputSignal {
             pictureOutputSignal = signal
@@ -2014,17 +2044,39 @@ final class MetalVideoRenderer {
         case .bypass:
             layerLine = "nil — BYPASS, no conversion  (source derived \(csName))"
         case .reference:
-            layerLine = referencePlan?.layerColorSpace == nil
-                ? "nil — REFERENCE on a calibrated display, no conversion  (source derived \(csName))"
-                : "\(csName)  (wideGamut=\(cs.isWideGamutRGB))  — REFERENCE"
-                  + (referencePlan?.shader == nil ? ", identity copy" : ", BT.1886 shader")
+            // The plan's colorspace, not the picture's: for HLG they differ (0.9.1, the layer is tagged PQ).
+            if let planCS = referencePlan?.layerColorSpace {
+                let shader: String
+                switch referencePlan?.shader?.mode {
+                case nil: shader = ", identity copy"
+                case 2:   shader = ", HLG → PQ shader (BT.2408, 1000 nits)  (source derived \(csName))"
+                default:  shader = ", BT.1886 shader"
+                }
+                layerLine = "\(Self.colorSpaceIdentity(planCS))  (wideGamut=\(planCS.isWideGamutRGB))  — REFERENCE" + shader
+            } else {
+                layerLine = "nil — REFERENCE on a calibrated display, no conversion  (source derived \(csName))"
+            }
         }
         print("[EDR] layer colorspace = " + layerLine + pictureLogSuffix)
         print("[EDR] wantsExtendedDynamicRangeContent = \(pictureWantsEDR)"
             + (pictureWantsEDR ? "  (HDR transfer \(pictureTransferCode.map(String.init) ?? "nil") → EDR ON)"
                                : "  (SDR source → EDR OFF, unchanged path)")
             + pictureLogSuffix)
+        print("[EDR] EDRMetadata = "
+            + (hlgAdjustmentActive ? "HLG (macOS HLG adjustment, follows display peak) · toneMapMode = ifSupported — AS MACOS SHOWS IT"
+                                   : "nil · toneMapMode = never"))
     }
+
+    /// Whether HLG in As macOS Shows It can have macOS's HLG adjustment: `CAEDRMetadata.hlg` with `toneMapMode = .ifSupported`
+    /// (docs/HLG_MACOS_MODE_PLAN.md §3.6a, measured: `.never` blocks it, `.ifSupported` gives one conversion, equal to ColorSync's
+    /// HLG → SDR at headroom 1.0, and matched QuickTime by eye at headroom 4.48).
+    static let hlgAdjustmentAvailable: Bool = {
+        guard CAEDRMetadata.isAvailable else {
+            print("[EDR] ⚠️ CAEDRMetadata unavailable — HLG in As macOS Shows It gets no HLG adjustment")
+            return false
+        }
+        return true
+    }()
 
     /// - Parameter provenance: **where these codes came from, stated by the caller.** Required,
     ///   and deliberately without a default: `SourceColorProvenance` records why deriving it here
@@ -2139,10 +2191,9 @@ final class MetalVideoRenderer {
         resolvePictureCodes()
         publishColorState()
 
-        // NOTE: edrMetadata (CAEDRMetadata) is deliberately NOT set — E3. This stage tests
-        // whether colorspace + the opt-in alone lift the image. If PQ content does not display
-        // without it, edrMetadata is REQUIRED-to-display rather than a tonemapping refinement,
-        // and that is the finding this stage exists to produce.
+        // NOTE: edrMetadata (CAEDRMetadata) is set for ONE case only, by `publishColorState`: an HLG
+        // picture in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md, 2026-10-30). Everything else,
+        // PQ included, displays from colorspace + the opt-in alone, as E3 established.
 
         // ── ⚠️ THREE TIERS OF LOGGING, BECAUSE THIS IS NO LONGER A ONCE-PER-SOURCE EVENT ────
         //
@@ -3135,7 +3186,20 @@ final class MetalVideoRenderer {
             // and it would look like it was working.
             metalLayer.colorspace = colorState.colorSpace
             metalLayer.wantsExtendedDynamicRangeContent = colorState.wantsEDR
+            // HLG in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md). Here, with the colorspace, and above `nextDrawable()`,
+            // which `CAMetalLayer.h` requires ("Must be set before calling nextDrawable").
+            metalLayer.edrMetadata = colorState.edrMetadata
+            metalLayer.toneMapMode = colorState.toneMapMode
             CATransaction.commit()
+            // Read back, so a property the layer silently declines shows in the log rather than being assumed.
+            if (metalLayer.edrMetadata != nil) != activeEDRMetadataSet || metalLayer.toneMapMode != activeToneMapMode {
+                activeEDRMetadataSet = metalLayer.edrMetadata != nil
+                activeToneMapMode = metalLayer.toneMapMode
+                print("[EDR] layer read-back: EDRMetadata " + (metalLayer.edrMetadata == nil ? "nil" : "set")
+                    + " · toneMapMode \(metalLayer.toneMapMode.rawValue)"
+                    + ((metalLayer.edrMetadata != nil) != (colorState.edrMetadata != nil)
+                       || metalLayer.toneMapMode != colorState.toneMapMode ? "  ⚠️ NOT WHAT WAS SET" : ""))
+            }
             activeReference = colorState.reference
             activeDecodeMatrix = colorState.decodeMatrix
             activeOutput = colorState.output

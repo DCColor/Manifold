@@ -103,11 +103,64 @@ public enum ReferenceGamut {
     public static func apply(_ m: Matrix3, _ v: [Double]) -> [Double] { ColorMatrix.apply(m, v) }
 }
 
+/// Reference's HLG → PQ transcode (docs/HLG_MACOS_MODE_PLAN.md §6; 0.9.1). Reference is absolute display light, 1.0 = 100 nits;
+/// HLG is transcoded to PQ per BT.2408 at a 1000-nit nominal peak, so the layer can be tagged PQ exactly as a PQ source is:
+///
+///     E  = HLG inverse OETF (E′), per channel          scene-linear, [0, 1] for legal signal
+///     Ys = kR·R + kG·G + kB·B                            luminance of the PICTURE primaries
+///     F  = Lw · Ys^(γ − 1) · E,  Lw 1000, γ 1.2          cd/m² (BT.2100 OOTF, on luminance: hue kept)
+///     out = PQ inverse EOTF (F / 10000), per channel
+///
+/// HLG 75 % → 203.2 nits (PQ 0.5808); 100 nits is reached at HLG 62.96 %. The shader's mode 2 (`displayReferenceFragment`)
+/// evaluates the same formulas from `luminanceWeights`; these tests are the arbiter.
+public enum HLGToPQ {
+    public static let nominalPeak = 1000.0
+    public static let systemGamma = 1.2
+
+    static let a = 0.17883277, b = 0.28466892, c = 0.55991073
+
+    /// HLG inverse OETF (BT.2100): E′ → scene-linear E. Below 0 clamps to 0; above 1 continues the curve.
+    public static func inverseOETF(_ e: Double) -> Double {
+        let v = max(e, 0)
+        return v <= 0.5 ? v * v / 3 : (Foundation_exp((v - c) / a) + b) / 12
+    }
+
+    /// The OOTF, in cd/m², for one pixel's scene-linear RGB.
+    public static func displayLight(_ rgb: [Double], weights w: [Double]) -> [Double] {
+        let ys = w[0] * rgb[0] + w[1] * rgb[1] + w[2] * rgb[2]
+        guard ys > 0 else { return [0, 0, 0] }
+        let gain = nominalPeak * Foundation_pow(ys, systemGamma - 1)
+        return rgb.map { gain * $0 }
+    }
+
+    /// PQ inverse EOTF (ST 2084): cd/m² → E′, clamped to [0, 1].
+    public static func pqEncode(_ nits: Double) -> Double {
+        let m1 = 2610.0 / 16384, m2 = 2523.0 / 4096 * 128
+        let c1 = 3424.0 / 4096, c2 = 2413.0 / 4096 * 32, c3 = 2392.0 / 4096 * 32
+        let y = Foundation_pow(min(max(nits / 10000, 0), 1), m1)
+        return Foundation_pow((c1 + c2 * y) / (1 + c3 * y), m2)
+    }
+
+    /// HLG-encoded R′G′B′ → PQ-encoded R′G′B′.
+    public static func transcode(_ rgb: [Double], weights: [Double]) -> [Double] {
+        displayLight(rgb.map(inverseOETF), weights: weights).map(pqEncode)
+    }
+
+    /// The luminance row (Y of RGB → XYZ) of the primaries as drawn, or nil for primaries the layer cannot be tagged PQ
+    /// with (`ColorimetryTable.layerAttachments` falls back to Rec.709 SDR for those, so Reference refuses rather than guess).
+    public static func luminanceWeights(primariesCode code: Int?) -> [Double]? {
+        guard ColorimetryTable.layerAttachments(primaries: code, transfer: 16, matrix: nil).hdrFallback == nil else { return nil }
+        return ColorPrimaries.resolve(code).rendered.rgbToXYZ[1]
+    }
+}
+
 // `pow` without importing Foundation into every client of this target.
 #if canImport(Darwin)
 import Darwin
 @inline(__always) func Foundation_pow(_ x: Double, _ y: Double) -> Double { Darwin.pow(x, y) }
+@inline(__always) func Foundation_exp(_ x: Double) -> Double { Darwin.exp(x) }
 #else
 import Glibc
 @inline(__always) func Foundation_pow(_ x: Double, _ y: Double) -> Double { Glibc.pow(x, y) }
+@inline(__always) func Foundation_exp(_ x: Double) -> Double { Glibc.exp(x) }
 #endif
