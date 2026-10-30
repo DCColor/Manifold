@@ -315,6 +315,12 @@ not tone-map.** Showing the user what their display's headroom *is* is informati
 picture to fit it is a different thing and was decided against. Keep them separate, or the mode
 picker grows a fourth entry nobody asked for.
 
+**Amended 2026-10-30 for HLG in As macOS Shows It only** (§6.11, *Amendment to DECISION 2026-08-28*). For an HLG picture,
+OS and Reference now differ on purpose: OS uses macOS's HLG adjustment, and Reference stays strict. "OS ≈ Reference" still holds
+for PQ. No fourth mode was added.
+**⚠️ Governing definition, 2026-10-30** (§6.11, end): Reference is absolute display light, 1.0 = 100 nits. PQ maps directly;
+HLG is transcoded to PQ per BT.2408 at 1000 nits. As macOS Shows It is what macOS and QuickTime show, tone mapping included.
+
 ---
 
 ### 6.3 UI — decided 2026-09-21
@@ -8353,6 +8359,10 @@ primaries conversion. That is the "flat, desaturated" look, and it is HLG's SDR 
 
 ##### 4. PQ — the same anchor, so no shared offset
 
+**⚠️ Corrected 2026-10-30 (GOVERNING DEFINITION, end of §6.11):** the figures below are ColorSync's CGColor conversion, not
+the screen. On screen PQ lands at **1.0 = 100 nits**, and everything from 100 nits up clips at headroom 1.0 (`HLG_MACOS_MODE_PLAN.md`
+§3.6b). That is correct absolute rendering, not a bug. The "203 → 1.0" target was wrong.
+
 PQ 203 nits (E′ 0.5807) → **1.0000**. A PQ file has no anchoring bug either. It shares the *consequence*: on a headroom-1.0
 display, every PQ pixel above 203 nits clips to SDR white. This is the behaviour the 2026-08-28 decision accepted ("content
 above it clips, and that is deliberate", §6.2). HLG from a phone shows it more than graded PQ does, because the phone exposes
@@ -8394,6 +8404,99 @@ skin above reference white.
 2. **Which display, and its headroom in Robbie's session: UNKNOWN.** That run's `[EDR] headroom` line was not read. With HDR
    off the LG measured potential 1.0 (U1). If the display had headroom above 1.0, the clip points move up by that factor.
 3. The CoreGraphics `.default` / `.referenceWhiteBased` results: inconclusive (above).
+
+#### Amendment to DECISION 2026-08-28 — HLG in As macOS Shows It uses macOS's HLG adjustment, 2026-10-30 (Robbie)
+
+**The decision as amended.** The desktop picture does not tone-map, **except one case: an HLG picture in As macOS Shows It.**
+There the layer is handed to macOS's HLG adjustment (`CAEDRMetadata.hlg`, `toneMapMode = .ifSupported`). Reference stays
+strict: BT.2408 anchor (HLG 75 % = SDR white), no tone-map, clips at the display's ceiling. **⚠️ Corrected 2026-10-30
+(GOVERNING DEFINITION, below):** Reference is absolute, 1.0 = 100 nits, with HLG transcoded to PQ at 1000 nits, so HLG 75 % =
+203 nits, not SDR white. Its clip line becomes `display in SDR mode · above 100 nits clips`. Bypass is unchanged. PQ is
+unchanged in every mode (deferred: `HLG_MACOS_MODE_PLAN.md` §5). The test is the **picture** transfer code, so a LUT stated as
+HLG gets the adjustment and an HLG source under a LUT stated as Rec.709 does not. Plan and code map: `docs/HLG_MACOS_MODE_PLAN.md`.
+
+**Why.** As macOS Shows It is *"what your client will see"* (§6.3). For HLG, what a client sees in QuickTime is macOS's
+display-adaptive HLG rendering, not BT.2408 clipped at the ceiling (2026-10-29 findings above, §5). Reference remains the mode
+for judging the file.
+
+**The two consequences, accepted:**
+
+1. **In As macOS Shows It, the HLG picture and the scopes disagree.** The scopes read the offscreen, upstream of the layer, and
+   show the file's BT.2408 code values. The picture shows macOS's adjustment, which moves every level, reference white included,
+   not only the highlights. This is reason 1 of the 2026-08-28 decision, now accepted for this one case. The readout says so in
+   the mode itself: `HLG (tagged) → macOS HLG adjustment · follows display brightness · scopes show the file`. In Reference the
+   picture and the scopes still agree.
+2. **The As macOS Shows It HLG picture moves with display brightness**, and with ambient light and granted headroom. This is
+   reason 3 of the decision, accepted here because it is what the client's Mac does too. It is not a reference picture, and the
+   readout says *follows display brightness*.
+
+**Unchanged by this amendment:** reason 2. SDI and HDMI read the offscreen, never the layer, so their bytes and tags are the
+same in every mode (`HLG_MACOS_MODE_PLAN.md` §3.4). Reference, Bypass, PQ and SDR layer state are also unchanged. Reference's
+HLG summary no longer says "identical to OS" (`ReferencePlan.swift`).
+
+**Reference at a granted headroom of 1.0** now states the clip in the readout:
+`display in SDR mode · highlights above reference white (HLG 75 %) clip`, or `no headroom granted · …` when the display is in
+HDR mode but nothing is granted. The same line shows in As macOS Shows It if the adjustment is not active.
+
+**Verification:** `HLG_MACOS_MODE_PLAN.md` §3.6, T1–T8. Results are recorded there and in `BUGS.md` (OPEN 2026-10-29 entry).
+
+**⚠️ Open 1 above, measured 2026-10-30 (T0, `HLG_MACOS_MODE_PLAN.md` §3.6a): the inference was wrong.** On screen, with no
+metadata and `.never`, a neutral HLG ramp on the ASUS (headroom 1.0) fits **display-linear = 4·E′²**: HLG's inverse OETF ×12, no
+OOTF. So **HLG 50 % lands at SDR white, not 75 %**, and everything above clips. ColorSync's CGColor conversions (table 2) do not
+describe the CAMetalLayer composite for HLG. Reference shares that layer state, so the "BT.2408 anchor" wording above, and in
+the amendment, is expected to be false on screen until Reference is captured or changed (Robbie's call).
+
+**Why T0 is 4·E′², and why the 2026-08-28 decision was wrong for HLG (recorded 2026-10-30, Robbie).** Apple documents, at
+`CAEDRMetadata.hlg`, that for an HLG layer *the system applies the OOTF* only when HLG metadata is set. The HLG nominal range is
+[0, 12]. Without the metadata, the layer's values are the scene-linear interpretation: 1.0 = 1/12 of the nominal peak, which
+puts E′ = 0.5 at 1.0. T0's 4·E′² (= 12 · E′²/3) is therefore the documented behaviour, not an anomaly. The 2026-08-28 decision set
+no metadata on the drawable path. That is correct for PQ, which is display-referred, has no OOTF to apply, and was measured at
+the BT.2408 anchor on screen (`MetalVideoRenderer.swift`, E2 note: PQ 0.58 shows as white). It is wrong for HLG, where leaving the
+metadata off also leaves off the OOTF and the anchor with it.
+**⚠️ Corrected 2026-10-30 (GOVERNING DEFINITION, below):** PQ was **not** measured at the BT.2408 anchor. On screen it lands at
+1.0 = 100 nits (§3.6b of the plan; 0.58 shows as white, but so does 0.51). The no-metadata path is right for PQ because 100 nits =
+1.0 is the Reference rendering, not because PQ lands at 203.
+
+Sources and limits, stated plainly:
+- The local SDK header (`CAEDRMetadata.h:100-105`, macOS 26.5 SDK) says the system *"will apply the OOTF based on peak display
+  brightness and ambient"* for `HLGMetadata`.
+- The "[0, 12] nominal range" wording is **not** in the local headers (grep of the QuartzCore, CoreGraphics and CoreVideo
+  headers). It is recorded from Apple's documentation, as stated by Robbie.
+- One measured result qualifies "only with metadata": at headroom 1.0, `toneMapMode = .ifSupported` **without** metadata (T4)
+  gave the same converted curve as with it (T3). So on this display the tone-map mode, not the metadata, switched the conversion
+  on. Whether the metadata changes the result at headroom > 1 is T5.
+
+#### ⚠️ GOVERNING DEFINITION — what Reference and As macOS Shows It render, 2026-10-30 (Robbie)
+
+**This definition governs every HDR statement in this document.** Where an earlier passage disagrees, this one is correct, and the
+passage carries a correction note pointing here.
+
+- **Reference = absolute display light, 1.0 = 100 nits** (Apple's convention: `CAEDRMetadata.h:28-31`, *"1.0 mapping to diffuse
+  white of 100 nits"*). **PQ maps directly.** **HLG is transcoded to PQ per BT.2408 at a 1000-nit nominal peak** (inverse OETF,
+  OOTF γ 1.2 at Lw 1000, PQ encode), so HLG 75 % = 203 nits = 2.03 on that scale.
+- **As macOS Shows It = what macOS and QuickTime show, including the system's tone mapping.**
+
+**Decisions that follow (Robbie, 2026-10-30):**
+
+1. **PQ in Reference is not a bug.** Measured on screen, PQ lands at 1.0 = 100 nits (`HLG_MACOS_MODE_PLAN.md` §3.6b), which is
+   correct absolute rendering for a display whose SDR white is 100 nits. **The earlier "PQ 203 nits → 1.0" target was wrong.** It
+   came from ColorSync's CGColor conversions into extended linear (table 2 of the 2026-10-29 section), which the CAMetalLayer
+   composite does not follow.
+2. **HLG in Reference is a 0.9.1 bug** (T0: scene-linear ×12, no OOTF). **The fix is the BT.2408 HLG → PQ transcode in the
+   shader, with the layer tagged PQ exactly as for a PQ source. A "÷ 203 into a linear extended layer" normalisation is
+   withdrawn.** Plan: `HLG_MACOS_MODE_PLAN.md` §6. Expected on screen after the fix: HLG 75 % = 203 nits. At headroom 1.0, clipping
+   starts from about 63 % signal (HLG E′ at 100 nits, the same point a PQ file clips).
+3. **PQ in As macOS Shows It clips where QuickTime tone-maps** (SDR display, or above the granted headroom). This is a
+   pre-existing 0.9.1 bug. It is measured this round; no fix until Robbie has seen the numbers.
+4. **Reference readout at a granted headroom of 1.0, PQ and HLG alike:** `display in SDR mode · above 100 nits clips` (and the
+   `no headroom granted · …` variant). This replaces `highlights above reference white (HLG 75 %) clip`. The code keeps the old
+   line until the Reference fix lands. The As macOS Shows It line stays as approved.
+
+**What this corrects:** §4 of the 2026-10-29 section (PQ "no anchoring bug … above 203 nits clips"); the amendment above
+(Reference "BT.2408 anchor (HLG 75 % = SDR white)" and its clip line); and the paragraph above calling the 2026-08-28 no-metadata
+decision *"correct for PQ"* on the grounds that PQ was measured at the BT.2408 anchor. PQ was in fact measured at 1.0 = 100 nits.
+The decision stands for PQ under this definition because 100 nits = 1.0 *is* the reference rendering, not because PQ lands at
+203.
 
 ---
 

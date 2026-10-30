@@ -3225,7 +3225,96 @@ Target: 0.9.1.
 
 ---
 
-## ☐ OPEN 2026-10-29 — DECISION NEEDED, NOT A CODE DEFECT AS REPORTED — an iPhone HLG clip clips face, shirt and sky to white on an SDR-mode display; QuickTime does not
+## ☐ OPEN 2026-10-30 — 0.9.1 BUG IN SHIPPED 0.9.0 — Reference shows HLG with no OOTF (scene-linear ×12): HLG 50 % at SDR white, everything above clips
+
+**Found** 2026-10-30 by measurement (`HLG_MACOS_MODE_PLAN.md` §3.6a, T0). It affects **0.9.0 (build 21, shipped 2026-10-29)** and every
+earlier build with an HLG path. On screen, an HLG layer with no `CAEDRMetadata` and `toneMapMode = .never` is shown as
+display-linear **4·E′²**: HLG's scene-linear interpretation (1.0 = 1/12 of nominal peak), with no OOTF. So at headroom 1.0, HLG 50 %
+is SDR white and everything from about 50 % up clips. Reference installs exactly that state for HLG (`ReferencePlan.swift`, HLG arm:
+source colorspace, no shader), and so did As macOS Shows It until the working-tree change.
+
+**Reference captured on screen, 2026-10-30** (ASUS, headroom 1.0, HLG ramp, mode set by a Color-menu AX click, confirmed by
+`[EDR] display transform → REFERENCE`): bar for bar **identical to T0**. HLG 50 % → 254, clipped from 55 % up. The layer read back
+`EDRMetadata nil · toneMapMode never`. Table: `HLG_MACOS_MODE_PLAN.md` §3.6b.
+
+**Governing definition (Robbie, 2026-10-30; `COLOR_MANAGEMENT_FINDINGS.md` §6.11, end):** Reference = absolute display light,
+1.0 = 100 nits. PQ maps directly; HLG is transcoded to PQ per BT.2408 at 1000 nits.
+
+**The fix (decided):** in Reference, the shader transcodes HLG → PQ per BT.2408 (inverse OETF, OOTF γ 1.2 at Lw 1000, PQ encode),
+and the layer is tagged PQ exactly as for a PQ source. Expected on screen: HLG 75 % = 203 nits. At headroom 1.0, clipping starts
+from about 63 % signal, as a PQ file clips at 100 nits. Plan: `HLG_MACOS_MODE_PLAN.md` §6. *Withdrawn:* the earlier "anchor 75 % =
+SDR white" target and the "÷ 203 into a linear extended layer" route.
+
+**Readout (decided):** Reference at a granted headroom of 1.0, PQ and HLG alike: `display in SDR mode · above 100 nits clips`
+(and `no headroom granted · …`). It replaces `highlights above reference white (HLG 75 %) clip`. The code keeps the old line
+until the fix lands.
+
+**Status: FIXED IN THE WORKING TREE 2026-10-30, uncommitted.** Verified on the ASUS (headroom 1.0): the HLG ramp in Reference
+matches the prediction within ±1 at every bar. HLG 50 % = the PQ ramp's 50-nit bar (188), and clipping starts at ≈ 63 % (between
+60 % = 236 and 65 % = 255). Readout: `display in SDR mode · above 100 nits clips`. Plan §6.7. **LG, HDR (headroom 4.48), T6, T7, T8 run 2026-10-30, all pass** (plan §6.8, §6.9): T6 18/18 holds
+install the right state; T7 offscreen / v210 / PNG bytes identical to build 21 in every mode; T8 PQ and SDR identical to build 21
+on screen in every mode. **⚠️ Open:** on the LG every HLG ramp bar was distinguishable in Reference, 90–100 % included, though
+granted headroom stayed 4.48 (predicted clip above ≈ 448 nits). Unexplained (plan §6.8).
+
+**Not a bug: PQ in Reference.** Measured the same run: PQ lands at **1.0 = 100 nits** on screen in both modes. PQ 203 nits reaches
+255, but so does 100 nits, and everything from 100 nits up clips; below the clip, linear ≈ 2.0× the old "203 = 1.0" prediction.
+Under the governing definition that is correct absolute rendering (`CAEDRMetadata.h:28-31`, *"1.0 mapping to diffuse white of
+100 nits"*). **The earlier "PQ 203 nits → 1.0000" target (2026-10-29) was wrong.** It came from ColorSync's CGColor conversion, not
+the screen.
+
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — PQ in As macOS Shows It clips where QuickTime tone-maps
+
+**Decision 3, Robbie, 2026-10-30.** As macOS Shows It is *what macOS and QuickTime show, including the system's tone mapping*. For PQ
+the layer has no metadata and `toneMapMode = .never`, so on an SDR display (or above the granted headroom) everything from 100
+nits up clips, where QuickTime's AVFoundation path rolls it off (`.forceSDR` of the PQ ramp: 100 nits → 186, 203 → 229, 1000 →
+255 on the ASUS; `HLG_MACOS_MODE_PLAN.md` §3.6b, §3.8). Pre-existing in 0.9.0 and earlier.
+
+**Status:** measure only this round (plan §3.8: today, `.ifSupported` without metadata, `.ifSupported` + `CAEDRMetadata.hdr10`
+from the file's values, each against AVFoundation). **No fix until Robbie has seen the numbers.**
+
+**Measured 2026-10-30** (ASUS, headroom 1.0; HEVC PQ ramp with file MDCV/CLLI; plan §3.8). 100 nits / 203 nits land at:
+today **255 / 255 (clipped)**; `.ifSupported` **139 / 189**; `.ifSupported` + `hdr10` from the file: **identical to `.ifSupported`**;
+AVFoundation (QuickTime's path) **186 / 229**. So today is ~2× QuickTime in the mids, and `.ifSupported` is ~0.5×. Neither matches.
+The HDR10 metadata changes nothing at headroom 1.0. Headroom > 1 not measured.
+
+**Decided 2026-10-30 (Robbie): do NOT adopt `.ifSupported` for PQ** (its 0.55× mids are further from QuickTime than today's 2×).
+**Keep today's PQ behaviour for now.** The bug stays open.
+
+**⚠️ Priority raised:** a MacBook Air is always at headroom 1.0, so Air users see PQ in As macOS Shows It **~2× too bright, and
+clipping from 100 nits**, against QuickTime, all the time. Next to measure: Core Image `CIToneMapHeadroom` against AVFoundation
+(plan §3.9).
+
+## ☐ OPEN 2026-10-29 — DECIDED 2026-10-30 (Option B), IMPLEMENTED, NOT COMMITTED, VERIFICATION PENDING — an iPhone HLG clip clips face, shirt and sky to white on an SDR-mode display; QuickTime does not
+
+**Decided 2026-10-30 (Robbie): Option B.** As macOS Shows It hands an HLG picture to macOS's HLG adjustment
+(`CAEDRMetadata.hlg`, `toneMapMode = .ifSupported`). Reference stays strict (BT.2408, no tone-map, clips at the ceiling).
+Bypass is unchanged. PQ is unchanged and deferred. This is a scoped amendment to *DECISION 2026-08-28*, accepting two
+consequences: in As macOS Shows It the HLG picture and the scopes disagree, and the picture moves with display brightness.
+Recorded in `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *Amendment to DECISION 2026-08-28*. Plan, code map and test matrix:
+`docs/HLG_MACOS_MODE_PLAN.md`.
+
+**Implemented in the working tree** (uncommitted). Files: `MetalVideoRenderer.swift` (the two fields in `PendingColorState`,
+set in `publishColorState`, installed with the colorspace, read back and logged), `ReferencePlan.swift` (HLG no longer
+"identical to OS"), `DisplayChainModel.swift` (the two HLG verdict lines, and a `[CHAIN] Verdict:` log),
+`DisplayTransform.swift` (comment). A temporary DEBUG-only switch, `MANIFOLD_HLG_TONEMAP`, runs T0–T4. Remove it before
+commit.
+
+**T0–T4 measured 2026-10-30** (ASUS, headroom 1.0, window-only captures; table in `HLG_MACOS_MODE_PLAN.md` §3.6a).
+(1) `.never` blocks `CAEDRMetadata.hlg`: T1 = T0. (2) `.ifSupported` takes effect as one conversion, equal within ±2 codes to
+ColorSync's HLG → SDR (100 % = white, 75 % → 187/255). No clipping, no double conversion. (3) T4 = T3: at headroom 1.0 the metadata
+adds nothing; `.ifSupported` alone does it. (4) ⚠️ **Today's on-screen HLG (T0) is not BT.2408:** it fits display-linear = 4·E′²,
+so **HLG 50 % = SDR white**, and everything above that clips. That overturns the 2026-10-29 inference (its Open 1). Reference has
+the same layer state, so Reference's "75 % = SDR white" wording and the clip line are expected to be wrong on screen (inferred,
+not captured in Reference). **Decision pending (Robbie).** T5–T8: not run yet.
+
+**T5, 2026-10-30** (LG, HDR on, headroom 4.48 of 8.97, `IMG_5070_noDV.mov`): As macOS Shows It and QuickTime Player are
+**identical by eye** on the same frame (Robbie; *"if Manifold was brighter it was hard to tell given the content"*). Reference is much brighter and clips: the 0.9.1 bug above. The brightness
+variation could not be tested (the LG has no brightness control, only HDR on/off). Plan §3.6c.
+
+**Verification T6–T8: pending** (T6 waits for the Reference fix). Stop conditions (Robbie): if the adjustment does not take effect, or the
+ASUS shows a double conversion, stop and report. Try no alternatives.
+
+*The 2026-10-29 record follows, unchanged.*
 
 **Reported** by Robbie on 2026-10-29 (build 21, `53b4bee`, display in SDR mode). `IMG_5070_noDV.mov` (iPhone 17 Pro HLG,
 Dolby Vision removed): face, white shirt and sky are blown to white in As macOS Shows It. Bypass looks right for HLG on SDR.
@@ -3242,6 +3331,8 @@ bright*, 2026-10-29.
   (`MetalVideoRenderer.swift:1178`), no `edrMetadata` (`:2142`), unknown headroom. Reference is identical to OS for HLG
   (`ReferencePlan.swift:67-74`). Bypass sends the codes unconverted, so nothing below superwhite clips.
 - **PQ has the same anchor** (no offset) and the same consequence above 203 nits on SDR.
+  **⚠️ Corrected 2026-10-30:** on screen PQ lands at 1.0 = 100 nits, not 203 (that was ColorSync, not the composite), and under
+  the governing definition that is correct. See the OPEN 2026-10-30 entries above.
 - **QuickTime moves reference white down.** AVFoundation's HLG → SDR (`.forceSDR`) gives face Y′ 0.60, shirt 0.81, sky 0.60,
   peak at SDR white, 0 % clipped. That is the shape of CoreGraphics' ITU-recommended HLG → SDR (75 % → 0.29 linear).
   `CAEDRMetadata.HLGMetadata` on the layer is the likely route to the same result. Not tried: its interaction with
@@ -8632,6 +8723,10 @@ pass, and the EDR configuration is reached identically.
 ---
 
 ## ✅ DECISION 2026-08-28: the desktop picture is the REFERENCE and does not tone-map
+
+**⚠️ AMENDED 2026-10-30, ONE CASE ONLY:** an HLG picture in As macOS Shows It uses macOS's HLG adjustment. Reference, Bypass,
+PQ and SDR are as decided below. See `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *Amendment to DECISION 2026-08-28*, and the OPEN
+2026-10-29 HLG entry above.
 
 **This closed as a colour decision, not as a scrub bug.** The investigation began as "scrubbing an
 HDR file looks different from playing it" and assumed throughout that the Metal path was correct
