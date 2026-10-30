@@ -5,7 +5,7 @@
 Bypass is unchanged.
 
 **Status: approved 2026-10-30, with three changes (Robbie): HLG only, PQ deferred (§5); the macOS-mode readout line is
-Robbie's wording (§3.2 item 9); the clip line is Robbie's wording (§4). Implemented in the working tree, not committed.**
+Robbie's wording (§3.2 item 9); the clip line is Robbie's wording (§4). Implemented and committed (`b9ce869`).**
 Sections 1–2 are the investigation, with file and line numbers as of `7e0da82`; they are not re-pinned to the change. Other
 claims cite an SDK header (macOS 26.5 SDK, `MacOSX26.5.sdk`). Background: `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *HLG on an
 SDR-mode display is far too bright* (2026-10-29), and `BUGS.md`, *OPEN 2026-10-29*.
@@ -762,7 +762,7 @@ mastering on the ASUS, and Hold C / mode-switch latency with this layer state (T
 
 **Approved 2026-10-30 (Robbie):** `.automatic` + `CAEDRMetadata.hdr10` for a PQ picture in As macOS Shows It, at any headroom.
 
-#### Design, as implemented (2026-10-30, uncommitted)
+#### Design, as implemented (2026-10-30, committed `9644122`)
 
 | mode | picture transfer | `edrMetadata` | `toneMapMode` | colorspace / wantsEDR / shader |
 |---|---|---|---|---|
@@ -798,7 +798,7 @@ mastering on the ASUS, and Hold C / mode-switch latency with this layer state (T
   by bytes.
 - **Removed:** the `MANIFOLD_PQ_TONEMAP` DEBUG switch.
 
-#### Implementation and verification, 2026-10-30 (uncommitted)
+#### Implementation and verification, 2026-10-30 (committed `9644122`)
 
 **Builds.** This change: Profile, `.build-run/`. Baseline: `b9ce869` (`git archive`, vendored libraries copied, DeckLink SDK
 symlinked, Profile, `.build-b9ce869/`, gitignored). `b9ce869` → HEAD differs in docs and `scripts/manifold-proc.sh` only, so it is
@@ -852,7 +852,68 @@ the names in the logs; none were left.
 builds were measured identically.)
 
 **Seen, pre-existing:** both builds took more than 30 s to quit with five document windows open (`manifold-proc.sh quit` timed
-out, exit 3). Each exited on its own soon after, and the guard was clean.
+out, exit 3). Each exited on its own soon after, and the guard was clean. A one-window session quit within the timeout (the Hold C
+run). Recorded in `BUGS.md`, 0.9.1.
+
+### 3.10d What AVFoundation's layers set: the AVPlayerLayer bench, 2026-10-30
+
+**Question.** §3.10b–c match QuickTime's grey curve with `CAEDRMetadata.hdr10` on Manifold's `CAMetalLayer`. Does QuickTime-style
+playback set the same thing on its layers, or does it reach the compositor another way?
+
+**Bench.** It is a standalone app in `.harness/avlayer-src/` (`main.swift`, `build.sh`; gitignored), built to
+`.harness/avlayer-build/AVLayerBench.app`.
+- **Bundle and focus:** bundle ID `tools.graviton.harness.avlayerbench`, with no Manifold defaults domain. It never activates.
+- **Players:** each file plays in two windows, a bare `AVPlayerLayer` and an AVKit `AVPlayerView` (`controlsStyle = .none`).
+  Whether QuickTime Player is built on `AVPlayerView` is UNKNOWN.
+- **What it logs, per layer:** the class; the public HDR properties (`toneMapMode`, `preferredDynamicRange`, `contentsHeadroom`,
+  `wantsExtendedDynamicRangeContent`, `contentsFormat`, and `CAMetalLayer`'s pixel format, colour space and `edrMetadata`); the
+  contents' type (an `IOSurface`'s pixel format and all its values, a `CGImage`'s colour space and headroom); and the private
+  zero-argument getters whose names are about colour or dynamic range.
+- **No pixels:** it captures and reads none.
+- **Files:** `pq14_m1000_c1000.mov` (1000-nit mastering), `pq14_m0_c0.mov` (no mastering) and `pq_colour_patches.mov`.
+- **Conditions:** each file paused on the ASUS (headroom 1.0), playing on the ASUS, and paused on the LG (headroom 4.48, potential
+  8.97). That is 18 dumps.
+
+**The video layer tree**, the same in both windows:
+
+```
+AVPlayerLayer                      preferredDynamicRange high (bare) / constrainedHigh (AVPlayerView)
+└ AVPlayerLayerIntermediateLayer   standard
+  ├ FigVideoContainerLayer         high / constrainedHigh
+  │ └ FigVideoLayer                high / constrainedHigh   contents: CAImageQueue
+  ├ FigSubtitleCALayer (hidden) ─ FigFCRCALayer ─ FigFCRCALayerOutputNodeLayer   standard
+  └ AVPlayerLayerIntermediateLayer (hidden)                                     standard
+```
+
+**Findings.**
+1. **`preferredDynamicRange` is the only HDR property AVFoundation sets.**
+   - On `AVPlayerLayer`, `FigVideoContainerLayer` and `FigVideoLayer` it is `high` in a bare `AVPlayerLayer` and `constrainedHigh`
+     under `AVPlayerView`. That one value is the only difference between the two trees.
+   - Every ancestor and every other layer is `standard`.
+2. **No layer carries tone-map metadata.** There is no `CAMetalLayer` in the tree, and so no `edrMetadata`, colour space or pixel
+   format at layer level.
+   - Every layer reads `toneMapMode automatic` (the default; it is the same on AppKit's own layers), `wantsExtendedDynamicRangeContent`
+     0 and `contentsHeadroom` 0.
+   - Private getters on every layer: `toneMapToStandardDynamicRange 0`, `allowsLimitedHeadroom 0`, `contentsEDRStrength 1`,
+     `contentsMaximumDesiredEDR 0`, `displayMaximumDesiredEDR 0`, `allowsColorMatching 1`, `_overrideImageFormat −1`.
+3. **The frames are a `CAImageQueue`** on `FigVideoLayer`. The queue is opaque to the layer API: its buffers, and whatever colour
+   tags and HDR metadata they carry, cannot be read from the tree.
+4. **Nothing at layer level reacts to the file or the display.** Apart from geometry, all 18 dumps are identical: 1000-nit mastering
+   or none, paused or playing, ASUS or LG. `AVPlayerItem.appliesPerFrameHDRDisplayMetadata` is `true` (the default) throughout.
+
+**Inferred, not observed:** AVFoundation hands the compositor YCbCr frames that carry their own colour tags and HDR metadata, per
+frame, through the `CAImageQueue`, and the compositor tone-maps from those. No layer setting does it.
+
+**Conclusions (Robbie, 2026-10-30).**
+1. **Two routes to one curve.** QuickTime tone-maps from per-frame tags; Manifold matches its grey curve through layer metadata
+   (`.automatic` + `hdr10`, §3.10c). They are separate paths in macOS, so they could drift apart if Apple changes one of them.
+   **Re-check after every macOS update:** run this bench, then the ASUS ramp against QuickTime (§3.10a, §3.10c). `BUGS.md`, 1.0.
+2. **The saturated-colour gap** (≤ 16 codes, §3.10b finding 2) is most likely the route into the compositor: QuickTime gives it
+   Rec.2020 PQ YCbCr with tags, Manifold an already-converted RGB picture. Accepted; not pursued for 0.9.1.
+3. **For 1.0:** `wantsExtendedDynamicRangeContent`, which Manifold's PQ and HLG layers use, is deprecated in macOS 26
+   (`CALayer.h`: "Use preferredDynamicRange instead", `macos(14.0, 26.0)`). Evaluate `preferredDynamicRange` (`.constrainedHigh`,
+   AVKit's choice, or `.high`) behind an availability branch, with the §3.10c and T7/T8 measurements as its acceptance test.
+   `BUGS.md`, 1.0.
 
 ### 3.7 Follow-ups, not in this change
 
@@ -1035,7 +1096,7 @@ two do not look contradictory.
 - **T6** (Hold C latency, no torn frame), **T7** (v210 / export bytes identical), **T8** (PQ and SDR unchanged).
 - Unit tests for `HLGToPQ` (table in §6.2) and for the plan's HLG arm (PQ colorspace, mode 2, the refusal case).
 
-### 6.7 Implemented and verified on the ASUS, 2026-10-30 (uncommitted)
+### 6.7 Implemented and verified on the ASUS, 2026-10-30 (committed `b9ce869`)
 
 **Code:** `HLGToPQ` in `ColorimetryModel/ReferenceTransform.swift`, with 7 tests in `HLGToPQTests.swift` (all pass): the §6.2
 table, 75 % within 0.5 nit of 203, 100 nits between 62.9 % and 63.0 %, channel ratios kept, black and bounds, and the refusal for

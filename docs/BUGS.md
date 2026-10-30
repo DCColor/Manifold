@@ -230,6 +230,17 @@ held back until after release, and the numbered defect entries follow.
        pictures and PQ match; HLG is not signalled, SDR after PQ sends no InfoFrame, and a same-mode colorimetry change
        drops the link for a frame (entries below). The reference monitor remains. The HDMI entries are parked
        (2026-10-25): retest on a second Mac, on the LG over HDMI, and with the SDK updated to the 16.4 driver.**
+   - ☐ **`preferredDynamicRange` in place of `wantsExtendedDynamicRangeContent`** (added 2026-10-30, Robbie). The EDR opt-in on
+     Manifold's PQ and HLG layers is deprecated in macOS 26 (`CALayer.h`: "Use preferredDynamicRange instead",
+     `macos(14.0, 26.0)`). AVFoundation's own video layers use `preferredDynamicRange`: `.high` in a bare `AVPlayerLayer`,
+     `.constrainedHigh` under AVKit's `AVPlayerView` (`HLG_MACOS_MODE_PLAN.md` §3.10d). Evaluate it behind an availability
+     branch. Acceptance: the As macOS Shows It curves of §3.10c (PQ) and §3.6a, §3.6c, §6.9 (HLG), ASUS and LG, and Reference, Bypass and
+     T7/T8 bytes unchanged.
+   - ☐ **Re-check As macOS Shows It against QuickTime after every macOS update** (added 2026-10-30, Robbie). QuickTime
+     tone-maps PQ from per-frame tags in a `CAImageQueue`; Manifold reaches the same grey curve through layer metadata
+     (`.automatic` + `hdr10`). These are two paths in macOS, and an update to one could move them apart (§3.10d conclusion 1).
+     Run the AVPlayerLayer bench (`.harness/avlayer-src/build.sh`; does its layer tree still match §3.10d?), then the ASUS
+     PQ ramp in Manifold against QuickTime (§3.10a: 100 nits → 152, 203 → 187).
 2. **Interlaced support** (decided, Robbie, 2026-10-09): after the colour work, before the shortcut
    registry. Plan, decisions and predictions: `INTERLACED_FINDINGS.md`. The defect entry: *interlaced
    sources: DeckLink Follow source picks a progressive mode*, below. In 1.0, in this order:
@@ -3262,7 +3273,7 @@ Under the governing definition that is correct absolute rendering (`CAEDRMetadat
 100 nits"*). **The earlier "PQ 203 nits → 1.0000" target (2026-10-29) was wrong.** It came from ColorSync's CGColor conversion, not
 the screen.
 
-## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — IMPLEMENTED AND VERIFIED 2026-10-30, NOT COMMITTED — PQ in As macOS Shows It clips where QuickTime tone-maps
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — IMPLEMENTED AND VERIFIED 2026-10-30, COMMITTED `9644122` — PQ in As macOS Shows It clips where QuickTime tone-maps
 
 **Implemented 2026-10-30 (Robbie's decision, plan §3.10b–c):** a PQ **picture** (the picture's transfer, so a LUT stated as PQ
 counts) in As macOS Shows It gets `toneMapMode = .automatic` + `CAEDRMetadata.hdr10`. The metadata is
@@ -3280,8 +3291,8 @@ AVFoundation `.forceSDR` nor Core Image (plan §3.10a). `.automatic` + `hdr10` r
 
 **⚠️ Open, accepted for 0.9.1:** saturated colours far outside the display's gamut differ from QuickTime by up to 16 codes on the
 ASUS: bright Rec.2020 green and cyan are brighter in Manifold (for example 248 against 233), and pure Rec.2020 blue has G 0
-against QuickTime's 5. In-gamut colours match within ~2 codes. Cause not identified (§3.10b finding 2). A follow-up AVPlayerLayer
-bench will log what QuickTime-style playback sets on its layers.
+against QuickTime's 5. In-gamut colours match within ~2 codes. Most likely the route into the compositor (QuickTime: tagged Rec.2020 PQ
+YCbCr; Manifold: converted RGB); not pursued for 0.9.1 (§3.10b finding 2, §3.10d conclusion 2).
 
 **Verification (2026-10-30, ASUS, against `b9ce869`; plan §3.10c, *Implementation and verification*):**
 - The PQ ramp in As macOS Shows It gives 100 → 152, 203 → 187, matching QuickTime.
@@ -3312,6 +3323,62 @@ The HDR10 metadata changes nothing at headroom 1.0. Headroom > 1 not measured.
 **⚠️ Priority raised:** a MacBook Air is always at headroom 1.0, so Air users see PQ in As macOS Shows It **~2× too bright, and
 clipping from 100 nits**, against QuickTime, all the time. Next to measure: Core Image `CIToneMapHeadroom` against AVFoundation
 (plan §3.9).
+
+---
+
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — "colour state installed … AFTER a frame was already on screen" on every mode change: misfire, or a one-frame flicker?
+
+**Seen** on every display-mode change, from the menu and from Hold C, in every source type measured. Each change logs
+`[EDR] colour state installed on the layer after N present(s) of this source — ⚠️ AFTER a frame was already on screen; that frame
+was drawn through the previous colour state. Re-rendering to repair it.`
+- **Hold C:** 62 lines for 31 hold/release pairs on the HDR10 ramp (`HLG_MACOS_MODE_PLAN.md` §3.10c, *Hold C*).
+- **Menu mode cycles:** 45 lines in this build and 45 in `b9ce869`, the same run on each.
+- **Earlier sightings:** HLG Hold C (§6.8), an NDI colorimetry override (`COLOR_MANAGEMENT_FINDINGS.md`, the redundant-republish
+  note), and at quit after a source is cleared (the I1 notes, below).
+
+**The line is printed in** `MetalVideoRenderer.swift` (the render thread's colour-state install, `presentsSinceFlush`). It was
+written for the first-frame bug: `presents=0` means a new source's colour state reached the layer before its first frame. But the
+counter counts presents **since the source loaded**, not since this colour state was published. So on a mode change it is always
+non-zero, and the warning fires whether or not a frame was actually shown under the wrong state.
+
+**What to find out.** §6.8 judged it "misleading wording, not a defect" from the counter's logic. Nothing has measured it. The
+question is whether a frame drawn for the NEW mode (new shader, new pixels) is ever presented while the layer still holds the OLD
+colour space, EDR flag or `edrMetadata`, or the reverse:
+- if never, it is a **misfire**: count presents since the publish, or log the mode change separately, and keep the warning for a
+  real late install;
+- if so, it is a **one-frame flicker**: one wrong frame per switch, which the re-present repairs a tick later. Fix the ordering.
+
+**How:**
+- tag each `PendingColorState` with a sequence number, log the number on the frame that is presented and on the state installed
+  for it, and look for a mismatch;
+- check it on the cases where the old and new states differ most: PQ OS ↔ Reference (`hdr10`/`automatic` ↔ nil/`never`) and HLG
+  OS ↔ Reference (shader mode 2);
+- optionally, by eye or with an AH-style frame grab at 120 Hz on the LG during fast Hold C taps.
+
+Pre-existing (identical counts in `b9ce869`). Target: 0.9.1.
+
+---
+
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — Quit takes more than 30 s with five windows open
+
+**Seen** 2026-10-30, in both the working-tree build and a clean `b9ce869` build (`HLG_MACOS_MODE_PLAN.md` §3.10c, *Seen,
+pre-existing*):
+- **What was open:** five document windows (`pq_ramp_14.mov`, `pq14_m1000_c1000.mov`, `pq_colour_patches.mov`,
+  `hlg_ramp_21.mov`, `sdr_ramp_21.mov`), after mode cycles and Chroma Scrub Bench runs, with DeckLink output off.
+- **What happened:** `scripts/manifold-proc.sh quit <pid>` sent its Quit event and waited its default 30 s; it then reported "still
+  running after 30 s" (exit 3). Each process exited on its own soon after, and the guard was clean. The total time is UNKNOWN: the
+  helper stopped watching at 30 s.
+- **The comparison case:** a one-window session (the Hold C run, same day) quit within the timeout.
+
+**Not known:**
+- whether the time grows with the number of windows, with which sources were open, or with whether the windows had played;
+- where the time goes (window teardown, the scrub or decode producers, DeckLink, scope teardown, a main-thread wait).
+
+**Next:** quit by PID with one, two, three and five windows, and `manifold-proc.sh quit <pid> --timeout 120` to get the real
+time. Take a `sample <pid>` during a long quit to see what the main thread is waiting on. The log's last lines before exit may
+already show the slow step.
+
+Pre-existing. Target: 0.9.1.
 
 ## ☐ OPEN 2026-10-29 — DECIDED 2026-10-30 (Option B), IMPLEMENTED, NOT COMMITTED, VERIFICATION PENDING — an iPhone HLG clip clips face, shirt and sky to white on an SDR-mode display; QuickTime does not
 
