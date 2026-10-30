@@ -317,7 +317,8 @@ picker grows a fourth entry nobody asked for.
 
 **Amended 2026-10-30 for HLG in As macOS Shows It only** (§6.11, *Amendment to DECISION 2026-08-28*). For an HLG picture,
 OS and Reference now differ on purpose: OS uses macOS's HLG adjustment, and Reference stays strict. "OS ≈ Reference" still holds
-for PQ. No fourth mode was added.
+for PQ. No fourth mode was added. **⚠️ Amended again 2026-10-30 for PQ:** OS now hands a PQ picture to macOS's HDR10 tone map
+(`HLG_MACOS_MODE_PLAN.md` §3.10c), so "OS ≈ Reference" no longer holds for PQ either.
 **⚠️ Governing definition, 2026-10-30** (§6.11, end): Reference is absolute display light, 1.0 = 100 nits. PQ maps directly;
 HLG is transcoded to PQ per BT.2408 at 1000 nits. As macOS Shows It is what macOS and QuickTime show, tone mapping included.
 
@@ -8414,6 +8415,10 @@ strict: BT.2408 anchor (HLG 75 % = SDR white), no tone-map, clips at the display
 203 nits, not SDR white. Its clip line becomes `display in SDR mode · above 100 nits clips`. Bypass is unchanged. PQ is
 unchanged in every mode (deferred: `HLG_MACOS_MODE_PLAN.md` §5). The test is the **picture** transfer code, so a LUT stated as
 HLG gets the adjustment and an HLG source under a LUT stated as Rec.709 does not. Plan and code map: `docs/HLG_MACOS_MODE_PLAN.md`.
+**⚠️ Second case added 2026-10-30 (Robbie): a PQ picture in As macOS Shows It** uses macOS's HDR10 tone map
+(`CAEDRMetadata.hdr10` from the source's mastering luminance, or system defaults; `toneMapMode = .automatic`), at any
+headroom, measured to match QuickTime Player (`HLG_MACOS_MODE_PLAN.md` §3.10a–c). Reference PQ is unchanged (absolute, no
+tone map). The same two consequences are accepted for PQ.
 
 **Why.** As macOS Shows It is *"what your client will see"* (§6.3). For HLG, what a client sees in QuickTime is macOS's
 display-adaptive HLG rendering, not BT.2408 clipped at the ceiling (2026-10-29 findings above, §5). Reference remains the mode

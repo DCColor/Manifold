@@ -3262,7 +3262,36 @@ Under the governing definition that is correct absolute rendering (`CAEDRMetadat
 100 nits"*). **The earlier "PQ 203 nits → 1.0000" target (2026-10-29) was wrong.** It came from ColorSync's CGColor conversion, not
 the screen.
 
-## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — PQ in As macOS Shows It clips where QuickTime tone-maps
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — IMPLEMENTED AND VERIFIED 2026-10-30, NOT COMMITTED — PQ in As macOS Shows It clips where QuickTime tone-maps
+
+**Implemented 2026-10-30 (Robbie's decision, plan §3.10b–c):** a PQ **picture** (the picture's transfer, so a LUT stated as PQ
+counts) in As macOS Shows It gets `toneMapMode = .automatic` + `CAEDRMetadata.hdr10`. The metadata is
+`hdr10(minLuminance:maxLuminance:opticalOutputScale: 100)` from the source's mastering luminance when the source declares it and
+describes the picture, and `hdr10(displayInfo: nil, contentInfo: nil, …)` (system defaults) otherwise; the two measured identical
+on screen. It applies at any headroom. It is installed in the same `PendingColorState` as the colorspace, read back on install,
+and logged as `[EDR] PQ → macOS HDR10 tone map …`. Readout verdict: `PQ (tagged) → macOS HDR10 tone map · follows display ·
+scopes show the file`. Reference, Bypass, HLG and SDR are unchanged. `MetalVideoRenderer.swift`, `DisplayChainModel.swift`,
+`ReferencePlan.swift` (PQ summary no longer "identical to OS"), `DisplayTransform.swift` (comment). The `MANIFOLD_PQ_TONEMAP`
+DEBUG switch is removed.
+
+**Why `.automatic` + `hdr10`, and not the earlier candidates:** QuickTime Player on screen (ASUS, headroom 1.0) matches neither
+AVFoundation `.forceSDR` nor Core Image (plan §3.10a). `.automatic` + `hdr10` reproduces its grey curve exactly (100 nits → 152,
+203 → 187; every bar within 0.3 codes) and matched it by eye at headroom 4.48 on the LG (§3.10b, §3.10c).
+
+**⚠️ Open, accepted for 0.9.1:** saturated colours far outside the display's gamut differ from QuickTime by up to 16 codes on the
+ASUS: bright Rec.2020 green and cyan are brighter in Manifold (for example 248 against 233), and pure Rec.2020 blue has G 0
+against QuickTime's 5. In-gamut colours match within ~2 codes. Cause not identified (§3.10b finding 2). A follow-up AVPlayerLayer
+bench will log what QuickTime-style playback sets on its layers.
+
+**Verification (2026-10-30, ASUS, against `b9ce869`; plan §3.10c, *Implementation and verification*):**
+- The PQ ramp in As macOS Shows It gives 100 → 152, 203 → 187, matching QuickTime.
+- Mode switches install the right layer state every time: read-back 15–25 ms after the click, none stale.
+- SDI/HDMI and export bytes are identical in all three modes.
+- HLG, SDR, and PQ in Reference and Bypass are identical on screen.
+- Hold C (attended, Robbie, 2026-10-30): 31 holds, taps and fast taps on the HDR10 ramp all read back the right layer state, with
+  none stale. First frame under the new state reached `present()` in a median of 4.5 ms (max 15.6 ms) after the key event.
+
+**History below, kept for the record.**
 
 **Decision 3, Robbie, 2026-10-30.** As macOS Shows It is *what macOS and QuickTime show, including the system's tone mapping*. For PQ
 the layer has no metadata and `toneMapMode = .never`, so on an SDR display (or above the granted headroom) everything from 100
@@ -8724,9 +8753,14 @@ pass, and the EDR configuration is reached identically.
 
 ## ✅ DECISION 2026-08-28: the desktop picture is the REFERENCE and does not tone-map
 
-**⚠️ AMENDED 2026-10-30, ONE CASE ONLY:** an HLG picture in As macOS Shows It uses macOS's HLG adjustment. Reference, Bypass,
-PQ and SDR are as decided below. See `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *Amendment to DECISION 2026-08-28*, and the OPEN
-2026-10-29 HLG entry above.
+**⚠️ AMENDED 2026-10-30, TWO CASES ONLY, BOTH IN AS MACOS SHOWS IT:** an HLG picture uses macOS's HLG adjustment
+(`CAEDRMetadata.hlg`, `.ifSupported`). A **PQ picture now tone-maps through the system as well**: macOS's HDR10 tone map
+(`CAEDRMetadata.hdr10`, `.automatic`), at any headroom, measured to match QuickTime Player (`HLG_MACOS_MODE_PLAN.md` §3.10b,
+§3.10c). **Reference is unchanged**: PQ and HLG absolute, 1.0 = 100 nits, no tone map, clip above the granted headroom.
+Bypass and SDR are as decided below. The accepted consequences are the same as for HLG: in As macOS Shows It the picture and
+the scopes disagree above the display's ceiling, and the picture moves with the display's headroom. See
+`COLOR_MANAGEMENT_FINDINGS.md` §6.11, *Amendment to DECISION 2026-08-28*, and the OPEN 2026-10-29 HLG and 2026-10-30 PQ
+entries above.
 
 **This closed as a colour decision, not as a scrub bug.** The investigation began as "scrubbing an
 HDR file looks different from playing it" and assumed throughout that the Metal path was correct

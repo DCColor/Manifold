@@ -429,6 +429,431 @@ ASUS profile, 8-bit, G at each bar centre. The two input paths agree within ±1 
    path, not a layer property. Whether it can feed the display layer at frame rate is not assessed. Report only.
 4. **Unset `sourceHeadroom` reads NaN**, and the filter then hard-clips at 203 nits (no curve). The value must be set.
 
+### 3.10 PQ in As macOS Shows It — the Core Image SDR curve, offline, 2026-10-30
+
+**Scope.** Measure only. No app was launched, and no app code was changed. Bench code and fixtures are in this session's scratchpad
+(`/private/tmp/claude-501/-Users-robbiecarman-Nextcloud-Vibe-Code-Output-Manifold-Manifold/7300a3ea-f2c5-480d-8352-2d5ac099fe3b/scratchpad/`,
+`bench/` and `fix/`): `ciprobe.swift` (synthetic patches: Q1, Q2, Q3, LUT bake), `filecurve.swift` and `hevcvar.swift` (metadata
+variants as real files), `colourfile.swift` (colour patches through AVFoundation), and `perf.swift` (Q4). Mac Studio M4 Max, macOS
+26.7.1, 26.5 SDK. Unless stated, the output is read as float, **linear Rec.2020, non-extended (an SDR destination)**, G channel, with
+1.0 = SDR white. Error figures are max |Δ| in 8-bit γ2.2 codes. The ASUS 8-bit row reproduces §3.9's no-filter row (`0 15 63 136 186
+213 229 243 250 254 255 …`; 50 nits 136 against 137, the earlier ±1). "CI" is a plain `CIContext` render with no filter (§3.9 finding
+3). "AV" is `AVAssetImageGenerator` `.forceSDR`, the stand-in for QuickTime used throughout this plan.
+
+#### Q1. Metadata: the curve does not change
+
+| input | `contentHeadroom` reported | 0 | 1 | 10 | 50 | **100** | 150 | **203** | 300 | 400 | 600 | **1000** | 2000+ |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| bitmap (float32), PQ colourspace | 4.9261 | 0 | .0049 | .0493 | .2463 | **.4894** | .6662 | **.7835** | .8990 | .9538 | .9917 | **1.0000** | 1.0000 |
+| CVPixelBuffer, no mdcv / clli | 4.9261 | 0 | .0049 | .0493 | .2461 | .4905 | .6663 | .7830 | .8994 | .9534 | .9917 | 1.0000 | 1.0000 |
+| CVPixelBuffer, mdcv 4000 + MaxCLL 4000 | **19.7044** | *same as the row above, to 4 decimals* |||||||||||||
+| CVPixelBuffer, mdcv 10000 + MaxCLL 10000 | **49.2611** | *same* |||||||||||||
+
+- **Synthetic, all identical to 4 decimals** (the half-float inputs differ from float32 by ≤ 0.0011, which is quantisation): nine
+  CVPixelBuffer attachment sets (none, 1000/1000, 4000/4000, 1000/4000, 4000/1000, mdcv only, MaxCLL only 1000 and 4000,
+  10000/10000), an `MTLTexture` (rgba16F, `.colorSpace` PQ), `settingContentHeadroom` 0 / 1 / 2 / 4.93 / 10 / 19.7 / 49.3, and the
+  `.contentHeadroom` creation option 2 and 19.7. **The SDR destination does not matter either**: ITUR_2020 SDR, sRGB and ITUR_709,
+  each decoded back to linear, give the same row.
+- **Real files, same answer.** The §3.6b ProRes ramp re-encoded HEVC Main 10 seven times: no metadata, mdcv 1000 + MaxCLL 1000,
+  4000 + 4000, 1000 + 4000, 4000 + 1000, MaxCLL 4000 only, mdcv 4000 only. ffmpeg confirmed each box. The decoded buffers carry
+  the attachments, and CI reports a `contentHeadroom` of 4.93 or 19.70 to match. **AV's row is identical across all seven files, and so
+  is CI's**, and the two agree with each other within 0.0035 linear.
+- **It is global, not local.** A 100-nit patch gives 0.48944 next to black, next to 10 000-nit patches, and after 200 patches of
+  10 000 nits.
+- **What the curve is:** a CoreGraphics draw of the same PQ `CGImage` into an SDR context with **`kCGToneMappingITURecommended`**
+  gives the CI row to 4 decimals (100 → 0.4895, 203 → 0.7835, 1000 → 1.0000), with or without a content headroom on the image.
+  The header defines that method as *"tone mapping based on ITU-R specifications for HDR-to-SDR … **assuming mastering peak of
+  1000 nits**"* (`CGToneMapping.h:28`), and says headroom values are ignored for it (`CGColorConversionInfo.h:63`). So the curve
+  is fixed by design. `kCGToneMappingDefault` and `referenceWhiteBased` drew nothing into these contexts (the fill showed through),
+  so they were not characterised.
+- **Consequence:** everything from about 1000 nits up is SDR white. A 4000-nit grade loses 1000–4000 nits on an SDR display, in
+  AV exactly as in CI. That is the system's behaviour, not a Manifold defect.
+
+**Answer 1: the same curve, whatever the metadata, through both CI and AVFoundation.**
+
+#### Q2. Per channel or luminance: AVFoundation scales by luminance, and Core Image does neither
+
+Colour patches were PQ Rec.2020, written as ProRes 4444 (`fix/pq_colour_patches.mov`: 14 neutrals, R / G / B / skin (1, .706, .490) /
+orange (1, .45, .05) / cyan (.05, .8, 1) at luminance 5–2000 nits, and 450 seeded random colours up to PQ 0.8 ≈ 1500 nits). Each
+was read back through AV and through CI from the decoded buffer. The three hypotheses use the measured neutral curve f, in nits on
+the 203 = 1.0 scale: **per channel** `f(R), f(G), f(B)`; **luminance** `in · f(Y)/Y`, with Y from BT.2020 weights; **max(RGB)**
+`in · f(max)/max`. All three are clipped at 1.0 in Rec.2020.
+
+| fit, median / p99 / max (codes) | per channel | **luminance** | max(RGB) |
+|---|---|---|---|
+| **AV `.forceSDR`**, 498 colour patches | 7.5 / 106 / 136 | **0.06 / 0.46 / 2.25** | 12.9 / 103 / 137 |
+| CI no filter, 498 colour patches | 48.7 / 154 / 158 | 48.2 / 154 / 159 | 49.8 / 155 / 160 |
+| CI no filter, the 77 inside Rec.709 | 8.7 / 101 / 101 | 1.0 / 61 / 61 | 7.2 / 105 / 105 |
+| **AV against CI directly** | neutrals 0.04 / 0.33 / 0.33 · Q2 colours 61 / 154 / 154 · random 47 / 154 / 159 |||
+
+| patch (nits R, G, B) | AV (linear 2020) | CI (linear 2020) |
+|---|---|---|
+| 2020 red, Y 100 (381, 0, 0) | 1.000 0.000 0.000 | **0.627 0.069 0.016** (= the BT.709 red primary in 2020) |
+| 2020 green, Y 100 (0, 148, 0) | 0.000 0.721 0.000 | 0.268 0.748 0.072 |
+| skin, Y 100 (130, 92, 64) | 0.636 0.448 0.311 | 0.637 0.450 0.316 |
+| skin, Y 400 (519, 367, 254) | 1.000 0.873 0.607 | 0.926 0.841 0.600 |
+| orange, Y 100 (175, 79, 9) | 0.859 0.386 0.043 | 0.737 0.374 0.046 |
+| cyan, Y 100 (8, 130, 163) | 0.040 0.636 0.794 | 0.270 0.662 0.809 |
+
+1. **AV `.forceSDR` is a luminance tone map**: `out = min(in · f(Y)/Y, 1)` in Rec.2020 (BT.2020 weights), with f the neutral curve.
+   It fits 498 patches within 2.25 codes (median 0.06), and hue and channel ratios are kept until a channel clips. Its output
+   colourspace is `QuickTime 'nclc' Video (9,1,9)`, so it stays in Rec.2020 primaries.
+2. **CI is not the same operation on colour.** It maps every colour into the **BT.709 gamut** (a Rec.2020 primary comes out as the 709
+   primary at every level). A Rec.2020 working colourspace (`.workingColorSpace` extended linear 2020) changes nothing. Inside 709 it
+   also desaturates toward white as the level rises (skin G/R 0.706 → 0.805 at Y 203 → 0.944 at 2000). Neither per-channel nor
+   luminance scaling describes it. Clipping to 709 first and then a lattice does not describe it either (p99 15 codes outside 709).
+   So it is a gamut map plus a chroma-dependent tone map.
+3. **§3.9 finding 3 holds for neutrals only.** On colour, CI per frame differs from QuickTime's path by a median of 47 and up to 159
+   codes.
+
+**Bake check** (5000 random PQ R′G′B′ in [0, 0.85]³, ≈ 0–4000 nits, against CI itself):
+
+| bake of the CI render | median | p99 | max |
+|---|---|---|---|
+| 1D, 1024 entries, neutrals | 0.00 | 0.01 | 0.01 |
+| 1D, 1024 entries, random colours | 50.9 | 154 | 162 |
+| 3D 33³, tetrahedral | 0.27 | 5.5 | 14.5 |
+| 3D 65³, trilinear / tetrahedral | 0.09 / 0.05 | 2.8 / 2.35 | 7.9 / 7.6 |
+
+**Answer 2: QuickTime's path (AV) preserves hue and ratio, so a 1D curve f applied to luminance reproduces it (≤ 2.25 codes). CI's
+render needs a 3D LUT, and even 65³ leaves up to 7.6 codes. A 1D LUT applied per channel reproduces neither.**
+
+#### Q3. Headroom above 1.0: yes in CI, but only for the curve family already rejected
+
+Output into extended linear Rec.2020, shown as nits on CI's 1.0 = 203 scale.
+
+| nits in | 10 | 50 | 100 | 203 | 400 | 600 | 1000 | ≥ 2000 |
+|---|---|---|---|---|---|---|---|---|
+| CI no filter → SDR (the AV-matching curve) | 10.0 | 50.0 | 99.4 | 159 | 194 | 201 | 203 | 203 |
+| `CIToneMapHeadroom` 4.926 → **1.0** = `CISystemToneMap` 1.0 | 6.3 | 27.9 | 53.0 | 101.8 | 150 | 174 | 203 | 203 |
+| `CIToneMapHeadroom` 4.926 → **2.0** = `CISystemToneMap` 2.0 | 9.4 | 45.6 | 90.2 | 181 | 284 | 339 | 406 | 406 |
+| `CIToneMapHeadroom` 4.926 → **4.48** = `CISystemToneMap` 4.48 | 10.0 | 50.0 | 100.0 | 203 | 396 | 581 | 909 | 909 |
+| no filter → extended destination (control) | 10 | 50 | 100 | 203 | 400 | 600 | 1000 | 2000… |
+
+- **`CISystemToneMap`** (`CIFilterBuiltins.h:708-714`, `:2553`; *"consistent with other frameworks"*) is `NS_AVAILABLE(16_0, …)`,
+  i.e. **macOS 26, above the 15.0 floor**. With `preferredDynamicRange` high or nil, it equals `CIToneMapHeadroom` at every target
+  tried. With constrainedHigh it stops at 2.0 (4.48 gives the 2.0 row). With standard it always gives the 1.0 row. **At 1.0 that is
+  §3.8's rejected `.ifSupported` curve** (100 → 53 nits, 0.53× AV's mids), not the AV-matching one.
+- **No measured API puts the AV-matching shape at a target headroom above 1.** CI's default render applies it only into an SDR
+  destination. Into an extended one it does nothing. CoreGraphics `ITURecommended` and `none` ignore `CGContextSetEDRTargetHeadroom`
+  (`CGContext.h:672`) at 1, 2 and 4.48, as `CGColorConversionInfo.h:63` says.
+- **What QuickTime does at headroom 2.0 or 4.48 cannot be measured offline.** AVFoundation's only offline HDR→SDR control is
+  `.forceSDR`, which is fixed at headroom 1 (output `contentHeadroom` 1.0). On-screen QuickTime at headroom > 1 needs an attended
+  LG run. Under this repo's screenshot rule (Manifold window only) that is a by-eye check unless Robbie says otherwise. **UNKNOWN.**
+
+**Answer 3: CI can render to 2.0 or 4.48, but only with the `.ifSupported` family. Whether QuickTime uses that family above 1.0
+cannot be measured offline.**
+
+#### Q4. Cost at 3840 × 2160: negligible either way
+
+Sustained, 8 s per case, at most 3 frames in flight, 4 rotating sources, `cacheIntermediates` off. A spot check confirmed the CI path
+tone-maps (100 / 203 / 1000 nits → 0.4902 / 0.7827 / 1.0000). Budget at 60 fps: 16.67 ms.
+
+| path | fps sustained | GPU ms / frame, mean · p99 · max |
+|---|---|---|
+| CI, x422 10-bit pixel buffer → BGRA8 IOSurface (ITUR_2020 SDR) | 3457 | 0.29 · 0.29 · 0.57 |
+| CI, rgba16F texture (the offscreen's format) → BGRA8 IOSurface | 4804 | 0.21 · 0.21 · 0.39 |
+| CI, rgba16F texture → RGBAh IOSurface (linear 2020) | 3631 | 0.27 · 0.28 · 0.62 |
+| CI, rgba16F → RGBAh texture on our own command buffer (GPU span) | 3625 | 0.27 · 0.28 · 0.48 |
+| Metal compute, **copy only** (memory floor) | 3671 | 0.27 · 0.28 · 0.46 |
+| Metal compute, luminance scale with a 1D LUT (the AV shape) | 3639 | 0.27 · 0.29 · 0.72 |
+| Metal compute, 65³ 3D LUT | 3624 | 0.27 · 0.32 · 0.72 |
+
+- **Every path costs the same as a copy.** The work is memory-bound, about 1.6 % of a 60 fps frame. CI fuses the conversion into one
+  pass.
+- **CI's extra costs are elsewhere.** CPU per `startTask` is 0.038 ms (p50), 0.082 ms (p99) and 0.38 ms (max). **A new
+  source/destination colourspace pair costs about 45 ms once**, the kernel compile (44.6 ms, measured in-process after warm-up). That
+  is three 60 Hz frames, at the first PQ frame and again after a display or tag change. CI also needs its own pass and destination,
+  where a shader step folds into the existing display pass. These are bench figures. Contention with Manifold's other GPU work was
+  not measured.
+
+#### Recommendation: (b), a baked curve in the display shader, of the AVFoundation (luminance) form, at headroom 1.0 only
+
+> **⚠️ WITHDRAWN 2026-10-30 (Robbie).** QuickTime Player on screen matches neither `.forceSDR` nor Core Image (§3.10a), so the
+> premise of (b) is false. Kept below for the record. The new working hypothesis is in §3.10a.
+
+For a PQ **picture** in As macOS Shows It at granted headroom 1.0: linearise, compute Y with the picture primaries' weights, apply
+`out = min(in · f(Y)/Y, 1)`, and write SDR. f is a 1D table of the neutral curve (1.0 = SDR white; 100 → 0.489, 203 → 0.784,
+1000 → 1.0).
+
+1. **It is the only option measured to match QuickTime's path on colour as well as neutrals** (≤ 2.25 codes over 498 patches). (a), CI
+   per frame, matches on neutrals but is up to 159 codes off on saturated colour (709 gamut mapping, desaturation). A 3D LUT baked
+   from CI would reproduce CI, and so inherit that error.
+2. **f is one fixed curve.** Metadata, MaxCLL and content headroom do not move it (Q1), so a single table serves every file and live
+   source. It is ColorSync's `kCGToneMappingITURecommended`, which is available at the 15.0 floor. The table can be **sampled at
+   launch** from that API (a one-off draw of a neutral strip), so it follows the OS, or pinned as a constant with a unit test.
+   Robbie's call.
+3. **Cost does not decide it** (Q4). The shader avoids CI's ≈ 45 ms compile hitch and its second pass.
+4. **(c) for headroom > 1: keep today's behaviour until it is measured.** No offline evidence says what QuickTime does there (Q3).
+
+**Open before implementing (not measured here):**
+- **QuickTime on screen = `.forceSDR`** is still an assumption (§3.6a finding 5). An attended by-eye check on the ASUS, QuickTime
+  against Manifold side by side on a saturated PQ clip, would test it. A pixel capture of QuickTime's window needs Robbie's explicit
+  OK under the screenshot rule.
+- **PQ with non-2020 primaries** (e.g. P3-D65 PQ): which weights AV uses is untested.
+- **How the shader output reaches the layer:** an SDR-tagged layer, or PQ re-encoded at 100 nits = 1.0 under today's PQ tag (the
+  composite anchor measured in §3.6b). Untested on screen. Either way it keys on the picture transfer (CLAUDE.md, colour codes rule),
+  is display-stage only, and leaves scopes, SDI, HDMI and export alone (§6.5).
+- **Headroom > 1** (LG, HDR on): QuickTime against Manifold by eye, before any change there.
+
+### 3.10a Addendum: QuickTime Player on screen, ASUS, headroom 1.0, 2026-10-30
+
+**Set-up.** One-time exception to the screenshot rule (Robbie): a capture of QuickTime Player's window only, by window ID. QuickTime
+was already running with no documents. Only the two fixtures were opened, moved onto the ASUS PA147 (potential = current = 1.0),
+and paused: the §3.6b ProRes ramp (`pq_ramp_14.mov`, no HDR10 metadata) at 1 s, and §3.10's `pq_colour_patches.mov` (ProRes
+4444, no HDR10 metadata) at 0.5 s. Both were opened with `open -a` and driven by AppleScript (`pause`, `current time`, `bounds`),
+with no keystrokes. The video was scaled into a 1840 × 505 window (ramp bars 70 px, patches ≈ 31.6 px). Values are the mean of a box
+at each bar or patch centre, raw 8-bit in the capture's ASUS profile, with ±1 dither. AV and CI were drawn into the same profile.
+Both captures were deleted after recording. Both documents were closed, and QuickTime was left running as found. Manifold was not
+launched, and the guard was clean before and after.
+
+**Greys** (G; the ramp at three heights, 150 / 260 / 400 px, agreed within 0.1; the colour file's grey patches gave the same row):
+
+| nits | 0 | 1 | 10 | 50 | **100** | 150 | **203** | 300 | 400 | 600 | **1000+** |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **QuickTime on screen** | 0 | 26 | 64 | 119 | **152** | 172 | **187** | 205 | 217 | 234 | **255** |
+| AV `.forceSDR` = CI no filter (§3.10) | 0 | 15 | 63 | 136 | 186 | 213 | 229 | 243 | 250 | 254 | 255 |
+| Manifold today (§3.6b) | 0 | 25 | 89 | 188 | 255 | 255 | 255 | 255 | 255 | 255 | 255 |
+| CA `.ifSupported` (§3.8 (b), rejected) | 0 | 12 | 50 | 104 | 139 | 166 | 189 | 210 | 224 | 239 | 255 |
+
+**Colour patches recorded** (QuickTime / AV / CI, ASUS codes R G B; "in" is Rec.2020 nits per channel):
+
+| # | in (R, G, B nits) | QuickTime | AV `.forceSDR` | CI |
+|---|---|---|---|---|
+| 17 | 2020 red, 381, 0, 0 | 255 0 0 | 255 0 0 | 255 0 0 |
+| 19 | 2020 red, 1523, 0, 0 | 255 0 0 | 255 0 0 | 255 0 0 |
+| 25 | 2020 green, 0, 147, 0 | 0 181 0 | 0 233 0 | 14 233 0 |
+| 27 | 2020 green, 0, 590, 0 | 0 233 0 | 0 255 0 | 17 255 0 |
+| 33 | 2020 blue, 0, 0, 1686 | 0 5 255 | 0 0 255 | 0 5 255 |
+| 35 | 2020 blue, 0, 0, 6745 | 0 5 255 | 0 0 255 | 0 5 255 |
+| 41 | skin, 130, 92, 64 | 180 138 116 | 227 174 147 | 227 175 148 |
+| 43 | skin, 519, 367, 254 | 249 191 160 | 255 239 199 | 255 235 199 |
+| 49 | orange, 175, 79, 9 | 209 117 4 | 255 155 0 | 255 156 0 |
+| 51 | orange, 701, 315, 35 | 255 156 0 | 255 221 0 | 255 209 0 |
+| 57 | cyan, 8, 130, 163 | 0 170 182 | 0 219 234 | 7 219 235 |
+| 59 | cyan, 33, 520, 651 | 0 217 249 | 0 255 255 | 12 255 255 |
+
+**Summary over all patches** (max-channel |Δ|, median / p99 / max): QuickTime vs AV, greys 17 / 42 / 42, Q2 colours 24 / 65 / 65,
+random 32 / 116 / 150. QuickTime vs CI, 17 / 42 / 42, 24 / 56 / 56, 26 / 94 / 126. QuickTime's own grey curve applied to BT.2020
+luminance: 14 / 67 / 67 on Q2 colours and 19 / 84 / 114 on random; applied per channel: 9 / 163 / 163 and 26 / 157 / 178.
+⚠️ Only the 14 greys and the 12 patches above were recorded per patch. The 450 random patches survive only in these summary
+figures, so later fits use the 26 recorded patches.
+
+**Findings:**
+1. **QuickTime on screen matches neither AV `.forceSDR` nor CI**, on greys (100 nits 152 against 186, 203 nits 187 against 229) or
+   on colour. It is darker from 50 nits up and still clips from 1000 nits.
+2. **Its grey curve is none of those measured:** near Manifold today at 1 nit (26 against 25), equal to AV at 10 nits (64 against
+   63), and close to but not equal to `.ifSupported` from 203 to 600 nits (187 / 205 / 217 / 234 against 189 / 210 / 224 / 239).
+3. **On these two frames it is content-independent:** the ramp and the colour file gave the same grey row.
+4. **Neither luminance scaling nor per-channel mapping with its own grey curve reproduces its colours.**
+5. Into the ASUS profile, AV and CI come out close on colour, because the display gamut clips CI's 709 mapping. §3.10's
+   47-code median split was measured in linear Rec.2020.
+6. Not verified: that a window capture equals the glass for QuickTime's layer. The same method matched predictions for Manifold's
+   layer (§3.6a, §3.6b).
+
+**Consequence:** §3.10's recommendation (b) is withdrawn. **New working hypothesis (Robbie):** QuickTime's picture is the
+compositor tone-mapping an `AVPlayerLayer`, not an offline conversion. The goal is a `CAMetalLayer` configuration that makes the
+compositor do the same, rather than a replicated curve.
+
+### 3.10b Finding QuickTime's layer configuration, 2026-10-30
+
+**Step 1, offline fits** of the 26 recorded QuickTime patches (§3.10a; bench `qtfit.swift` in this session's scratchpad). Output
+goes through ColorSync into the ASUS profile. The BT.2390 EETF parameters were grid-searched on greys: source peak Lw 400–10 000,
+target peak Lmax 60–600 (output = nits / Lmax), target black Lmin 0–0.5.
+
+| form (median / p99 / max, ASUS codes) | greys (14) | colours (12) |
+|---|---|---|
+| **max(RGB) scaling with QuickTime's own grey curve** | 0 / 0 / 0 | **3 / 13 / 13** |
+| luminance scaling with QuickTime's grey curve | 0 / 0 / 0 | 11 / 38 / 38 |
+| per channel with QuickTime's grey curve | 0 / 0 / 0 | 13 / 86 / 86 |
+| BT.2390 EETF on max(RGB) (best: Lw 4000, Lmax 330, Lmin 0.5) | 5 / 8 / 8 | 5 / 18 / 18 |
+| BT.2390 EETF on ICtCp I, Ct/Cp kept (Lw 4000, Lmax 335, Lmin 0.5) | 5 / 8 / 8 | 13 / 38 / 38 |
+| BT.2390 EETF on ICtCp I, Ct/Cp × min(I/I′, I′/I) | 5 / 8 / 8 | 14 / 154 / 154 |
+| BT.2390 EETF on luminance / per channel | 4–5 / 8 / 8 | 9 / 38 / 38 · 5 / 60 / 60 |
+
+QuickTime's colour behaviour is closest to max(RGB) scaling. No BT.2390 EETF form fits even the greys within 8 codes. Its grey curve
+(as linear 2020, 1.0 = SDR white): 1 nit 0.0103, 10 nits 0.0513, 50 nits 0.1845, 100 nits 0.314, 203 nits 0.497, 400 nits
+0.694, 1000 nits 1.0.
+
+**Step 2, on screen.** A temporary DEBUG switch, `MANIFOLD_PQ_TONEMAP=<automatic|ifSupported|never>[+hdr10[:scale]]`
+(`MetalVideoRenderer.swift`, `#if DEBUG`, tagged for removal before commit), applies only to a PQ picture in As macOS Shows It.
+Profile build in `.build-run/`, launched by absolute path, one launch per condition, quit by PID, guard clean before and after.
+Windows were moved onto the ASUS through AX position and size, and files were opened with `manifold-proc.sh open`. Captures were
+window-only and deleted after recording. The files are the two QuickTime played: no HDR10 metadata, so `hdr10` is
+`hdr10(displayInfo: nil, contentInfo: nil, …)`, which the header calls "system defaults". Each log shows the read-back and
+`display is in SDR mode on "ASUS PA147"`. ⚠️ The first launch used a relative path, which `manifold-proc.sh` rejects. After
+`lsof` confirmed that PID was this tree's `.build-run` binary, the same by-PID AppKit Quit was sent by hand. Every later launch used
+the absolute path.
+
+| condition (read-back) | greys | vs QuickTime: greys | colours (12) |
+|---|---|---|---|
+| (a) `.automatic`, no metadata (`nil · automatic`) | 0 25 89 188 255 … (= today) | 25 / 103 / 103 | 74 / 102 / 102 |
+| **(b) `.automatic` + `hdr10` scale 100 (`set · automatic`)** | **0 26 64 119 152 172 187 205 217 234 255 …** | **0.1 / 0.3 / 0.3** | **1.2 / 15 / 15** |
+| (c) `.ifSupported` + `hdr10`, scale 100 / 203 / 10 000 (`set · ifSupported`) | 0 12 50 104 140 166 188 211 223 238 255 … | 5.7 / 15 / 15 | 5.0 / 18 / 18 |
+
+(b) colour patches, Manifold / QuickTime: #41 skin 180 138 117 / 180 138 116 · #43 249 191 160 / 249 191 160 · #49 orange 209 117
+5 / 209 117 4 · #51 255 155 0 / 255 156 0 · #57 cyan 0 170 183 / 0 170 182 · #25 green 0 182 0 / 0 181 0 · #17, #19 red exact ·
+**#27 green 590 nits 0 248 0 / 0 233 0 · #59 cyan 33 / 520 / 651 nits 0 232 248 / 0 217 249 · #33, #35 blue 0 0 255 / 0 5 255**.
+
+**Findings:**
+1. **`.automatic` + `CAEDRMetadata.hdr10` reproduces QuickTime's grey curve exactly** (all 14 bars within 0.3 codes, on both files),
+   and 8 of the 12 recorded colours within 1.2 codes.
+2. **What differs is saturated colour far outside the display's gamut:** bright 2020 green and cyan (up to 15 codes brighter in
+   Manifold) and the G channel of pure 2020 blue (0 against 5). The cause is not identified. Gamut handling is the obvious
+   candidate, but that is not measured.
+3. **`.automatic` alone does not tone-map** (a = today). The metadata switches it on. With `.ifSupported` the same metadata gives the
+   `.ifSupported` curve, already rejected in §3.8.
+4. **`opticalOutputScale` has no effect** on this PQ-encoded rgba16F drawable at 100, 203 and 10 000 (byte-identical).
+
+**Decision (Robbie, 2026-10-30):** the target for PQ in As macOS Shows It is **`toneMapMode = .automatic` +
+`CAEDRMetadata.hdr10`**. **Open, accepted for 0.9.1:** saturated out-of-gamut colours differ from QuickTime by up to 15 codes. The
+AVPlayerLayer bench (what QuickTime-style playback sets on its layers) is a follow-up that does not block 0.9.1.
+
+### 3.10c `.automatic` + `hdr10`: file metadata, and HDR mode, 2026-10-30
+
+**a. ASUS, headroom 1.0: metadata does not change the curve, in Manifold or in QuickTime.** Fixtures: the §3.6b ramp and §3.10's
+colour patches, re-encoded HEVC Main 10 (VideoToolbox, Quality 1.0), once with mastering 0.0001–1000 nits + MaxCLL 1000 (ffmpeg
+confirmed both boxes) and once with none. QuickTime: the same window-only procedure as §3.10a. Only the 14 grey bars and the 12
+patches were recorded; captures deleted; documents closed. Manifold: the DEBUG switch at `automatic+hdr10:100`, which for a source
+with MDCV luminance builds `hdr10(minLuminance: 0.0001, maxLuminance: 1000, opticalOutputScale: 100)` (logged). Read-back `set ·
+automatic`, `display is in SDR mode on "ASUS PA147"`, one launch, quit by PID, guard clean.
+
+| G, ASUS codes | 1 | 10 | 50 | 100 | 150 | 203 | 300 | 400 | 600 | 1000+ nits |
+|---|---|---|---|---|---|---|---|---|---|---|
+| QuickTime, ProRes, no metadata (§3.10a) | 26 | 64 | 119 | 152 | 172 | 187 | 205 | 217 | 234 | 255 |
+| QuickTime, HEVC, mastering 1000 + MaxCLL 1000 | 23 | 61 | 116 | 150 | 170 | 186 | 204 | 216 | 233 | 255 |
+| QuickTime, HEVC, no metadata | 23 | 61 | 116 | 150 | 170 | 186 | 204 | 216 | 233 | 255 |
+| **Manifold, HEVC with metadata, `hdr10(min, max)` from the file** | 26 | 64 | 119 | 152 | 172 | 187 | 205 | 217 | 234 | 255 |
+| Manifold, ProRes, `hdr10` system defaults (§3.10b) | 26 | 64 | 119 | 152 | 172 | 187 | 205 | 217 | 234 | 255 |
+
+- **QuickTime:** the HEVC file with and without metadata is identical, greys and all 12 colours. It is within 2.9 codes of the
+  ProRes file; QuickTime decodes this HEVC 2–3 codes darker below 100 nits.
+- **Manifold:** the file's metadata gives the same greys and colours as system defaults (for example #41 skin, 180.0 138.1 116.8
+  both times). The codec makes no difference in Manifold.
+- Against QuickTime on the HEVC file, Manifold is greys 1.1 / 3.3 / 3.3 and colours 2.5 / 15.9 / 15.9. The open items are the
+  same as §3.10b: #27 green 248 against 233, #59 cyan G 232 against 216, #33/#35 blue G 0 against 5.
+- Only 1000-nit mastering was tested on the ASUS.
+
+**b. LG, HDR on: Manifold matches QuickTime by eye (Robbie).** One launch with `automatic+hdr10:100`, window on the LG, quit by
+PID, guard clean. Files, the same in both apps: the §3.6b ProRes ramp (no metadata, so `hdr10` system defaults) and
+`/Volumes/DCCOLOR/HDR10_9-16-9_resolve_prores4444_Meta.mov` (ProRes 4444 3840 × 2160, tagged 9-16-9; mastering 0.0001–4000 nits on
+P3; logged `hdr10(minLuminance: 0.0001, maxLuminance: 4000, …)`). **Finding, not a defect:** that file declares **MaxCLL 54 900**,
+above PQ's 10 000-nit ceiling. Read-back `set · automatic` for both.
+- **Headroom granted: 4.4827 of potential 8.9654**, both files. Before any PQ frame the layer had 1.0. It was granted at the first
+  PQ frame (`display change — screen parameters` → 4.4827) and stayed there.
+- **Ramp: identical in both apps.** The 4000- and 10 000-nit bars blend together in both, and every bar below is distinguishable.
+  So at 4.48 the picture is rolled off well above the 448 nits where today's `.never` clips (§6.4), and the roll-off is the same as
+  QuickTime's.
+- **HDR10 clip: "pretty much identical"** in both apps. By eye on the LG; a sanity check, not a reference judgement.
+
+**Proposed gate: always, for a PQ picture in As macOS Shows It, whatever the headroom.** Not only at potential headroom 1.0, for
+three reasons.
+1. **It is measured to match QuickTime at both ends:** numerically at 1.0 (ASUS) and by eye at 4.48 (LG). At 4.48, today's
+   behaviour (`.never`, clip above 100 · h nits) would merge every bar from 600 nits up, where QuickTime separates them up to
+   2000.
+2. **The compositor adapts by itself.** A gate on the mode and the picture transfer, not the display, never has to change when the
+   window moves between displays or HDR is toggled. The display's headroom changes what the compositor does with the same layer
+   state, and Manifold changes nothing. A gate on potential headroom 1.0 would flip the layer state on every HDR toggle or
+   move between the LG and the ASUS.
+3. **It is the same structure as HLG** (§3.1: `.hlg` + `.ifSupported` whenever the picture is HLG in As macOS Shows It).
+
+Not measured: headroom values between 1 and 4.48, a second brightness setting (the LG has none on this Mac, §3.6c), 4000-nit
+mastering on the ASUS, and Hold C / mode-switch latency with this layer state (T6-style).
+
+**Approved 2026-10-30 (Robbie):** `.automatic` + `CAEDRMetadata.hdr10` for a PQ picture in As macOS Shows It, at any headroom.
+
+#### Design, as implemented (2026-10-30, uncommitted)
+
+| mode | picture transfer | `edrMetadata` | `toneMapMode` | colorspace / wantsEDR / shader |
+|---|---|---|---|---|
+| As macOS Shows It | 18 (HLG) | `.hlg` | `.ifSupported` | unchanged (§3.1) |
+| **As macOS Shows It** | **16 (PQ)** | **`.hdr10`** (below) | **`.automatic`** | unchanged |
+| As macOS Shows It | anything else | nil | `.never` | unchanged |
+| Reference, Bypass | any | nil | `.never` | unchanged |
+
+- **Where:** `MetalVideoRenderer.publishColorState()`, beside the HLG arm. The gate is `displayTransform == .os &&
+  pictureTransferCode == 16 && edrMetadataAvailable` (the HLG check, renamed, since it guards both). It uses the **picture** transfer,
+  so a LUT stated as PQ counts and a PQ source under a LUT stated as Rec.709 does not.
+- **The metadata:** `hdr10(minLuminance:maxLuminance:opticalOutputScale: 100)` from `sourceHDR10.mastering` when the source declares
+  mastering luminance (with max > min) and the picture is not a LUT's stated output (the same rule as `OutputSignal`). Otherwise
+  `hdr10(displayInfo: nil, contentInfo: nil, opticalOutputScale: 100)`, which the header calls system defaults. The two measured
+  identical on screen (§3.10c a). MaxCLL is not passed: the min/max initializer takes none, and the HDR10 file in §3.10c b declares
+  an impossible 54 900. Scale 100 is the header's 1.0 = 100 nits; 100, 203 and 10 000 measured byte-identical (§3.10b).
+- **One install, one thread:** both values travel in the existing `PendingColorState` with the colorspace. They are installed in the
+  same `CATransaction` before `nextDrawable()`, and read back by the existing `[EDR] layer read-back` line, which prints on a change.
+  Main logs `[EDR] PQ → macOS HDR10 tone map: toneMapMode automatic · hdr10 (<where from>) — AS MACOS SHOWS IT` when the state or its
+  source changes, and `logLayerState`'s third `[EDR]` line names it.
+- **Display moves and HDR toggles change nothing in Manifold.** The gate reads no display state, so the layer state is the same on
+  every display. The compositor applies it to whichever display the window is on, at that display's headroom. That is the reason for
+  "any headroom" (§3.10c b).
+- **Readout:** `renderer.pqToneMapActive` (what was published) drives the verdict `PQ (<tier>) → macOS HDR10 tone map · follows
+  display · scopes show the file`, with the tier `tagged` / `assumed` / `overridden`, or `LUT output`, as for HLG. It is logged as
+  `[CHAIN] Verdict:`.
+- **Wording:** `ReferencePlan`'s PQ summary and log line no longer say "identical to OS" / "Reference = As macOS shows it" (now
+  `Reference — PQ absolute, 1.0 = 100 nits, no tone map`). The comments in `ReferencePlan.swift`, `DisplayTransform.swift` and the
+  renderer are updated to match.
+- **Scopes, SDI, HDMI and export are unaffected by construction.** The change adds only two layer presentation properties, on the
+  desktop layer, written by the render thread's install block. The scopes, the DeckLink v210 convert, the HDMI InfoFrame and the frame
+  export all read the offscreen ring or `OutputSignal`, upstream of the layer (§3.4, §6.5), and neither is touched. T7 below checks it
+  by bytes.
+- **Removed:** the `MANIFOLD_PQ_TONEMAP` DEBUG switch.
+
+#### Implementation and verification, 2026-10-30 (uncommitted)
+
+**Builds.** This change: Profile, `.build-run/`. Baseline: `b9ce869` (`git archive`, vendored libraries copied, DeckLink SDK
+symlinked, Profile, `.build-b9ce869/`, gitignored). `b9ce869` → HEAD differs in docs and `scripts/manifold-proc.sh` only, so it is
+the app as committed. One session per build (driver `verify.py`, this session's scratchpad): launched by absolute path with
+`MANIFOLD_DEBUG_MENU=1`, window on the ASUS (headroom 1.0) via AX position and size, files opened with `manifold-proc.sh open`. Modes
+were set by AX clicks on the Color menu items, each confirmed by its `display transform →` line. Captures were window-only by id, 12 × 12
+boxes at each bar centre, deleted at once. Quit by PID, guard clean before and after. No keystrokes.
+
+**1. PQ ramp in As macOS Shows It reproduces §3.10c (pass).** `0 26 64 119 152 172 187 205 217 234 255 …`: 100 → **152**, 203 →
+**187**. That holds on the ProRes ramp (system defaults) and on the HEVC ramp with 1000-nit mastering (`hdr10 (mastering
+0.0001–1000 nits, from the source)`). The colour patches are as in §3.10b: greys 0.1 / 0.3 / 0.3, colours 1.2 / 15 / 15 against
+QuickTime. Log: `[EDR] PQ → macOS HDR10 tone map …`, read-back `set · automatic`, `[CHAIN] Verdict: PQ (tagged) → macOS HDR10 tone
+map · follows display · scopes show the file`. Baseline: `0 25 89 188 255 …` (as §3.6b).
+
+**2. Mode switches with a PQ file (pass; Hold C itself not run).** OS → Reference → Bypass → OS once with captures, then ten cycles
+on the PQ ramp, timed from the AX click returning to the render thread's read-back line:
+
+| switch | read-back | after the click (n = 10) |
+|---|---|---|
+| → Reference | `nil · never`, every time | median 15 ms, max 15 ms |
+| → Bypass | none, as expected (Reference → Bypass changes no layer property) | — |
+| → As macOS Shows It | `set · automatic`, every time | median 15 ms, max 25 ms |
+
+No missing or stale read-back. The OS capture after the ten cycles equals the first. In each mode the capture is that mode's
+curve (Reference and Bypass = baseline). The baseline printed no read-back on these switches: its layer state never changed for PQ.
+**Hold C (attended, Robbie, 2026-10-30, pass).** The HDR10 ramp (`pq14_m1000_c1000.mov`, mastering 0.0001–1000 nits) was held in
+As macOS Shows It on the ASUS: several long holds, single taps, and runs of fast taps 58–82 ms apart, 31 hold/release pairs in all.
+Every hold read back `nil · never` with the Reference verdict, and every release read back `set · automatic` with the HDR10
+verdict: none missing, none stale, and the window ended in As macOS Shows It. First frame under the new state handed to `present()`
+after the key event: hold median 4.5 ms (0.4–15.6), release median 4.7 ms (0.9–13.3), within one 60 Hz refresh. By eye: as
+expected, with Reference showing only the first 4 bars on the ASUS (it clips above 100 nits). Each swap also logs "colour state
+installed … AFTER a frame was already on screen; … Re-rendering to repair it". That is pre-existing: the menu mode cycles log it
+the same number of times (45) in this build and in `b9ce869`.
+
+**3. T7, SDI/HDMI and export bytes (pass).** Debug ▸ Chroma Scrub Bench in OS, Reference and Bypass. Files: the ProRes PQ ramp and
+the HEVC ramp with 1000-nit mastering (so the source's HDR10 metadata reaches the output). **SHA-256 of all 8 files per run
+(`.rgba16f`, `.v210`, `.v210.json`, `.png`, playback and scrub) identical between this change and `b9ce869`, in every mode, for both
+files** (`.rgba16f` `23ee70caec70…`, `.v210` `38691f71cced…`). DeckLink signal lines identical: `PQ · Rec. 2020 · mastering P3
+D65 · 1000 / 0.0050 cd/m² (defaults) · MaxCLL 0 · MaxFALL 0` for the ProRes ramp, `… 1000 / 0.0001 cd/m² · MaxCLL 1000 · MaxFALL
+400` for the HEVC ramp. The bench writes to the export-folder preference (the Desktop). The 96 files were moved to the scratchpad by
+the names in the logs; none were left.
+
+**4. T8, unchanged elsewhere (pass).** Bar for bar and patch for patch, this change = `b9ce869`:
+- PQ Reference `0 25 89 188 255 …`, PQ Bypass `0 38 77 112 130 140 148 159 166 178 192 211 230 255`, on both PQ ramps, and the colour
+  patches in Reference and Bypass.
+- HLG ramp (21 bars): OS `0 3 13 25 37 48 60 71 82 93 104 116 130 146 166 188 206 221 233 245 255` (`set · ifSupported`), Reference
+  `0 6 26 46 67 87 107 128 148 168 189 211 237 255 …`, Bypass `0 12 25 … 242 255`.
+- SDR ramp (21 bars): OS `0 10 27 43 58 73 86 100 …`, Reference `0 5 13 26 40 …`, Bypass `0 12 25 … 242 255`.
+
+(Bar values sit 1–2 codes off §6.9 / §6.7 because this driver samples a 12 × 12 box at each bar centre across the window width. Both
+builds were measured identically.)
+
+**Seen, pre-existing:** both builds took more than 30 s to quit with five document windows open (`manifold-proc.sh quit` timed
+out, exit 3). Each exited on its own soon after, and the guard was clean.
+
 ### 3.7 Follow-ups, not in this change
 
 - File AVE through `hlg(ambientViewingEnvironment:)` from `kCMFormatDescriptionExtension_AmbientViewingEnvironment`
