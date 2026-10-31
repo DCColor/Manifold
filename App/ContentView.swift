@@ -3,6 +3,7 @@ import ShortcutRegistry
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 import StreamBookmarkModel
+import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision banner (0.9.1)
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -429,6 +430,9 @@ struct ContentView: View {
     // The transient readout's text, or nil when nothing is showing. Auto-hides on its own `.task`
     // timer, keyed on the text — see `rasterReadout`.
     @State private var rasterNotice: String?
+    // The Dolby Vision banner was closed. Cleared each time the engine reads a file (the `engine.metadata` observer), so
+    // closing it holds for the file on screen only. See `dolbyVisionBanner`.
+    @State private var dolbyVisionBannerClosed = false
     // Tray open/close and the three per-slot scope selections now live on `chrome` (per window).
     // They were @AppStorage here, which shared them across every open window; the keys and their
     // defaults are unchanged, so an existing install's arrangement carries over. Each slot can show
@@ -779,6 +783,8 @@ struct ContentView: View {
             // It cannot defeat the feature — nothing but a read publishes metadata, so an external
             // rewrite still lights the button.
             fileWatch.rebaseline()
+            // A newly read file earns its own Dolby Vision banner, even after the last one was closed.
+            dolbyVisionBannerClosed = false
             // Derive the Metal layer colorspace once per source from the
             // inspector's authoritative color tags (not per-frame from buffers).
             if let meta {
@@ -1303,6 +1309,7 @@ struct ContentView: View {
                 arbitrationNotice
                 connectErrorBanner
                 deckLinkRefusalBanner
+                dolbyVisionBanner
             }
         }
         .animation(.easeInOut(duration: 0.25), value: whep.lastError)
@@ -2569,6 +2576,39 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.55)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// A Dolby Vision file whose base layer no standard decoder can show (profile 5, or any profile without a compatible
+    /// base layer: `DolbyVisionConfig.bannerText`). Manifold shows the base layer, so the picture is not the file's.
+    ///
+    /// STANDING, LIKE `deckLinkRefusalBanner`, AND IN ITS STYLE: true for as long as the file is loaded, so no timer. Closing
+    /// it holds until the engine reads another file (or this one again). The Inspector's Dolby Vision row says the same, and stays.
+    @ViewBuilder private var dolbyVisionBanner: some View {
+        if engine.hasMedia, let message = engine.metadata?.dolbyVision?.bannerText, !dolbyVisionBannerClosed {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button {
+                    dolbyVisionBannerClosed = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.55))
+                .accessibilityLabel("Close Dolby Vision warning")
             }
             .padding(12)
             .frame(maxWidth: 520, alignment: .leading)
