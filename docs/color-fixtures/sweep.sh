@@ -1,5 +1,11 @@
 #!/bin/bash
 #
+# ⚠️⚠️ AIR ONLY. NEVER RUN THIS ON THE MAC STUDIO (docs/BUGS.md, "Scripts", 2026-10-31). ⚠️⚠️
+# `pkill -f "MacOS/Manifold"` matches EVERY Manifold process by path, the installed /Applications/Manifold.app
+# included, and `open -a "$APP"` addresses the app by path. Both break CLAUDE.md's launch/quit rules (launch by
+# binary, quit by PID through scripts/manifold-proc.sh); on the Studio the installed copy rewrites licence
+# values in the real plist when it is launched or quit that way.
+#
 # EXPERIMENT 3 sweep — for each candidate layer destination: launch Manifold on the wedge,
 # capture the COMPOSITED WINDOW (not the offscreen export), extract raw samples, quit.
 #
@@ -93,11 +99,16 @@ for tool in getwin extract; do
 done
 
 # ── Sweep ─────────────────────────────────────────────────────────────────────────────────
+# APPPID is this script's own child. Waited on after each quit: an exited child stays a zombie until its parent
+# reaps it, and a zombie still answers `kill -0` (docs/BUGS.md slow-quit entry, 2026-10-30).
+APPPID=""
+reap() { [ -n "$APPPID" ] && wait "$APPPID" 2>/dev/null; APPPID=""; }
 for idx in 0 1 2; do
     echo "=== destination index $idx ==="
-    pkill -f "MacOS/Manifold" 2>/dev/null; sleep 1
+    pkill -f "MacOS/Manifold" 2>/dev/null; reap; sleep 1
     echo "$idx" > /tmp/manifold_debug_cs
     "$BIN" > "run_$idx.log" 2>&1 &
+    APPPID=$!
     sleep 4
     open -a "$APP" "$WEDGE"
     sleep 7
@@ -126,7 +137,7 @@ for idx in 0 1 2; do
     grep -E "\[CSDEBUG\]" "run_$idx.log" | tail -2 | sed 's/^/  /'
 done
 
-pkill -f "MacOS/Manifold" 2>/dev/null
+pkill -f "MacOS/Manifold" 2>/dev/null; reap
 rm -f /tmp/manifold_debug_cs
 
 echo ""

@@ -4,11 +4,11 @@
 #
 #   manifold-proc.sh guard                      exit 2 (and list them) if any process of /Applications/Manifold.app
 #                                               is running, else 0. Never touches what it finds.
-#   manifold-proc.sh check <pid>                exit 0 if <pid> is alive and is a build from this tree, else 1
+#   manifold-proc.sh check <pid>                exit 0 if <pid> is alive (not a zombie) and is a build from this tree, else 1
 #   manifold-proc.sh quit <pid> [--no-wait] [--timeout S]
 #                                               a Quit Apple event to THAT process only (NSRunningApplication
 #                                               terminate), after `check`; then waits up to S s (default 30) for
-#                                               it to exit. --no-wait returns once the event is sent (the driver
+#                                               it to exit (a zombie counts as exited). --no-wait returns once the event is sent (the driver
 #                                               polls its own Popen). Exit 0 sent/exited, 1 refused, 3 still alive.
 #   manifold-proc.sh open <pid> <file>...       open files in THAT running build, after `check`: Launch Services
 #                                               with the exact bundle of that pid (see below). Refuses if the build
@@ -27,12 +27,20 @@ BUILD_SUFFIX="/Manifold.app/Contents/MacOS/Manifold"
 
 exe_of() { ps -o comm= -p "$1" 2>/dev/null; }
 
+# Alive means running, not a zombie. A process that has exited stays in the table as a zombie (ps state Z) until its
+# parent reaps it, and `kill -0` still succeeds on it. A driver that launched the build itself (Python `Popen`) and
+# never waited made this script report "still running after 30 s" for a build that had quit in under a second
+# (2026-10-30, docs/BUGS.md slow-quit entry). Drivers must still wait() on their child; this only stops the
+# misreport.
+alive() { kill -0 "$1" 2>/dev/null && [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]; }
+
 # A build from this tree: alive, executable under $REPO, ending in Manifold.app/Contents/MacOS/Manifold,
 # and never the installed copy.
 is_ours() {
   local pid="$1" exe
   [[ "$pid" == <-> ]] || { echo "manifold-proc: not a pid: $pid" >&2; return 1; }
   kill -0 "$pid" 2>/dev/null || { echo "manifold-proc: pid $pid is not running — nothing sent" >&2; return 1; }
+  alive "$pid" || { echo "manifold-proc: pid $pid has exited (a zombie its parent has not reaped) — nothing sent" >&2; return 1; }
   exe="$(exe_of "$pid")"
   [[ "$exe" == "$INSTALLED"* ]] && { echo "manifold-proc: pid $pid is the INSTALLED app ($exe) — refused" >&2; return 1; }
   [[ "$exe" == "$REPO/"* && "$exe" == *"$BUILD_SUFFIX" ]] \
@@ -62,7 +70,7 @@ case "${1:-}" in
       a.isNil() ? 'not-an-app' : (a.terminate ? 'sent' : 'refused')" 2>&1)"
     [[ "$r" == sent ]] || { echo "manifold-proc: quit of pid $pid not sent ($r)" >&2; exit 1; }
     (( wait )) || exit 0
-    for _ in {1..$(( timeout * 10 ))}; do kill -0 "$pid" 2>/dev/null || exit 0; sleep 0.1; done
+    for _ in {1..$(( timeout * 10 ))}; do alive "$pid" || exit 0; sleep 0.1; done
     echo "manifold-proc: pid $pid still running after ${timeout} s" >&2; exit 3 ;;
   open)
     pid="${2:-}"; shift 2 2>/dev/null

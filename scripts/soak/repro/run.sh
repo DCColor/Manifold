@@ -1,4 +1,8 @@
 #!/bin/zsh
+# ⚠️⚠️ DO NOT RUN AS IS: IT SENDS KEYSTROKES, WHICH CLAUDE.md FORBIDS (docs/BUGS.md, "Scripts", 2026-10-31). ⚠️⚠️
+# ⌘N (line 59) and ⌃⌥D (line 85) go out through `System Events … keystroke`, which delivers them to whatever app
+# is in front, not to the Manifold this script launched: a ⌘Q sent the same way quit VS Code (2026-10-19). Drive
+# Manifold by accessibility clicks on named elements, and quit it by PID through scripts/manifold-proc.sh.
 # One unattended SRT repro run (README.md, "Local SRT repro"): serve <file.ts> as a local SRT
 # listener, launch Manifold with the DEBUG-only MANIFOLD_SRT_DEBUG_URL override (no bookmark, so no
 # keychain read), Deny the unsigned build's licence prompt, press ⌃⌥D, and wait for the file to end.
