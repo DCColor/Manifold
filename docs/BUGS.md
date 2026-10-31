@@ -2339,7 +2339,9 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 ## ☐ OPEN — NEW 2026-10-23 — PRE-EXISTING, ALL BUILDS — CAUSE FOUND 2026-10-31 — file playback at 95.90 fps and above does not keep up
 
 **Cause found 2026-10-31: the renderer's 12-frame queue drops the frames about to come due.** Same cause as the 0.9.1 entry
-*A 119.95 fps iPhone clip plays audio but the picture freezes*, which has the measurements and the proposed fix. It is not decode,
+*A 119.95 fps iPhone clip plays audio but the picture freezes*, which has the measurements and the fix (decode backpressure,
+2026-10-31, not committed; 96, 100, 119.88 and 120 fps now play at their rate on the desktop). The DeckLink side above 60 is the
+separate 2160p entry above. It is not decode,
 the frame source's back-pressure or the display tick. *Was: "Not investigated" (below).*
 
 **Found in the SDI scaling follow-ups** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, P8).
@@ -3460,13 +3462,13 @@ the 30 s was the driver's.
 
 ---
 
-## ☐ OPEN 2026-10-31 — 0.9.1, HIGH — PRE-EXISTING, ALL BUILDS — CAUSE MEASURED, FIX PROPOSED, NOT APPLIED — A 119.95 fps iPhone clip plays audio but the picture freezes
+## ☐ OPEN 2026-10-31 — 0.9.1, HIGH — PRE-EXISTING, ALL BUILDS — FIXED 2026-10-31 (DECODE BACKPRESSURE), VERIFIED, NOT COMMITTED — A 119.95 fps iPhone clip plays audio but the picture freezes
 
 **Seen (Robbie, 2026-10-31):** `IMG_5070.MOV` (1920×1080 HEVC Main 10, 119.95 fps nominal, variable, iPhone; Dolby Vision 8.4)
 plays its audio, but the picture stays on the frame playback started from. Desktop only, no DeckLink output. QuickTime plays it
 normally, so decode speed is not the limit. The same cause as *file playback at 95.90 fps and above does not keep up* (2026-10-23).
 
-**The mechanism (code).** A file's frames are decoded by `AVAssetReaderTrackOutput` (`FileFrameSource.swift:77`), paced by a hidden
+**The mechanism (code; line numbers from before the fix).** A file's frames are decoded by `AVAssetReaderTrackOutput` (`FileFrameSource.swift:77`), paced by a hidden
 `AVSampleBufferDisplayLayer`: the pump reads while that layer's renderer `isReadyForMoreMediaData` (`FileFrameSource.swift:103-120`;
 layer at `ContentView.swift:1167`). Every frame goes both to that layer and, through `onVideoFrame`, to `MetalVideoRenderer.enqueue`
 (`FrameEngine.swift:4352-4353`, `WindowDeck.swift:1113`), which keeps a PTS-sorted queue bounded at **`defaultMaxQueued = 12` frames**
@@ -3511,7 +3513,57 @@ even with the window moved to the ASUS (60 Hz; the colour probe followed it to d
 run. By the code, on a 60 Hz link the freeze is the same, and the playing rates would add one superseded drop per tick above 60 fps.
 (A link that ignores the window's display is a separate observation; see *`CVDisplayLink` → `CADisplayLink`*, post-release.)
 
-**Proposed fix (not applied; Robbie to decide).** Bound a playing file's queue by TIME, not frames. On a file load, set
+**Fixed 2026-10-31: the decode pump waits on a full queue (backpressure), chosen over a time-sized queue on evidence.**
+`VideoSinkGate` (new, `ManifoldCore/VideoSinkGate.swift`): before decoding each frame, both file pumps (`FileFrameSource.start`,
+`LibavFrameSource.arm`) ask the window renderer's queue for room (`MetalVideoRenderer.queueHasRoom`); while it is full the pump
+parks instead of decoding, and the renderer resumes it whenever frames leave the queue (`onQueueRoom`: a tick's selection, the
+paused relaxed render, a flush). The engine owns one gate (`FrameEngine.videoSinkGate`), wired per window in `WindowDeck`. A full
+queue now always holds the next frames due, so the clock reaches the oldest, the tick takes it and the pump runs again: **a file
+cannot evict its next frame at any rate, by construction.** The 12-frame bound, the drop-oldest backstop and the paused trim policy
+are unchanged; for a file the backstop no longer fires. Live sources do not use the gate; their bound and overflow report are
+untouched. Also added: **`[FRAMEQ]`**, a file's evictions logged at most once a second (they were silent), and **`[FREEZE-GUARD]`**,
+log only: a playing file whose queue is full with nothing due for 0.5 s of clock (and `recovered` when a frame shows again). A
+variable-rate file holding one picture that long would also trip it, correctly: the picture is not advancing.
+
+**The comparison (2026-10-31, one build with a temporary DEBUG policy switch, since removed; the same nine files, 4 s each, LG):**
+
+| | 96–120 fps, `IMG_5070.MOV`, 2160p120 | Evicted unseen | 2160p120 footprint, idle → playing | Distinct decoder surfaces |
+|---|---|---|---|---|
+| Old (12, evict oldest) | frozen or stuttering (0.7–65 shown/s) | 135–479 per run | 195 → 253 MB (frozen) | 29 |
+| (a) time-sized queue (≤ 39) | 107–120 shown/s | **2 at 2160p120** | 196 → 501 MB | 28 |
+| (b) backpressure (12, pump waits) | 115–120 shown/s | **0 in every run** | 264 → 497 MB | 26 |
+
+- (a) relies on the pacing renderer's lead staying under 0.30 s, a number inside AVFoundation; it already evicted at 2160p120.
+- Memory is the same: 1080p ≈ 370 MB playing under all three. The distinct `IOSurface`s reaching the queue (26–29) did not grow
+  with the bound, so the queue holds the decoder's own buffers, the ones the hidden layer holds, not copies (one `CMSampleBuffer`
+  to both, `alwaysCopiesSampleData = false`).
+- Clock against wall time 1.0000 in every run. Under (b) the hidden layer's lead falls to 85–98 ms at 120 fps (12 frames); at
+  48–100 fps it is unchanged. Audio has its own reader and does not wait on the video pump.
+- 119.88 fps on the 120 Hz tick shows ≈ 115 distinct frames a second under (a) and (b) alike, with ≈ 5 a second superseded: the
+  0.12 fps beat against the tick, plus tick jitter. A tick effect, not the queue.
+
+**Verified 2026-10-31** (the final build, no temporary code; window on the LG; `[PLAYBACK-STATS]`, windows of just over 1 s):
+- **Playback, frames presented per window:** 48 → 50 49 48 · 60 → 61 61 60 · 72 → 74 73 72 · 96 → 98 97 96 · 100 → 102 101 100 ·
+  119.88 → 122 120 112 (10 superseded) · 120 → 121 121 121 · `IMG_5070.MOV` → 121 121 121 · 2160p120 → 122 121 121. **Regression:**
+  23.976 → 25 25 24 · 25 → 27 26 25 · 29.97 → 32 31 30 · 59.94 → 62 61 60. 0 late; **0 `[FRAMEQ]`, 0 `[FREEZE-GUARD]`**.
+- **Paused step and seek** (`MANIFOLD_DEBUG_STEPS` 1, 1, 1, −1, −1, 10, −10, 100, −57, through `FrameEngine.stepFrame`; a
+  temporary log of the rendered PTS, since removed): **27 of 27 rendered exactly the engine's target**, on `hfr_120.mov`,
+  `hfr_59.94.mov` and `IMG_5070.MOV`. (The iPhone clip steps on its nominal rate, so its times are uneven; pre-existing.)
+- **DeckLink at 1080p59.94** (`hfr_59.94.mov`, Follow source, 8 s playing): `completed=798 late=0 dropped=0`, buffered 5 throughout;
+  `[CADENCE]`: 475 of 475 slots while playing advanced exactly one source frame (the 2 repeats are after Pause). SDI timing unchanged.
+- **The libav pump** (`LibavFrameSource`, also changed): `TEST FLIP/OP1A Test.mxf` (DNxHR HQX 3840×2160 23.98, opened read-only)
+  played 6 s at 25 presented per ≈ 1.04 s window, 0 dropped, 0 late, no `[FRAMEQ]` or `[FREEZE-GUARD]`. Paused step on the libav
+  path: not run.
+- `swift test` (ManifoldCore): 779 tests, 0 failures.
+- **Release on every path, by code read (2026-10-31, after the runs above).** Nothing blocks: `park` stores a closure and the pump
+  returns. A parked pump is resumed by `onQueueRoom` (a tick's selection, the paused relaxed render, `flush`), and every seek, scrub
+  settle, step, reload, loop wrap and new file goes through `beginReading`/`beginLibavReading`, which flush the window queue.
+  **One path did not:** `FrameEngine.stop()` (window close, file → live takeover, unload) flushes only the pacing renderer, so a
+  parked pump stayed in the gate, the gate and its closure holding each other with the retired reader; after a window close, for
+  good. **Fixed:** `stop()` now calls `videoSinkGate.roomAvailable()` after retiring the session; the pump wakes, finds its token
+  retired and returns. Built; not re-run at runtime (no instrument here shows the release).
+
+*Was, before the comparison (superseded):* **Proposed fix (not applied; Robbie to decide).** Bound a playing file's queue by TIME, not frames. On a file load, set
 `maxQueuedOverride` (the existing live-source knob, `MetalVideoRenderer.swift:599`) to `max(12, ceil(0.30 s / frameDuration) + 2)`,
 using the shortest frame duration for a variable-rate file (`IMG_5070.MOV`: 19/2400 s → 40 frames; 120 fps → 38; 60 fps → 20); clear
 it to nil when the file goes. 0.30 s is about 1.5× the largest lead measured (195 ms). Memory: the queue holds the same
@@ -3523,6 +3575,25 @@ slide away). Verify with the same eight clips, plus a non-HFR regression pass an
 exists for (2026-10-16).
 
 Pre-existing (the 2026-10-23 entry measured the same freeze on ProRes at `cb39182`). Target: 0.9.1.
+
+## ☐ OPEN 2026-10-31 — 0.9.1 — PRE-EXISTING, ALL BUILDS — the window's display link follows the MAIN display, not the display the window is on
+
+**Found 2026-10-31** while measuring the 120 fps freeze (above; a separate issue, not part of that fix). The renderer's display link is
+created with `CVDisplayLinkCreateWithActiveCGDisplays` (`MetalVideoRenderer.makeDisplayLink`, `MetalVideoRenderer.swift:3153`
+with the 2026-10-31 fix in the tree) and never retargeted: there is no `CVDisplayLinkSetCurrentCGDisplay` anywhere in `App/`. So it ticks at the
+main display's refresh wherever the window is.
+
+**Measured:** with the window moved by AX onto the ASUS PA147 (60 Hz; the colour probe followed it, `CGDisplayCopyColorSpace
+(displayID=4)`), the tick still ran at 120.0–120.3 a second, the LG's (the main display, 120 Hz), and 72 fps played at 70–72 frames
+a second, which a 60 Hz tick cannot show. Not measured: the reverse (window on a faster display than the main one), and what the
+compositor does with the extra presents on the 60 Hz display (half of them should never reach the glass).
+
+**Effects, by inference:** on a slower display than the main one, about half the presents are wasted work; on a faster one the
+window would update at the main display's slower rate. Frame selection is by clock, so A/V sync is not affected.
+
+**Direction (not decided):** retarget the link to the window's display on `NSWindow.didChangeScreenNotification` (and at bind), or
+move to the window's own `CADisplayLink` (`NSView.displayLink(target:selector:)`, macOS 14), which follows the window by design. The
+second is the post-release item *`CVDisplayLink` → `CADisplayLink`*; the first is the small 0.9.1-sized change. Target: 0.9.1.
 
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
