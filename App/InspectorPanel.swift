@@ -2,6 +2,7 @@ import SwiftUI
 import ManifoldCore
 import FileScan   // FieldView — the Window View row (interlaced I4)
 import PictureGeometry   // the Orientation row (docs/BUGS.md, iPhone clips, 2026-10-29)
+import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
@@ -141,6 +142,13 @@ struct InspectorPanel: View {
                 MetadataRow(label: "Full Chroma",
                             value: engine.effectiveIsFullRange ? engine.fullRangeChromaConvention.label : "—")
                 MetadataRow(label: "nclc", value: m.nclcTriple)
+                // The file's Dolby Vision configuration, and what of it reaches the screen: the base layer only.
+                // Absent when the file carries no DOVI record. Orange when there is no base layer Manifold can show,
+                // the same register as the Picture row.
+                if let dv = m.dolbyVision?.inspectorText {
+                    MetadataRow(label: "Dolby Vision", value: dv.text)
+                        .foregroundStyle(dv.isWarning ? Color.orange : Color.primary)
+                }
 
                 // HDR10 static metadata. Shown when the clip is HDR (PQ/HLG) — where the
                 // presence OR absence of this metadata is a fact worth reporting — or

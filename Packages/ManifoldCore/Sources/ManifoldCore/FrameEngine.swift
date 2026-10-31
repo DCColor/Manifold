@@ -2132,7 +2132,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         meta.startTimecode = info.startTimecode   // MXF Material Package TC (libav)
         // Same HDR10 reader the AVFoundation path uses, so the inspector's HDR10 section
         // reads identically whichever backend supplied the rest of the metadata.
-        meta.hdr10 = HDR10MetadataReader.read(url: url)
+        (meta.hdr10, meta.dolbyVision) = HDR10MetadataReader.readWithDolbyVision(url: url)
 
         // Feed the SAME transport time-display path the .mov tmcd path uses: build a
         // TimecodeReader.Result from libav's TC string + frame rate so the scrubber/

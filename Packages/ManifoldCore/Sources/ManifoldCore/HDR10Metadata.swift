@@ -1,5 +1,6 @@
 import Foundation
 import CFFmpeg
+import ColorimetryModel   // DolbyVisionConfig
 
 /// HDR10 STATIC metadata — read-only.
 ///
@@ -309,24 +310,28 @@ public enum HDR10MetadataReader {
     /// Parse the video stream's HDR10 static metadata. Returns an all-absent value
     /// (NOT an error) when the file simply declares none — which is the correct,
     /// common case for SDR and for HLG.
-    public static func read(url: URL) -> HDR10StaticMetadata {
+    public static func read(url: URL) -> HDR10StaticMetadata { readWithDolbyVision(url: url).hdr10 }
+
+    /// `read(url:)`, plus the video stream's Dolby Vision configuration record (`dvcC`/`dvvC`, which libav's mov
+    /// demuxer parses into `AV_PKT_DATA_DOVI_CONF`), from the same open. nil when the file carries none.
+    public static func readWithDolbyVision(url: URL) -> (hdr10: HDR10StaticMetadata, dolbyVision: DolbyVisionConfig?) {
         var ctx: UnsafeMutablePointer<AVFormatContext>? = nil
         guard avformat_open_input(&ctx, url.path, nil, nil) == 0, ctx != nil else {
-            return HDR10StaticMetadata()
+            return (HDR10StaticMetadata(), nil)
         }
         defer { avformat_close_input(&ctx) }
-        guard avformat_find_stream_info(ctx, nil) >= 0 else { return HDR10StaticMetadata() }
+        guard avformat_find_stream_info(ctx, nil) >= 0 else { return (HDR10StaticMetadata(), nil) }
 
         let idx = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
         guard idx >= 0, let streams = ctx!.pointee.streams,
-              let stream = streams[Int(idx)] else { return HDR10StaticMetadata() }
+              let stream = streams[Int(idx)] else { return (HDR10StaticMetadata(), nil) }
 
         // HDR10 static metadata is STREAM-level (it describes the whole clip, not a
         // frame), so it is read from the stream's codec parameters — NOT from decoded
         // frames. In FFmpeg 8 `AVStream.side_data` no longer exists; the demuxer's only
         // stream-level attachment point is `codecpar->coded_side_data` (verified against
         // the vendored 8.1.1 headers, not assumed).
-        guard let par = stream.pointee.codecpar else { return HDR10StaticMetadata() }
+        guard let par = stream.pointee.codecpar else { return (HDR10StaticMetadata(), nil) }
         let sideData = { (type: AVPacketSideDataType) -> UnsafePointer<AVPacketSideData>? in
             av_packet_side_data_get(par.pointee.coded_side_data,
                                     par.pointee.nb_coded_side_data, type)
@@ -388,7 +393,22 @@ public enum HDR10MetadataReader {
         if !result.hasAny {
             print("HDR10 [\(file)] no MDCV and no CLLI side data on the video stream")
         }
-        return result
+
+        // --- DOVI configuration record (dvcC / dvvC) ---
+        var dolbyVision: DolbyVisionConfig?
+        if let sd = sideData(AV_PKT_DATA_DOVI_CONF), let raw = sd.pointee.data,
+           Int(sd.pointee.size) >= MemoryLayout<AVDOVIDecoderConfigurationRecord>.size {
+            let d = UnsafeRawPointer(raw).loadUnaligned(as: AVDOVIDecoderConfigurationRecord.self)
+            dolbyVision = DolbyVisionConfig(profile: Int(d.dv_profile), level: Int(d.dv_level),
+                                            rpuPresent: d.rpu_present_flag != 0,
+                                            enhancementLayerPresent: d.el_present_flag != 0,
+                                            baseLayerPresent: d.bl_present_flag != 0,
+                                            compatibilityID: Int(d.dv_bl_signal_compatibility_id))
+            print("DOVI [\(file)] config via codecpar.coded_side_data: version \(d.dv_version_major).\(d.dv_version_minor) "
+                + "profile \(d.dv_profile) level \(d.dv_level) rpu \(d.rpu_present_flag) el \(d.el_present_flag) "
+                + "bl \(d.bl_present_flag) compatibility \(d.dv_bl_signal_compatibility_id)")
+        }
+        return (result, dolbyVision)
     }
 
     /// AVRational → Double. den == 0 is libav's "unset" rational; it is NOT 0.0 nits or

@@ -9,5 +9,6 @@
 #include <libavutil/pixdesc.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/dovi_meta.h>
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>

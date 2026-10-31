@@ -61,7 +61,7 @@ public enum MediaInspector {
         // the mastering-display / content-light boxes, so this one fact comes from libav
         // even on the AVFoundation path — the same reader the libav/MXF path uses, so
         // both paths report HDR10 identically.
-        meta.hdr10 = HDR10MetadataReader.read(url: url)
+        (meta.hdr10, meta.dolbyVision) = HDR10MetadataReader.readWithDolbyVision(url: url)
 
         meta.audioTracks = await audioTracks(for: asset)
         meta.textTracks = await textTracks(for: asset)

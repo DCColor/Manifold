@@ -2,6 +2,7 @@ import Foundation
 import CoreMedia
 import FileScan
 import PictureGeometry
+import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
 
 public struct ChapterMarker: Equatable, Sendable {
     public var time: Double
@@ -400,6 +401,10 @@ public struct VideoMetadata: Equatable, Sendable {
     /// declares none — the present flags live inside, so absence is never a defaulted
     /// value pretending to be a declaration. Read-only: displayed, never rendered from.
     public var hdr10 = HDR10StaticMetadata()
+
+    /// The file's Dolby Vision configuration record (`dvcC`/`dvvC`), or nil when it carries none. Read with the
+    /// HDR10 metadata, from the same libav open. Displayed only: Manifold applies no Dolby Vision processing.
+    public var dolbyVision: DolbyVisionConfig?
 
     /// Whether the file's transfer function is an HDR one (PQ or HLG). Drives whether
     /// the inspector shows the HDR10 section at all: on an SDR clip, "no HDR10 metadata"
