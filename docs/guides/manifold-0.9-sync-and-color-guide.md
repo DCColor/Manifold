@@ -163,7 +163,7 @@ Every source has **tags** that say what its color is: primaries, transfer curve 
 - **Chroma:** the color resolution being used (4:2:0, 4:2:2 or 4:4:4, and bit depth).
 - **Transform:** the display transform in use and what it's doing.
 - **Display:** your display and its curve, from its macOS profile.
-- **Headroom:** for HDR, how much brightness headroom the display offers, or that it's in SDR mode. Manifold only reports this; it doesn't cap or tone-map the picture.
+- **Headroom:** for HDR, how much brightness headroom the display offers, or that it's in SDR mode. In As macOS Shows It, macOS adapts HLG and PQ to this headroom. In Reference, anything above it clips, and on a display in SDR mode the readout says "above 100 nits clips".
 - **Buffer:** for SRT and WHEP, how much of the stream is buffered.
 
 Overrides and LUTs are marked in the readout, and the window title says when one is on, so a changed picture is never silent.
@@ -172,13 +172,13 @@ Overrides and LUTs are marked in the readout, and the window title says when one
 
 Choose per window from the control bar, the Color menu, or **⌥⌘1 / ⌥⌘2 / ⌥⌘3**.
 
-- **macOS:** macOS color-manages the picture for your display, as QuickTime, Safari and most Mac apps do. Use it to see what a client sees in those apps. Note that macOS decodes Rec. 709 video with a lighter curve (about gamma 1.96) than a reference monitor, which is the familiar "QuickTime looks washed out compared with Resolve" effect.
-- **Reference:** the picture shown with the **BT.1886** curve a reference monitor uses (gamma 2.4 on a display with a true black). Use it to judge the picture the way you would in a grading suite.
+- **As macOS Shows It:** macOS color-manages the picture for your display, as QuickTime, Safari and most Mac apps do. Use it to see what a client sees in those apps. Note that macOS decodes Rec. 709 video with a lighter curve (about gamma 1.96) than a reference monitor, which is the familiar "QuickTime looks washed out compared with Resolve" effect. For HDR, Manifold hands HLG to macOS's HLG adjustment and PQ to macOS's HDR10 tone mapping, as QuickTime does, so highlights roll off instead of clipping. Above the display's limit the picture then no longer matches the scopes, which still show the file.
+- **Reference:** the picture shown with the **BT.1886** curve a reference monitor uses (gamma 2.4 on a display with a true black). Use it to judge the picture the way you would in a grading suite. For HDR, Reference shows absolute light, where 1.0 is 100 nits, with no tone mapping: PQ maps directly, and HLG is converted to PQ as BT.2408 describes, at 1000 nits (HLG 75 % lands at 203 nits). Anything above the display's headroom clips.
 - **Bypass:** no color management at all. The picture's values go to the screen untouched. Use it for diagnostics, or on a display that is itself set to exactly the source's standard. A window in Bypass says so in its title.
 
 ### Hold to compare
 
-- Hold **C** to see the other of macOS and Reference while the key is down.
+- Hold **C** to see the other of As macOS Shows It and Reference while the key is down. For HLG and PQ the two now differ, so this shows what macOS's tone mapping does to the picture.
 - Hold **⇧C** to see Bypass.
 - With a LUT on, hold **⌥C** to see the picture without it.
 
@@ -191,13 +191,17 @@ Reference promises the light a BT.1886 reference monitor would put out. How it g
 - **Unchecked (the default):** Manifold reads your display's macOS profile and converts the picture so that, after the display's own curve, the light lands on BT.1886. **White** and **Black** are the display's white and black levels in cd/m²; Black 0 gives exactly gamma 2.4.
 - **Checked, "Calibrated to Rec. 709 / BT.1886 in the display":** the display itself applies BT.1886 (a hardware-calibrated monitor, or a TV in a calibrated picture mode), so Manifold sends the values untouched. White and Black are greyed out.
 - **It's remembered per display,** not per window, so moving a window to another display can change the picture.
-- **It applies in Reference only.** In macOS and Bypass the section is greyed and reads "Applies in Reference mode only".
+- **It applies in Reference only.** In As macOS Shows It and Bypass the section is greyed and reads "Applies in Reference mode only".
 
 > **Only tick it if the display really is calibrated to BT.1886.** Manifold trusts the setting. On a display that isn't, the picture will be wrong in Reference mode and nothing will say so.
 
 ### HDR in the window
 
-PQ and HLG sources are shown as HDR when macOS HDR is on for the display. The **Headroom** line says how much the display offers, follows the window to another display, and updates when HDR is switched or brightness changes. If the display is in SDR mode, the readout says so. Manifold never caps or tone-maps the picture.
+PQ and HLG sources are shown as HDR when macOS HDR is on for the display. The **Headroom** line says how much the display offers, follows the window to another display, and updates when HDR is switched or brightness changes.
+
+- **In As macOS Shows It,** Manifold hands HLG and PQ to macOS, which adapts them to the display's headroom (and, for HLG, its brightness), as QuickTime does. On a display in SDR mode they roll off instead of clipping.
+- **In Reference,** PQ and HLG are absolute light (1.0 = 100 nits) and clip above the display's headroom. On a display in SDR mode the readout says "display in SDR mode · above 100 nits clips".
+- **The scopes always show the file,** in every mode.
 
 ### Overriding a source's color tags
 
@@ -229,8 +233,8 @@ An override changes the picture, so the window, scopes, SDI color tag and readou
 
 ### Quick answers
 
-- **"It looks different in QuickTime."** Switch the window to **macOS** to see what QuickTime shows, and hold **C** to flip back to Reference.
+- **"It looks different in QuickTime."** Switch the window to **As macOS Shows It** to see what QuickTime shows, and hold **C** to flip back to Reference. This now includes HDR. Very saturated PQ colors outside your display's range can still differ slightly.
 - **"I want to judge the grade on my desk display."** Use **Reference**, and set the display's calibration settings honestly in the transform chain.
 - **"This file is tagged wrong."** Use an override, then **Reset to File's Tags** when you're done.
 - **"This stream is log footage."** Load your conversion LUT and set **LUT Outputs** to the standard it produces.
-- **"The scopes didn't change when I switched modes."** That's correct. Scopes measure the picture, not your display.
+- **"The scopes didn't change when I switched modes."** That's correct. Scopes measure the picture, not your display. In As macOS Shows It with HDR, bright highlights on screen can sit below what the scopes show, because macOS tone-maps the window.
