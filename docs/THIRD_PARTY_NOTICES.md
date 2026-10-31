@@ -178,9 +178,12 @@ None of these block shipping in my view; all four are cheap to adjust if an opin
 
 **NDI SDK License Agreement.** Clause 3(a) designates the SDK and its documentation Confidential
 Information; clause 2(d) permits distribution only of files the SDK itself identifies as
-distributable. The agreement is therefore linked (<http://ndi.link/ndisdk_license>), not copied.
-`licenses/libndi_licenses.txt` *is* identified for distribution — it says so in its own text — so
-that ships verbatim.
+distributable. The agreement is therefore linked, not copied: to NDI's licensing page
+(<https://docs.ndi.video/all/developing-with-ndi/sdk/licensing>). The NDI SDK License Agreement
+is included in the NDI SDK download. `licenses/libndi_licenses.txt` *is* identified for
+distribution — it says so in its own text — so that ships verbatim. `ndi.link`, used in NDI's
+notice, has been down since 2026-10-29; NDI's licensing page is
+<https://docs.ndi.video/all/developing-with-ndi/sdk/licensing>.
 
 Requirements the SDK licence does place on us, all met in the About window:
 

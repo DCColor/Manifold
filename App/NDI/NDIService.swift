@@ -65,7 +65,8 @@ final class NDIService: ObservableObject {
     ///
     /// ── ⚠️ 0.9.1: THE DIRECT PACKAGE PATH, NOT THE ndi.link VANITY REDIRECT ─────────────────────
     ///
-    /// `https://ndi.link/NDIRedistV6Apple` returned 502 on 2026-10-29: the redirector itself failed,
+    /// `https://ndi.link/NDIRedistV6Apple` returned 502 on 2026-10-29, and was still down on 2026-10-30 (HTTP 500, as
+    /// was `ndi.link/ndisdk_license`, while the direct package URL below worked; Robbie): the redirector itself failed,
     /// so the menu item and the Settings button opened an error page. The direct path below is the
     /// file that redirect resolved to (measured, quoted further down). The reasoning in "WHY THE
     /// ndi.link VANITY REDIRECT" below is reversed by that, not wrong: a direct path can move, which

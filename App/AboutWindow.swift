@@ -364,12 +364,14 @@ enum Attributions {
             note: """
                   SDK build NDI 2026-04-13 git-5396c5f1. NOT LINKED — the NDI runtime is loaded \
                   dynamically at run time if the user has installed it; Manifold ships no NDI \
-                  binary. The SDK license itself is at http://ndi.link/ndisdk_license and is not \
-                  reproduced here: the agreement designates the SDK confidential and permits \
-                  distribution only of files the SDK identifies as distributable. The third-party \
+                  binary. NDI's licensing is described at https://docs.ndi.video/all/developing-with-ndi/sdk/licensing and the \
+                  SDK license is not reproduced here: the agreement designates the SDK confidential \
+                  and permits distribution only of files the SDK identifies as distributable. The \
+                  NDI SDK License Agreement is included in the NDI SDK download. The third-party \
                   notice file below IS one of those ("This file should be included with all \
                   distribution of the binary files included with the NDI SDK"), so it ships \
-                  verbatim.
+                  verbatim. ndi.link, used in NDI's notice, has been down since 2026-10-29; NDI's \
+                  licensing page is https://docs.ndi.video/all/developing-with-ndi/sdk/licensing
                   """,
             documents: [LicenseDoc(title: "NDI SDK third-party notices (libndi_licenses.txt)",
                                    resource: "NDI-libndi_licenses")]),
