@@ -152,7 +152,8 @@ struct ManifoldApp: App {
     }
 
     var body: some Scene {
-        WindowGroup {
+        // `id:` names the window's saved frame; see `PlayerScene`.
+        WindowGroup(id: PlayerScene.windowID) {
             ContentView()
                 .frame(minWidth: 720, minHeight: 460)
                 // THE PLAYER WINDOW IS ALWAYS DARK (Robbie, 2026-10-27), as QuickTime's and Resolve's are: the control bar,

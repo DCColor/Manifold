@@ -1,6 +1,16 @@
 import SwiftUI
 import AppKit
 
+/// The player `WindowGroup`'s scene identity (0.9.1, docs/BUGS.md, saved window positions). Named the same way as
+/// `AboutScene` and `KeyboardShortcutsScene`, and for a second reason: with no id, SwiftUI names the window's
+/// frame-autosave key (`NSWindow Frame …-AppWindow-1`) after the group content's TYPE, so a modifier added to the
+/// content, a renamed type, a `private` type's moving address or a macOS update started a new key and stranded the
+/// old one (1,627 by 2026-10-30). With an id the key is named after the id, which changes only if this string does.
+/// ⚠️ CHANGING IT RESETS EVERY USER'S SAVED WINDOW FRAME, once.
+enum PlayerScene {
+    static let windowID = "player"
+}
+
 /// Full-bleed NSWindow whose size is governed by `WindowSizer` — the video keeps the source aspect,
 /// and chrome (scopes tray, docked control bar) is added BELOW it by growing the window taller.
 /// Traffic-light buttons fade with the controls.
