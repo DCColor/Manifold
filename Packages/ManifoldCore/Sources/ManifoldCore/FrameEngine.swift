@@ -294,6 +294,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public var onSourceScan: ((SourceScan) -> Void)?
 
     nonisolated(unsafe) private let synchronizer = AVSampleBufferRenderSynchronizer()
+    /// The window renderer's backpressure on this engine's file decode pumps (`VideoSinkGate`). The owner wires its
+    /// renderer's queue to it; every file source this engine creates parks on it.
+    public let videoSinkGate = VideoSinkGate()
     private var videoRenderer: AVSampleBufferVideoRenderer?
     // `nonisolated(unsafe)` for the same reason as `synchronizer`: the reference never changes, and
     // the one off-main reader is `liveAudioRendererState()` on the NDI audio pump (diagnostics only).
@@ -1158,6 +1161,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         libavSource = nil
         libavAudioSource?.stop()
         libavAudioSource = nil
+        // A video pump parked on the window's full queue (`VideoSinkGate`) is released HERE, explicitly: this path flushes
+        // only the pacing renderer, never the window's queue, so nothing else would. Resumed, the pump finds its session
+        // retired (the token bumped above) and returns, and the gate lets go of it. Left parked, the gate and the pump's
+        // closure hold each other, with its reader, until the next load in this window, and for good after a window close.
+        videoSinkGate.roomAvailable()
         // Cleared WITH the source, always: it is that source's stream list, and a count left
         // standing would keep the toolbar offering a choice against an unloaded file.
         libavAudioInfo = nil
@@ -2354,6 +2362,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                           proResHeaderColor: proResHeaderColor(for: url),
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
+            source.sinkGate = videoSinkGate
             do {
                 // open() enables auto-threaded decode so the 4K 10-bit source cost
                 // doesn't contend with the render pipeline (locks 23.976fps).
@@ -4297,6 +4306,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                            isCurrent: { session.isCurrent(token) }) else {
             print("FrameEngine: cannot add video output"); return
         }
+        source.sinkGate = videoSinkGate
 
         // ── THE VIDEO READER CARRIES VIDEO ONLY ───────────────────────────────────────────────
         // Audio lives on its own reader (see `audioReader`), so there is nothing here that could

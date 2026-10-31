@@ -1112,6 +1112,11 @@ final class DeckRegistry {
         // …and the engine feeds this window's renderer, and only this one.
         engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
         engine.onFlush = { [weak renderer] in renderer?.flush() }
+        // The renderer's queue paces this engine's file decode (0.9.1, docs/BUGS.md, the 120 fps freeze): a full queue parks
+        // the pump, and each frame the queue gives up resumes it. Weak to the renderer for the same reason as above.
+        let sinkGate = engine.videoSinkGate
+        sinkGate.setHasRoom { [weak renderer] in renderer?.queueHasRoom() ?? true }
+        renderer.onQueueRoom = { sinkGate.roomAvailable() }
         // Play, pause, shuttle: a paused renderer has stopped its display link, and Play may need no new frame.
         engine.onClockRateChange = { [weak renderer] in renderer?.wakeDisplayLink() }
         // THE SOURCE'S COLOUR TAGS, ON THE LOAD PATH RATHER THAN BEHIND THE INSPECTION TASK.

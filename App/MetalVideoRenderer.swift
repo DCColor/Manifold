@@ -599,6 +599,24 @@ final class MetalVideoRenderer {
     var maxQueuedOverride: Int?
     private var maxQueued: Int { maxQueuedOverride ?? defaultMaxQueued }
 
+    /// A FILE's decode pump asks this before decoding a frame (`VideoSinkGate`, 0.9.1, docs/BUGS.md, the 120 fps freeze):
+    /// false while the queue is full, so the pump parks instead of handing over a frame the queue would have to evict.
+    /// Live sources do not ask; their bound and its overflow report are unchanged.
+    func queueHasRoom() -> Bool {
+        queueLock.lock(); defer { queueLock.unlock() }
+        return frameQueue.count < maxQueued
+    }
+    /// Called, outside `queueLock`, whenever frames leave the queue (a tick's selection, the paused relaxed render, a
+    /// flush): resumes a file's pump parked on a full queue. Wired to the engine's `VideoSinkGate`.
+    var onQueueRoom: (() -> Void)?
+    // A file's evictions (the backstop below): counted under `queueLock`, logged at most once a second from `enqueue`.
+    private var fileEvictionsPending = 0
+    private var fileEvictionsLastLog: CFTimeInterval = 0
+    // The freeze guard (render thread only): the clock time at which a playing file's queue was first seen full with
+    // every frame still in the future, and whether this episode has been logged. Log only; it changes nothing.
+    private var freezeGuardSince: Double?
+    private var freezeGuardReported = false
+
     /// Created and released on `linkQueue` only (see the idle note below).
     private var displayLink: CVDisplayLink?
 
@@ -3039,10 +3057,25 @@ final class MetalVideoRenderer {
            FrameQueuePolicy.trimEnd(paused: isPausedProvider?() == true) == .newest {
             frameQueue.removeLast(frameQueue.count - maxQueued)
         } else if frameQueue.count > maxQueued {
+            // A file has no clock to re-anchor: count the eviction so it is logged (below). With the pump's
+            // backpressure (`queueHasRoom`) this should never happen to a file; a non-zero count is the evidence.
+            if onQueueOverflow == nil { fileEvictionsPending += frameQueue.count - maxQueued }
             frameQueue.removeFirst(frameQueue.count - maxQueued)
             if let newest = frameQueue.last?.pts { overflow = (newest, frameQueue.count) }
         }
+        var evictionLog: String?
+        if fileEvictionsPending > 0 {
+            let t = CACurrentMediaTime()
+            if t - fileEvictionsLastLog >= 1 {
+                evictionLog = "[FRAMEQ] queue full (\(maxQueued) frames): evicted \(fileEvictionsPending) oldest frame(s) unseen"
+                    + " since the last report — no live clock to re-anchor. A playing file should not get here (the"
+                    + " decode pump waits on a full queue)."
+                fileEvictionsPending = 0
+                fileEvictionsLastLog = t
+            }
+        }
         queueLock.unlock()
+        if let evictionLog { print(evictionLog) }
 
         // Outside the lock: the sink takes LiveClock's lock, and holding two is how deadlocks are
         // built. Same discipline as onDepthSample below.
@@ -3066,6 +3099,7 @@ final class MetalVideoRenderer {
         // `presentsSinceFlush` is reset with it: a flush IS the source boundary, which is what
         // makes "was the colour state installed before this source's first frame?" answerable at
         // all — see where it is reported, in the tick.
+        onQueueRoom?()   // a pump parked on the full queue may run again (the retired session's bows out)
         refreshLock.lock()
         pendingSeekRender = true
         presentsSinceFlush = 0
@@ -3437,7 +3471,29 @@ final class MetalVideoRenderer {
         if cachedFrameInterval > 0, depthCount >= 4 { settleFrameIntervalHint = cachedFrameInterval }
         let settleFrameInterval = settleFrameIntervalHint
         #endif
+        // THE FREEZE GUARD (log only). A playing file whose queue is full while every frame in it is still in the future
+        // can only wait for the clock; if the clock moves half a second on without reaching the oldest, the queue has
+        // slid away from it (the 0.9.1 120 fps freeze), or the clock has. Captured here, logged after the lock.
+        let queueFullAhead = holdFloor == nil && chosen == nil && onQueueOverflow == nil
+            && isPausedProvider?() != true && frameQueue.count >= maxQueued && (oldest.map { $0 > now } ?? false)
+        let guardCount = frameQueue.count, guardMax = maxQueued
         queueLock.unlock()
+        if chosen != nil { onQueueRoom?() }
+        if queueFullAhead, let oldest {
+            if freezeGuardSince == nil { freezeGuardSince = now }
+            if let since = freezeGuardSince, now - since >= 0.5, !freezeGuardReported {
+                freezeGuardReported = true
+                print(String(format: "[FREEZE-GUARD] playing, queue full (%d/%d) and nothing due for %.2f s of clock: "
+                             + "oldest queued %.4f, clock %.4f (%.1f ms ahead). The picture is not advancing.",
+                             guardCount, guardMax, now - since, oldest, now, (oldest - now) * 1000))
+            }
+        } else {
+            if freezeGuardReported, chosen != nil {
+                print(String(format: "[FREEZE-GUARD] recovered: presented %.4f at clock %.4f", chosenPts, now))
+            }
+            freezeGuardSince = nil
+            freezeGuardReported = false
+        }
 
         onDepthSample?(DepthSample(spanSeconds: depthSpan,
                                    count: depthCount,
@@ -3527,6 +3583,7 @@ final class MetalVideoRenderer {
                 }
                 if nearest != nil { frameQueue.removeFirst() }
                 queueLock.unlock()
+                if nearest != nil { onQueueRoom?() }
                 if let nearest {
                     // TEMP (STEP 1 confirm — REMOVE after validating): prove the overshoot
                     // is why the strict gate rejected the frame (pts > now on a paused seek).

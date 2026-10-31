@@ -97,6 +97,9 @@ public final class LibavFrameSource: @unchecked Sendable {
 
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
 
+    /// The display queue's backpressure, as `FileFrameSource.sinkGate`. Set by the owner before `arm`.
+    public var sinkGate: VideoSinkGate?
+
     private let url: URL
     /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries: the file's
     /// resolved format (`FileChromaProbe`), `x422` for HQX, `x444` for 4:4:4 (Stage 3b S2).
@@ -461,20 +464,29 @@ public final class LibavFrameSource: @unchecked Sendable {
         let renderer = pacingRenderer
         let emit = onVideoFrame
         let current = isCurrent
+        let gate = sinkGate
+        let queue = pumpQueue
         // Seek runs on pumpQueue BEFORE the first pump pull (serial queue ordering).
         pumpQueue.async { [weak self] in self?.seekOnPump(toSeconds: time) }
-        renderer.requestMediaDataWhenReady(on: pumpQueue) { [weak self] in
+        // A local function so a parked pump can be resumed with the same body (`FileFrameSource.start`).
+        func pump(_ source: LibavFrameSource?) {
             // Superseded / deallocated: bow out WITHOUT stopping the shared renderer
             // (the new session already re-armed it) — the Stage 1 race fix.
-            guard let self, current() else { return }
+            guard let source, current() else { return }
             while renderer.isReadyForMoreMediaData {
                 guard current() else { return }
-                guard let sb = self.nextFrame() else {
+                // The window's queue is full: park, don't decode (`VideoSinkGate`).
+                if let gate, !gate.hasRoom {
+                    gate.park { [weak source] in queue.async { pump(source) } }
+                    return
+                }
+                guard let sb = source.nextFrame() else {
                     renderer.stopRequestingMediaData(); return   // genuine end-of-stream
                 }
                 emit?(sb)
             }
         }
+        renderer.requestMediaDataWhenReady(on: pumpQueue) { [weak self] in pump(self) }
     }
 
     /// Stop the pump and free libav resources. The renderer is stopped by the engine

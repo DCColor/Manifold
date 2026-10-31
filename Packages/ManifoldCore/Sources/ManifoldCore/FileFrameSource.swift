@@ -44,6 +44,10 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
     /// `start()`. Called on a background queue; consumers hop threads as needed.
     public var onVideoFrame: ((CMSampleBuffer) -> Void)?
 
+    /// The display queue's backpressure (`VideoSinkGate`): while the window's queue is full the pump parks instead of
+    /// decoding a frame the queue would have to evict. Set by the owner before `start()`; nil pumps as before.
+    public var sinkGate: VideoSinkGate?
+
     private let output: AVAssetReaderTrackOutput
     private let reader: AVAssetReader
     private let pacingRenderer: AVSampleBufferVideoRenderer
@@ -100,12 +104,21 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
         let rdr = reader
         let emit = onVideoFrame
         let current = isCurrent
-        renderer.requestMediaDataWhenReady(on: pumpQueue) {
+        let gate = sinkGate
+        let queue = pumpQueue
+        // A local function rather than the closure inline, so a parked pump can be resumed with the same body.
+        func pump() {
             // Superseded by a newer session: do NOT stop the renderer — the new
             // session already re-armed it; just bow out.
             guard current() else { return }
             while renderer.isReadyForMoreMediaData {
                 guard current() else { return }
+                // The window's queue is full: park rather than decode a frame it would evict. Resumed when the queue
+                // takes a frame (`VideoSinkGate`). Before the decode, so nothing is read that cannot be queued.
+                if let gate, !gate.hasRoom {
+                    gate.park { queue.async { pump() } }
+                    return
+                }
                 guard rdr.status == .reading, let next = out.copyNextSampleBuffer() else {
                     // Genuine end-of-stream for the CURRENT session: stop requesting
                     // so the renderer doesn't spin on an exhausted reader.
@@ -119,6 +132,7 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
                 emit?(next)
             }
         }
+        renderer.requestMediaDataWhenReady(on: pumpQueue) { pump() }
     }
 
     /// Stop requesting frames. Called by the engine on the main actor, ordered
