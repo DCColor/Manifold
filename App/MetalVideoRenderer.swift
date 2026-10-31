@@ -1630,8 +1630,22 @@ final class MetalVideoRenderer {
         /// `.never` except where `edrMetadata` is set: `.never` would block it (`CALayer.h`, "Never tone map contents").
         /// `.ifSupported` with HLG, `.automatic` with HDR10 (each measured against the system's own result).
         let toneMapMode: CALayer.ToneMapMode
+        /// The publish number, logged on install (0.9.1, docs/BUGS.md mode-change warning).
+        let seq: UInt64
+        /// True when this state, or one it replaced before the render thread took it, came from a SOURCE edge: new
+        /// codes in `setSourceColorSpace`, other than the teardown clear and an override set or removed. Only such a
+        /// state is judged against `presentsSinceFlush`: a frame of this source presented before it was drawn through a
+        /// state that was not this source's. Every other publish (a mode, LUT, display, calibration or override change,
+        /// or the teardown clear) replaces a state that was this source's own, so the frame on
+        /// screen was right for its state, and the re-present moves it to the new one. Measured 2026-10-30: 84 mode
+        /// switches, PQ and HLG, paused and playing, no frame presented under an older state than the one installed.
+        let sourceEdge: Bool
     }
     private var pendingColorState: PendingColorState?
+    /// MAIN. The last publish number (`PendingColorState.seq`).
+    private var colorStatePublishSeq: UInt64 = 0
+    /// MAIN. Set by `setSourceColorSpace` around its publish only, so that publish is marked as a source edge.
+    private var publishingSourceEdge = false
     /// MAIN. True while the published colour state hands HLG to macOS's HLG adjustment (As macOS Shows It, HLG picture).
     /// The chain readout's verdict reads it; it says what was published, which the `[EDR]` read-back confirms on install.
     private(set) var hlgAdjustmentActive = false
@@ -1930,6 +1944,7 @@ final class MetalVideoRenderer {
     /// Reference plan); only the decode matrix comes from the SOURCE codes, because it decodes the source.
     private func publishColorState() {
         guard let cs = pictureDerivedColorSpace else { return }
+        colorStatePublishSeq &+= 1
 
         // ⚠️ `nil` IS THE PAYLOAD IN BYPASS, NOT AN ERROR. Measured in Phase 1 (§6.6): a layer with
         // `colorspace = nil` performs NO CONVERSION. The LG discriminates there — sRGB and its
@@ -2012,7 +2027,10 @@ final class MetalVideoRenderer {
                                               lut: interpretationLUT,
                                               output: FrameOutputState(signal: signal,
                                                                        v210MatrixCode: signal.sdiMatrixCode(pictureMatrix: pictureMatrixCode)),
-                                              edrMetadata: edrMetadata, toneMapMode: toneMapMode)
+                                              edrMetadata: edrMetadata, toneMapMode: toneMapMode,
+                                              seq: colorStatePublishSeq,
+                                              // A source edge not yet installed stays one when a later publish replaces it.
+                                              sourceEdge: publishingSourceEdge || (pendingColorState?.sourceEdge ?? false))
         pendingRefresh = true
         refreshLock.unlock()
         wakeDisplayLink()
@@ -2184,6 +2202,10 @@ final class MetalVideoRenderer {
             return
         }
         hasQueuedColorState = true
+        // Same source, not a source edge (0.9.1, `PendingColorState.sourceEdge`): the teardown clear, and an override
+        // set or removed (NDI or file). Read before the provenance below is replaced.
+        let sameSource = (primaries == nil && transfer == nil && matrix == nil)
+            || provenance == .overridden || sourceColorProvenance == .overridden
         // Store the raw CICP codes FIRST (before the colorspace guard) so the CIE scope can
         // pick its RGB→XYZ matrix + EOTF even when CGColorSpace construction below fails.
         sourcePrimariesCode = primaries
@@ -2230,7 +2252,9 @@ final class MetalVideoRenderer {
         sourceWantsEDR = isHDRTransfer
         // Colour S6, L2: the picture codes follow the source unless a LUT states its output.
         resolvePictureCodes()
+        publishingSourceEdge = !sameSource
         publishColorState()
+        publishingSourceEdge = false
 
         // NOTE: edrMetadata (CAEDRMetadata) is set for TWO cases only, by `publishColorState`: an HLG or a
         // PQ picture in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md §3 and §3.10c, 2026-10-30). Everything
@@ -3218,9 +3242,17 @@ final class MetalVideoRenderer {
             metalLayer.drawableSize = drawableSize
         }
 
+        // ⚠️ THE COLOUR STATE'S TRANSACTION IS LEFT OPEN UNTIL THIS TICK'S PRESENT (0.9.1, docs/BUGS.md mode-change
+        // entry). Committed here on its own, it reached the render server 3–7.5 ms before the repainted frame on a
+        // paused deck (measured, 84 switches), so a composite in that gap could show the old picture under the new
+        // state. Left open, the present's transaction nests inside it and both land in one commit:
+        // `closeColorStateTransaction()` right after the present, or at the end of a tick that presents nothing.
+        defer { closeColorStateTransaction() }
         if let colorState {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            colorStateTransactionOpen = true
+
             // ⚠️ A `nil` HERE IS BYPASS BEING INSTALLED, NOT A MISSING VALUE — see
             // `PendingColorState.colorSpace`. Do not add a `??` fallback: substituting 709 (or
             // anything else) would silently turn Bypass into a fourth transform nobody asked for,
@@ -3231,7 +3263,6 @@ final class MetalVideoRenderer {
             // which `CAMetalLayer.h` requires ("Must be set before calling nextDrawable").
             metalLayer.edrMetadata = colorState.edrMetadata
             metalLayer.toneMapMode = colorState.toneMapMode
-            CATransaction.commit()
             // Read back, so a property the layer silently declines shows in the log rather than being assumed.
             if (metalLayer.edrMetadata != nil) != activeEDRMetadataSet || metalLayer.toneMapMode != activeToneMapMode {
                 activeEDRMetadataSet = metalLayer.edrMetadata != nil
@@ -3261,12 +3292,21 @@ final class MetalVideoRenderer {
             //
             // Ungated, like the rest of the [EDR] family (see the note on `colorSpaceIdentity`):
             // these lines ship, and a tester's diagnostics export is where this gets noticed.
-            print("[EDR] colour state installed on the layer after \(presentsSinceFlush) present(s) "
-                + "of this source"
-                + (presentsSinceFlush == 0
-                   ? " — BEFORE its first frame, as intended"
-                   : " — ⚠️ AFTER a frame was already on screen; that frame was drawn through the"
-                     + " previous colour state. Re-rendering to repair it."))
+            //
+            // ⚠️ ONLY A SOURCE EDGE IS JUDGED (`PendingColorState.sourceEdge`). Until 0.9.1 every install was, and
+            // `presentsSinceFlush` counts since the source loaded, so every mode change printed the warning although
+            // no frame had been drawn through a state that was not its own (docs/BUGS.md, measured 2026-10-30).
+            if colorState.sourceEdge {
+                print("[EDR] colour state #\(colorState.seq) installed on the layer after \(presentsSinceFlush) present(s) "
+                    + "of this source"
+                    + (presentsSinceFlush == 0
+                       ? " — BEFORE its first frame, as intended"
+                       : " — ⚠️ AFTER a frame was already on screen; that frame was drawn through the"
+                         + " previous colour state. Re-rendering to repair it."))
+            } else {
+                print("[EDR] colour state #\(colorState.seq) installed on the layer (same source: mode, LUT, display, "
+                    + "override or teardown); re-presenting the frame on screen under it")
+            }
         }
 
         // One-shot screen wipe: a source was torn down with nothing to replace it. Present a black
@@ -4097,6 +4137,18 @@ final class MetalVideoRenderer {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         drawable.present()
+        CATransaction.commit()
+        // The colour state installed this tick, if any, lands in the same commit as this frame.
+        closeColorStateTransaction()
+    }
+
+    /// RENDER THREAD ONLY. True between a colour-state install and the commit it shares with the tick's present.
+    private var colorStateTransactionOpen = false
+
+    /// RENDER THREAD ONLY. Commit the colour state's transaction if one is open (see the install in the tick).
+    private func closeColorStateTransaction() {
+        guard colorStateTransactionOpen else { return }
+        colorStateTransactionOpen = false
         CATransaction.commit()
     }
 
