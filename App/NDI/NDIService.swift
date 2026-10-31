@@ -61,7 +61,16 @@ final class NDIService: ObservableObject {
 
     /// The single source of truth for the NDI runtime download. Referenced by BOTH the "Install NDI
     /// Runtime…" menu item (ManifoldApp) and the Settings button (SettingsView) — no duplicated
-    /// string literal.
+    /// string literal. `toolsPageURL` below is the fallback both of them also show.
+    ///
+    /// ── ⚠️ 0.9.1: THE DIRECT PACKAGE PATH, NOT THE ndi.link VANITY REDIRECT ─────────────────────
+    ///
+    /// `https://ndi.link/NDIRedistV6Apple` returned 502 on 2026-10-29: the redirector itself failed,
+    /// so the menu item and the Settings button opened an error page. The direct path below is the
+    /// file that redirect resolved to (measured, quoted further down). The reasoning in "WHY THE
+    /// ndi.link VANITY REDIRECT" below is reversed by that, not wrong: a direct path can move, which
+    /// is why `toolsPageURL` is shown beside it in both places, so a moved package costs the user
+    /// one more click and never a dead end. Not re-fetched when this was changed (2026-10-30).
     ///
     /// ── ⚠️ THE `Apple` SUFFIX IS THE WHOLE POINT. IT SHIPPED WITHOUT IT ONCE. ────────────────
     ///
@@ -99,7 +108,11 @@ final class NDIService: ObservableObject {
     /// these — the failure mode to watch for is not a 404 but a link that quietly starts serving a
     /// different platform, which is what happened here. RE-FOLLOW IT, do not re-read it, if this is
     /// ever revisited.
-    static let runtimeInstallURL = URL(string: "https://ndi.link/NDIRedistV6Apple")!
+    static let runtimeInstallURL = URL(string: "https://downloads.ndi.tv/SDK/NDI_SDK_Mac/libNDI_for_Mac.pkg")!
+
+    /// NDI's own tools and downloads page: the secondary link beside every `runtimeInstallURL` control, in case
+    /// the package path ever moves. A page, not a download.
+    static let toolsPageURL = URL(string: "https://ndi.video/tools/")!
 
     /// Whether the NDI runtime dylib is present and loadable. Published for the picker empty state
     /// and the Settings status row. Detection is LAZY and RELAUNCH-ONLY by design: the underlying

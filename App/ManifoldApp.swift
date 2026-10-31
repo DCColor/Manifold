@@ -247,6 +247,10 @@ struct ManifoldApp: App {
                     Button("Install NDI Runtime…") {
                         NSWorkspace.shared.open(NDIService.runtimeInstallURL)
                     }
+                    // The fallback beside it, under the same condition: NDI's own page, if the package path moves.
+                    Button("NDI Downloads Page…") {
+                        NSWorkspace.shared.open(NDIService.toolsPageURL)
+                    }
                 }
                 // Same rule as the NDI item above — offered only when we know it is missing,
                 // hidden while `.unknown`. The two are deliberately identical in shape: these are

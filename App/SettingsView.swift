@@ -662,6 +662,8 @@ private struct SourcesSettingsPane: View {
                 Button(ndi.runtimeAvailable ? "Reinstall NDI Runtime…" : "Install NDI Runtime…") {
                     NSWorkspace.shared.open(NDIService.runtimeInstallURL)
                 }
+                // The fallback, visible in both states: NDI's own page, if the package path ever moves.
+                Link("NDI downloads page", destination: NDIService.toolsPageURL)
                 SettingsCaption("After installing the NDI runtime, relaunch Manifold to enable NDI sources.")
             }
 
