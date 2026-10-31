@@ -2306,7 +2306,8 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
   runs.
 - **Two limits found, each its own entry below:**
   - 2160p above 60 runs late on the test card;
-  - file playback at 95.90 fps and above does not keep up, so SDI repeats frames.
+  - file playback at 95.90 fps and above does not keep up, so SDI repeats frames (cause found 2026-10-31: the renderer's
+    12-frame queue; see the 0.9.1 entry *A 119.95 fps iPhone clip plays audio but the picture freezes*).
   So at those rates the MODE is right, and what goes out in it is not yet a clean picture.
 
 ---
@@ -2335,7 +2336,11 @@ HEAD did the same under the same driver. After the driver was fixed, quit took 2
 
 ---
 
-## ☐ OPEN — NEW 2026-10-23 — PRE-EXISTING, ALL BUILDS — file playback at 95.90 fps and above does not keep up
+## ☐ OPEN — NEW 2026-10-23 — PRE-EXISTING, ALL BUILDS — CAUSE FOUND 2026-10-31 — file playback at 95.90 fps and above does not keep up
+
+**Cause found 2026-10-31: the renderer's 12-frame queue drops the frames about to come due.** Same cause as the 0.9.1 entry
+*A 119.95 fps iPhone clip plays audio but the picture freezes*, which has the measurements and the proposed fix. It is not decode,
+the frame source's back-pressure or the display tick. *Was: "Not investigated" (below).*
 
 **Found in the SDI scaling follow-ups** (`COLOR_MANAGEMENT_FINDINGS.md` §6.11, P8).
 - **What, at 119.88 and 120** (1920×1080 ProRes 422 HQ fixtures): the picture advances about 11 frames (0.24 s), then
@@ -3223,7 +3228,7 @@ Confirmed 2026-10-29 by Robbie on the MacBook Air (2048x1332): orientation corre
 
 ---
 
-## ☐ OPEN 2026-10-29 — 0.9.1 — PRE-EXISTING — Narrow/vertical windows: control bar and resolution overlay layout
+## ☐ OPEN 2026-10-29 — 0.9.1 — PRE-EXISTING — MEASURED AND PLANNED 2026-10-30 (`3e47ee5`), NOT IMPLEMENTED — Narrow/vertical windows: control bar and resolution overlay layout
 
 **Seen** by Robbie on the MacBook Air (2048 × 1332) with `IMG_9457.MOV` (720 × 1280) at the window's minimum size, while
 confirming the rotation fix above.
@@ -3232,11 +3237,26 @@ confirming the rotation fix above.
 - **The resolution text overlay is badly placed** at these aspects.
 
 Pre-existing; not caused by the build 21 fix (`0f74e4a`), which only made these narrow windows reachable on a small screen.
+
+**Measured 2026-10-30** (Accessibility frames, LG, overlay HUD pinned; `docs/NARROW_WINDOW_LAYOUT_PLAN.md` §1):
+- At the 720-pt minimum (720 × 569 and 720 × 1280) the HUD's button row lays out at its natural **≈ 1,077 pt** (1,151 with a PQ
+  file's longer colour label) and is centred, so ≈ 180 pt is cut off each side: **Open, Play, Mute** on the left, **Display
+  transform and Unpin** on the right. Play is unreachable.
+- **The overlays: one cause.** The HUD is held at `maxWidth: 760` + 2 × 16 padding = 792 pt, wider than the window, so the video
+  region overhangs it by 36 pt each side. The raster readout (`25% — 720×1280 (window minimum)`) starts 8 pt outside the left edge
+  (measured x = 1432, expected 1468); the Inspector ends 6 pt past the right edge (30 pt inside in a wide window). The file-name
+  overlay is centred and unaffected.
+- MacBook Air 2048 × 1332: by calculation, a vertical window opens ≈ 728 pt wide, so the same overflow (≈ 175 pt per side).
+
+**Plan** (`docs/NARROW_WINDOW_LAYOUT_PLAN.md` §2, for Robbie to judge by eye): cap the HUD at the window's width (fixes the
+overlays on its own); three control-bar layouts chosen by `ViewThatFits` (full, compact with a More (…) menu, two-row narrow), with
+Play, the scrubber, Mute, Display transform, DeckLink-while-on and Pin never collapsing; the readout top-centre in narrow windows.
+
 Target: 0.9.1.
 
 ---
 
-## ☐ OPEN 2026-10-30 — 0.9.1 BUG IN SHIPPED 0.9.0 — Reference shows HLG with no OOTF (scene-linear ×12): HLG 50 % at SDR white, everything above clips
+## ✅ FIXED 2026-10-30 (`b9ce869`) — 0.9.1 BUG IN SHIPPED 0.9.0 — Reference shows HLG with no OOTF (scene-linear ×12): HLG 50 % at SDR white, everything above clips
 
 **Found** 2026-10-30 by measurement (`HLG_MACOS_MODE_PLAN.md` §3.6a, T0). It affects **0.9.0 (build 21, shipped 2026-10-29)** and every
 earlier build with an HLG path. On screen, an HLG layer with no `CAEDRMetadata` and `toneMapMode = .never` is shown as
@@ -3260,7 +3280,7 @@ SDR white" target and the "÷ 203 into a linear extended layer" route.
 (and `no headroom granted · …`). It replaces `highlights above reference white (HLG 75 %) clip`. The code keeps the old line
 until the fix lands.
 
-**Status: FIXED IN THE WORKING TREE 2026-10-30, uncommitted.** Verified on the ASUS (headroom 1.0): the HLG ramp in Reference
+**Status: FIXED 2026-10-30, COMMITTED `b9ce869`.** Verified on the ASUS (headroom 1.0): the HLG ramp in Reference
 matches the prediction within ±1 at every bar. HLG 50 % = the PQ ramp's 50-nit bar (188), and clipping starts at ≈ 63 % (between
 60 % = 236 and 65 % = 255). Readout: `display in SDR mode · above 100 nits clips`. Plan §6.7. **LG, HDR (headroom 4.48), T6, T7, T8 run 2026-10-30, all pass** (plan §6.8, §6.9): T6 18/18 holds
 install the right state; T7 offscreen / v210 / PNG bytes identical to build 21 in every mode; T8 PQ and SDR identical to build 21
@@ -3326,7 +3346,7 @@ clipping from 100 nits**, against QuickTime, all the time. Next to measure: Core
 
 ---
 
-## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — "colour state installed … AFTER a frame was already on screen" on every mode change: misfire, or a one-frame flicker?
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — MEASURED: A MISFIRE — FIXED AND VERIFIED 2026-10-30, NOT COMMITTED — "colour state installed … AFTER a frame was already on screen" on every mode change: misfire, or a one-frame flicker?
 
 **Seen** on every display-mode change, from the menu and from Hold C, in every source type measured. Each change logs
 `[EDR] colour state installed on the layer after N present(s) of this source — ⚠️ AFTER a frame was already on screen; that frame
@@ -3355,11 +3375,41 @@ colour space, EDR flag or `edrMetadata`, or the reverse:
   OS ↔ Reference (shader mode 2);
 - optionally, by eye or with an AH-style frame grab at 120 Hz on the LG during fast Hold C taps.
 
+**Measured 2026-10-30 (unattended, LG, Profile build of the working tree; mode changes by Color-menu AX clicks).** Each published
+`PendingColorState` carried a number; the render thread logged it on install, on every presented frame, and whether the layer held
+that state's colorspace, EDR flag, `edrMetadata` and `toneMapMode` at the present. 84 switches: `pq_ramp_14.mov` and
+`hlg_ramp_21.mov`, each 21 × (Reference, Bypass, OS) paused and 21 playing (loop on).
+- **No frame was presented under an older state than the one installed: 0 of 1,855 presents.** The layer held the frame's own state
+  at every present. The warning fired on 84 of 84 switches. **A misfire:** the counter counts presents since the source loaded.
+- **The reverse window was real, and is now closed.** The state was committed in its own `CATransaction` at the top of the tick,
+  3.2–7.5 ms (median 4.1–4.3) before the repainted frame's present on a paused deck (0.3–0.5 ms playing). A composite in that gap
+  would show the old picture under the new state for one refresh. Not measurable here: `presentedTime` read 0 for every frame, and
+  no pixels were taken.
+
+**Fixed (Robbie's decisions, 2026-10-30), `MetalVideoRenderer.swift`, not committed:**
+1. **Only a source edge is judged** (`PendingColorState.sourceEdge`): new codes in `setSourceColorSpace`, other than the teardown
+   clear (all three codes nil) and an override set or removed (NDI or file). Every other install logs `[EDR] colour state #N
+   installed on the layer (same source: mode, LUT, display, override or teardown); re-presenting the frame on screen under it`. A
+   file load still logs `… after 0 present(s) of this source — BEFORE its first frame, as intended`.
+2. **The colour state lands in the same commit as its repainted frame.** The install's transaction stays open until the tick's
+   present (`closeColorStateTransaction()` after `drawable.present()`, or at the end of a tick that presents nothing).
+
+**Re-run after the fix, same 84 switches:** every install was committed together with a present (84 of 84; 0 commits without
+one), so the commit-to-present gap is 0 by construction. Install to the shared commit, the render time in which nothing is
+committed: paused 0.87–6.78 ms (median 4.1–4.2), playing 0.33–0.59 ms. 0 stale presents, 0 warnings. Layer read-backs right in every
+mode (`EDRMetadata set · automatic` in OS for PQ, `nil · never` in Reference), none `NOT WHAT WAS SET`. Three Color ▸ Next Tag
+Override steps and Reset Tags to Source: plain line, no warning. The clear at quit is published but the process exits before the
+render thread installs it, so it prints nothing either way.
+
+**Not verified:** on screen. With the properties now committed with the frame rather than before it, `edrMetadata` is still set
+before `nextDrawable()` (`CAMetalLayer.h`), but no pixel or by-eye check was allowed in this run. Next: one by-eye Hold C pass on
+the LG with an HDR file, and T8's on-screen bars in each mode.
+
 Pre-existing (identical counts in `b9ce869`). Target: 0.9.1.
 
 ---
 
-## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — Quit takes more than 30 s with five windows open
+## ✅ CLOSED 2026-10-30 — NOT A MANIFOLD DEFECT: A TEST DRIVER'S UNREAPED CHILD — Quit takes more than 30 s with five windows open
 
 **Seen** 2026-10-30, in both the working-tree build and a clean `b9ce869` build (`HLG_MACOS_MODE_PLAN.md` §3.10c, *Seen,
 pre-existing*):
@@ -3378,9 +3428,180 @@ pre-existing*):
 time. Take a `sample <pid>` during a long quit to see what the main thread is waiting on. The log's last lines before exit may
 already show the slow step.
 
+**Measured 2026-10-30 (unattended): it never reproduced.** `manifold-proc.sh quit` by PID, the PID polled every 50 ms, fresh launch
+per count, the five files above opened in order: **1, 2, 3 and 5 windows all exited in 0.15–0.17 s.** Also 0.15–0.17 s: five
+windows after six mode switches and 3 s of playback each; five windows after a Chroma Scrub Bench run; two windows after 84 mode
+switches. No quit lasted 3 s, so no `sample` was taken.
+
+**The cause: the 2026-10-30 driver.** `verify.py` (session scratchpad, `bench/verify.py`) launched the build with
+`subprocess.Popen` and never called `wait()`. An exited child stays in the process table as a zombie (`ps` state `Z`) until its
+parent reaps it, and `kill -0` succeeds on a zombie, so `manifold-proc.sh` polled a process that had already gone. The file times
+agree: in both runs the app's last log line and the driver's quit fall in the same second (16:04:34; 16:09:45), and the driver's
+output ends 34 s later (16:05:08; 16:10:19), the 30-s timeout plus the guard. It "exited on its own" when Python exited and the system
+reaped it. The one-window Hold C session quit in time because its build was launched by a shell script that had already exited
+(reparented, reaped). Confirmed with a dummy child: `kill -0` succeeds on it 0.8 s after it exits, `ps` state `Z`, gone after `wait()`.
+
+**Fixed (not committed):**
+- `scripts/manifold-proc.sh`: a zombie counts as exited (`alive()`: `kill -0` and `ps` state not `Z`), in `quit`'s wait and in
+  `check`, which now refuses a zombie with "has exited (a zombie its parent has not reaped)". Checked on a dummy zombie.
+- `verify.py` (scratchpad, not in the repo) waits on its child after the quit, with `--timeout 120`.
+- `docs/color-fixtures/sweep.sh` records its child's PID and waits on it after each quit.
+- Every other repo script that launches the app runs it in the foreground or under `caffeinate` (which waits on it):
+  `scripts/run.sh` (`nohup … & disown`, the script exits), `scripts/verify-4e1.sh`, `scripts/soak/go.sh`,
+  `scripts/soak/repro/run.sh`.
+
+**⚠️ Not fixed, found on the way:** `sweep.sh` still quits with `pkill -f "MacOS/Manifold"`, which matches the installed app too, and
+opens with `open -a "$APP"`. It is written for the installed app on the Air, which `manifold-proc.sh` refuses by design. And
+`scripts/soak/repro/run.sh` sends ⌘N by keystroke to `process "Manifold"` by name. Both predate the CLAUDE.md rules. *Was: decision
+pending.* Warned in both files 2026-10-31: see *Scripts: two test scripts break CLAUDE.md's launch, quit and keystroke rules*.
+
+**Not tested:** the original cause (mode cycles and bench runs in both builds) beyond the cases above. Closed on the evidence that
+the 30 s was the driver's.
+
+---
+
+## ☐ OPEN 2026-10-31 — 0.9.1, HIGH — PRE-EXISTING, ALL BUILDS — CAUSE MEASURED, FIX PROPOSED, NOT APPLIED — A 119.95 fps iPhone clip plays audio but the picture freezes
+
+**Seen (Robbie, 2026-10-31):** `IMG_5070.MOV` (1920×1080 HEVC Main 10, 119.95 fps nominal, variable, iPhone; Dolby Vision 8.4)
+plays its audio, but the picture stays on the frame playback started from. Desktop only, no DeckLink output. QuickTime plays it
+normally, so decode speed is not the limit. The same cause as *file playback at 95.90 fps and above does not keep up* (2026-10-23).
+
+**The mechanism (code).** A file's frames are decoded by `AVAssetReaderTrackOutput` (`FileFrameSource.swift:77`), paced by a hidden
+`AVSampleBufferDisplayLayer`: the pump reads while that layer's renderer `isReadyForMoreMediaData` (`FileFrameSource.swift:103-120`;
+layer at `ContentView.swift:1167`). Every frame goes both to that layer and, through `onVideoFrame`, to `MetalVideoRenderer.enqueue`
+(`FrameEngine.swift:4352-4353`, `WindowDeck.swift:1113`), which keeps a PTS-sorted queue bounded at **`defaultMaxQueued = 12` frames**
+(`MetalVideoRenderer.swift:595`). On overflow while playing it **drops the oldest frame** (`MetalVideoRenderer.swift:3038-3043`); for
+a live source the overflow is reported to the clock (`onQueueOverflow`), but for a file nothing listens, and the drop is not logged
+anywhere. Each display tick shows the newest frame with `pts <= now`, dropping older due ones (`MetalVideoRenderer.swift:3391-3405`).
+**The decoder runs ahead of the clock by a roughly fixed TIME (≈ 105–130 ms), whatever the frame rate.** When 12 frames span less
+than that lead, the queue always holds only frames later than `now`: each new frame evicts the oldest, which was the next to come
+due, nothing ever passes `pts <= now`, and the picture stays put. The code's own comment at `MetalVideoRenderer.swift:3013-3018`
+describes exactly this failure ("slides the whole window into the future until nothing satisfies `pts <= now` and the renderer
+freezes"). The ≈ 11 frames that do show at the start are the paused queue's oldest 12, kept by the paused trim policy.
+
+**Measured 2026-10-31** (unattended, Profile build of the working tree with a temporary per-tick log, since removed; window on the
+LG; each clip opened, played 4 s by an AX press on Play, paused). Clips: ffmpeg `testsrc2`, 1920×1080 HEVC Main 10 (VideoToolbox,
+`hvc1`), BT.2020 HLG tags, AAC, 10 s. Per run: frames decoded (enqueued), presented, dropped as superseded (a newer frame also due),
+dropped as queue full (oldest evicted at enqueue), and the decoder's lead (newest queued PTS − clock). Three passes, all at a 120 Hz
+tick (see below); presented/s for each pass:
+
+| Clip | 12 frames span | Decoded in 3.94 s | Presented/s (3 passes) | Dropped, queue full | Superseded | Lead median / max |
+|---|---|---|---|---|---|---|
+| 48 fps | 250 ms | 189 | 47.8 · 48.0 · 48.0 | 0 | 0 | 130–133 / 167–195 ms |
+| 60 fps | 200 ms | 236 | 59.9 · 60.0 · 60.0 | 0 | 0 | 114–122 / 148–166 ms |
+| 72 fps | 167 ms | 282 | 71.8 · 70.1 · 71.8 | 0–7 | 0 | 126–131 / 151–168 ms |
+| 96 fps | 125 ms | 374–379 | **59.4 · 40.0 · 38.6** (stutter) | 140–226 | 0 | 114–118 / 137–144 ms |
+| 100 fps | 120 ms | 391–393 | **68.2 · 36.4 · 39.5** (stutter) | 124–250 | 0 | 108–114 / 132–141 ms |
+| 119.88 fps | 100 ms | 469–473 | **0.3 · 3.1 · 1.8** (frozen) | 457–472 | 0 | 106–107 / 128–136 ms |
+| 120 fps | 100 ms | 470–473 | **2.8 · 1.5 · 2.3** (frozen) | 461–464 | 0 | 104–113 / 120–147 ms |
+| `IMG_5070.MOV` | ≈ 100 ms | 471–473 | **2.5 · 6.6 · 2.8** (frozen) | 446–463 | 0 | 105–114 / 122–140 ms |
+
+- **48–72 fps play; 96 and 100 stutter; 119.88, 120 and the iPhone clip freeze.** Decoding kept up at every rate (decoded ≈ rate × 3.94 s).
+- **Every lost frame was a queue-full eviction; none was superseded.** On the frozen runs 94–100 % of decoded frames were evicted
+  unseen, and on 94–100 % of ticks the oldest queued frame was later than the clock.
+- The threshold is where 12 frame intervals fall below the lead: 167 ms (72 fps) clears a lead of at most 168 ms; 125 ms (96 fps)
+  sits inside 114–144 ms, so 96 and 100 vary run to run; 100 ms (120 fps) is below even the median.
+
+**Frame-due selection and the refresh rate.** Selection is "the newest frame with `pts <= now`; every older due frame is dropped as
+superseded" (`MetalVideoRenderer.swift:3391-3405`). With two source frames due per refresh (120 fps on a 60 Hz tick) that shows every
+second frame, which is correct, and is not the defect: no step of it depends on the refresh rate, and the eviction happens at
+enqueue, before any tick. **Not measured at 60 Hz:** the display link is `CVDisplayLinkCreateWithActiveCGDisplays` and is never
+retargeted (`MetalVideoRenderer.swift:3132`, no `CVDisplayLinkSetCurrentCGDisplay` in `App/`), so it ticked at 120 Hz (≈ 120 ticks/s)
+even with the window moved to the ASUS (60 Hz; the colour probe followed it to display 4). Superseded drops were therefore 0 in every
+run. By the code, on a 60 Hz link the freeze is the same, and the playing rates would add one superseded drop per tick above 60 fps.
+(A link that ignores the window's display is a separate observation; see *`CVDisplayLink` → `CADisplayLink`*, post-release.)
+
+**Proposed fix (not applied; Robbie to decide).** Bound a playing file's queue by TIME, not frames. On a file load, set
+`maxQueuedOverride` (the existing live-source knob, `MetalVideoRenderer.swift:599`) to `max(12, ceil(0.30 s / frameDuration) + 2)`,
+using the shortest frame duration for a variable-rate file (`IMG_5070.MOV`: 19/2400 s → 40 frames; 120 fps → 38; 60 fps → 20); clear
+it to nil when the file goes. 0.30 s is about 1.5× the largest lead measured (195 ms). Memory: the queue holds the same
+`CVPixelBuffer`s the hidden layer is already holding for that lead (`alwaysCopiesSampleData = false`, one sample buffer to both), so
+the deeper bound should add almost nothing; to be measured at 2160p120. With it: log a file's queue-full evictions (today they are
+silent), and add a file freeze guard (playing, queue full, oldest > now for many ticks) that logs. **Rejected:** dropping the newest on
+overflow while playing (future frames go missing, so gaps instead of a freeze); a tolerance on `pts <= now` (the queue would still
+slide away). Verify with the same eight clips, plus a non-HFR regression pass and the paused step/seek test that the paused trim policy
+exists for (2026-10-16).
+
+Pre-existing (the 2026-10-23 entry measured the same freeze on ProRes at `cb39182`). Target: 0.9.1.
+
+## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
+
+**Question (Robbie, 2026-10-31).** Would handing a Dolby Vision file's sample buffers to an `AVSampleBufferDisplayLayer` give
+system-licensed Dolby Vision playback (the RPU applied by macOS, as QuickTime does) in As macOS Shows It, where today Manifold shows
+only the base layer and a profile 5 file cannot be shown at all (0.9.1 Inspector row and banner, `DolbyVision.swift`)?
+
+**To find out:** whether the layer applies the RPU when fed compressed or decoder-output `CMSampleBuffer`s with their DV
+attachments; profile 5 and 8.4 (`HDR Samples/CLIMATE.mp4`, `IMG_5070.MOV`); against QuickTime on the LG; what that does to the
+scopes (they read Manifold's own decode, so in that mode they would describe the base layer, not the picture); and whether it can
+coexist with the Metal renderer for Reference and Bypass. `SampleBufferSurfaceView.swift` is an `AVSampleBufferDisplayLayer`
+surface already in the tree (the reference surface, `ContentView.swift:1162`). Nothing measured yet. Target: 1.0 investigation.
+
+## ☐ OPEN 2026-10-31 — SCRIPTS — WARNED, NOT FIXED — two test scripts break CLAUDE.md's launch, quit and keystroke rules
+
+**`docs/color-fixtures/sweep.sh`** quits Manifold with `pkill -f "MacOS/Manifold"` (lines 108 and 140), which matches every
+Manifold process by path, the installed `/Applications/Manifold.app` included, and opens the wedge with `open -a "$APP"` (by path).
+It prefers the installed app (`find_app`), because it was written for the DMG install on the MacBook Air (`AIR-COLOUR-TEST.md`).
+On the Mac Studio the installed copy rewrites licence values in the real plist when it is launched or quit that way (privacy P1).
+`manifold-proc.sh` refuses the installed app by design, so the script cannot simply call it.
+
+**`scripts/soak/repro/run.sh`** sends ⌘N (line 59) and ⌃⌥D (line 85) through `System Events … keystroke`. A keystroke goes to the
+frontmost app, not the process the script names: a ⌘Q sent the same way quit VS Code (2026-10-19). CLAUDE.md forbids keystrokes.
+
+**Done 2026-10-31:** a warning comment at the top of each: `sweep.sh` is Air-only, never on the Mac Studio; `run.sh` must not be
+run as is. Neither script's behaviour is changed.
+
+**Fix, not done:** `run.sh`: replace both keystrokes with AX clicks on File ▸ New Window and the SRT debug-connect menu item (if the
+DEBUG connect has one; UNKNOWN), and quit by PID with `manifold-proc.sh quit`. `sweep.sh`: launch by binary, hold the PID, quit with
+`kill <pid>` on the Air (or `manifold-proc.sh quit` once it accepts a named build there), and open the wedge with `manifold-proc.sh
+open <pid>`. Found 2026-10-30 (*Quit takes more than 30 s*, above). Pre-existing.
+
+## ☐ OPEN 2026-10-30 — 0.9.1, PRE-EXISTING — FIXED 2026-10-31 (EXPLICIT SCENE ID), VERIFIED, NOT COMMITTED; THIS MAC CLEANED — saved window positions grow by one per build (1,627 keys)
+
+**Seen** 2026-10-30: `com.graviton.manifold` held **1,627 `NSWindow Frame …` keys** of 1,697 (key names read, values not).
+
+**Where and how they are keyed.** AppKit's frame autosave, set up by SwiftUI for the `WindowGroup` player window. SwiftUI names
+the key after the window content's **type**: `NSWindow Frame SwiftUI.ModifiedContent<…Manifold.ContentView…,
+Manifold.(unknown context at $<address>).LicenseGate>, SwiftUI._TaskModifier2>-1-AppWindow-1`. `LicenseGate` was a `private`
+struct (`LicenseManager.swift`), and Swift prints a private type as `unknown context at $<address>`: an address in the binary that
+moves with every build. So each build wrote a new key and never read the old ones. 1,620 keys are of that form, **every one with the
+suffix `-1-AppWindow-1`**: one per build, not one per window or per position. The other 7: `GoToSheet`, `NSColorPanel`, `about`,
+Settings, `keyboard-shortcuts`, and older builds' keys from before `LicenseGate` existed (an address inside SwiftUI's own type
+instead, which changes only with a macOS update). About 575 KB of key names and values, loaded with the rest of the domain. This machine: one per dev build.
+Users: by inference one dead key per update they install (each release is a new build); not measured.
+
+**Why not a "most recent N" cap.** The keys carry no date and nothing records which was written last, so "most recent" cannot be
+known. A cap would keep an arbitrary 100–200. Every key but the current build's is dead anyway.
+
+**Fixed 2026-10-31 (Robbie: an explicit name, so a type rename can't start a new key), not committed.** The player `WindowGroup`
+has a scene id, `WindowGroup(id: PlayerScene.windowID)` with `PlayerScene.windowID = "player"` (`PlayerWindow.swift`, `ManifoldApp.swift`),
+the same convention as `about` and `keyboard-shortcuts`. SwiftUI then names the autosave key after the id, not the type.
+**Measured:** a build of the working tree wrote exactly one new key, **`NSWindow Frame player-AppWindow-1`**, and no type-derived key
+(1,628 → 1,629 frame keys; no other frame key changed). A second build, after code changes in `ContentView.swift`, reused it (no new
+key). The key now changes only if the id string does; a second player window gets `-AppWindow-2`, as before. `LicenseGate` is back
+to `private`: its visibility no longer matters.
+
+**This Mac cleaned 2026-10-31 (Robbie).** Every `NSWindow Frame` key listed and stashed, names and values (session scratchpad,
+`frame-keys-before.json`). The **1,623** type-derived player keys (names containing `Manifold.ContentView`), and nothing else, were
+each read and then deleted, stopping at the first failure (none failed). No Manifold was running (`manifold-proc.sh guard`).
+**Domain 1,698 → 76 keys; window-frame keys 1,628 → 6** (`GoToSheet`, `NSColorPanel`, `about`, the Settings window,
+`keyboard-shortcuts`, `player-AppWindow-1`). `streamBookmarks` hash unchanged; licence keys present before and after (3), by
+presence only. The installed 0.9.0's own key was among the 1,623, so `/Applications/Manifold.app` opens its window at the default
+frame once.
+
+*Superseded 2026-10-31:* `LicenseGate` is internal, so the key reads `… Manifold.LicenseGate> …` with no address,
+the same in every build. **Measured:** a build wrote one new key, `NSWindow Frame SwiftUI.ModifiedContent<…<Manifold.ContentView,
+SwiftUI._FlexFrameLayout>, SwiftUI._PreferenceWritingModifier<SwiftUI.PreferredColorSchemeKey>>, Manifold.LicenseGate>,
+SwiftUI._TaskModifier2>, SwiftUI._TaskModifier2>, SwiftUI._TaskModifier2>-1-AppWindow-1`: **1,627 → 1,628**. A second build, after
+code changes elsewhere (About window, NDI comments), with a window opened and resized by AX: **1,628 → 1,628**, the same key reused.
+A new key still appears when the window content's type itself changes (a modifier added to the `WindowGroup` content), or with a
+macOS update that changes SwiftUI's types.
+
+*Was: decision pending; the 1,627 old keys untouched.* Users' old keys are not pruned (no launch prune was asked for): they stay as
+dead keys, and stop growing from 0.9.1. Upgrading users lose their saved window frame once on 0.9.1, as on every update until now.
+
 Pre-existing. Target: 0.9.1.
 
-## ☐ OPEN 2026-10-29 — DECIDED 2026-10-30 (Option B), IMPLEMENTED, NOT COMMITTED, VERIFICATION PENDING — an iPhone HLG clip clips face, shirt and sky to white on an SDR-mode display; QuickTime does not
+## ✅ FIXED 2026-10-30 (`b9ce869`) — DECIDED 2026-10-30 (Option B), VERIFIED (T6–T8 pass) — an iPhone HLG clip clips face, shirt and sky to white on an SDR-mode display; QuickTime does not
 
 **Decided 2026-10-30 (Robbie): Option B.** As macOS Shows It hands an HLG picture to macOS's HLG adjustment
 (`CAEDRMetadata.hlg`, `toneMapMode = .ifSupported`). Reference stays strict (BT.2408, no tone-map, clips at the ceiling).
@@ -3389,11 +3610,11 @@ consequences: in As macOS Shows It the HLG picture and the scopes disagree, and 
 Recorded in `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *Amendment to DECISION 2026-08-28*. Plan, code map and test matrix:
 `docs/HLG_MACOS_MODE_PLAN.md`.
 
-**Implemented in the working tree** (uncommitted). Files: `MetalVideoRenderer.swift` (the two fields in `PendingColorState`,
+**Implemented, committed in `b9ce869`.** Files: `MetalVideoRenderer.swift` (the two fields in `PendingColorState`,
 set in `publishColorState`, installed with the colorspace, read back and logged), `ReferencePlan.swift` (HLG no longer
 "identical to OS"), `DisplayChainModel.swift` (the two HLG verdict lines, and a `[CHAIN] Verdict:` log),
 `DisplayTransform.swift` (comment). A temporary DEBUG-only switch, `MANIFOLD_HLG_TONEMAP`, runs T0–T4. Remove it before
-commit.
+commit. (Removed: no reference to it in `App/` or `Packages/`, checked 2026-10-30.)
 
 **T0–T4 measured 2026-10-30** (ASUS, headroom 1.0, window-only captures; table in `HLG_MACOS_MODE_PLAN.md` §3.6a).
 (1) `.never` blocks `CAEDRMetadata.hlg`: T1 = T0. (2) `.ifSupported` takes effect as one conversion, equal within ±2 codes to
@@ -3407,7 +3628,7 @@ not captured in Reference). **Decision pending (Robbie).** T5–T8: not run yet.
 **identical by eye** on the same frame (Robbie; *"if Manifold was brighter it was hard to tell given the content"*). Reference is much brighter and clips: the 0.9.1 bug above. The brightness
 variation could not be tested (the LG has no brightness control, only HDR on/off). Plan §3.6c.
 
-**Verification T6–T8: pending** (T6 waits for the Reference fix). Stop conditions (Robbie): if the adjustment does not take effect, or the
+**Verification T6–T8: passed 2026-10-30** (`HLG_MACOS_MODE_PLAN.md` §6.8 T6, §6.9 T7 and T8). *Was: pending (T6 waits for the Reference fix).* Stop conditions (Robbie): if the adjustment does not take effect, or the
 ASUS shows a double conversion, stop and report. Try no alternatives.
 
 *The 2026-10-29 record follows, unchanged.*
