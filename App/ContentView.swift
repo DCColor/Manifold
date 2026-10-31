@@ -1214,7 +1214,13 @@ struct ContentView: View {
                             .padding(12)
                             .background(.black.opacity(0.55),
                                         in: RoundedRectangle(cornerRadius: 12))
-                            .frame(maxWidth: 760)
+                            // ⚠️ `minWidth: 0` IS THE FIX, NOT NOISE (docs/NARROW_WINDOW_LAYOUT_PLAN.md §2.1). With
+                            // `maxWidth` alone the frame reports min(760, its child), not min(760, what it is offered):
+                            // in a window narrower than 792 pt it reported 760, the video region grew to 792 and was
+                            // centred, and everything anchored to its edges (the raster readout, the Inspector) sat
+                            // 36 pt outside the window. With a minimum the frame takes the offered width, capped at
+                            // 760, so the region is never wider than the window. Unchanged in any window ≥ 792 pt.
+                            .frame(minWidth: 0, maxWidth: 760)
                             .padding(16)
                     }
                     .opacity(controlsShown ? 1 : 0)
