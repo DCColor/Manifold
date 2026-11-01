@@ -50,6 +50,9 @@ let package = Package(
         .library(name: "AudioOutputLayout", targets: ["AudioOutputLayout"]),
         // Linked by the APP target directly (project.yml), for the renderer's paused-picture rules.
         .library(name: "FrameQueuePolicy", targets: ["FrameQueuePolicy"]),
+        // Linked by the APP target directly (project.yml): the DeckLink output pacer's rate and its interval statistics
+        // (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4).
+        .library(name: "OutputPacing", targets: ["OutputPacing"]),
         // Linked by the APP target directly (project.yml): what a refused DeckLink output start says (docs/BUGS.md).
         .library(name: "DeckLinkRefusal", targets: ["DeckLinkRefusal"]),
         // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
@@ -478,6 +481,24 @@ let package = Package(
             name: "FrameQueuePolicyTests",
             dependencies: ["FrameQueuePolicy"],
             path: "Tests/FrameQueuePolicyTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The DeckLink output pacer's period (a whole number of ticks per frame, at least 60 a second) and the tick
+        // interval statistics its log reports (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4). A leaf target, no dependencies;
+        // the pacer thread is app code.
+        .target(
+            name: "OutputPacing",
+            path: "Sources/OutputPacing",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "OutputPacingTests",
+            dependencies: ["OutputPacing"],
+            path: "Tests/OutputPacingTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

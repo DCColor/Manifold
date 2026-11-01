@@ -17,6 +17,7 @@ import FrameQueuePolicy  // the paused-picture rules: which end a full queue tri
 import LUTCube           // colour S6: the Interpretation LUT's tables (docs/COLOR_MANAGEMENT_FINDINGS.md §6.11)
 import FileScan          // interlaced I4: the window's field view (docs/INTERLACED_FINDINGS.md §14)
 import PictureGeometry   // a file's orientation, applied in the offscreen pass (docs/BUGS.md, iPhone clips, 2026-10-29)
+import OutputPacing      // the DeckLink output pacer's rate and statistics (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
 // UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
@@ -620,6 +621,23 @@ final class MetalVideoRenderer {
     /// Created and released on `linkQueue` only (see the idle note below).
     private var displayLink: CVDisplayLink?
 
+    // ── THE LINK FOLLOWS THE WINDOW'S DISPLAY; SDI FOLLOWS NO DISPLAY (0.9.1, docs/DISPLAY_LINK_PER_WINDOW_PLAN.md) ───────
+    //
+    // The link used to be made on the active displays and never moved, so it ticked at the MAIN display's rate wherever
+    // the window was (docs/BUGS.md, 2026-10-31). Now every link is pointed at the display the window is on: at bind, when
+    // the window changes screen, when the displays are reconfigured, and on every new link (`makeDisplayLink`, so the
+    // −6660 recreation lands there too). `retargetDisplayLink` is the one entry.
+    //
+    // ⚠️ AND WHILE THIS RENDERER FEEDS DECKLINK OUTPUT, THE LINK DOES NOT TICK AT ALL. Every SDI frame is made by this
+    // render, so a window-paced render would make SDI depend on a desktop display. The `OutputPacer` ticks instead, at a
+    // rate set by the card's mode and the source (§4.4), from `beginDeckLinkOutput` to `stopDeckLinkOutput`. ONE TICK
+    // SOURCE AT A TIME: the switch runs on `linkQueue`, stopping one (which waits for its tick in flight) before starting
+    // the other, so `performDisplayTick` stays on one thread at a time. The idle stop and wake act on whichever is active.
+    /// The display the window is on, for every link. `linkQueue` only.
+    private var linkTargetDisplay: CGDirectDisplayID?
+    /// While output runs, the tick source. `linkQueue` only; nil otherwise.
+    private var outputPacer: OutputPacer?
+
     // ── A PAUSED WINDOW STOPS ITS DISPLAY LINK ────────────────────────────────────────────────
     //
     // While paused with nothing to do, every tick finds no frame due and no one-shot armed, so the link
@@ -691,6 +709,15 @@ final class MetalVideoRenderer {
     /// if it did not take, recreate the link; if that fails too, mark it stopped so the next wake tries again.
     /// Never leave `idleStopped` false on a link that is not running.
     private func ensureRunningOnQueue(resuming: Bool) {
+        // While output runs the pacer is the tick source, and it cannot refuse a start.
+        if let pacer = outputPacer {
+            #if DEBUG
+            rpLastTickWall = 0
+            idleTicksSinceStart = 0
+            #endif
+            pacer.setRunning(true)
+            return
+        }
         guard let link = displayLink else { return }   // `stop()` took it: not ours to start
         if !resuming {
             idleLock.lock()
@@ -714,7 +741,7 @@ final class MetalVideoRenderer {
         if let fresh = makeDisplayLink(), Self.setRunning(fresh, true) == kCVReturnSuccess {
             displayLink = fresh
             idleLock.lock(); lastTickAt = CACurrentMediaTime(); idleLock.unlock()
-            print("[IDLE] display link recreated and running")
+            print("[IDLE] display link recreated and running on display \(CVDisplayLinkGetCurrentCGDisplay(fresh))")
         } else {
             idleLock.lock(); idleStopped = true; idleLock.unlock()
             print("[IDLE] ⚠️ display link could not be recreated — the next wake tries again")
@@ -755,7 +782,7 @@ final class MetalVideoRenderer {
             || pendingFieldChroma != nil || pendingFieldView != nil
         refreshLock.unlock()
         let canIdle = !armed && onDisplayTick == nil && presentationHoldFloor == nil && calibrationFlash == nil
-            && isPausedProvider?() == true
+            && deferredPresent == nil && isPausedProvider?() == true
         if generation != lastSeenWakeGeneration || !canIdle {
             lastSeenWakeGeneration = generation
             lastActiveTick = now
@@ -769,10 +796,11 @@ final class MetalVideoRenderer {
     /// `linkQueue`. Stop only if nothing woke the link since the tick that asked.
     private func stopForIdle(generation: UInt64) {
         idleLock.lock()
-        guard wakeGeneration == generation, !idleStopped, let link = displayLink else { idleLock.unlock(); return }
+        guard wakeGeneration == generation, !idleStopped, outputPacer != nil || displayLink != nil else { idleLock.unlock(); return }
         idleStopped = true
         idleLock.unlock()
-        let rc = Self.setRunning(link, false)
+        var rc = kCVReturnSuccess
+        if let pacer = outputPacer { pacer.setRunning(false) } else if let link = displayLink { rc = Self.setRunning(link, false) }
         #if DEBUG
         FileHandle.standardError.write(Data(("[IDLE] display link stopped (paused, nothing to draw) after \(idleTicksSinceStart) ticks"
             + (rc == kCVReturnSuccess ? "" : " · CVDisplayLinkStop → \(rc) ⚠️") + "\n").utf8))
@@ -1211,11 +1239,13 @@ final class MetalVideoRenderer {
         }
         installReferenceObservers()
         installHeadroomMonitor()
+        installLinkTargetObservers()
     }
 
     deinit {
         referenceObservers.forEach { NotificationCenter.default.removeObserver($0) }
         headroomObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        linkTargetObservers.forEach { NotificationCenter.default.removeObserver($0) }
         headroomTimer?.invalidate()
         stop()
     }
@@ -1240,6 +1270,7 @@ final class MetalVideoRenderer {
     /// re-plan if in Reference.
     func hostViewDidMoveToWindow() {
         sampleHeadroom(context: "window on screen")
+        retargetDisplayLink(reason: "window shown")
         guard displayTransform == .reference else { return }
         publishColorState()
         sourceColorStateChanged()
@@ -1287,6 +1318,24 @@ final class MetalVideoRenderer {
     /// keeps every case inside S4's "within 1 s". It logs and posts only on a change the readout would
     /// SHOW (`EDRHeadroom.differsVisibly`), so a quiet display costs two property reads and no output.
     /// Whichever path sees a change first logs it; the other then finds nothing to say.
+    private var linkTargetObservers: [NSObjectProtocol] = []
+
+    /// The link follows the window (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §3.2): this window changing screen, and any display
+    /// reconfiguration (a display connected, removed or re-moded can move the window, or take its display away). The bind
+    /// is `hostViewDidMoveToWindow`. Unlike the Reference observers these run in every display mode.
+    private func installLinkTargetObservers() {
+        let nc = NotificationCenter.default
+        linkTargetObservers.append(nc.addObserver(forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main) { [weak self] note in
+            // A window notification for ANOTHER window says nothing about this one.
+            guard let self, let w = note.object as? NSWindow, w === self.hostView?.window else { return }
+            self.retargetDisplayLink(reason: "window moved")
+        })
+        linkTargetObservers.append(nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                  object: nil, queue: .main) { [weak self] _ in
+            self?.retargetDisplayLink(reason: "display reconfiguration")
+        })
+    }
+
     private func installHeadroomMonitor() {
         let nc = NotificationCenter.default
         let windowEvents: [(Notification.Name, String)] = [
@@ -3141,17 +3190,23 @@ final class MetalVideoRenderer {
             guard let link = makeDisplayLink() else { print("MetalVideoRenderer: CVDisplayLink create failed"); return }
             // A link just started has not ticked yet: stamp it, so the first wakes do not read it as silent.
             idleLock.lock(); idleStopped = false; lastTickAt = CACurrentMediaTime(); idleLock.unlock()
-            Self.setRunning(link, true)
+            // A pacer already ticking (output armed before the window bound) stays the one tick source.
+            if outputPacer == nil { Self.setRunning(link, true) }
             displayLink = link
         }
     }
 
-    /// `linkQueue`. A display link on the active displays, calling this renderer's tick. `start()` and the recovery in
-    /// `ensureRunningOnQueue` both make theirs here.
+    /// `linkQueue`. A display link on the active displays, pointed at the window's display when it is known, calling this
+    /// renderer's tick. `start()` and the recovery in `ensureRunningOnQueue` both make theirs here, so a recreated link
+    /// lands on the window's display, not the main one.
     private func makeDisplayLink() -> CVDisplayLink? {
         var link: CVDisplayLink?
         CVDisplayLinkCreateWithActiveCGDisplays(&link)
         guard let link else { return nil }
+        if let target = linkTargetDisplay {
+            let rc = CVDisplayLinkSetCurrentCGDisplay(link, target)
+            if rc != kCVReturnSuccess { print("[LINK] ⚠️ new link: display \(target) refused (\(rc)) — on display \(CVDisplayLinkGetCurrentCGDisplay(link))") }
+        }
         let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
             let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
             renderer.displayTick()
@@ -3163,6 +3218,11 @@ final class MetalVideoRenderer {
 
     func stop() {
         linkQueue.sync {
+            if let pacer = outputPacer {
+                print("[PACER] stopped (window closed) — " + pacer.cancel())
+                outputPacer = nil
+                setPacerPresents(active: false)
+            }
             if let link = displayLink {
                 Self.setRunning(link, false)
                 displayLink = nil
@@ -3170,6 +3230,105 @@ final class MetalVideoRenderer {
             idleLock.lock(); idleStopped = false; idleLock.unlock()
         }
         flush()
+    }
+
+    // MARK: - Which display the link follows (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §3)
+
+    /// MAIN. Point the link at the display this window is on now. No screen (not yet on screen, a Space or full-screen
+    /// transition): keep the current target. Every trigger comes here: bind, a screen change, a display reconfiguration.
+    func retargetDisplayLink(reason: String) {
+        guard let screen = hostingScreen,
+              let id = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        else { return }
+        let name = screen.localizedName, window = hostWindowNumber.map(String.init) ?? "?"
+        linkQueue.async { [weak self] in self?.retargetOnQueue(id, name: name, window: window, reason: reason) }
+    }
+
+    /// `linkQueue`. Running or idle-stopped, the link can be moved in place (measured, plan §2.5); a refusal keeps the old one.
+    private func retargetOnQueue(_ id: CGDirectDisplayID, name: String, window: String, reason: String) {
+        // Same display: nothing to do, unless the displays were reconfigured (its mode, so its rate, may have changed).
+        guard id != linkTargetDisplay || reason == "display reconfiguration" else { return }
+        let previous = linkTargetDisplay
+        linkTargetDisplay = id
+        var rc = kCVReturnSuccess
+        var hz = Double.nan
+        if let link = displayLink {
+            rc = CVDisplayLinkSetCurrentCGDisplay(link, id)
+            if rc != kCVReturnSuccess { linkTargetDisplay = previous }
+            let t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link)
+            if t.timeValue > 0 { hz = Double(t.timeScale) / Double(t.timeValue) }
+        }
+        if hz.isNaN {   // no link yet: ask a scratch link for the display's rate, for the log and the present cap
+            var probe: CVDisplayLink?
+            if CVDisplayLinkCreateWithCGDisplay(id, &probe) == kCVReturnSuccess, let probe {
+                let t = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(probe)
+                if t.timeValue > 0 { hz = Double(t.timeScale) / Double(t.timeValue) }
+            }
+        }
+        if rc == kCVReturnSuccess, hz.isFinite, hz > 0 { setWindowDisplayPeriod(1 / hz) }
+        print(String(format: "[LINK] window %@ → display %u \"%@\" (%.3f Hz) · %@ · rc %d%@", window, id, name, hz, reason, rc,
+                     displayLink == nil ? " · no link yet: the next one starts there"
+                     : outputPacer != nil ? " · DeckLink output: the pacer ticks, the link waits here" : ""))
+    }
+
+    // MARK: - The output pacer (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4)
+
+    /// The source's frame duration in seconds (0 = unknown), for the pacer's rate. `deckLinkLock`.
+    private var deckLinkSourceFrame: Double = 0
+
+    /// MAIN, with each source format (DeckLinkService): the source's rate, nil or 0 when unknown. A running pacer is re-rated.
+    func setDeckLinkSourceFrameRate(_ fps: Double?) {
+        deckLinkLock.lock()
+        deckLinkSourceFrame = (fps ?? 0) > 0 ? 1 / fps! : 0
+        let active = deckLinkActive
+        deckLinkLock.unlock()
+        if active { schedulePacer(reason: "source rate changed") }
+    }
+
+    /// Any thread, outside `deckLinkLock`: start the pacer, or re-rate a running one, from the card's and the source's frames.
+    private func schedulePacer(reason: String) {
+        deckLinkLock.lock()
+        let card = deckLinkCardFrame, source = deckLinkSourceFrame
+        let size = deckLinkOutputSize
+        deckLinkLock.unlock()
+        guard let timing = OutputPacerTiming.period(cardFrame: card, sourceFrame: source) else {
+            print("[PACER] ⚠️ no card or source rate known — the link keeps ticking (\(reason))"); return
+        }
+        let mode = String(format: "%@ %.3f fps · source %@", size.map { "\($0.w)x\($0.h)" } ?? "?", card > 0 ? 1 / card : 0,
+                          source > 0 ? String(format: "%.3f fps", 1 / source) : "rate unknown")
+        linkQueue.async { [weak self] in self?.startPacerOnQueue(timing.period, k: timing.ticksPerFrame, mode: mode, reason: reason) }
+    }
+
+    /// `linkQueue`. Stop the link (it waits for a tick in flight), then start the pacer in the link's idle state.
+    private func startPacerOnQueue(_ period: Double, k: Int, mode: String, reason: String) {
+        let line = String(format: "%@ · P %.2f ms (k %d, %.2f Hz)", mode, period * 1000, k, 1 / period)
+        if let pacer = outputPacer {
+            pacer.setPeriod(period)
+            print("[PACER] re-rated for \(line) · \(reason)")
+            return
+        }
+        if let link = displayLink { Self.setRunning(link, false) }
+        setPacerPresents(active: true)
+        let pacer = OutputPacer(period: period, label: mode) { [weak self] in self?.displayTick() }
+        outputPacer = pacer
+        idleLock.lock(); let stopped = idleStopped; if !stopped { lastTickAt = CACurrentMediaTime() }; idleLock.unlock()
+        #if DEBUG
+        rpLastTickWall = 0
+        #endif
+        if !stopped { pacer.setRunning(true) }
+        print("[PACER] started for \(line) · \(reason)" + (stopped ? " · idle (paused, nothing to draw) until a wake" : ""))
+    }
+
+    /// `linkQueue`. Stop the pacer and join it, then hand the ticks back to the link, on the window's display.
+    private func stopPacerOnQueue(reason: String) {
+        guard let pacer = outputPacer else { return }
+        let summary = pacer.cancel()
+        outputPacer = nil
+        setPacerPresents(active: false)
+        idleLock.lock(); let stopped = idleStopped; idleLock.unlock()
+        let display = displayLink.map { CVDisplayLinkGetCurrentCGDisplay($0) }
+        print("[PACER] stopped (\(reason)) — \(summary) · link back on display \(display.map(String.init) ?? "none")")
+        if !stopped { ensureRunningOnQueue(resuming: true) }
     }
 
     // MARK: - Per-refresh presentation
@@ -3204,7 +3363,13 @@ final class MetalVideoRenderer {
         #if DEBUG
         watchTickBegan = CACurrentMediaTime()
         #endif
-        autoreleasepool { performDisplayTick() }
+        currentTickStart = CACurrentMediaTime()
+        autoreleasepool {
+            performDisplayTick()
+            // Pacer mode (addition B): a frame the present gate held back is shown on the first tick the gate allows.
+            if deferredPresent != nil { servePacedPresent() }
+            if pacerPresentsOn { flushPacerPresentStats(now: currentTickStart) }
+        }
         noteIdleTick()
         #if DEBUG
         watchTickEnded = CACurrentMediaTime()
@@ -3352,6 +3517,7 @@ final class MetalVideoRenderer {
         if doClear {
             lastPixelBuffer = nil
             lastPixelBufferPts = .nan
+            deferredPresent = nil   // a held-back frame of the old source must not land after the wipe
             presentBlackFrame()
             return
         }
@@ -3900,6 +4066,81 @@ final class MetalVideoRenderer {
         let rpEncEnd = CACurrentMediaTime()
         #endif
 
+        // The render's completion: publish this buffer as the readable frame + trigger scope sampling ONLY once the
+        // render's GPU work has COMPLETED — so scopes (on their own queue) read a fully-written frame, never a half-drawn
+        // one (read-after-write safety without a cross-queue event). Runs on a Metal completion thread; onFrameRendered
+        // just enqueues (non-blocking). One body for both paths below; `commitWall` is the wall clock at the commit.
+        func addFrameCompletion(to cb: MTLCommandBuffer, commitWall: CFTimeInterval) {
+            cb.addCompletedHandler { [weak self] cb in
+                guard let self else { return }
+                #if DEBUG
+                // GPU-side tail (completion thread): pure GPU exec + end-to-end pipeline latency. Guarded
+                // because recordRenderPerf reads/resets these from the render thread. gpuStartTime/EndTime
+                // are 0 if the buffer never scheduled; only record a plausible (positive) sample.
+                let gpu = cb.gpuEndTime - cb.gpuStartTime
+                let lat = CACurrentMediaTime() - commitWall
+                if gpu >= 0 {
+                    self.rpGpuLock.lock()
+                    self.rpGpuSum += gpu; self.rpGpuMax = max(self.rpGpuMax, gpu)
+                    self.rpLatSum += lat; self.rpLatMax = max(self.rpLatMax, lat)
+                    self.rpGpuSamples += 1
+                    self.rpGpuLock.unlock()
+                }
+                #endif
+                self.offscreenIndexLock.lock()
+                self.offscreenReadableIndex = writeIndex
+                self.offscreenReadableChroma = frameChroma
+                self.offscreenReadableOutput = frameOutput
+                #if DEBUG
+                self.readableDisplaySource = (displaySource, displaySourceView.view, displaySourceView.order)
+                #endif
+                self.offscreenIndexLock.unlock()
+                #if DEBUG
+                ScopePerf.count("frames")
+                #endif
+                self.onFrameRendered?()
+                // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
+                // The frame's SOURCE pts rides along so it can be published with the converted pixels.
+                self.pushDeckLinkConvert(sourcePts: pts)
+            }
+        }
+
+        // ── PACER MODE: THE SDI FRAME IS COMMITTED BEFORE ANY DRAWABLE IS ASKED FOR (addition B, plan §4.4) ──────────
+        //
+        // While DeckLink output runs, this command buffer holds only the offscreen pass (and the field view), and it is
+        // committed HERE, with the completion that publishes the frame and pushes its v210 convert. Nothing after this
+        // line can delay this frame's SDI: the convert is driven by this buffer's GPU completion on the DeckLink queue,
+        // and the drawable is asked for afterwards, in a separate command buffer, by `servePacedPresent`. That present is
+        // GATED so it can never block this thread either (which would delay the NEXT frame's selection): at most one
+        // present waiting for the glass beside the one on it, so `nextDrawable()` always finds a free drawable in the
+        // default pool of three, and none sooner than ¾ of the window's display period after the last, so the window's
+        // presents are capped at its own display's rate whatever the pacer's. A present the gate holds back is not lost:
+        // the newest frame waits in `deferredPresent` and a later tick shows it.
+        if pacerPresentsOn {
+            #if DEBUG
+            let rpDrawStart = CACurrentMediaTime(), rpDrawEnd = rpDrawStart
+            #endif
+            notePacerConvertProbe(pts: pts)
+            addFrameCompletion(to: cmdBuffer, commitWall: CACurrentMediaTime())
+            #if DEBUG
+            let rpCommitStart = CACurrentMediaTime()
+            #endif
+            cmdBuffer.commit()
+            #if DEBUG
+            let rpCommitEnd = CACurrentMediaTime()
+            #endif
+            offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
+            pacerPresentStats.rendered += 1
+            deferredPresent = (displaySource, offscreen.width, offscreen.height)
+            let wait = servePacedPresent()
+            #if DEBUG
+            recordRenderPerf(texture: rpTexEnd - rpTexStart, drawable: wait ?? (rpDrawEnd - rpDrawStart),
+                             encode: rpEncEnd - rpEncStart, present: 0, commit: rpCommitEnd - rpCommitStart,
+                             iosurface: rpIOSurface)
+            #endif
+            return
+        }
+
         // Acquire the drawable here and NOWHERE else in the render path. If it comes back nil (pool
         // momentarily empty / the internal ~1s wait elapsed), drop this frame: nothing was checked
         // out, so the pool is unaffected and the next tick retries. The offscreen work encoded above
@@ -3912,19 +4153,68 @@ final class MetalVideoRenderer {
         let rpDrawEnd = CACurrentMediaTime()
         #endif
 
-        // ⚠️ EXPERIMENT 2 SCAFFOLD — 1:1 offscreen -> drawable as a RENDER PASS rather than a blit.
-        // Still colour-neutral: displayCopyFragment is an identity read() at the fragment's own
-        // pixel coordinate. Measured bit-identical to the blit at 1920x1080 and 3840x2160 (0 of
-        // 8,294,400 pixels differ, 0 ULP), for +0.0026 ms/frame of GPU time at 4K.
-        //
-        // The point of the shape: this stage reads the offscreen and writes the DRAWABLE, so a
-        // display-only transform placed here cannot be observed by the scopes, the DeckLink v210
-        // convert, or the frame export — all of which read the offscreen ring.
-        //
-        // Falls back to the blit if the pipeline failed to build, so the display path is never lost.
-        //
-        // COLOUR S1: Reference binds its OWN pipeline here and nowhere else. `activeReference` is nil
-        // in OS and Bypass, so those two take exactly the branch they always took.
+        encodeDisplayStage(from: displaySource, width: offscreen.width, height: offscreen.height,
+                           into: cmdBuffer, drawable: drawable)
+
+        // ⚠️ NO `cmdBuffer.present(drawable)` HERE. With `presentsWithTransaction` the present has to
+        // happen AFTER the command buffer is scheduled, inside a CATransaction — see
+        // `presentDrawable`, below the commit. The completion handler and the commit are unchanged.
+        // Wall clock at commit, captured so the completion handler can compute end-to-end latency
+        // (commit → GPU-done + present). A growing lat with flat gpu = drawable/present back-pressure.
+        addFrameCompletion(to: cmdBuffer, commitWall: CACurrentMediaTime())
+        #if DEBUG
+        let rpCommitStart = CACurrentMediaTime()
+        #endif
+        cmdBuffer.commit()
+        #if DEBUG
+        let rpCommitEnd = CACurrentMediaTime()
+        #endif
+
+        reportCompareStamp(on: drawable)
+        presentDrawable(drawable, on: cmdBuffer)
+        // Counted HERE and not in `presentDrawable`, deliberately: this counter answers "did the
+        // colour state reach the layer before this SOURCE's first frame?", and a black-frame present
+        // (presentBlackFrame, on teardown) is not one of this source's frames. Counting it there
+        // would report 1 where the teardown→new-source path must report 0.
+        presentsSinceFlush &+= 1
+
+        #if DEBUG
+        let rpPresEnd = CACurrentMediaTime()
+        recordRenderPerf(texture:  rpTexEnd    - rpTexStart,
+                         drawable: rpDrawEnd   - rpDrawStart,
+                         encode:   rpEncEnd    - rpEncStart,
+                         // presMs NOW MEANS THE TRANSACTIONAL PRESENT — waitUntilScheduled() plus the
+                         // CATransaction — which is the price of `presentsWithTransaction` and the
+                         // one number that says whether it is costing us. It used to mean the blit
+                         // plus an enqueue-only present(), which was always ~0.02 ms; do not compare
+                         // the two across that change.
+                         present:  rpPresEnd   - rpCommitEnd,
+                         commit:   rpCommitEnd - rpCommitStart,
+                         iosurface: rpIOSurface)
+        #endif
+        // Advance so the NEXT render targets a different ring texture (write-during-read
+        // safety: a scope reading this frame's buffer won't be overwritten until the ring
+        // wraps ~offscreenRingCount frames later).
+        offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
+    }
+
+    /// The offscreen (or the field view) → the drawable, in `cb`. Render thread.
+    ///
+    /// ⚠️ EXPERIMENT 2 SCAFFOLD — 1:1 offscreen -> drawable as a RENDER PASS rather than a blit.
+    /// Still colour-neutral: displayCopyFragment is an identity read() at the fragment's own
+    /// pixel coordinate. Measured bit-identical to the blit at 1920x1080 and 3840x2160 (0 of
+    /// 8,294,400 pixels differ, 0 ULP), for +0.0026 ms/frame of GPU time at 4K.
+    ///
+    /// The point of the shape: this stage reads the offscreen and writes the DRAWABLE, so a
+    /// display-only transform placed here cannot be observed by the scopes, the DeckLink v210
+    /// convert, or the frame export — all of which read the offscreen ring.
+    ///
+    /// Falls back to the blit if the pipeline failed to build, so the display path is never lost.
+    ///
+    /// COLOUR S1: Reference binds its OWN pipeline here and nowhere else. `activeReference` is nil
+    /// in OS and Bypass, so those two take exactly the branch they always took.
+    private func encodeDisplayStage(from displaySource: MTLTexture, width: Int, height: Int,
+                                    into cmdBuffer: MTLCommandBuffer, drawable: CAMetalDrawable) {
         if var reference = activeReference, let refPipeline = displayReferencePipelineState {
             let refDesc = MTLRenderPassDescriptor()
             refDesc.colorAttachments[0].texture = drawable.texture
@@ -3957,108 +4247,145 @@ final class MetalVideoRenderer {
             // have shipped untested and failed on a machine where the pipeline failed to build.
             blit.copy(from: displaySource, sourceSlice: 0, sourceLevel: 0,
                       sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                      sourceSize: MTLSize(width: offscreen.width, height: offscreen.height, depth: 1),
+                      sourceSize: MTLSize(width: width, height: height, depth: 1),
                       to: drawable.texture, destinationSlice: 0, destinationLevel: 0,
                       destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
             blit.endEncoding()
         }
+    }
 
-        // ⚠️ NO `cmdBuffer.present(drawable)` HERE. With `presentsWithTransaction` the present has to
-        // happen AFTER the command buffer is scheduled, inside a CATransaction — see
-        // `presentDrawable`, below the commit. The completion handler and the commit are unchanged.
-        #if DEBUG
-        // Wall clock at commit, captured so the completion handler can compute end-to-end latency
-        // (commit → GPU-done + present). A growing lat with flat gpu = drawable/present back-pressure.
-        let rpCommitWall = CACurrentMediaTime()
-        #endif
+    /// Colour S2: the first present under a held (or released) state reports when it was handed to
+    /// the compositor (the `present()` call, render thread) and, when Core Animation reports it, when it
+    /// reached the glass. `presentedTime` reads 0 when the frame was not shown OR when the system does
+    /// not report it, so a 0 is stated as "not reported", never as a measurement.
+    private func reportCompareStamp(on drawable: CAMetalDrawable) {
+        guard let stamp = activeCompareStamp else { return }
+        activeCompareStamp = nil
+        let presentCall = CACurrentMediaTime()
+        print(String(format: "[COMPARE] %@: first frame under the new state handed to present() %.1f ms after the key event",
+                     stamp.label, (presentCall - stamp.time) * 1000))
+        drawable.addPresentedHandler { d in
+            let shown = d.presentedTime
+            if shown > 0 {
+                print(String(format: "[COMPARE] %@: on glass %.1f ms after the key event", stamp.label, (shown - stamp.time) * 1000))
+            } else {
+                print("[COMPARE] \(stamp.label): presentedTime not reported (0) for that frame")
+            }
+        }
+    }
 
-        // Publish this buffer as the readable frame + trigger scope sampling ONLY once the
-        // render's GPU work has COMPLETED — so scopes (on their own queue) read a fully-written
-        // frame, never a half-drawn one (read-after-write safety without a cross-queue event).
-        // Runs on a Metal completion thread; onFrameRendered just enqueues (non-blocking).
-        cmdBuffer.addCompletedHandler { [weak self] cb in
+    // MARK: - The gated desktop present (pacer mode; addition B, docs/DISPLAY_LINK_PER_WINDOW_PLAN.md)
+
+    /// More presents than this waiting for the glass and `nextDrawable()` could block: one on the glass + this many
+    /// queued + the one we ask for = the layer's default pool of three.
+    private static let presentsInFlightLimit = 1
+    /// A present whose presented handler has not come in this long is taken as landed (a hidden window may never
+    /// report one). Counted, so a run says whether it happened.
+    private static let presentGateTimeout: CFTimeInterval = 0.5
+
+    private let presentGateLock = NSLock()
+    private var pacerPresentsActive = false      // presentGateLock; written on linkQueue at the pacer switch
+    private var windowDisplayPeriod: Double = 0  // presentGateLock; the window's display, from the retarget
+    private var presentsInFlight = 0             // presentGateLock; presented handlers decrement it
+    /// RENDER THREAD. The newest rendered frame not yet on the desktop, while the gate holds it back.
+    private var deferredPresent: (texture: MTLTexture, width: Int, height: Int)?
+    private var lastGatedPresentAt: CFTimeInterval = 0   // render thread
+
+    private var pacerPresentsOn: Bool { presentGateLock.lock(); defer { presentGateLock.unlock() }; return pacerPresentsActive }
+
+    private func setPacerPresents(active: Bool) {
+        presentGateLock.lock(); pacerPresentsActive = active; presentGateLock.unlock()
+        pacerStatsLock.lock(); pacerConvertProbe.removeAll(); pacerConvertLag.reset(); pacerStatsLock.unlock()
+    }
+
+    private func setWindowDisplayPeriod(_ period: Double) {
+        presentGateLock.lock(); windowDisplayPeriod = period; presentGateLock.unlock()
+    }
+
+    /// RENDER THREAD. Show `deferredPresent` if the gate allows; returns the time spent in `nextDrawable()` if it was
+    /// called. A frame the gate holds back stays deferred for a later tick. Also the only caller after the pacer stops,
+    /// for a frame still deferred then (the gate is harmless there).
+    @discardableResult
+    private func servePacedPresent() -> Double? {
+        guard let pending = deferredPresent else { return nil }
+        let now = CACurrentMediaTime()
+        presentGateLock.lock()
+        if presentsInFlight > 0, now - lastGatedPresentAt > Self.presentGateTimeout {
+            presentsInFlight = 0
+            pacerPresentStats.gateTimeouts += 1
+        }
+        let inFlight = presentsInFlight, period = windowDisplayPeriod
+        presentGateLock.unlock()
+        if inFlight > Self.presentsInFlightLimit { pacerPresentStats.heldInFlight += 1; return nil }
+        if period > 0, now - lastGatedPresentAt < period * 0.75 { pacerPresentStats.heldRate += 1; return nil }
+        guard let cb = commandQueue.makeCommandBuffer() else { return nil }
+        let t0 = CACurrentMediaTime()
+        guard let drawable = metalLayer.nextDrawable() else { pacerPresentStats.nilDrawable += 1; return nil }
+        let wait = CACurrentMediaTime() - t0
+        pacerPresentStats.drawableWait.add(wait)
+        encodeDisplayStage(from: pending.texture, width: pending.width, height: pending.height, into: cb, drawable: drawable)
+        presentGateLock.lock(); presentsInFlight += 1; presentGateLock.unlock()
+        drawable.addPresentedHandler { [weak self] _ in
             guard let self else { return }
-            #if DEBUG
-            // GPU-side tail (completion thread): pure GPU exec + end-to-end pipeline latency. Guarded
-            // because recordRenderPerf reads/resets these from the render thread. gpuStartTime/EndTime
-            // are 0 if the buffer never scheduled; only record a plausible (positive) sample.
-            let gpu = cb.gpuEndTime - cb.gpuStartTime
-            let lat = CACurrentMediaTime() - rpCommitWall
-            if gpu >= 0 {
-                self.rpGpuLock.lock()
-                self.rpGpuSum += gpu; self.rpGpuMax = max(self.rpGpuMax, gpu)
-                self.rpLatSum += lat; self.rpLatMax = max(self.rpLatMax, lat)
-                self.rpGpuSamples += 1
-                self.rpGpuLock.unlock()
-            }
-            #endif
-            self.offscreenIndexLock.lock()
-            self.offscreenReadableIndex = writeIndex
-            self.offscreenReadableChroma = frameChroma
-            self.offscreenReadableOutput = frameOutput
-            #if DEBUG
-            self.readableDisplaySource = (displaySource, displaySourceView.view, displaySourceView.order)
-            #endif
-            self.offscreenIndexLock.unlock()
-            #if DEBUG
-            ScopePerf.count("frames")
-            #endif
-            self.onFrameRendered?()
-            // PUSH: convert this freshly-completed frame → v210 for DeckLink (no-op if not active).
-            // The frame's SOURCE pts rides along so it can be published with the converted pixels.
-            self.pushDeckLinkConvert(sourcePts: pts)
+            self.presentGateLock.lock(); self.presentsInFlight = max(0, self.presentsInFlight - 1); self.presentGateLock.unlock()
         }
-        #if DEBUG
-        let rpCommitStart = CACurrentMediaTime()
-        #endif
-        cmdBuffer.commit()
-        #if DEBUG
-        let rpCommitEnd = CACurrentMediaTime()
-        #endif
-
-        // Colour S2: the first present under a held (or released) state reports when it was handed to
-        // the compositor (the `present()` call, render thread) and, when Core Animation reports it, when it
-        // reached the glass. `presentedTime` reads 0 when the frame was not shown OR when the system does
-        // not report it, so a 0 is stated as "not reported", never as a measurement.
-        if let stamp = activeCompareStamp {
-            activeCompareStamp = nil
-            let presentCall = CACurrentMediaTime()
-            print(String(format: "[COMPARE] %@: first frame under the new state handed to present() %.1f ms after the key event",
-                         stamp.label, (presentCall - stamp.time) * 1000))
-            drawable.addPresentedHandler { d in
-                let shown = d.presentedTime
-                if shown > 0 {
-                    print(String(format: "[COMPARE] %@: on glass %.1f ms after the key event", stamp.label, (shown - stamp.time) * 1000))
-                } else {
-                    print("[COMPARE] \(stamp.label): presentedTime not reported (0) for that frame")
-                }
-            }
-        }
-        presentDrawable(drawable, on: cmdBuffer)
-        // Counted HERE and not in `presentDrawable`, deliberately: this counter answers "did the
-        // colour state reach the layer before this SOURCE's first frame?", and a black-frame present
-        // (presentBlackFrame, on teardown) is not one of this source's frames. Counting it there
-        // would report 1 where the teardown→new-source path must report 0.
+        cb.commit()
+        deferredPresent = nil
+        lastGatedPresentAt = CACurrentMediaTime()
+        pacerPresentStats.presents += 1
+        reportCompareStamp(on: drawable)
+        presentDrawable(drawable, on: cb)
         presentsSinceFlush &+= 1
+        return wait
+    }
 
-        #if DEBUG
-        let rpPresEnd = CACurrentMediaTime()
-        recordRenderPerf(texture:  rpTexEnd    - rpTexStart,
-                         drawable: rpDrawEnd   - rpDrawStart,
-                         encode:   rpEncEnd    - rpEncStart,
-                         // presMs NOW MEANS THE TRANSACTIONAL PRESENT — waitUntilScheduled() plus the
-                         // CATransaction — which is the price of `presentsWithTransaction` and the
-                         // one number that says whether it is costing us. It used to mean the blit
-                         // plus an enqueue-only present(), which was always ~0.02 ms; do not compare
-                         // the two across that change.
-                         present:  rpPresEnd   - rpCommitEnd,
-                         commit:   rpCommitEnd - rpCommitStart,
-                         iosurface: rpIOSurface)
-        #endif
-        // Advance so the NEXT render targets a different ring texture (write-during-read
-        // safety: a scope reading this frame's buffer won't be overwritten until the ring
-        // wraps ~offscreenRingCount frames later).
-        offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
+    // The B measurement: what the gate did, how long `nextDrawable()` took, and how long after its tick began each frame
+    // reached the SDI ring. Logged every 10 s while output runs, beside the pacer's own interval line.
+    private struct PacerPresentStats {
+        var rendered = 0, presents = 0, heldInFlight = 0, heldRate = 0, nilDrawable = 0, gateTimeouts = 0
+        var drawableWait = IntervalStats()
+        var since: CFTimeInterval = 0
+    }
+    private var pacerPresentStats = PacerPresentStats()   // render thread
+    /// The tick that is running: its start, for the tick → SDI ring lag. Render thread.
+    private var currentTickStart: CFTimeInterval = 0
+    private let pacerStatsLock = NSLock()                 // a leaf: taken under `deckLinkLock`, never around it
+    private var pacerConvertProbe: [(pts: Double, tick: CFTimeInterval)] = []   // pacerStatsLock
+    private var pacerConvertLag = IntervalStats()                                // pacerStatsLock
+
+    /// RENDER THREAD, pacer mode: remember when this frame's tick began, for `notePacerFramePublished`.
+    private func notePacerConvertProbe(pts: Double) {
+        guard pts.isFinite else { return }
+        pacerStatsLock.lock()
+        pacerConvertProbe.append((pts, currentTickStart))
+        if pacerConvertProbe.count > 8 { pacerConvertProbe.removeFirst() }
+        pacerStatsLock.unlock()
+    }
+
+    /// With `deckLinkLock` held, when a converted frame is published to the ring: tick start → in the ring.
+    private func notePacerFramePublished(pts: Double) {
+        pacerStatsLock.lock()
+        if let i = pacerConvertProbe.firstIndex(where: { $0.pts == pts }) {
+            pacerConvertLag.add(CACurrentMediaTime() - pacerConvertProbe[i].tick)
+            pacerConvertProbe.remove(at: i)
+        }
+        pacerStatsLock.unlock()
+    }
+
+    /// RENDER THREAD, every tick while the pacer runs: the 10 s line.
+    private func flushPacerPresentStats(now: CFTimeInterval) {
+        if pacerPresentStats.since == 0 { pacerPresentStats.since = now; return }
+        let span = now - pacerPresentStats.since
+        guard span >= 10 else { return }
+        presentGateLock.lock(); let period = windowDisplayPeriod; presentGateLock.unlock()
+        pacerStatsLock.lock(); let lag = pacerConvertLag.summary; pacerConvertLag.reset(); pacerStatsLock.unlock()
+        let s = pacerPresentStats
+        print(String(format: "[PACER] desktop 10 s: rendered %d (%.1f/s) · presented %d (%.1f/s; display %.2f Hz) · held back: "
+                     + "in flight %d, rate %d · nil drawable %d · gate timeouts %d · nextDrawable %@ · tick → SDI ring %@",
+                     s.rendered, Double(s.rendered) / span, s.presents, Double(s.presents) / span,
+                     period > 0 ? 1 / period : .nan, s.heldInFlight, s.heldRate, s.nilDrawable, s.gateTimeouts,
+                     s.drawableWait.summary, lag))
+        pacerPresentStats = PacerPresentStats(since: now)
     }
 
     #if DEBUG
@@ -4598,6 +4925,15 @@ final class MetalVideoRenderer {
     /// seconds, for the pull's slot timeline. Called from the App (DeckLinkService) when scheduled playback starts.
     /// Idempotent.
     func beginDeckLinkOutput(width: Int, height: Int, frameDuration: Double) {
+        armDeckLinkOutput(width: width, height: height, frameDuration: frameDuration)
+        // From here the card's mode and the source pace this renderer, not its display (plan §4.4). Outside the lock: the
+        // switch waits for a tick in flight, and a tick takes `deckLinkLock`.
+        if deckLinkActiveNow { schedulePacer(reason: "DeckLink output started") }
+    }
+
+    private var deckLinkActiveNow: Bool { deckLinkLock.lock(); defer { deckLinkLock.unlock() }; return deckLinkActive }
+
+    private func armDeckLinkOutput(width: Int, height: Int, frameDuration: Double) {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         let rowBytes = Self.v210RowBytes(width: width)
         if deckLinkOutputSize?.w != width || deckLinkOutputSize?.h != height || deckLinkStaging.count != Self.deckLinkRingCount {
@@ -4684,6 +5020,7 @@ final class MetalVideoRenderer {
     /// A convert completed: its slot now holds that frame. Called with `deckLinkLock` held.
     private func publishDeckLinkSlotLocked(_ slot: Int, pts: Double, signal: OutputSignal) {
         guard slot < deckLinkSlotPts.count else { return }
+        notePacerFramePublished(pts: pts)
         deckLinkSeq &+= 1
         deckLinkSlotPts[slot] = pts.isFinite ? pts : -.infinity   // a frame without a pts is never chosen by time
         deckLinkSlotSignal[slot] = signal
@@ -4759,6 +5096,8 @@ final class MetalVideoRenderer {
         // never fires and never takes the warning down. Clear it here, where the output the warning
         // was about genuinely ends.
         if wasMismatched { DispatchQueue.main.async { self.onDeckLinkRasterMismatch?(nil) } }
+        // Output is over: the window's display paces it again. Async on `linkQueue` like the start, so no caller waits.
+        linkQueue.async { [weak self] in self?.stopPacerOnQueue(reason: "DeckLink output stopped") }
     }
 
     /// PUSH: convert the just-completed offscreen → v210 into the BACK staging buffer, then (on GPU

@@ -193,6 +193,10 @@ targets:
       # can replay the traced bursts. Used by App/MetalVideoRenderer.swift only.
       - package: ManifoldCore
         product: FrameQueuePolicy
+      # The DeckLink output pacer's rate and its tick statistics (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4) — a leaf
+      # target so `swift test` can pin the rule. Used by App/OutputPacer.swift and App/MetalVideoRenderer.swift.
+      - package: ManifoldCore
+        product: OutputPacing
       # What a refused DeckLink output start says (docs/BUGS.md, the 2160p23.98 refusal) — a leaf target so `swift test`
       # can pin that only the measured busy code is mapped. Used by App/DeckLink/DeckLinkService.swift only.
       - package: ManifoldCore

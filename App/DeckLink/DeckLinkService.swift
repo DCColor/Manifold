@@ -1152,6 +1152,8 @@ final class DeckLinkService: ObservableObject {
         renderer?.setDeckLinkSourceInterlaced(scan.interlaced)
         // A file's frames go to the card by time: the frame due at each slot (docs/BUGS.md, 2026-10-26).
         renderer?.setDeckLinkPullByTime(true)
+        // The output pacer ticks at least twice per source frame (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4).
+        renderer?.setDeckLinkSourceFrameRate(frameRate)
         resolveFileMode(width: width, height: height, pixelAspect: pixelAspect, frameRate: frameRate, scan: scan)
         applyEffectiveMode(trigger: "file source format")
     }
@@ -1201,6 +1203,8 @@ final class DeckLinkService: ObservableObject {
         renderer?.setDeckLinkSourceInterlaced(false)
         // A live source keeps the newest-frame pull until the timed pull is verified on a live server (CLAUDE.md).
         renderer?.setDeckLinkPullByTime(false)
+        // The output pacer: a stated live rate, else the card's frame alone (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4).
+        renderer?.setDeckLinkSourceFrameRate(format?.frameRate)
 
         guard let format else {
             // The live source is gone. Drop the derived mode but leave `currentMode` exactly where
