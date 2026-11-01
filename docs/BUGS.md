@@ -2066,7 +2066,7 @@ items.
 
 ---
 
-## ☐ OPEN — PRE-EXISTING, ALL BUILDS — at 875–900 pt the control row is cut off at both edges
+## ✅ FIXED 2026-10-31 (covered by the narrow/vertical fix) — PRE-EXISTING, ALL BUILDS — at 875–900 pt the control row is cut off at both edges
 
 **Added 2026-10-16**, seen while checking the line playhead (`b4a0389`) at small window sizes. Not fixed. The same
 in both playhead styles, so not caused by it.
@@ -2080,6 +2080,12 @@ in both playhead styles, so not caused by it.
 - **Likely fix (for its stage):** a minimum window width that fits the row, or a row that drops or folds its
   least-used controls below a width. The row's width grows whenever a control is added, so whichever is chosen
   needs to be measured from the row, not hard-coded.
+
+**Fixed 2026-10-31 by the narrow/vertical window fix** (the entry *Narrow/vertical windows: control bar and resolution
+overlay layout*, below, has the change and the runs). The row now folds into Compact (less-used tools in More (…)) and
+Narrow (two rows) by `ViewThatFits`, measured from the rows rather than from a constant. Verified by Accessibility frames
+2026-10-31 with `H264.mp4`: at 875 × 492 the bar is Compact with every control inside the window, floating and docked
+(docked window 875 × 571). Docked at 900 × 581, this entry's other case, was not measured.
 
 ---
 
@@ -3230,7 +3236,7 @@ Confirmed 2026-10-29 by Robbie on the MacBook Air (2048x1332): orientation corre
 
 ---
 
-## ☐ OPEN 2026-10-29 — 0.9.1 — PRE-EXISTING — MEASURED AND PLANNED 2026-10-30 (`3e47ee5`), NOT IMPLEMENTED — Narrow/vertical windows: control bar and resolution overlay layout
+## ✅ FIXED 2026-10-31 (part 1 `b876c10`; the layouts in the commit that closes this entry) — APPROVED BY ROBBIE 2026-10-31 — 0.9.1 — PRE-EXISTING — Narrow/vertical windows: control bar and resolution overlay layout
 
 **Seen** by Robbie on the MacBook Air (2048 × 1332) with `IMG_9457.MOV` (720 × 1280) at the window's minimum size, while
 confirming the rotation fix above.
@@ -3255,6 +3261,41 @@ overlays on its own); three control-bar layouts chosen by `ViewThatFits` (full, 
 Play, the scrubber, Mute, Display transform, DeckLink-while-on and Pin never collapsing; the readout top-centre in narrow windows.
 
 Target: 0.9.1.
+
+**Fixed** (`docs/NARROW_WINDOW_LAYOUT_PLAN.md` §2.1–2.3), in all builds; the temporary DEBUG switch the layouts were judged
+behind is gone.
+- **Part 1 (`b876c10`):** the HUD frame takes the window's width (`minWidth: 0`), so the video region no longer overhangs a
+  window narrower than 792 pt and the raster readout and the Inspector sit inside it. The 760-pt cap is now the scrubber's.
+- **Three control-bar layouts,** the first that fits (`ContentView.adaptiveButtonRows`, `ViewThatFits`), in the floating HUD and
+  the docked bar alike. **Full:** the row as before. **Compact:** Edit in Flip, Refresh Metadata, Subtitles, Export Frame,
+  Framing Guides and Loop move into More (…), and the colour face is short ("709", "2020 PQ"; "●" when asserted). **Narrow:**
+  two rows: Open, Play | Mute, Audio track, Loop | Inspector, Scopes; then DeckLink, Streaming, A/V offset | Colour (icon) |
+  Display transform | More, Pin. More is lit while anything in it is on (Refresh's file change, subtitles shown, a framing
+  guide, Loop in Compact), and the framing-guides popover hangs off it.
+- **The raster readout** goes top-centre in windows under 900 pt, below the file name when that is shown, and wraps its
+  parenthetical rather than being cut.
+- **NDI discovery** is held by the control bar instead of by each layout's streaming control. Held there, a resize across a
+  layout boundary gave the window's hold back and discovery stopped until the NDI list was reopened.
+- **The docked bar** grows by Narrow's second row (79 → 113 pt) and the window grows with it; the picture keeps its width.
+
+**Verified** 2026-10-31 by Accessibility frames, overlay and docked, `H264.mp4` (16:9), `IMG_9457.MOV` (9:16) and
+`shape-square.mov` (1:1): every control inside the window at every size, the layout as predicted.
+
+| Asked | Source | Floating | Docked |
+|---|---|---|---|
+| 1920 × 1080 | 16:9 | Full | Full (1780 × 1080 with the bar) |
+| 875 × 492 | 16:9 | Compact | Compact (875 × 571) |
+| 720 × 569 | 9:16 | Narrow | Narrow (720 × 682) |
+| 720 × 492 | 1:1 | Narrow | Narrow |
+
+NDI discovery across layout changes: the finder's threads stayed up through every layout change, overlay and docked
+(2026-10-31, no sender on the network); **verified by Robbie with a live sender on 2026-10-31.** Layouts approved by Robbie
+by eye on 16:9, 9:16 and 1:1, floating and docked, 2026-10-31.
+
+Not measured: subtitles shown lighting More (needs a sidecar through the open panel); a docked window resized by
+Accessibility while it has a raster size snaps back to that size when the bar changes height, because only a pointer drag
+clears the size to Custom (`WindowSizer.setGeometry`). The docked Narrow checks above therefore used windows opened with no
+raster size (Settings seed Automatic, restored to 50 % after); a docked pointer drag into Narrow was not measured.
 
 ---
 

@@ -218,14 +218,27 @@ struct ColorInterpretationSlot: View {
     let deck: WindowDeck
     let live: LiveSource?
     let hasFile: Bool
+    var face: ColorInterpretationFace = .full
 
     var body: some View {
         if let live, LiveColorOverrideModel.offersOverride(live) {
-            ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut)
+            ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face)
         } else if live == nil, hasFile {
-            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut)
+            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face)
         }
     }
+}
+
+/// How much of the face the control bar has room for (docs/NARROW_WINDOW_LAYOUT_PLAN.md §2.2). Every form keeps a
+/// user assertion visible: the yellow, and in the short forms a "●", because an override or a LUT must never read as
+/// the resting state.
+enum ColorInterpretationFace {
+    /// "709 709 · Declared": colorimetry and tier.
+    case full
+    /// "709", "2020 PQ": primaries, and the transfer only when it is HDR or unnamed; no tier.
+    case short
+    /// The palette alone.
+    case icon
 }
 
 struct ColorInterpretationControl: View {
@@ -234,6 +247,7 @@ struct ColorInterpretationControl: View {
     @ObservedObject var fileModel: FileColorOverrideModel
     /// Colour S6: the window's LUT slot, and the app-wide interpolation (D1).
     @ObservedObject var lut: InterpretationLUTModel
+    var face: ColorInterpretationFace = .full
     @ObservedObject private var lutSetting = LUTInterpolationSetting.shared
     @ObservedObject private var recentLUTs = RecentLUTStore.shared
     @ObservedObject private var ndi = NDIService.shared
@@ -305,9 +319,7 @@ struct ColorInterpretationControl: View {
                 menuContent
             } label: {
                 (Text(Image(systemName: "paintpalette")).font(.system(size: 13))
-                 + Text("  ")
-                 + Text(faceLabel + lut.faceSuffix).font(.system(.caption, design: .monospaced))
-                 + bypassedLUTFace)
+                 + faceText)
                     .foregroundColor(colorControlTint)
             }
             .menuStyle(.borderlessButton)
@@ -331,6 +343,16 @@ struct ColorInterpretationControl: View {
                ? "Color interpretation — Auto trusts the file’s tags; a preset or Override asserts them"
                : "Color interpretation — Auto trusts the stream; a preset or Override asserts it")
               + (ShortcutCenter.shared.registry.label(for: .cycleInterpretation).map { " (\($0) cycles the presets)" } ?? ""))
+    }
+
+    /// The face after the palette, as runs of the one `Text` (see the note on `body`), in the form `face` asks for.
+    private var faceText: Text {
+        let mono = Font.system(.caption, design: .monospaced)
+        switch face {
+        case .full:  return Text("  ") + Text(faceLabel + lut.faceSuffix).font(mono) + bypassedLUTFace
+        case .short: return Text("  ") + Text(shortFaceLabel + lut.faceSuffix).font(mono) + bypassedLUTFace
+        case .icon:  return Text(isOverridden || lut.isApplied ? " ●" : "").font(mono)
+        }
     }
 
     /// " + LUT bypassed" while the window's LUT is bypassed, struck through and dimmed: neither the amber of an applied
@@ -375,13 +397,16 @@ struct ColorInterpretationControl: View {
     /// The app's yellow when something on screen is a human assertion rather than a reading (amber until
     /// 2026-10-25), the control bar's own white otherwise. Applied per leaf — see the note on `body`.
     private var colorControlTint: Color {
-        let overridden: Bool
-        switch subject {
-        case .live: overridden = reading?.effective.isOverridden == true
-        case .file: overridden = fileModel.override != .auto
-        }
         // Colour S6, L3: an applied LUT is an assertion too (the face reads "+ LUT"); a bypassed one is not.
-        return overridden || lut.isApplied ? Color.appYellow : .white.opacity(0.9)
+        isOverridden || lut.isApplied ? Color.appYellow : .white.opacity(0.9)
+    }
+
+    /// A preset, Custom or Override in force: the face's tier would read "Overridden".
+    private var isOverridden: Bool {
+        switch subject {
+        case .live: return reading?.effective.isOverridden == true
+        case .file: return fileModel.override != .auto
+        }
     }
 
     // MARK: The menu
@@ -687,6 +712,30 @@ struct ColorInterpretationControl: View {
         }
         return "\(SourceColorimetry.primariesName(p).replacingOccurrences(of: "Rec.", with: "")) "
              + "\(SourceColorimetry.transferName(t).replacingOccurrences(of: "Rec.", with: "")) · \(tier)"
+    }
+
+    /// The short face: "709", "2020 PQ", "P3 D65 HLG"; Custom as its short label. The tier is dropped, and an override
+    /// keeps a " ●" in its place. The transfer is named only when it is PQ, HLG or one the table does not name: Rec.709
+    /// and Rec.2020 (SDR) are the same curve and are what the primaries already imply.
+    private var shortFaceLabel: String {
+        let mark = isOverridden ? " ●" : ""
+        let p: Int, t: Int
+        switch subject {
+        case .live(let s):
+            guard let info = reading?.effective else { return "—" }
+            if model.current(for: s).isCustom, info.isOverridden { return model.current(for: s).shortLabel + mark }
+            (p, t) = (info.primaries.code, info.transfer.code)
+        case .file:
+            if fileModel.override.isCustom { return fileModel.override.shortLabel + mark }
+            (p, t) = (fileModel.effective.primaries, fileModel.effective.transfer)
+        }
+        let transfer: String
+        switch t {
+        case 1, 14: transfer = ""
+        case 16:    transfer = " PQ"
+        default:    transfer = " " + SourceColorimetry.transferName(t)
+        }
+        return SourceColorimetry.primariesName(p).replacingOccurrences(of: "Rec.", with: "") + transfer + mark
     }
 
     /// The source's own claim, independent of the override — an absence stated as an absence.

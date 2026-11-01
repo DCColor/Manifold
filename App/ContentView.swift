@@ -402,6 +402,7 @@ struct ContentView: View {
     @ObservedObject private var diagnostics = DiagnosticsExporter.shared
     /// The shortcut registry, for tooltips that name a key (`helpText`), so a rebound key is the one they name.
     private var keys: ShortcutRegistry { ShortcutCenter.shared.registry }
+
     // A droppable file is hovering over this window's picture — see the drop destination on
     // `videoRegion`. Purely the highlight's state; the drop itself carries no view state.
     @State private var dropTargeted = false
@@ -450,6 +451,11 @@ struct ContentView: View {
     // Persisted vectorscope target-box amplitude (75%/100%/both), cycled by the boxes shortcut, read here + by
     // VectorscopeScopeView via the same key. Overlay-only — a change just redraws the boxes.
     @AppStorage("manifold.vectorscope.boxAmplitude") private var vectorscopeBoxAmplitude: VectorscopeBoxAmplitude = .percent75
+    // Read only so More (…) can show that a guide is on while the guides button is in it; the guides' own state is
+    // `GuidesPanel`'s and `GuideOverlay`'s (FramingGuide.swift), under the same keys and defaults.
+    @AppStorage("guideMode") private var guideMode: GuideMode = .off
+    @AppStorage("safeLinesOn") private var safeLinesOn = false
+    @AppStorage("broadcastSafeOn") private var broadcastSafeOn = false
     // The four scope models (one each, rendered wherever its kind is selected — duplicates share
     // the single model). A model samples/computes only while its kind is in the active set.
     // Held through `ScopeModelStore`, NOT as `@StateObject`s here: see that type for why.
@@ -1082,15 +1088,7 @@ struct ContentView: View {
     /// missing from `connectErrorBanner` until this arc.
     @ViewBuilder private var rasterReadout: some View {
         if let text = rasterNotice {
-            Text(text)
-                .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.95))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(.black.opacity(0.6), in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
-                .padding(.top, 44)
-                .padding(.leading, 16)
+            rasterReadoutPlaced(text)
                 .transition(.opacity)
                 .task(id: text) {
                     try? await Task.sleep(nanoseconds: 1_600_000_000)
@@ -1110,6 +1108,40 @@ struct ContentView: View {
                     rasterNotice = nil
                 }
         }
+    }
+
+    /// The readout where it goes. Top-leading, below the traffic lights; in a window narrower than 900 pt, top-centre
+    /// instead (docs/NARROW_WINDOW_LAYOUT_PLAN.md §2.3), over the picture rather than over a pillarbox bar, and below
+    /// the file name when that is shown. A readout wider than the window less 32 pt moves its parenthetical to a second
+    /// line rather than being cut: the parenthetical is the part that says why the size is not the one asked for.
+    private func rasterReadoutPlaced(_ text: String) -> some View {
+        GeometryReader { geo in
+            let centred = geo.size.width < 900
+            // The file name's capsule: a callout line (15 pt) and 2 × 8 padding, at 24 from the top; then 8.
+            let belowFileName = showFileNameOverlay && engine.hasMedia && engine.metadata?.fileName != nil
+            ViewThatFits(in: .horizontal) {
+                rasterLabel(Text(text), in: Capsule())
+                if let cut = text.range(of: " (") {
+                    rasterLabel(Text(text[..<cut.lowerBound]) + Text("\n") + Text(text[cut.lowerBound...].dropFirst()),
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+            }
+            .frame(maxWidth: max(geo.size.width - 32, 0), alignment: centred ? .center : .leading)
+            .padding(.top, centred ? (belowFileName ? 24 + 31 + 8 : 24) : 44)
+            .padding(.leading, centred ? 0 : 16)
+            .frame(maxWidth: .infinity, alignment: centred ? .top : .topLeading)
+        }
+    }
+
+    private func rasterLabel<S: InsettableShape>(_ text: Text, in shape: S) -> some View {
+        text
+            .font(.system(.callout, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.95))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.black.opacity(0.6), in: shape)
+            .overlay(shape.strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
     }
 
     /// Is this a file the app should ACCEPT and try to open — which is a different question from
@@ -1214,13 +1246,14 @@ struct ContentView: View {
                             .padding(12)
                             .background(.black.opacity(0.55),
                                         in: RoundedRectangle(cornerRadius: 12))
-                            // ⚠️ `minWidth: 0` IS THE FIX, NOT NOISE (docs/NARROW_WINDOW_LAYOUT_PLAN.md §2.1). With
-                            // `maxWidth` alone the frame reports min(760, its child), not min(760, what it is offered):
-                            // in a window narrower than 792 pt it reported 760, the video region grew to 792 and was
-                            // centred, and everything anchored to its edges (the raster readout, the Inspector) sat
-                            // 36 pt outside the window. With a minimum the frame takes the offered width, capped at
-                            // 760, so the region is never wider than the window. Unchanged in any window ≥ 792 pt.
-                            .frame(minWidth: 0, maxWidth: 760)
+                            // ⚠️ `minWidth: 0` IS THE FIX, NOT NOISE (docs/NARROW_WINDOW_LAYOUT_PLAN.md §2.1). Without
+                            // it the frame reports at least its child's width, not what it is offered: when this was
+                            // `maxWidth: 760` alone, a window narrower than 792 pt grew the video region to 792, and
+                            // everything anchored to its edges (the raster readout, the Inspector) sat 36 pt outside
+                            // the window. With a minimum the frame takes the offered width, so the region is never
+                            // wider than the window. The 760-pt HUD cap is the scrubber's now (`controls`), so the
+                            // button rows are offered the window's width to choose a layout in (`adaptiveButtonRows`).
+                            .frame(minWidth: 0, maxWidth: .infinity)
                             .padding(16)
                     }
                     .opacity(controlsShown ? 1 : 0)
@@ -1334,9 +1367,13 @@ struct ContentView: View {
     /// looks slightly off". Reporting the laid-out height closes that by construction, and keeps
     /// doing so when the row gains a control.
     ///
-    /// The measurement cannot oscillate against the resize it feeds: the row's height is set by its
+    /// The measurement cannot oscillate against the resize it feeds. Within a layout the height is set by
     /// fixed-size content, not by the width (both readouts are `lineLimit(1)` and the slider absorbs
-    /// horizontal squeeze), so a wider or narrower window reports the same number back.
+    /// horizontal squeeze). Narrow's second row does make the bar taller below Compact's width, but a
+    /// chrome change re-solves only the window's HEIGHT, at a width that does not depend on the chrome
+    /// (the current one, or the raster preset's; `WindowSizer.setGeometry`), so the width that chose the
+    /// layout does not move. MEASURED both ways at 720 and 1080 pt, 2026-10-31: 79 pt and 113 pt, one
+    /// settle each, no oscillation.
     private var dockedControlBar: some View {
         controls(showPin: false)
             .padding(14)
@@ -2198,7 +2235,7 @@ struct ContentView: View {
     /// full-brightness white when LOCAL — local is a legitimate resting mode, so it must read as
     /// available, not as a disabled/off look. Discovery starts the first time the NDI source list
     /// is opened (privacy P1 — never merely because this control is on screen), and is released
-    /// when the control leaves the screen.
+    /// when the control bar leaves the screen (`controls`).
     private var streamingControl: some View {
         // Same rule as the DeckLink control: a non-owning deck may neither connect a stream nor
         // disconnect somebody else's. `activeLiveSource` is ownership-scoped, so the lit-green
@@ -2230,11 +2267,6 @@ struct ContentView: View {
             .help("Streaming sources")
         }
         .disabled(arbitrated)
-        .onReceive(NotificationCenter.default.publisher(for: NDIMenuOpenWatcher.ndiSubmenuWillOpen)) { _ in
-            // The menu belongs to the key window; other windows ignore it (privacy P1).
-            if deck.window?.isKeyWindow == true { requestNDIDiscovery() }
-        }
-        .onDisappear { releaseNDIDiscovery() }
     }
 
     /// Caption control — a split-button mirroring `streamingControl` / `deckLinkOutputControl`. The
@@ -2723,369 +2755,606 @@ struct ContentView: View {
         // and keep their own brightness for the reason stated at the fader below.
         let live = Color.white.opacity(0.9)
         let dim = Color.white.opacity(0.35)
+        let gates = RowGates(transport: transport, position: position, positionWhy: positionWhy, live: live, dim: dim)
         return VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                Text(leadingReadout)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.85))
-                    // ONE LINE, ALWAYS. In the docked bar this row's height is measured and fed to
-                    // the WINDOW's height; a readout that wrapped at a narrow width would make the
-                    // bar taller, which would resize the window, which would change the width. One
-                    // line breaks that loop at the only place it could start.
-                    .lineLimit(1)
-                    .frame(minWidth: 86, alignment: .leading)
-                    // ⚠️ THE LEADING READOUT NO LONGER CYCLES THE MODE — IT OPENS TIMECODE ENTRY.
-                    // The settled design says clicking the timecode display is one of the two ways
-                    // in, and this is the timecode display: it is the PLAYHEAD, which is the only
-                    // number on this bar you can be taken to. Mode cycling did not go anywhere — the
-                    // trailing readout still carries it, and it cycles both, so the pair behaves
-                    // exactly as before for anyone who reaches for the other end.
-                    // Opens timecode entry, which exists to SEEK — so it is a position control and
-                    // carries the position gate. `TransportKeyMonitor.begin` guards on the same
-                    // condition for the type-to-enter route; this is the click route.
-                    .onTapGesture { if position { transportKeys.begin() } }
-                    // A pointer cue, because a click target that looks like a label is a click
-                    // target nobody finds — AND ONLY WHILE IT IS ONE. A pointing hand over a gated
-                    // readout promises a click that `position` will refuse, which is the same lie
-                    // the ungreyed play button was telling.
-                    .onHover { inside in
-                        if inside && position { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                    }
-                    // NOT DIMMED, unlike the buttons: this is a READOUT first and a click target
-                    // second, and the playhead it shows is still true in a gated window — greying
-                    // the number would cost information to make a point about a click. The tooltip
-                    // is what carries the point.
-                    .help(position ? "Go to timecode — click, or type a number"
-                                   : (positionWhy ?? ""))
-
-                // THE PLAYHEAD. A `TransportScrubber`, not a `Slider`, so it can draw the playhead
-                // as a Ball or a Line (Settings ▸ Playback). Same contract as the Slider it
-                // replaced — the value, the per-move setter, the editing bracket below are unchanged —
-                // and the Ball is that Slider's knob, byte for byte. See TransportScrubber.
-                TransportScrubber(
-                    value: isScrubbing ? scrubValue : engine.currentTime,
-                    range: 0...max(engine.duration, 0.1),
-                    onChange: { newValue in
-                        scrubValue = newValue
-                        engine.scrubSeek(to: newValue)
-                    },
-                    onEditingChanged: { editing in
-                        if editing {
-                            #if DEBUG
-                            // The v210 baseline for the interval BEFORE the drag, so the line
-                            // printed at release has something to be read against. Silent unless
-                            // DeckLink output is running.
-                            metalRenderer?.debugFlushV210Stats(label: "before-drag")
-                            #endif
-                            wasPlayingBeforeScrub = engine.isPlaying
-                            if engine.isPlaying { engine.pause() }
-                            scrubValue = engine.currentTime
-                            isScrubbing = true
-                        } else {
-                            // ── RELEASE. FOUR ORDERED STEPS BECAME THREE, AND THE ONE THAT WENT
-                            //    WAS THE HOLD ─────────────────────────────────────────────────
-                            //
-                            // It used to be: retire the readout, open a handoff, fire a corrective
-                            // un-throttled preview, seek — with the overlay held up by a one-shot
-                            // and a 400 ms timeout until the seeked-to frame was PRESENTED. All of
-                            // that existed to keep a SECOND surface alive across the gap.
-                            //
-                            // ⚠️ THERE IS NOTHING IN ITS PLACE, AND THAT IS CORRECT RATHER THAN AN
-                            // OMISSION. There is no second surface to keep alive: the Metal layer
-                            // is ALREADY showing the release frame, because it got there through
-                            // the ordinary present path during the drag. `exactSeek` →
-                            // `beginReading` → `flush()` clears the queue, and a CAMetalLayer keeps
-                            // its last presented drawable — which is that scrub frame. The hold now
-                            // happens by default instead of by machinery. That is what "one display
-                            // path" buys, stated concretely.
-                            //
-                            // ⚠️ AND IT IS NOW TRUE OF EVERY FILE. Stage 2 had to keep an MXF-only
-                            // hold, because MXF still had no producer and its Metal layer held the
-                            // PRE-DRAG frame for the whole gesture — the reasoning above simply did
-                            // not reach it. With `LibavScrubProducer` putting real frames on that
-                            // layer, it does, and the hold, the 400 ms fallback and the last
-                            // `CGImage` in the scrub path are gone with it. MEASURED, not assumed:
-                            // the `[SETTLE]` line on MXF (see MetalVideoRenderer).
-                            isScrubbing = false          // the readout goes back to the engine
-
-                            // 1. THE PENDING SLOT, FLUSHED AT THE RELEASE POINT. This is what the
-                            //    old `requestScrubPreview(at:final:)` became. Its job was to close
-                            //    a staleness floor created by a media-DISTANCE gate that was never
-                            //    re-asked at the release point; that gate is gone, so there is no
-                            //    floor and no corrective request. What survives is the in-flight
-                            //    LATCH: one decode may still be outstanding at a marginally older
-                            //    position, so the release point is submitted and the coalescer
-                            //    issues it the moment that decode completes. Latest wins, and the
-                            //    latest is now exactly where the user let go.
-                            engine.scrubSeek(to: scrubValue)
-                            // 2. The real seek.
-                            engine.exactSeek(to: scrubValue)
-                            #if DEBUG
-                            // Flushed BEFORE the resume so playback's converts cannot land in the
-                            // drag's numbers.
-                            metalRenderer?.debugFlushV210Stats(label: "drag")
-                            #endif
-                            // 3. …and the transport resumes if it was running.
-                            if wasPlayingBeforeScrub { engine.play() }
-                        }
-                    }
-                )
-                // A stream has no duration, so this slider's range collapses to 0...0.1 and its
-                // thumb sits pinned at zero. Inert AND operable-looking is the worst pairing.
-                .disabled(!position)
-                .help(position ? "" : (positionWhy ?? ""))
-
-                Text(trailingReadout)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .lineLimit(1)                       // see the leading readout
-                    .frame(minWidth: 86, alignment: .trailing)
-                    .onTapGesture { cycleReadout() }
-            }
-
-            HStack(spacing: 16) {
-                Button { DeckRegistry.shared.presentOpenPanel(from: deck) } label: {
-                    Image(systemName: "folder")
-                }
-                .help(keys.helpText("Open…", .fileOpen))
-
-                Button { engine.togglePlayPause() } label: {
-                    Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
-                }
-                // Space is the shortcut registry's (`.playPause`), dispatched with this button's gate.
-                .disabled(!position)
-                // See the `dim` note above: `.disabled` does not grey a control in this row.
-                .foregroundStyle(position ? live : dim)
-                .help(position ? keys.helpText(engine.isPlaying ? "Pause" : "Play", .playPause)
-                               : (positionWhy ?? "Playback is in another window"))
-
-                Divider().frame(height: 16).overlay(.white.opacity(0.25))
-
-                // ⚠️ FIXED GEOMETRY, AND THE JITTER WAS GEOMETRY (§8 item 17, MEASURED by Accessibility on HEAD
-                // `3c5526d`). This row is centred, and the fader used to be inserted on hover: hovering the speaker
-                // moved the play button and the speaker itself 38 pt left (half the fader and its spacing). The
-                // speaker slid out from under the pointer, the hover ended, the fader went, the speaker slid back
-                // under the pointer, and round again: the shake, with the play button passing under the pointer. The
-                // speaker glyph also changes width with the level (wave.1 / wave.2 / slash), which nudged the fader
-                // during a drag. Now the fader is always laid out (hidden and untouchable until hovered), the glyph
-                // has a fixed frame, and the whole group is the hover area: nothing in the row moves (measured, 0 pt).
-                HStack(spacing: 6) {
-                    Button { engine.toggleMute() } label: {
-                        Image(systemName: speakerSymbol)
-                            .frame(width: 26, alignment: .leading)
-                    }
-                    .help(keys.helpText(engine.isMuted ? "Unmute" : "Mute", .mute))
-                    Slider(
-                        value: Binding(
-                            get: { Double(engine.volume) },
-                            set: { newValue in
-                                engine.setVolume(Float(newValue))
-                                Preferences.shared.playbackVolume = newValue
-                            }
-                        ),
-                        in: 0...1
-                    )
-                    .controlSize(.mini)
-                    .frame(width: 70)
-                    .opacity(volumeHovering ? 1 : 0)
-                    .allowsHitTesting(volumeHovering)
-                    .accessibilityHidden(!volumeHovering)
-                }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-                .onHover { h in
-                    withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
-                }
-                // ⚠️ `transport`, NOT `position`, AND THAT IS DELIBERATE. Audio is not a position:
-                // NDI carries it, and mute reaches the DeckLink card through `applyAudioMute`, so
-                // a stream being up is no reason to take the fader away. The one live source with
-                // no audio at all is WHEP (its audio track is wired to
-                // ManifoldWHEPDiscardMessage) — not enough to justify a third gate, and greying
-                // the control per-transport would be less predictable than leaving it alone.
-                .disabled(!transport)
-                Button { engine.toggleLoop() } label: { Image(systemName: "repeat") }
-                    .help(position ? "Loop playback" : (positionWhy ?? "Loop playback"))
-                    // File-only, and now gated twice on purpose. `!engine.hasMedia` already
-                    // self-disabled it for live sources — a live takeover calls engine.stop() —
-                    // but that was incidental, not stated: it read as a no-file gate that happened
-                    // to catch streams. `position` says the intended thing, and the pair costs
-                    // nothing.
-                    .disabled(!engine.hasMedia || !position)
-                    // Three states, and the middle one is the new part: ON (the app's yellow; green
-                    // until 2026-10-25, now kept for live), available (0.9), gated (0.35). This button
-                    // ALREADY overrode the row's foreground style to carry its colour, so it was the
-                    // clearest case of a disabled control drawn at full brightness — see the `dim` note above.
-                    .foregroundStyle(engine.isLooping ? Color.appYellow
-                                     : ((engine.hasMedia && position) ? live : dim))
-                Button { showGuidesPanel.toggle() } label: {
-                    // `viewfinder.rectangular` — an outer frame with corner brackets and OPEN space
-                    // inside it, which is what a framing guide is: marks over a picture you can
-                    // still see through.
-                    //
-                    // It replaces `rectangle.inset.filled`, whose inner rectangle is SOLID. At the
-                    // size this row draws (`.imageScale(.large)`, ~16 pt) that fill reads as a block
-                    // — a filled tile, or a slide — rather than as an inset. The distinction the
-                    // glyph exists to carry is exactly the one the fill destroys: guides are LINES
-                    // at an inset, not a filled area. `rectangle.inset.filled` was itself a
-                    // replacement for `grid`, which rendered as a bare `#` with no outer frame at
-                    // all and read as a table.
-                    //
-                    // AVAILABILITY CHECKED, NOT ASSUMED — an SF Symbol that postdates the
-                    // deployment target renders BLANK at run time and raises no build error, so
-                    // compiling proves nothing. The OS's own catalog
-                    // (CoreGlyphs.bundle/Contents/Resources/name_availability.plist) lists this
-                    // symbol under release year 2023, which that file's `year_to_release` table maps
-                    // to macOS 14.0. This target's floor is macOS 15.0, so it is present on every OS
-                    // the app can launch on.
-                    Image(systemName: "viewfinder.rectangular")
-                }
-                    .help("Framing guides")
-                    .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
-                        GuidesPanel()
-                    }
-                // Captions: split-button — main toggles the overlay (or opens the picker when
-                // nothing's loaded yet), chevron loads/clears the sidecar and picks position.
-                captionControl
-                Button { showInspector.toggle() } label: {
-                    Image(systemName: "info.circle")
-                }
-                .help(keys.helpText("Inspector", .inspector))
-
-                Button(action: editInFlip) {
-                    // AN F IN A ROUNDED SQUARE — the silhouette of an app icon, so it reads as
-                    // "the app Flip" rather than as a letter badge. A SQUARE and not `f.circle`
-                    // because the neighbours here are square-ish (`square.and.arrow.down`, `tv`,
-                    // `viewfinder.rectangular`) while the circles in this row mean something else —
-                    // `info.circle` is a status affordance — so the square keeps the row's geometry
-                    // consistent AND keeps the two apart at a glance.
-                    //
-                    // UNFILLED, and that is a weight decision made by looking at the built bar.
-                    // `f.square.fill` was the first cut: it is a solid tile with the letter knocked
-                    // out, and next to a row drawn entirely in thin strokes it was the heaviest mark
-                    // present — it read as selected, or as a badge, rather than as one control among
-                    // twelve. `f.square` carries the same silhouette at the row's own weight.
-                    Image(systemName: "f.square")
-                }
-                .help("Edit in Flip")
-                .disabled(engine.currentURL == nil)
-
-                // Refresh metadata — ALWAYS PRESSABLE, and lit when there is a reason to press it.
-                //
-                // The press always re-reads, whether or not anything changed; pressing it on an
-                // unchanged file is never wrong, it just re-reads. The alternative design — enable
-                // it only when the file has changed — was rejected: it makes the common case a dead
-                // control, and it is the DEAD-CONTROL reading that produced the bug report this
-                // fixes (a tester pressed it on an unchanged file, saw nothing happen, and
-                // concluded it was broken). `.disabled` here is only the same no-file gate its
-                // neighbours in this row carry; it never tracks the changed state.
-                //
-                // ⚠️ THE GREEN MEANS SOMETHING DIFFERENT HERE THAN IT DOES THREE BUTTONS ALONG.
-                // On the DeckLink and scopes-tray buttons this tint means "this is ON" — a mode the
-                // user turned on and can turn off. Here it means "there is something waiting" — a
-                // notification, cleared by acting on it, not by pressing it again. Same treatment,
-                // different meaning, deliberately: a second highlight colour in a twelve-button row
-                // would be read as a third state of the first meaning rather than as a new one, and
-                // "this control has something for you" is exactly what green already says at a
-                // glance. If it ever reads oddly, that is why.
-                //
-                // ⚠️ TWO DIFFERENT REASONS PRODUCE THIS ONE GREEN, and the tooltip is the ONLY
-                // place they are told apart — see `reloadHelp` below, and `sentForEditing` in
-                // SourceFileWatcher for why they are two flags and not one. Deliberately not two
-                // colours: a second highlight in this row would read as a third state of the
-                // first meaning rather than as a new meaning.
-                Button(action: {
-                    // The press IS the acknowledgement — adopt what is on disk now as the truth
-                    // before the read, so the highlight clears immediately rather than on the next
-                    // poll. See SourceFileWatcher.rebaseline for the during-the-read race.
-                    fileWatch.rebaseline()
-                    Task { await engine.reinspect() }
-                }) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .foregroundStyle(fileWatch.isHighlighted ? Color.appYellow : .white.opacity(0.9))
-                .help(reloadHelp)
-                .disabled(engine.currentURL == nil)
-
-                // Export the current frame (ACTION) — sits with the file/action controls.
-                Button(action: { metalRenderer?.exportCurrentFrame() }) {
-                    Image(systemName: "square.and.arrow.down")
-                }
-                .help(keys.helpText("Export frame", .exportFrame))
-                .disabled(engine.currentURL == nil)
-
-                Divider().frame(height: 16).overlay(.white.opacity(0.25))
-
-                // Audio track (WHAT YOU ARE HEARING) — first in the group, ahead of the scopes /
-                // DeckLink / streaming controls. It governs PLAYBACK, not display: it decides which
-                // of the file's audio tracks feeds the speakers, the meters and SDI. That is why it
-                // is a control-bar control and not a scope setting — you should not have to open a
-                // scope slot to change what you are listening to.
-                audioTrackControl
-
-                // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is
-                // chosen per-slot via each slot's header picker, not from here.
-                Button { chrome.showTray.toggle(); updateScopeSampling() } label: {
-                    Image(systemName: "chart.bar.xaxis")
-                }
-                .foregroundStyle(chrome.showTray ? Color.appYellow : .white.opacity(0.9))
-                .help(keys.helpText("Scopes tray", .scopesTray))
-
-                // DeckLink output: split-button — main toggles output, chevron picks device + status.
-                deckLinkOutputControl
-
-                // Streaming source: split-button next to DeckLink output — main quick-connects/stops,
-                // chevron opens the tech → source picker. Lit while streaming, dark (local) otherwise.
-                streamingControl
-
-                // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
-                // about the source, so it lives with the actions, not in the inspector (which reports
-                // what things ARE). The live stream's override on NDI, SRT, WHEP and HLS; the file's since
-                // colour S5 (§6.11, decision 6). One element, no modifiers (§6.7): the slot picks which, so
-                // this body does not grow a branch — see LiveColorOverride.swift.
-                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia)
-
-                // Display transform (§6.3 tiers 1–3) — Phase 2b. Next to the Color control because
-                // they are the two halves §6.3 names: that one is INTERPRETATION (what the source
-                // is), this one is the DISPLAY TRANSFORM (what is sent to the screen). Kept as two
-                // adjacent controls rather than merged, because "keeping them visibly separate is
-                // what stops 'Embedded' creeping back in as a concept."
-                //
-                // ⚠️ NOT GATED ON `activeLiveSource` the way the Color control is. That gate exists
-                // because the interpretation control has nothing to say about a FILE yet; this one
-                // has everything to say about a file — §6.5 and §6.6 were measured on file
-                // playback, and gating it to NDI would put the mode out of reach of its main case.
-                // Gated on `hasSource` only, matching when the Color menu's items are enabled.
-                //
-                // ⚠️ ONE ELEMENT, NO MODIFIERS — see DisplayTransformControl.swift's header and
-                // §6.7: this file's body is at the type-checker's limit.
-                if hasSource {
-                    DisplayTransformControl(deck: deck, chrome: chrome)
-                }
-
-                // The per-source audio offset (docs/AUDIO_RESAMPLER_DESIGN.md §19.8): its control and
-                // its standing badge, while this window has a live source. One element, no modifiers,
-                // for the same reason as the line above.
-                if activeLiveSource != nil {
-                    AudioOffsetControl(model: deck.audioOffset, calibration: deck.calibration)
-                }
-
-                Spacer()
-
-                if showPin {
-                    Button { togglePin() } label: {
-                        Image(systemName: pinned ? "pin.fill" : "pin")
-                    }
-                    // Pinned reads in the app's yellow, as Loop does when on (§8 item 16; Robbie, 2026-10-25).
-                    .foregroundStyle(pinned ? Color.appYellow : live)
-                    .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
-                    // Test drivers find the button by this, not by its help text, which names the shortcut.
-                    .accessibilityIdentifier("pinControls")
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white.opacity(0.9))
-            .imageScale(.large)
+            scrubberRow(gates)
+                // In the floating HUD the scrubber keeps the HUD's 760-pt width (less its padding) by itself, so the
+                // button rows below can be offered the whole window (`adaptiveButtonRows`). Docked, it spans the bar.
+                .frame(maxWidth: showPin ? 736 : .infinity)
+            adaptiveButtonRows(gates, showPin: showPin)
         }
+        // THE NDI DISCOVERY HOLD BELONGS TO THE BAR, NOT TO THE STREAMING CONTROL IN IT. Each layout has its own
+        // `streamingControl`, and `ViewThatFits` takes one off screen and puts another on whenever the window is resized
+        // across a layout boundary; held there, the leaving copy gave the window's hold back and the arriving one never
+        // asked again, so discovery stopped until the NDI list was reopened. The bar is on screen whichever layout is.
+        .onReceive(NotificationCenter.default.publisher(for: NDIMenuOpenWatcher.ndiSubmenuWillOpen)) { _ in
+            // The menu belongs to the key window; other windows ignore it (privacy P1).
+            if deck.window?.isKeyWindow == true { requestNDIDiscovery() }
+        }
+        .onDisappear { releaseNDIDiscovery() }
+    }
+
+    /// The gates and the two greys every control in the transport rows reads, computed once in `controls` — see the
+    /// notes there for what each one means and why the greys are set by hand.
+    private struct RowGates {
+        let transport: Bool
+        let position: Bool
+        let positionWhy: String?
+        let live: Color
+        let dim: Color
+    }
+
+    /// The scrubber with its two readouts.
+    private func scrubberRow(_ g: RowGates) -> some View {
+        let position = g.position, positionWhy = g.positionWhy
+        return HStack(spacing: 12) {
+            Text(leadingReadout)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.85))
+                // ONE LINE, ALWAYS. In the docked bar this row's height is measured and fed to
+                // the WINDOW's height; a readout that wrapped at a narrow width would make the
+                // bar taller, which would resize the window, which would change the width. One
+                // line breaks that loop at the only place it could start.
+                .lineLimit(1)
+                .frame(minWidth: 86, alignment: .leading)
+                // ⚠️ THE LEADING READOUT NO LONGER CYCLES THE MODE — IT OPENS TIMECODE ENTRY.
+                // The settled design says clicking the timecode display is one of the two ways
+                // in, and this is the timecode display: it is the PLAYHEAD, which is the only
+                // number on this bar you can be taken to. Mode cycling did not go anywhere — the
+                // trailing readout still carries it, and it cycles both, so the pair behaves
+                // exactly as before for anyone who reaches for the other end.
+                // Opens timecode entry, which exists to SEEK — so it is a position control and
+                // carries the position gate. `TransportKeyMonitor.begin` guards on the same
+                // condition for the type-to-enter route; this is the click route.
+                .onTapGesture { if position { transportKeys.begin() } }
+                // A pointer cue, because a click target that looks like a label is a click
+                // target nobody finds — AND ONLY WHILE IT IS ONE. A pointing hand over a gated
+                // readout promises a click that `position` will refuse, which is the same lie
+                // the ungreyed play button was telling.
+                .onHover { inside in
+                    if inside && position { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                }
+                // NOT DIMMED, unlike the buttons: this is a READOUT first and a click target
+                // second, and the playhead it shows is still true in a gated window — greying
+                // the number would cost information to make a point about a click. The tooltip
+                // is what carries the point.
+                .help(position ? "Go to timecode — click, or type a number"
+                               : (positionWhy ?? ""))
+
+            // THE PLAYHEAD. A `TransportScrubber`, not a `Slider`, so it can draw the playhead
+            // as a Ball or a Line (Settings ▸ Playback). Same contract as the Slider it
+            // replaced — the value, the per-move setter, the editing bracket below are unchanged —
+            // and the Ball is that Slider's knob, byte for byte. See TransportScrubber.
+            TransportScrubber(
+                value: isScrubbing ? scrubValue : engine.currentTime,
+                range: 0...max(engine.duration, 0.1),
+                onChange: { newValue in
+                    scrubValue = newValue
+                    engine.scrubSeek(to: newValue)
+                },
+                onEditingChanged: { editing in
+                    if editing {
+                        #if DEBUG
+                        // The v210 baseline for the interval BEFORE the drag, so the line
+                        // printed at release has something to be read against. Silent unless
+                        // DeckLink output is running.
+                        metalRenderer?.debugFlushV210Stats(label: "before-drag")
+                        #endif
+                        wasPlayingBeforeScrub = engine.isPlaying
+                        if engine.isPlaying { engine.pause() }
+                        scrubValue = engine.currentTime
+                        isScrubbing = true
+                    } else {
+                        // ── RELEASE. FOUR ORDERED STEPS BECAME THREE, AND THE ONE THAT WENT
+                        //    WAS THE HOLD ─────────────────────────────────────────────────
+                        //
+                        // It used to be: retire the readout, open a handoff, fire a corrective
+                        // un-throttled preview, seek — with the overlay held up by a one-shot
+                        // and a 400 ms timeout until the seeked-to frame was PRESENTED. All of
+                        // that existed to keep a SECOND surface alive across the gap.
+                        //
+                        // ⚠️ THERE IS NOTHING IN ITS PLACE, AND THAT IS CORRECT RATHER THAN AN
+                        // OMISSION. There is no second surface to keep alive: the Metal layer
+                        // is ALREADY showing the release frame, because it got there through
+                        // the ordinary present path during the drag. `exactSeek` →
+                        // `beginReading` → `flush()` clears the queue, and a CAMetalLayer keeps
+                        // its last presented drawable — which is that scrub frame. The hold now
+                        // happens by default instead of by machinery. That is what "one display
+                        // path" buys, stated concretely.
+                        //
+                        // ⚠️ AND IT IS NOW TRUE OF EVERY FILE. Stage 2 had to keep an MXF-only
+                        // hold, because MXF still had no producer and its Metal layer held the
+                        // PRE-DRAG frame for the whole gesture — the reasoning above simply did
+                        // not reach it. With `LibavScrubProducer` putting real frames on that
+                        // layer, it does, and the hold, the 400 ms fallback and the last
+                        // `CGImage` in the scrub path are gone with it. MEASURED, not assumed:
+                        // the `[SETTLE]` line on MXF (see MetalVideoRenderer).
+                        isScrubbing = false          // the readout goes back to the engine
+
+                        // 1. THE PENDING SLOT, FLUSHED AT THE RELEASE POINT. This is what the
+                        //    old `requestScrubPreview(at:final:)` became. Its job was to close
+                        //    a staleness floor created by a media-DISTANCE gate that was never
+                        //    re-asked at the release point; that gate is gone, so there is no
+                        //    floor and no corrective request. What survives is the in-flight
+                        //    LATCH: one decode may still be outstanding at a marginally older
+                        //    position, so the release point is submitted and the coalescer
+                        //    issues it the moment that decode completes. Latest wins, and the
+                        //    latest is now exactly where the user let go.
+                        engine.scrubSeek(to: scrubValue)
+                        // 2. The real seek.
+                        engine.exactSeek(to: scrubValue)
+                        #if DEBUG
+                        // Flushed BEFORE the resume so playback's converts cannot land in the
+                        // drag's numbers.
+                        metalRenderer?.debugFlushV210Stats(label: "drag")
+                        #endif
+                        // 3. …and the transport resumes if it was running.
+                        if wasPlayingBeforeScrub { engine.play() }
+                    }
+                }
+            )
+            // A stream has no duration, so this slider's range collapses to 0...0.1 and its
+            // thumb sits pinned at zero. Inert AND operable-looking is the worst pairing.
+            .disabled(!position)
+            .help(position ? "" : (positionWhy ?? ""))
+
+            Text(trailingReadout)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.85))
+                .lineLimit(1)                       // see the leading readout
+                .frame(minWidth: 86, alignment: .trailing)
+                .onTapGesture { cycleReadout() }
+        }
+    }
+
+    /// Full: every control, one row — the widest of the three layouts (`adaptiveButtonRows`).
+    private func fullButtonRow(_ g: RowGates, showPin: Bool) -> some View {
+        HStack(spacing: 16) {
+            openButton
+            playButton(g)
+
+            rowDivider
+
+            muteGroup(g)
+            loopButton(g)
+            guidesButton
+            // Captions: split-button — main toggles the overlay (or opens the picker when
+            // nothing's loaded yet), chevron loads/clears the sidecar and picks position.
+            captionControl
+            inspectorButton
+            flipButton
+            reloadButton
+            exportButton
+
+            rowDivider
+
+            // Audio track (WHAT YOU ARE HEARING) — first in the group, ahead of the scopes /
+            // DeckLink / streaming controls. It governs PLAYBACK, not display: it decides which
+            // of the file's audio tracks feeds the speakers, the meters and SDI. That is why it
+            // is a control-bar control and not a scope setting — you should not have to open a
+            // scope slot to change what you are listening to.
+            audioTrackControl
+            scopesButton
+            // DeckLink output: split-button — main toggles output, chevron picks device + status.
+            deckLinkOutputControl
+            // Streaming source: split-button next to DeckLink output — main quick-connects/stops,
+            // chevron opens the tech → source picker. Lit while streaming, dark (local) otherwise.
+            streamingControl
+            // Color — the color-interpretation control (source-agnostic). It hosts an ASSERTION
+            // about the source, so it lives with the actions, not in the inspector (which reports
+            // what things ARE). The live stream's override on NDI, SRT, WHEP and HLS; the file's since
+            // colour S5 (§6.11, decision 6). One element, no modifiers (§6.7): the slot picks which, so
+            // this body does not grow a branch — see LiveColorOverride.swift.
+            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia)
+            displayTransformSlot
+            audioOffsetSlot
+
+            Spacer()
+
+            if showPin { pinButton(g) }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .imageScale(.large)
+    }
+
+    // ── NARROW-WINDOW LAYOUTS (docs/NARROW_WINDOW_LAYOUT_PLAN.md §2.2) ─────────────────────────────────────────────
+    //
+    // Three layouts, widest first, and `ViewThatFits` takes the first whose natural width fits. Not breakpoints: the
+    // row's width moves with the colour and audio labels (1077 and 1151 pt measured), so a constant would be wrong
+    // for some file. In the floating HUD each row is laid out at its natural width (`fixedSize`); the docked bar offers
+    // each row its own width. Never collapsed, at any width: Play, the scrubber and its readouts, Mute, Display
+    // transform, DeckLink and Pin.
+    //
+    // The framing-guides popover hangs off the guides button in Full and off More in Compact and Narrow, where the
+    // guides are a More item. Only the layout on screen presents it.
+    private func adaptiveButtonRows(_ g: RowGates, showPin: Bool) -> some View {
+        ViewThatFits(in: .horizontal) {
+            fullButtonRow(g, showPin: showPin)
+                .fixedSize(horizontal: showPin, vertical: false)
+            compactButtonRow(g, showPin: showPin)
+                .fixedSize(horizontal: showPin, vertical: false)
+            narrowButtonRows(g, showPin: showPin)
+        }
+    }
+
+    /// Compact: Full less the least-used tools, which move into More, and the colour face shortened.
+    private func compactButtonRow(_ g: RowGates, showPin: Bool) -> some View {
+        HStack(spacing: 16) {
+            openButton
+            playButton(g)
+
+            rowDivider
+
+            muteGroup(g)
+            inspectorButton
+
+            rowDivider
+
+            audioTrackControl
+            scopesButton
+            deckLinkOutputControl
+            streamingControl
+            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, face: .short)
+            displayTransformSlot
+            audioOffsetSlot
+            moreMenu(g, includesLoop: true)
+
+            Spacer()
+
+            if showPin { pinButton(g) }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .imageScale(.large)
+    }
+
+    /// Narrow: two rows under the scrubber — transport, then output and colour.
+    private func narrowButtonRows(_ g: RowGates, showPin: Bool) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 16) {
+                openButton
+                playButton(g)
+
+                rowDivider
+
+                muteGroup(g)
+                audioTrackControl
+                loopButton(g)
+
+                rowDivider
+
+                inspectorButton
+                scopesButton
+            }
+            HStack(spacing: 16) {
+                deckLinkOutputControl
+                streamingControl
+                audioOffsetSlot
+
+                rowDivider
+
+                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, face: .icon)
+                displayTransformSlot
+
+                rowDivider
+
+                moreMenu(g, includesLoop: false)
+                if showPin { pinButton(g) }
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .imageScale(.large)
+    }
+
+    /// More (…): the tools Compact and Narrow take off the row, least used first, each with its title and its key.
+    /// Lit yellow while anything in it is on, since those controls' own on-states are not on screen: Refresh metadata
+    /// waiting, subtitles shown, a framing guide on, and Loop where Loop is a More item (`moreOnStates`).
+    private func moreMenu(_ g: RowGates, includesLoop: Bool) -> some View {
+        let on = moreOnStates(includesLoop: includesLoop)
+        return Menu {
+            Button("Edit in Flip", action: editInFlip)
+                .disabled(engine.currentURL == nil)
+            // The same press as the button: acknowledge, then re-read (see `reloadButton`).
+            Button(fileWatch.isHighlighted ? reloadHelp : "Refresh Metadata") {
+                fileWatch.rebaseline()
+                Task { await engine.reinspect() }
+            }
+            .disabled(engine.currentURL == nil)
+            Section("Subtitles") {
+                if captions.isLoaded {
+                    Toggle("Show Subtitles", isOn: Binding(get: { captions.enabled }, set: { captions.enabled = $0 }))
+                }
+                Button(captions.isLoaded ? "Load Different Subtitles…" : "Load Subtitles…") { presentCaptionPicker() }
+                if captions.isLoaded {
+                    Button("Clear Subtitles") { captions.clear() }
+                    Picker("Position", selection: $captionPosition) {
+                        ForEach(CaptionPosition.allCases) { Text($0.label).tag($0) }
+                    }
+                }
+            }
+            // File-only, as `captionControl` is.
+            .disabled(!engine.hasMedia)
+            Section {
+                Button(keys.helpText("Export Frame", .exportFrame)) { metalRenderer?.exportCurrentFrame() }
+                    .disabled(engine.currentURL == nil)
+                Button("Framing Guides…") { showGuidesPanel = true }
+                if includesLoop {
+                    Toggle(keys.helpText("Loop Playback", .loop),
+                           isOn: Binding(get: { engine.isLooping }, set: { _ in engine.toggleLoop() }))
+                        .disabled(!engine.hasMedia || !g.position)
+                }
+            }
+        } label: {
+            // One `Text`, so the yellow survives the borderless menu (see `ColorInterpretationControl`'s body).
+            Text(Image(systemName: "ellipsis.circle")).font(.system(size: 15))
+                .foregroundColor(on.isEmpty ? g.live : Color.appYellow)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(on.isEmpty ? "More" : "More — " + on.joined(separator: ", "))
+        .accessibilityIdentifier("moreControls")
+        // "Framing Guides…" is a More item here, so its panel hangs off More (see `adaptiveButtonRows`).
+        .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
+            GuidesPanel()
+        }
+    }
+
+    /// What is on inside More (…), in its menu order, as the tooltip names it. Empty when nothing is.
+    private func moreOnStates(includesLoop: Bool) -> [String] {
+        var on: [String] = []
+        if fileWatch.isHighlighted { on.append(reloadHelp) }
+        if captions.isLoaded && captions.enabled { on.append("subtitles shown") }
+        if guideMode != .off || safeLinesOn || broadcastSafeOn { on.append("framing guides on") }
+        if includesLoop && engine.isLooping { on.append("loop on") }
+        return on
+    }
+
+    // MARK: The transport rows' controls, one each, so the layouts above can place them
+
+    private var rowDivider: some View {
+        Divider().frame(height: 16).overlay(.white.opacity(0.25))
+    }
+
+    private var openButton: some View {
+        Button { DeckRegistry.shared.presentOpenPanel(from: deck) } label: {
+            Image(systemName: "folder")
+        }
+        .help(keys.helpText("Open…", .fileOpen))
+    }
+
+    private func playButton(_ g: RowGates) -> some View {
+        let position = g.position, positionWhy = g.positionWhy, live = g.live, dim = g.dim
+        return Button { engine.togglePlayPause() } label: {
+            Image(systemName: engine.isPlaying ? "pause.fill" : "play.fill").frame(width: 24)
+        }
+        // Space is the shortcut registry's (`.playPause`), dispatched with this button's gate.
+        .disabled(!position)
+        // See the `dim` note above: `.disabled` does not grey a control in this row.
+        .foregroundStyle(position ? live : dim)
+        .help(position ? keys.helpText(engine.isPlaying ? "Pause" : "Play", .playPause)
+                       : (positionWhy ?? "Playback is in another window"))
+    }
+
+    // ⚠️ FIXED GEOMETRY, AND THE JITTER WAS GEOMETRY (§8 item 17, MEASURED by Accessibility on HEAD
+    // `3c5526d`). This row is centred, and the fader used to be inserted on hover: hovering the speaker
+    // moved the play button and the speaker itself 38 pt left (half the fader and its spacing). The
+    // speaker slid out from under the pointer, the hover ended, the fader went, the speaker slid back
+    // under the pointer, and round again: the shake, with the play button passing under the pointer. The
+    // speaker glyph also changes width with the level (wave.1 / wave.2 / slash), which nudged the fader
+    // during a drag. Now the fader is always laid out (hidden and untouchable until hovered), the glyph
+    // has a fixed frame, and the whole group is the hover area: nothing in the row moves (measured, 0 pt).
+    private func muteGroup(_ g: RowGates) -> some View {
+        let transport = g.transport
+        return HStack(spacing: 6) {
+            Button { engine.toggleMute() } label: {
+                Image(systemName: speakerSymbol)
+                    .frame(width: 26, alignment: .leading)
+            }
+            .help(keys.helpText(engine.isMuted ? "Unmute" : "Mute", .mute))
+            Slider(
+                value: Binding(
+                    get: { Double(engine.volume) },
+                    set: { newValue in
+                        engine.setVolume(Float(newValue))
+                        Preferences.shared.playbackVolume = newValue
+                    }
+                ),
+                in: 0...1
+            )
+            .controlSize(.mini)
+            .frame(width: 70)
+            .opacity(volumeHovering ? 1 : 0)
+            .allowsHitTesting(volumeHovering)
+            .accessibilityHidden(!volumeHovering)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onHover { h in
+            withAnimation(.easeInOut(duration: 0.15)) { volumeHovering = h }
+        }
+        // ⚠️ `transport`, NOT `position`, AND THAT IS DELIBERATE. Audio is not a position:
+        // NDI carries it, and mute reaches the DeckLink card through `applyAudioMute`, so
+        // a stream being up is no reason to take the fader away. The one live source with
+        // no audio at all is WHEP (its audio track is wired to
+        // ManifoldWHEPDiscardMessage) — not enough to justify a third gate, and greying
+        // the control per-transport would be less predictable than leaving it alone.
+        .disabled(!transport)
+    }
+
+    private func loopButton(_ g: RowGates) -> some View {
+        let position = g.position, positionWhy = g.positionWhy, live = g.live, dim = g.dim
+        return Button { engine.toggleLoop() } label: { Image(systemName: "repeat") }
+            .help(position ? "Loop playback" : (positionWhy ?? "Loop playback"))
+            // File-only, and now gated twice on purpose. `!engine.hasMedia` already
+            // self-disabled it for live sources — a live takeover calls engine.stop() —
+            // but that was incidental, not stated: it read as a no-file gate that happened
+            // to catch streams. `position` says the intended thing, and the pair costs
+            // nothing.
+            .disabled(!engine.hasMedia || !position)
+            // Three states, and the middle one is the new part: ON (the app's yellow; green
+            // until 2026-10-25, now kept for live), available (0.9), gated (0.35). This button
+            // ALREADY overrode the row's foreground style to carry its colour, so it was the
+            // clearest case of a disabled control drawn at full brightness — see the `dim` note above.
+            .foregroundStyle(engine.isLooping ? Color.appYellow
+                             : ((engine.hasMedia && position) ? live : dim))
+    }
+
+    private var guidesButton: some View {
+        Button { showGuidesPanel.toggle() } label: {
+            // `viewfinder.rectangular` — an outer frame with corner brackets and OPEN space
+            // inside it, which is what a framing guide is: marks over a picture you can
+            // still see through.
+            //
+            // It replaces `rectangle.inset.filled`, whose inner rectangle is SOLID. At the
+            // size this row draws (`.imageScale(.large)`, ~16 pt) that fill reads as a block
+            // — a filled tile, or a slide — rather than as an inset. The distinction the
+            // glyph exists to carry is exactly the one the fill destroys: guides are LINES
+            // at an inset, not a filled area. `rectangle.inset.filled` was itself a
+            // replacement for `grid`, which rendered as a bare `#` with no outer frame at
+            // all and read as a table.
+            //
+            // AVAILABILITY CHECKED, NOT ASSUMED — an SF Symbol that postdates the
+            // deployment target renders BLANK at run time and raises no build error, so
+            // compiling proves nothing. The OS's own catalog
+            // (CoreGlyphs.bundle/Contents/Resources/name_availability.plist) lists this
+            // symbol under release year 2023, which that file's `year_to_release` table maps
+            // to macOS 14.0. This target's floor is macOS 15.0, so it is present on every OS
+            // the app can launch on.
+            Image(systemName: "viewfinder.rectangular")
+        }
+            .help("Framing guides")
+            .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
+                GuidesPanel()
+            }
+    }
+
+    private var inspectorButton: some View {
+        Button { showInspector.toggle() } label: {
+            Image(systemName: "info.circle")
+        }
+        .help(keys.helpText("Inspector", .inspector))
+    }
+
+    private var flipButton: some View {
+        Button(action: editInFlip) {
+            // AN F IN A ROUNDED SQUARE — the silhouette of an app icon, so it reads as
+            // "the app Flip" rather than as a letter badge. A SQUARE and not `f.circle`
+            // because the neighbours here are square-ish (`square.and.arrow.down`, `tv`,
+            // `viewfinder.rectangular`) while the circles in this row mean something else —
+            // `info.circle` is a status affordance — so the square keeps the row's geometry
+            // consistent AND keeps the two apart at a glance.
+            //
+            // UNFILLED, and that is a weight decision made by looking at the built bar.
+            // `f.square.fill` was the first cut: it is a solid tile with the letter knocked
+            // out, and next to a row drawn entirely in thin strokes it was the heaviest mark
+            // present — it read as selected, or as a badge, rather than as one control among
+            // twelve. `f.square` carries the same silhouette at the row's own weight.
+            Image(systemName: "f.square")
+        }
+        .help("Edit in Flip")
+        .disabled(engine.currentURL == nil)
+    }
+
+    // Refresh metadata — ALWAYS PRESSABLE, and lit when there is a reason to press it.
+    //
+    // The press always re-reads, whether or not anything changed; pressing it on an
+    // unchanged file is never wrong, it just re-reads. The alternative design — enable
+    // it only when the file has changed — was rejected: it makes the common case a dead
+    // control, and it is the DEAD-CONTROL reading that produced the bug report this
+    // fixes (a tester pressed it on an unchanged file, saw nothing happen, and
+    // concluded it was broken). `.disabled` here is only the same no-file gate its
+    // neighbours in this row carry; it never tracks the changed state.
+    //
+    // ⚠️ THE GREEN MEANS SOMETHING DIFFERENT HERE THAN IT DOES THREE BUTTONS ALONG.
+    // On the DeckLink and scopes-tray buttons this tint means "this is ON" — a mode the
+    // user turned on and can turn off. Here it means "there is something waiting" — a
+    // notification, cleared by acting on it, not by pressing it again. Same treatment,
+    // different meaning, deliberately: a second highlight colour in a twelve-button row
+    // would be read as a third state of the first meaning rather than as a new one, and
+    // "this control has something for you" is exactly what green already says at a
+    // glance. If it ever reads oddly, that is why.
+    //
+    // ⚠️ TWO DIFFERENT REASONS PRODUCE THIS ONE GREEN, and the tooltip is the ONLY
+    // place they are told apart — see `reloadHelp` below, and `sentForEditing` in
+    // SourceFileWatcher for why they are two flags and not one. Deliberately not two
+    // colours: a second highlight in this row would read as a third state of the
+    // first meaning rather than as a new meaning.
+    private var reloadButton: some View {
+        Button(action: {
+            // The press IS the acknowledgement — adopt what is on disk now as the truth
+            // before the read, so the highlight clears immediately rather than on the next
+            // poll. See SourceFileWatcher.rebaseline for the during-the-read race.
+            fileWatch.rebaseline()
+            Task { await engine.reinspect() }
+        }) {
+            Image(systemName: "arrow.clockwise")
+        }
+        .foregroundStyle(fileWatch.isHighlighted ? Color.appYellow : .white.opacity(0.9))
+        .help(reloadHelp)
+        .disabled(engine.currentURL == nil)
+    }
+
+    // Export the current frame (ACTION) — sits with the file/action controls.
+    private var exportButton: some View {
+        Button(action:         { metalRenderer?.exportCurrentFrame() }) {
+            Image(systemName: "square.and.arrow.down")
+        }
+        .help(keys.helpText("Export frame", .exportFrame))
+        .disabled(engine.currentURL == nil)
+    }
+
+    // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is
+    // chosen per-slot via each slot's header picker, not from here.
+    private var scopesButton: some View {
+        Button {         chrome.showTray.toggle(); updateScopeSampling() } label: {
+            Image(systemName: "chart.bar.xaxis")
+        }
+        .foregroundStyle(chrome.showTray ? Color.appYellow : .white.opacity(0.9))
+        .help(keys.helpText("Scopes tray", .scopesTray))
+    }
+
+    // Display transform (§6.3 tiers 1–3) — Phase 2b. Next to the Color control because
+    // they are the two halves §6.3 names: that one is INTERPRETATION (what the source
+    // is), this one is the DISPLAY TRANSFORM (what is sent to the screen). Kept as two
+    // adjacent controls rather than merged, because "keeping them visibly separate is
+    // what stops 'Embedded' creeping back in as a concept."
+    //
+    // ⚠️ NOT GATED ON `activeLiveSource` the way the Color control is. That gate exists
+    // because the interpretation control has nothing to say about a FILE yet; this one
+    // has everything to say about a file — §6.5 and §6.6 were measured on file
+    // playback, and gating it to NDI would put the mode out of reach of its main case.
+    // Gated on `hasSource` only, matching when the Color menu's items are enabled.
+    //
+    // ⚠️ ONE ELEMENT, NO MODIFIERS — see DisplayTransformControl.swift's header and
+    // §6.7: this file's body is at the type-checker's limit.
+    @ViewBuilder private var displayTransformSlot: some View {
+        if hasSource {
+            DisplayTransformControl(deck: deck, chrome: chrome)
+        }
+    }
+
+    // The per-source audio offset (docs/AUDIO_RESAMPLER_DESIGN.md §19.8): its control and
+    // its standing badge, while this window has a live source. One element, no modifiers,
+    // for the same reason as the line above.
+    @ViewBuilder private var audioOffsetSlot: some View {
+        if activeLiveSource != nil {
+            AudioOffsetControl(model: deck.audioOffset, calibration: deck.calibration)
+        }
+    }
+
+    private func pinButton(_ g: RowGates) -> some View {
+        let live = g.live
+        return Button { togglePin() } label: {
+            Image(systemName: pinned ? "pin.fill" : "pin")
+        }
+        // Pinned reads in the app's yellow, as Loop does when on (§8 item 16; Robbie, 2026-10-25).
+        .foregroundStyle(pinned ? Color.appYellow : live)
+        .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
+        // Test drivers find the button by this, not by its help text, which names the shortcut.
+        .accessibilityIdentifier("pinControls")
     }
 
     private var emptyState: some View {
