@@ -2019,7 +2019,10 @@ items.
 
 - **What:** `MetalVideoRenderer.start()` / `stop()` use `CVDisplayLinkCreateWithActiveCGDisplays`,
   `CVDisplayLinkSetOutputCallback`, `CVDisplayLinkStart` and `CVDisplayLinkStop`, all deprecated in
-  macOS 15. They still work.
+  macOS 15. They still work. Since the 0.9.1 display-link fix (2026-11-01) also `CVDisplayLinkSetCurrentCGDisplay`,
+  `CVDisplayLinkGetCurrentCGDisplay`, `CVDisplayLinkCreateWithCGDisplay` and `CVDisplayLinkGetNominalOutputVideoRefreshPeriod`
+  (+4 warnings). A `CADisplayLink` follows the window by itself; the output pacer (`App/OutputPacer.swift`) is not a display link
+  and stays.
 - **Replacement:** `NSView` / `NSWindow` / `NSScreen.displayLink(target:selector:)`, which returns a
   `CADisplayLink`. Available from macOS 14, so on our 15.0 floor.
 - **Why it is a project, not a swap — the behaviour changes:**
@@ -3617,7 +3620,22 @@ exists for (2026-10-16).
 
 Pre-existing (the 2026-10-23 entry measured the same freeze on ProRes at `cb39182`). Target: 0.9.1.
 
-## ☐ OPEN 2026-10-31 — 0.9.1 — PRE-EXISTING, ALL BUILDS — the window's display link follows the MAIN display, not the display the window is on
+## ☐ FIXED IN THE TREE 2026-11-01, NOT COMMITTED — 0.9.1 — PRE-EXISTING, ALL BUILDS — the window's display link follows the MAIN display, not the display the window is on
+
+**Fixed 2026-11-01 (working tree, not committed; plan and full results: `docs/DISPLAY_LINK_PER_WINDOW_PLAN.md` §7).** Each window's
+link is pointed at the display its window is on (`MetalVideoRenderer.retargetDisplayLink`: at bind, on the window's
+`didChangeScreen`, on `didChangeScreenParameters`, and in `makeDisplayLink`, so every new link, the −6660 recreation included, starts
+there). While a window feeds DeckLink output it is ticked by an output pacer instead (`App/OutputPacer.swift`; rate from the card's
+mode and the source, `OutputPacing`), so SDI depends on no desktop display; in that mode the SDI frame is committed before any
+drawable is asked for and the desktop present is gated (≤ 1 waiting for the glass, ≥ ¾ of the window's display period apart).
+**Measured, unattended, 2026-11-01:** the tick is 16.68 ms with the window on the ASUS and 8.33 ms on the LG, and follows a move
+within one interval; every SDI mode the card can run (1080p23.98 / 59.94 / 100 / 119.88 / 120, 2160p59.94, with the window on
+either display and moved mid-play, and 2160p59.94 with the scopes open) gave late 0, dropped 0, 0 repeats and 0 skips at the card's
+input; the 10-minute 1080p59.94 soak on the ASUS gave 36 000 completed, late 0, dropped 0, 0 / 0 in 35 911 pulls. 1080p119.88 is now
+frame-exact (today's code: 61 repeats, 61 skips). **Open from these runs** (entries below): a live 59.94 stream in a window on the
+60 Hz display presents 46–51 a second; pacer-mode desktop presents at 100 / 119.88 fps on the 120 Hz LG are 57–103 a second. Not
+run: NDI (no source discovered on either build), A/V sync (attended), the 60 Hz-main baseline (attended, tomorrow), the wire
+(cable).
 
 **Found 2026-10-31** while measuring the 120 fps freeze (above; a separate issue, not part of that fix). The renderer's display link is
 created with `CVDisplayLinkCreateWithActiveCGDisplays` (`MetalVideoRenderer.makeDisplayLink`, `MetalVideoRenderer.swift:3153`
@@ -3635,6 +3653,44 @@ window would update at the main display's slower rate. Frame selection is by clo
 **Direction (not decided):** retarget the link to the window's display on `NSWindow.didChangeScreenNotification` (and at bind), or
 move to the window's own `CADisplayLink` (`NSView.displayLink(target:selector:)`, macOS 14), which follows the window by design. The
 second is the post-release item *`CVDisplayLink` → `CADisplayLink`*; the first is the small 0.9.1-sized change. Target: 0.9.1.
+
+## ☐ OPEN 2026-11-01 — 0.9.1, FROM THE DISPLAY-LINK FIX — a live 59.94 stream in a window on a 60 Hz display presents 46–51 frames a second
+
+**Found 2026-11-01** in the display-link runs (`DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.6). SRT from a local ffmpeg listener,
+1080p59.94, window on the ASUS (59.936 Hz link), no SDI: 46 51 46 49 48 49 48 presented a second, 85 superseded in 7 s, late 0. The
+same stream on the LG: 60 a second, 0 superseded; today's code ticked at 120 Hz everywhere, so it never showed this. Files at 59.94 on
+the ASUS gave 60 a second and 0 superseded in every run; 60 fps gave 5 superseded in 2 s. With SDI output running the pacer ticks at
+119.88 Hz and the window showed 60 a second.
+**Cause, by inference:** the plan's §4.3 (a) beat, on the window: one tick per frame period, with the frames' due times on the tick
+boundaries, so tick jitter puts two frames due in one tick and none in the next. A live clock's phase against the tick is whatever it
+is at connect; a file's is set at Play. **Direction (not decided, not tuned):** select against the time the frame will be on the
+glass (the link's output time) rather than the tick's `now`, so a due time cannot straddle a tick by jitter alone. A/V sync is not
+affected (selection is by clock).
+
+## ☐ OPEN 2026-11-01 — 0.9.1, FROM THE DISPLAY-LINK FIX — in pacer mode, 100 and 119.88 fps reach a 120 Hz window at 57–103 frames a second
+
+**Found 2026-11-01** (§7.5). With SDI output running, the window's presents are gated (one waiting for the glass at most; ¾ of the
+display period apart). On the LG (120 Hz): 1080p119.88 presented 65–103 a second, 1080p100 57–91, 2160p119.88 64, 2160p100 55; on the
+ASUS 35–60 (≤ its 59.94 Hz, as intended). Without output, the same files show 100–121 on the LG. SDI was frame-exact in every one of
+these runs. **Cause, by inference:** the in-flight limit: a present's handler arrives a vsync or more after the present, so on a
+120 Hz display the gate is often still closed at the next frame. Held back counts: 26–1578 "in flight" per 10 s. **Direction (not
+decided):** a second drawable in flight on displays above 60 Hz (the pool of three still leaves one free), or present from the most
+recent frame at the vsync rather than per frame. Window only; SDI must stay as measured.
+
+## ☐ RECORDED 2026-11-01 — PRE-EXISTING — 2160p100 and 2160p119.88: the card reports every frame late, on today's code too
+
+On the 8K Pro (profile `1dfd`, single link), Follow source with a 2160p100 or 2160p119.88 file: `completed=0`, every frame
+`late`, `dropped=0`, on `26f7794` and on the display-link build alike, in every run (window on either display). At the card's input
+the pull then skips 17–37 % of frames on both builds (variance runs: today's code 195–314 skips / 26–185 repeats at 2160p100, 402–421
+/ 36–69 at 2160p119.88; the new build 168–300 / 0–168 and 400–441 / 0–7). The card accepts the mode but cannot play it out on time;
+the probe says quad-link is not supported (`COLOR_MANAGEMENT_FINDINGS.md` S7-5). Not caused by pacing. **Direction:** Follow source
+should not choose a 2160p mode above 60 on a card that cannot run it (refuse or fall back, with the reason shown), to be decided.
+
+## ☐ RECORDED 2026-11-01 — a −6660 restart refusal at a window close, recovered
+
+`CVDisplayLinkStart → -6660` at Close All on a window whose link had idle-stopped, with no display change (`DISPLAY_LINK_PER_WINDOW_PLAN.md`
+§7.3, one in about 30 windows). The recovery (`ensureRunningOnQueue`) recreated the link at once. Seen once on the display-link
+build; not seen in the shorter HEAD runs, which is not evidence either way. The recovery logs the display of every recreated link now.
 
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
