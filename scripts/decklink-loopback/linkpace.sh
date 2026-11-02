@@ -6,10 +6,17 @@
 # repeat or a skip on the wire is counted by identity, not inferred.
 #
 #   zsh scripts/decklink-loopback/linkpace.sh fixtures
-#       → build/linkpace/ : mark-1080p5994-660s.mov, mark-1080p2398-60s.mov, mark-2160p5994-30s.mov, mark-1080p11988-30s.mov
-#   zsh scripts/decklink-loopback/linkpace.sh run <app bundle> <fixture> <lg|asus> <seconds> <label>
+#       → build/linkpace/ : mark-1080p5994-660s.mov, mark-1080p2398-60s.mov, mark-2160p5994-30s.mov, mark-1080p11988-30s.mov,
+#            mark-1080p100-30s.mov
+#   zsh scripts/decklink-loopback/linkpace.sh run <app bundle> <fixture> <lg|asus|move> <seconds> <label>
 #       guard && launch the bundle's binary (held by PID), open the fixture, place the window, start DeckLink output
 #       (Follow source), Play, capture <seconds> of the loop, stop, quit by PID, guard; then the summary below.
+#       `move`: the window starts on the ASUS, is moved to the LG at a third of the run and back at two thirds.
+#   zsh scripts/decklink-loopback/linkpace.sh window <app bundle> <file | srt> <lg|asus|move> <seconds> <label>
+#       The window alone, no DeckLink output (`MANIFOLD_PLAYBACK_STATS=1`): Play for <seconds>, then the window summary
+#       (presents, dropped and late per second, the tick interval from [RENDER-PERF]). `srt`: a local ffmpeg listener on
+#       srt://127.0.0.1:9000 sends 1080p59.94 testsrc2 + tone, dialled through MANIFOLD_DEBUG_DIAL_URL (no bookmark read
+#       or written); the listener is stopped by its own PID afterwards.
 #
 # Accessibility clicks on named menu items and buttons only; no keystrokes, no screenshots; never addresses Manifold by
 # name or bundle id (scripts/manifold-proc.sh). Changes no display, defaults key or Desktop Video setting. Making the
@@ -34,6 +41,7 @@ import AppKit
 import ApplicationServices
 // linkpace-ax <pid> press <window title> <button description>
 // linkpace-ax <pid> place <window title> <display name substring>
+// A title of "*" means the first window (a live stream's title is the stream's, not a file name).
 let a = CommandLine.arguments, pid = pid_t(a[1])!, verb = a[2], title = a[3], arg = a[4]
 func attr(_ e: AXUIElement, _ n: String) -> AnyObject? { var v: AnyObject?; return AXUIElementCopyAttributeValue(e, n as CFString, &v) == .success ? v : nil }
 func find(_ e: AXUIElement) -> AXUIElement? {
@@ -42,7 +50,7 @@ func find(_ e: AXUIElement) -> AXUIElement? {
     for c in (attr(e, kAXChildrenAttribute) as? [AXUIElement]) ?? [] { if let f = find(c) { return f } }
     return nil
 }
-for w in (attr(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? [] where (attr(w, kAXTitleAttribute) as? String) == title {
+for w in (attr(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? [] where title == "*" || (attr(w, kAXTitleAttribute) as? String) == title {
     if verb == "press", let b = find(w) { print("press:", AXUIElementPerformAction(b, kAXPressAction as CFString).rawValue); exit(0) }
     if verb == "place" {
         guard let s = NSScreen.screens.first(where: { $0.localizedName.contains(arg) }), let main = NSScreen.screens.first else { print("no display \(arg)"); exit(1) }
@@ -60,6 +68,15 @@ band() {   # $1 size WxH, $2 rate, $3 seconds: testsrc2 with the frame number dr
   print -r -- "testsrc2=s=${1}:r=${2}:d=${3},drawtext=fontfile=/System/Library/Fonts/Menlo.ttc:text='%{n}':fontsize=200:fontcolor=white:box=1:boxcolor=black:x=160:y=160,format=yuv420p[bg];color=c=black:s=${w}x64:r=${2}:d=${3},format=yuv420p,geq=lum='16+219*if(lt($k\,16)\,bitand(floor(N/pow(2\,$k))\,1)\,eq(mod($k\,2)\,0))':cb=128:cr=128[band];[bg][band]overlay=0:0:shortest=1"
 }
 
+# For `run` and `window`: place the window on a display by name; `moves` does the `move` run's two moves, timed from
+# Play, and marks each in the log.
+place() { if [[ $1 == asus ]]; then $AXT $PID place "$T" "ASUS"; else $AXT $PID place "$T" "LG"; fi }
+moves() {
+  [[ $WHERE == move ]] || return 0
+  nap $(( SECS / 3.0 )); echo "[DRV] MOVE lg" >> $LOG; place lg
+  nap $(( SECS / 3.0 )); echo "[DRV] MOVE asus" >> $LOG; place asus
+}
+
 case ${1:-} in
 fixtures)
   q=(-hide_banner -loglevel error -y)
@@ -67,9 +84,11 @@ fixtures)
   ffmpeg $q -f lavfi -i "$(band 1920x1080 24000/1001 60)"  -c:v h264_videotoolbox -b:v 12M $OUT/mark-1080p2398-60s.mov
   ffmpeg $q -f lavfi -i "$(band 3840x2160 60000/1001 30)"  -c:v hevc_videotoolbox -b:v 60M -tag:v hvc1 $OUT/mark-2160p5994-30s.mov
   ffmpeg $q -f lavfi -i "$(band 1920x1080 120000/1001 30)" -c:v h264_videotoolbox -b:v 30M $OUT/mark-1080p11988-30s.mov
+  ffmpeg $q -f lavfi -i "$(band 1920x1080 100 30)" -c:v h264_videotoolbox -b:v 30M $OUT/mark-1080p100-30s.mov
   ls -l $OUT ;;
 run)
-  APPB=$2; F=$3; WHERE=$4; SECS=$5; LABEL=$6; T=${F:t}; LOG=$OUT/$LABEL.log; MARKS=$OUT/$LABEL.marks
+  # Absolute paths: `manifold-proc.sh check` refuses a build whose executable path is relative.
+  APPB=${2:A}; F=${3:A}; WHERE=$4; SECS=$5; LABEL=$6; T=${F:t}; LOG=$OUT/$LABEL.log; MARKS=$OUT/$LABEL.marks
   [[ -x $CAP ]] || { echo "build the capture first: zsh scripts/decklink-loopback/build.sh capture"; exit 1; }
   axtool
   $PROC guard || { echo "GUARD: the installed app is running — stopping, nothing launched"; exit 2; }
@@ -80,13 +99,16 @@ run)
   menu() { osascript -e "tell application \"System Events\" to tell (first process whose unix id is $PID) to click menu item \"$2\" of menu 1 of menu bar item \"$1\" of menu bar 1" >/dev/null; }
   press() { $AXT $PID press "$T" "$1" >/dev/null || echo "no $1 button in $T"; }
   $PROC open $PID $F; nap 3.5
-  if [[ $WHERE == asus ]]; then $AXT $PID place "$T" "ASUS"; else $AXT $PID place "$T" "LG"; fi; nap 1.5
+  place ${WHERE:/move/asus}; nap 1.5
   grep -q 'CGDisplayCopyColorSpace' $LOG && grep 'obtained via' $LOG | tail -1
   menu View "Always Show Controls"; nap 1.2
   menu File "Start/Stop DeckLink Output"; nap 3
   echo "[DRV] BEGIN $LABEL" >> $LOG
   press Play; nap 1
-  $CAP --device 0 --seconds $SECS --label $LABEL --marks $MARKS > $OUT/$LABEL.cap 2>&1
+  $CAP --device 0 --seconds $SECS --label $LABEL --marks $MARKS > $OUT/$LABEL.cap 2>&1 &
+  CP=$!
+  moves
+  wait $CP
   echo "[DRV] END $LABEL" >> $LOG
   press Pause; nap 1.5
   menu File "Start/Stop DeckLink Output"; nap 2.5
@@ -94,5 +116,37 @@ run)
   $PROC quit $PID; wait $PID 2>/dev/null
   $PROC guard || echo "GUARD tripped after the run"
   python3 -I $HERE/linkpace-summary.py $MARKS $LOG ;;
-*) sed -n '2,24p' $0 ;;
+window)
+  APPB=${2:A}; F=$3; [[ $F == srt ]] || F=${F:A}; WHERE=$4; SECS=$5; LABEL=$6; LOG=$OUT/$LABEL.log; SRTPID=
+  axtool
+  $PROC guard || { echo "GUARD: the installed app is running — stopping, nothing launched"; exit 2; }
+  : > $LOG
+  if [[ $F == srt ]]; then
+    T="*"
+    ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc2=s=1920x1080:r=60000/1001" -f lavfi -i "sine=f=1000:r=48000" \
+      -c:v h264_videotoolbox -b:v 12M -g 60 -c:a aac -f mpegts "srt://127.0.0.1:9000?mode=listener" > $OUT/$LABEL.srt 2>&1 &
+    SRTPID=$!; nap 1
+    MANIFOLD_PLAYBACK_STATS=1 MANIFOLD_DEBUG_DIAL_URL='srt://127.0.0.1:9000' "$APPB/Contents/MacOS/Manifold" >> $LOG 2>&1 &
+  else
+    T=${F:t}
+    MANIFOLD_PLAYBACK_STATS=1 "$APPB/Contents/MacOS/Manifold" >> $LOG 2>&1 &
+  fi
+  PID=$!; nap 7
+  $PROC check $PID || { echo "the build did not come up"; [[ -n $SRTPID ]] && kill $SRTPID; exit 3; }
+  menu() { osascript -e "tell application \"System Events\" to tell (first process whose unix id is $PID) to click menu item \"$2\" of menu 1 of menu bar item \"$1\" of menu bar 1" >/dev/null; }
+  press() { $AXT $PID press "$T" "$1" >/dev/null || echo "no $1 button in $T"; }
+  if [[ $F == srt ]]; then nap 5; else $PROC open $PID $F; nap 3.5; fi
+  place ${WHERE:/move/asus}; nap 1.5
+  [[ $F == srt ]] || { menu View "Always Show Controls"; nap 1.2; }
+  echo "[DRV] BEGIN $LABEL" >> $LOG
+  [[ $F == srt ]] || press Play
+  if [[ $WHERE == move ]]; then moves; nap $(( SECS / 3.0 )); else nap $SECS; fi
+  echo "[DRV] END $LABEL" >> $LOG
+  if [[ $F == srt ]]; then menu File "Disconnect Live Source"; else press Pause; fi; nap 1.5
+  menu File "Close All"; nap 1.5
+  $PROC quit $PID; wait $PID 2>/dev/null
+  [[ -n $SRTPID ]] && { kill $SRTPID 2>/dev/null; wait $SRTPID 2>/dev/null; }
+  $PROC guard || echo "GUARD tripped after the run"
+  python3 -I $HERE/linkpace-summary.py --window $LOG ;;
+*) sed -n '2,26p' $0 ;;
 esac

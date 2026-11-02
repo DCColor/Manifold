@@ -2,6 +2,42 @@
 # Marks lines (capture --marks): "<rx index> <stream time> <top number|?> <bottom number|?> <dominance>". A progressive
 # picture carries one number in both fields; a frame whose band does not read is "?" and counted as unread.
 import re, sys
+from statistics import median
+
+def window(log):
+    # linkpace-summary.py --window <app log>: the window alone (linkpace.sh window), between [DRV] BEGIN and END, split
+    # at each [DRV] MOVE. Per segment: presented a second (each [PLAYBACK-STATS] line covers ≈1 s), dropped (superseded)
+    # and late totals, and the tick interval from [RENDER-PERF] (median of the 1 s means, and the max).
+    L = open(log, errors="replace").read().splitlines()
+    b = next((i for i, l in enumerate(L) if l.startswith("[DRV] BEGIN")), 0)
+    e = next((i for i, l in enumerate(L) if l.startswith("[DRV] END")), len(L))
+    segs = [("start", [])]
+    for l in L[b:e]:
+        if l.startswith("[DRV] MOVE"): segs.append((l.split()[-1], [])); continue
+        segs[-1][1].append(l)
+    for name, ls in segs:
+        st = [re.search(r"presented=(\d+) dropped=(\d+) late=(\d+)", l) for l in ls if l.startswith("[PLAYBACK-STATS] t=")]
+        st = [m for m in st if m]
+        tk = [re.search(r"tickMs=([\d.]+)/([\d.]+)", l) for l in ls if l.startswith("[RENDER-PERF]")]
+        tk = [m for m in tk if m]
+        pres = [int(m[1]) for m in st]
+        print(f"window [{name}]: presented a second {' '.join(map(str, pres)) or '—'} · dropped {sum(int(m[2]) for m in st)} · "
+              f"late {sum(int(m[3]) for m in st)} · tick median {median(float(m[1]) for m in tk) if tk else float('nan'):.2f} ms, "
+              f"max {max((float(m[2]) for m in tk), default=float('nan')):.2f} ms")
+    # [AV-LAG], once a second: medians over the run (ms) and the count. With MANIFOLD_AVLAG_FILE=1 a file's audio−now is 0
+    # by construction (the clock is the synchronizer's audio timeline).
+    av = [re.search(r"now−pts=([-+\d.]+) ms audio−now=([-+\d.]+) ms tick→glass=([-+\d.]+) ms av=([-+\d.]+) ms", l)
+          for l in L[b:e] if l.startswith("[AV-LAG]")]
+    av = [m for m in av if m]
+    if av:
+        med = [median(float(m[i]) for m in av) for i in range(1, 5)]
+        print(f"av-lag: n={len(av)} · now−pts {med[0]:+.2f} · audio−now {med[1]:+.2f} · tick→glass {med[2]:+.2f} · "
+              f"av {med[3]:+.2f} ms (median; av min {min(float(m[4]) for m in av):+.2f}, max {max(float(m[4]) for m in av):+.2f})")
+    for l in L:
+        if l.startswith("[LINK]") or l.startswith("[PACER] desktop"): print(l[:220])
+
+if sys.argv[1] == "--window":
+    window(sys.argv[2]); sys.exit(0)
 marks, log = sys.argv[1], sys.argv[2]
 nums, unread = [], 0
 for line in open(marks):

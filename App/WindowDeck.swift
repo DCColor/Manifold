@@ -1695,7 +1695,13 @@ final class DeckRegistry {
         // the audio being heard against the live clock, for either push transport. The HEARD figure,
         // which carries the per-source audio offset O (§19.1); `liveAudioDrift` is blind to O.
         // Identical while O = 0.
-        renderer?.avLagAudioMinusClock = { [weak engine] c in engine?.liveAudioHeardMinusClock(against: c) }
+        // `MANIFOLD_AVLAG_FILE=1` (measurement only, pre-ship removal): with no live audio, report audio − clock as 0, so a
+        // FILE logs [AV-LAG] too. A file's clock is the synchronizer's audio timeline, so `av` then reads where the picture
+        // is against that timeline when it reaches the glass (the frame choice and tick → glass), not the audio device.
+        let avLagFile = ProcessInfo.processInfo.environment["MANIFOLD_AVLAG_FILE"] == "1"
+        renderer?.avLagAudioMinusClock = { [weak engine] c in
+            engine?.liveAudioHeardMinusClock(against: c) ?? (avLagFile ? 0 : nil)
+        }
         #endif
 
         // SEED THE INCOMING DECK WITH WHATEVER SHAPE IS ALREADY ON SCREEN. `LiveDisplaySize` only
