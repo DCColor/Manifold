@@ -1210,7 +1210,7 @@ else
        The verified DMG is still at:
          ${DMG}
        Re-run publishing alone once the cause is fixed:
-         cd ${REPO_ROOT} && RELEASE_MAC_ARM='${DMG}' RELEASE_BUILD='${NEW_BUILD}' \\
+         cd '${REPO_ROOT}' && RELEASE_MAC_ARM='${DMG}' RELEASE_BUILD='${NEW_BUILD}' \\
            RELEASE_NOTES_FILE='${NOTES_FILE}' bash '${UPLOAD_SCRIPT}' ${PRODUCT_SLUG} ${VERSION}"
     ok "upload reported success"
 
@@ -1346,7 +1346,7 @@ printf '  ----\n'
 printf '    - commit the CURRENT_PROJECT_VERSION bump in project.yml (now %s)\n' "$NEW_BUILD"
 if [[ $DO_UPLOAD -eq 0 ]]; then
     printf '    - NOT PUBLISHED (--no-upload). To publish this exact DMG later:\n'
-    printf '        cd %s && RELEASE_MAC_ARM=%q RELEASE_BUILD=%q \\\n' "$REPO_ROOT" "$DMG" "$NEW_BUILD"
+    printf '        cd %q && RELEASE_MAC_ARM=%q RELEASE_BUILD=%q \\\n' "$REPO_ROOT" "$DMG" "$NEW_BUILD"
     printf '          RELEASE_NOTES_FILE=%q bash %q %s %s\n' \
         "$NOTES_FILE" "$UPLOAD_SCRIPT" "$PRODUCT_SLUG" "$VERSION"
 fi
