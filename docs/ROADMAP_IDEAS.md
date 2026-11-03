@@ -1,6 +1,16 @@
 ## HEVC 4:2:2 10-bit over SRT
 Moved into the plan (2026-10-07): COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3b.
 
+## Export/Import Settings
+Status: idea (2026-11-02)
+Version: 0.9.2
+
+What: Export/Import Settings (shortcuts + streams) for moving between workstations. Streams export without
+secrets by default; optional password-protected credentials.
+
+Next: audit and plan after 0.9.1 ships.
+Size guess: ?
+
 ## 4:4:4 SDI output
 Status: idea (2026-10-10)
 Version: ?
