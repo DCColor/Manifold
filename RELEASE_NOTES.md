@@ -11,6 +11,7 @@ The update dialog's notes: plain text, most consequential first. The dialog show
 rest behind "Show more". The full notes for testers are `docs/release-notes/0.9.1.md`; the internal
 changelog is `docs/release-notes/0.9.1-changelog.md`.
 
+- Build 23: if you clicked the This display checkbox in 0.9.1 build 22, check it's still set the way you want in Reference. The checkbox is now greyed when it should be, and the section says when it applies.
 - SDI no longer stutters with a 60 Hz main display: output is timed by its own frame rate, and 1080p119.88 is frame-accurate.
 - HDR in As macOS Shows It now matches QuickTime: HLG and PQ highlights roll off instead of clipping.
 - HLG in Reference is no longer far too bright. It follows BT.2408, with reference white at 203 nits.
