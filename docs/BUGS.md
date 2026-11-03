@@ -3749,6 +3749,42 @@ should not choose a 2160p mode above 60 on a card that cannot run it (refuse or 
 §7.3, one in about 30 windows). The recovery (`ensureRunningOnQueue`) recreated the link at once. Seen once on the display-link
 build; not seen in the shorter HEAD runs, which is not evidence either way. The recovery logs the display of every recreated link now.
 
+## ☐ OPEN 2026-11-03 — 0.9.2 — PQ in As macOS Shows It: the colour state isn't reinstalled when the window moves to another display
+
+**What is wrong.** PQ in As macOS Shows It: the colour state isn't reinstalled when the window moves to another display, so macOS
+keeps the HDR10 tone map set up for the first display (1–3 codes low on the ASUS after opening on the LG; exact after any reinstall).
+
+**Found 2026-11-03** in the Xcode 27.2 / macOS SDK 27.2 regression pass, item 1 (unattended; HEAD `91b09c2`, Profile, `.build-cc`,
+0.9.1 (22)). Treated as a display-move issue, not an SDK regression (Robbie, 2026-11-03). Generated `pq_ramp_14.mov` (2100 × 1080
+ProRes 422 HQ, 9-16-9 limited, no mastering metadata, so `hdr10 (system defaults)`). The window was opened by `manifold-proc.sh open`
+on the LG (main; in SDR mode that day, current = potential = 1.0), then moved by AX to the ASUS PA147 (headroom 1.0) at 1011 × 520.
+Window-only captures by id, G at a 12 × 12 box per bar centre (the `HLG_MACOS_MODE_PLAN.md` §3.10c verification's method); deleted
+after recording. Reproduced in two launches:
+
+| PQ ramp, As macOS Shows It, ASUS | 0 | 1 | 10 | 50 | **100** | 150 | **203** | 300 | 400 | 600 | 1000+ nits |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| After opening on the LG and moving (+0 s and +5 s) | 0 | 23 | 61 | 116 | **150** | 171 | **186** | 204 | 216 | 234 | 255 |
+| After OS → Reference → Bypass → OS on the ASUS (= 0.9.1, §3.10c) | 0 | 26 | 64 | 119 | **152** | 172 | **187** | 205 | 217 | 234 | 255 |
+
+**Log evidence** (same launch, in order):
+- at the load, on the LG: `[EDR] EDRMetadata = HDR10 (system defaults: …) · toneMapMode = automatic — AS MACOS SHOWS IT`,
+  `[EDR] headroom (source load) on "LG TV SSCR2" …: current=1.0000 potential=1.0000`, `[EDR] layer read-back: EDRMetadata set ·
+  toneMapMode automatic`, `[EDR] colour state #1 installed on the layer after 0 present(s) of this source — BEFORE its first frame`;
+- at the move: `[EDR] headroom (display change — window moved) on "ASUS PA147" …: current=1.0000 potential=1.0000` and
+  `[CHAIN] Headroom: display is in SDR mode on "ASUS PA147"`, and **no colour-state install**;
+- the reinstall at the switch back: `[EDR] display transform → OS`, `[EDR] PQ → macOS HDR10 tone map: toneMapMode automatic · hdr10
+  (system defaults …)`, `[EDR] layer read-back: EDRMetadata set · toneMapMode automatic`, `colour state #4 installed on the layer
+  (same source: …)`. From then on the ramp reads the 0.9.1 values.
+
+The layer's properties read back the same before and after; what differs is that they were last set while the window was on
+another display. **HLG in OS mode does not show it:** the same open-and-move gave T3 exactly at load and after the round trip.
+Reference and Bypass are unaffected (no tone map). Whether the effect depends on the first display's mode (the LG was in HDR mode in
+the 2026-10-30 measurements and in SDR mode here) is UNKNOWN.
+
+**Fix:** republish the colour state on a screen change, as the display link already retargets (`retargetDisplayLink`, on the
+window's `didChangeScreen`, `MetalVideoRenderer.swift:1284-1331` at `91b09c2`). Verify: open on the LG, move to the ASUS, and the ramp reads the second row with no mode change; both
+LG modes.
+
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
 **Question (Robbie, 2026-10-31).** Would handing a Dolby Vision file's sample buffers to an `AVSampleBufferDisplayLayer` give
