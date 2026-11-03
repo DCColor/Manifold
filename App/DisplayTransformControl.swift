@@ -400,11 +400,12 @@ struct DisplayCalibrationSection: View {
                 // Greyed, with one note, where the record does nothing: outside Reference, and for an HDR picture.
                 let inactiveNote: String? = !applies ? "Applies in Reference mode only."
                     : hdrPicture ? "Applies to SDR sources. HDR is shown absolute (1.0 = 100 nits)." : nil
-                Toggle("This display is calibrated to BT.1886 (Rec. 709)", isOn: Binding(
-                    get: { cal.calibrated },
-                    set: { var c = cal; c.calibrated = $0; store.set(c, for: screen) }))
-                    .font(.caption)
-                    .disabled(inactiveNote != nil)
+                // An AppKit checkbox, not a SwiftUI Toggle: in this popover a Toggle's name never reached Accessibility,
+                // neither its title nor `.accessibilityLabel` (MEASURED twice, 2026-11-02: only its role and value).
+                // NSButton's title is its AXTitle. The fields below are named with `.accessibilityLabel`, which works.
+                CalibratedCheckbox(title: "This display is calibrated to BT.1886 (Rec. 709)", isOn: cal.calibrated,
+                                   enabled: inactiveNote == nil) { var c = cal; c.calibrated = $0; store.set(c, for: screen) }
+                    .fixedSize()
                 if inactiveNote == nil {
                     caption("Tick only if the monitor itself applies BT.1886, e.g. hardware-calibrated. "
                             + "Manifold then sends the picture untouched.")
@@ -431,11 +432,42 @@ struct DisplayCalibrationSection: View {
     private func nitsField(_ label: String, value: Double, set: @escaping (Double) -> Void) -> some View {
         HStack(spacing: 6) {
             Text(label).font(.caption)
+                .accessibilityHidden(true)   // the field carries the name; read once, not twice
             TextField(label, value: Binding(get: { value }, set: set),
                       format: .number.precision(.fractionLength(0...3)))
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.caption, design: .monospaced))
                 .frame(width: 64)
+                .accessibilityLabel(label)
         }
+    }
+}
+
+/// The This display checkbox: an `NSButton` checkbox at the caption size, so its title is its accessible name.
+private struct CalibratedCheckbox: NSViewRepresentable {
+    let title: String
+    let isOn: Bool
+    let enabled: Bool
+    let set: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(checkboxWithTitle: title, target: context.coordinator, action: #selector(Coordinator.toggled(_:)))
+        button.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        button.controlSize = .small
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.set = set
+        button.title = title
+        button.state = isOn ? .on : .off
+        button.isEnabled = enabled
+    }
+
+    final class Coordinator: NSObject {
+        var set: ((Bool) -> Void)?
+        @objc func toggled(_ sender: NSButton) { set?(sender.state == .on) }
     }
 }
