@@ -76,17 +76,15 @@ struct HelpGuideView: View {
                     .accessibilityIdentifier("guide.findStatus")
                 GuideFindField(page: page)
                     .frame(width: 220)
-                // Titled buttons shown icon-only: in a toolbar ControlGroup, `.accessibilityLabel` on an image-only
-                // button is dropped (MEASURED, 2026-11-02: both read as "button"); the title is what AX reads.
-                ControlGroup {
-                    Button("Previous Match", systemImage: "chevron.left") { page.findAgain(backwards: true) }
-                        .help("Previous Match (⇧⌘G)")
-                        .accessibilityIdentifier("guide.findPrevious")
-                    Button("Next Match", systemImage: "chevron.right") { page.findAgain(backwards: false) }
-                        .help("Next Match (⌘G)")
-                        .accessibilityIdentifier("guide.findNext")
-                }
-                .labelStyle(.iconOnly)
+                // Two plain toolbar buttons, NOT a ControlGroup: inside a toolbar ControlGroup a button's name never
+                // reaches Accessibility, neither `.accessibilityLabel` nor a titled `Button(_:systemImage:)` with
+                // `.labelStyle(.iconOnly)` (MEASURED twice, 2026-11-02: both read as "button", only the tooltip as help).
+                Button { page.findAgain(backwards: true) } label: { Label("Previous Match", systemImage: "chevron.left") }
+                    .help("Previous Match (⇧⌘G)")
+                    .accessibilityIdentifier("guide.findPrevious")
+                Button { page.findAgain(backwards: false) } label: { Label("Next Match", systemImage: "chevron.right") }
+                    .help("Next Match (⌘G)")
+                    .accessibilityIdentifier("guide.findNext")
             }
         }
         .onChange(of: AppHighlight.shared.hex) { _, _ in page.applyHighlight() }

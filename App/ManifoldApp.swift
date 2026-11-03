@@ -285,6 +285,7 @@ struct ManifoldApp: App {
             // `SyncClipLibrary.downloadURL` is the single source of truth (A/V ▸ Download ProRes Sync
             // Clips… opens the same). Not gated: calibration ships.
             CommandGroup(after: .help) {
+                Divider()   // the guides above, on their own (Robbie, 2026-11-02)
                 Button("Keyboard Shortcuts…") { openWindow(id: KeyboardShortcutsScene.windowID) }
                 Button("Download Sync Clips…") { SyncClipLibrary.openDownload() }
                 // The two support exports, together under one separator (Robbie, 2026-10-28; Export Diagnostics… was
