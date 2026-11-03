@@ -3666,7 +3666,7 @@ window would update at the main display's slower rate. Frame selection is by clo
 move to the window's own `CADisplayLink` (`NSView.displayLink(target:selector:)`, macOS 14), which follows the window by design. The
 second is the post-release item *`CVDisplayLink` → `CADisplayLink`*; the first is the small 0.9.1-sized change. Target: 0.9.1.
 
-## ✅ FIXED 2026-11-02 (display-link window fixes) — 0.9.1, FROM THE DISPLAY-LINK FIX — a live 59.94 stream in a window on a 60 Hz display presents 46–51 frames a second
+## ✅ FIXED 2026-11-02 (6581dcd) — 0.9.1, FROM THE DISPLAY-LINK FIX — a live 59.94 stream in a window on a 60 Hz display presents 46–51 frames a second
 
 **Measured 2026-11-02 (`DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9).** SRT (local ffmpeg listener), 1080p59.94, window on the ASUS: HEAD
 48 … 57 46 54 47 a second, 49 superseded in 30 s; the fix 60–61 every second, 0 superseded. **The A/V shift, in-app (`[AV-LAG]` `av`,
@@ -3694,7 +3694,7 @@ is at connect; a file's is set at Play. **Direction (not decided, not tuned):** 
 glass (the link's output time) rather than the tick's `now`, so a due time cannot straddle a tick by jitter alone. A/V sync is not
 affected (selection is by clock).
 
-## ✅ FIXED 2026-11-02 (display-link window fixes) — 0.9.1, FROM THE DISPLAY-LINK FIX — in pacer mode, 100 and 119.88 fps reach a 120 Hz window at 57–103 frames a second
+## ✅ FIXED 2026-11-02 (6581dcd) — 0.9.1, FROM THE DISPLAY-LINK FIX — in pacer mode, 100 and 119.88 fps reach a 120 Hz window at 57–103 frames a second
 
 **Measured 2026-11-02 (§7.9).** Output running, window on the LG: 1080p119.88 86–92 → 119.8–119.9 presented a second, 1080p100 82–93
 → 100.0–100.1; `nextDrawable()` max ≤ 0.09 ms, nil drawables 0, gate timeouts 0; SDI 0 / 0 on the wire and late 0 / dropped 0 on both
