@@ -300,6 +300,21 @@ targets:
             if [ -f "$f" ]; then mkdir -p "$DEST"; cp "$f" "$DEST/"; n=$((n + 1)); fi
           done
           echo "Sync clips bundled: $n of $total (from build/syncclips/)"
+      # ── THE GUIDES (App/Help/HelpGuides.swift) ──────────────────────────────────────────────────
+      # Help ▸ Sync and Color Guide is docs/guides/<guide>.md, converted on EVERY build (stdlib Python, no
+      # dependencies) into Contents/Resources/Guides/<slug>/index.html with one shared Guides/guide.css and the
+      # images it uses, so the bundle always matches the doc. A missing image is a build warning; the shot list
+      # (the guide's <!-- IMAGE: … --> comments) is printed in the log. A failed conversion fails the build.
+      # One line per guide; a new guide is a new line and a HelpGuide case.
+      - name: Bundle the guides
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          DEST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/Guides"
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          /usr/bin/python3 "${SRCROOT}/scripts/guide/build_guide.py" \
+            --src "${SRCROOT}/docs/guides/manifold-0.9-sync-and-color-guide.md" --slug sync-and-color --out "$DEST"
     info:
       path: App/Info.generated.plist
       properties:

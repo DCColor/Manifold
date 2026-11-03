@@ -1,6 +1,6 @@
 # Manifold 0.9 Guide
 
-**Live stream sync and color management · Manifold 0.9.0 · October 2026**
+**Live stream sync and color management · Manifold {{VERSION}} · October 2026**
 
 > **Two ideas run through this whole guide.** Manifold never guesses: it plays sound and picture exactly as the stream stamps them, and shows color exactly as the source declares it, and it tells you when something has been changed. And what you see in the window is not always what goes out: the display transform changes only the window, while the scopes, SDI/HDMI output and exported frames always carry the picture itself.
 
@@ -44,6 +44,8 @@ Manifold is also where you get the clip: it carries a copy for every frame rate,
 7. Press **Start** again to check: it should read close to 0 ms.
 
 **Afterwards:** stop the clip on the sender. Calibrate again whenever anything changes on the sender.
+<!-- IMAGE: the whole loop in one picture: the sender (OBS with the sync clip in its scene) beside Manifold's calibration sheet with a result, an annotated composite, workflow-at-a-glance.png -->
+
 
 ### The audio offset
 
@@ -58,14 +60,19 @@ While a stream is playing, the control bar has an **A/V** menu. From the keyboar
 - **⌥]** moves the sound 1 ms later, **⌥[** 1 ms earlier. Add **⇧** to move 10 ms at a time.
 - **Reset to 0 ms** removes the offset.
 - **Save to "stream name"** stores the current offset with the saved stream, so it's applied every time you connect. **Revert to Saved** goes back to the stored value.
+<!-- IMAGE: the control bar's A/V menu open while a stream plays: the 1 ms and 10 ms items, Reset to 0 ms, Save to "stream name" and Revert to Saved, control bar ▸ A/V menu, av-menu.png -->
 
 You can also type a value into the **Audio offset** field when you edit a saved stream. Whenever an offset is on, a badge in the control bar and the end of the window title show it (for example **A/V +40 ms**). Streams with no saved entry, such as an NDI source or a URL you didn't save, keep an offset only until you disconnect.
+<!-- IMAGE: the A/V +40 ms badge in the control bar and the end of the window title, a player window with a stream connected, av-offset-badge.png -->
+
 
 ### Why sound can only be made a little earlier on some streams
 
 Making sound **later** always works: Manifold holds it back a little longer. Making sound **earlier** means playing sound Manifold has already received, sooner, and it keeps a safety margin so playback never runs dry. On some streams there's room for 200 ms or more; on others there's very little or none.
 
 If you ask for more than there's room for, Manifold refuses the change, leaves the offset where it was and says so, for example "Can move sound earlier by at most 9 ms on this stream right now." If the sound needs to be earlier than that, correct it at the sender if it has an audio sync setting.
+<!-- IMAGE: the refusal message "Can move sound earlier by at most … ms on this stream right now", the A/V offset control after asking for too much, offset-refused.png -->
+
 
 ### Calibrating, step by step
 
@@ -74,6 +81,7 @@ Calibration measures how far apart sound and picture are in the stream as Manifo
 **Step 1, in Manifold: get the clip.**
 
 1. With the stream connected, choose **A/V ▸ Save Sync Clip…**. The panel names the stream's frame rate and preselects the matching clip. Save it.
+<!-- IMAGE: the Save Sync Clip panel with the stream's rate named and its clip preselected, A/V ▸ Save Sync Clip…, save-sync-clip-panel.png -->
 2. If the sender is another computer, copy the file over to it (AirDrop, a shared drive, a USB stick). The clip is just a video file; nothing links it to Manifold.
 
 **Step 2, on the sender: play the clip into the stream.**
@@ -87,7 +95,9 @@ Calibration measures how far apart sound and picture are in the stream as Manifo
 6. **Let the stream settle.** A stream that has just connected can take up to a minute to settle.
 7. **Open calibration:** **A/V ▸ Calibrate…** and press **Start**. Leave the clip playing on the sender and don't touch the offset; if it changes, calibration starts again.
 8. **Wait for the result,** usually 15 to 60 seconds. The sheet shows how many flash-and-beep pairs it has found (it needs 10), how much they disagree, and what it's waiting for.
+<!-- IMAGE: the calibration sheet part-way through: pairs found, the spread and what it is waiting for, A/V ▸ Calibrate… after Start, calibration-measuring.png -->
 9. **Read the result,** for example "Sound is heard 40 ms late" and "Current offset 0 ms → proposed −40 ms".
+<!-- IMAGE: the calibration sheet with a result: "Sound is heard 40 ms late", the proposal line and the Apply and Save, Apply for Session, Cancel and Measure Again buttons, A/V ▸ Calibrate…, calibration-result.png -->
 10. **Apply it:** **Apply and Save** stores it with the saved stream; **Apply for Session** lasts until you disconnect (the only choice on NDI and unsaved streams); **Cancel** changes nothing; **Measure Again** runs another measurement.
 11. **Check it.** Press **Start** again. It should read close to 0 ms.
 
@@ -106,6 +116,7 @@ The sync clips are made to be **played on the sender**, never in Manifold itself
 - **Built into Manifold, for taking to the sender:** one clip for each of 23.976, 24, 25, 29.97, 30, 50 and 59.94 fps, from **A/V ▸ Save Sync Clip…** (or **Get Sync Clip…** in the calibration sheet). They loop exactly, so they can run for hours without drifting.
 - **Download set:** **Help ▸ Download Sync Clips…** gets a zip with the same loop clips, ProRes 422 masters with 24-bit PCM sound for finishing and playout systems, an OBS scene collection template, and a README.
 - **The label** burned into each clip shows its frame rate, the code, and a frame counter you can use to check the sender isn't dropping or repeating frames.
+<!-- IMAGE: one frame of a sync clip at its flash, with the burned-in label (rate, code, frame counter), the clip itself (any player), sync-clip-frame.png -->
 - **The quiet hiss between beeps is deliberate.** It keeps the encoder sending sound continuously. Don't remove or gate it.
 - **Match the frame rate.** If the stream's rate matches no clip, the panel says so. Set the sender's output to one of the clip rates for the calibration.
 - **Playing a clip in Manifold's own window does nothing for calibration.** Calibration measures the stream, so the clip has to be part of what the sender sends.
@@ -117,6 +128,8 @@ The sync clips are made to be **played on the sender**, never in Manifold itself
 3. Mute every other sound source in that scene.
 4. In **Settings ▸ Video**, set the output frame rate to the clip's rate (for example 23.976) and apply.
 5. Start streaming. Then, in Manifold, connect and calibrate.
+<!-- IMAGE: OBS's Media Source properties with the sync clip, Loop and Restart playback when source becomes active ticked, OBS ▸ the source's Properties, obs-media-source.png -->
+
 
 The frame rate matters: with OBS at 60 fps and the 23.976 clip, readings scattered by about one 60 fps frame between connections; at 23.976 they agreed within 2–3 ms. If you changed the rate, set it back afterwards and **calibrate again at the rate you'll actually stream at**.
 
@@ -165,6 +178,8 @@ Every source has **tags** that say what its color is: primaries, transfer curve 
 - **Display:** your display and its curve, from its macOS profile.
 - **Headroom:** for HDR, how much brightness headroom the display offers, or that it's in SDR mode. In As macOS Shows It, macOS adapts HLG and PQ to this headroom. In Reference, anything above it clips, and on a display in SDR mode the readout says "above 100 nits clips".
 - **Buffer:** for SRT and WHEP, how much of the stream is buffered.
+<!-- IMAGE: the transform chain readout for an HDR file in As macOS Shows It, every line visible (Source, Chroma, Transform, Display, Headroom), Color ▸ Show/Hide Transform Chain, transform-chain.png -->
+
 
 Overrides and LUTs are marked in the readout, and the window title says when one is on, so a changed picture is never silent.
 
@@ -175,6 +190,8 @@ Choose per window from the control bar, the Color menu, or **⌥⌘1 / ⌥⌘2 /
 - **As macOS Shows It:** macOS color-manages the picture for your display, as QuickTime, Safari and most Mac apps do. Use it to see what a client sees in those apps. Note that macOS decodes Rec. 709 video with a lighter curve (about gamma 1.96) than a reference monitor, which is the familiar "QuickTime looks washed out compared with Resolve" effect. For HDR, Manifold hands HLG to macOS's HLG adjustment and PQ to macOS's HDR10 tone mapping, as QuickTime does, so highlights roll off instead of clipping. Above the display's limit the picture then no longer matches the scopes, which still show the file.
 - **Reference:** the picture shown with the **BT.1886** curve a reference monitor uses (gamma 2.4 on a display with a true black). Use it to judge the picture the way you would in a grading suite. For HDR, Reference shows absolute light, where 1.0 is 100 nits, with no tone mapping: PQ maps directly, and HLG is converted to PQ as BT.2408 describes, at 1000 nits (HLG 75 % lands at 203 nits). Anything above the display's headroom clips.
 - **Bypass:** no color management at all. The picture's values go to the screen untouched. Use it for diagnostics, or on a display that is itself set to exactly the source's standard. A window in Bypass says so in its title.
+<!-- IMAGE: the display transform choice open on the control bar, with the three modes and their keys, control bar ▸ display transform, display-transform-menu.png -->
+
 
 ### Hold to compare
 
@@ -183,6 +200,8 @@ Choose per window from the control bar, the Color menu, or **⌥⌘1 / ⌥⌘2 /
 - With a LUT on, hold **⌥C** to see the picture without it.
 
 Let go and the window is back where it was. A badge and the window title say what you're comparing against.
+<!-- IMAGE: a window while C is held: the compare badge and the window title naming the mode compared against, a player window, compare-badge.png -->
+
 
 ### Reference mode and display calibration
 
@@ -192,6 +211,8 @@ Reference promises the light a BT.1886 reference monitor would put out. How it g
 - **Checked, "Calibrated to Rec. 709 / BT.1886 in the display":** the display itself applies BT.1886 (a hardware-calibrated monitor, or a TV in a calibrated picture mode), so Manifold sends the values untouched. White and Black are greyed out.
 - **It's remembered per display,** not per window, so moving a window to another display can change the picture.
 - **It applies in Reference only.** In As macOS Shows It and Bypass the section is greyed and reads "Applies in Reference mode only".
+<!-- IMAGE: the transform chain's This display section in Reference: the Calibrated to Rec. 709 / BT.1886 checkbox with White and Black, Color ▸ Show/Hide Transform Chain, reference-this-display.png -->
+
 
 > **Only tick it if the display really is calibrated to BT.1886.** Manifold trusts the setting. On a display that isn't, the picture will be wrong in Reference mode and nothing will say so.
 
@@ -210,6 +231,7 @@ Sometimes a file or stream is tagged wrong, or not tagged at all. Override it fr
 - **Presets:** Rec. 709, Rec. 2020 PQ, Rec. 2020 HLG, P3-D65 PQ or Rec. 2020 SDR. **Color ▸ Next Tag Override** steps through them.
 - **One tag at a time:** set primaries, transfer and matrix separately in the **Override** section. Combinations Manifold can't display as stated are greyed out with the reason.
 - **Reset to File's Tags** (or **Reset to Stream's Tags**) at the top of the Color control undoes it at once.
+<!-- IMAGE: the Color control open on a file with an override on: the presets, the Override section with one tag changed and Reset to File's Tags at the top, control bar ▸ Color, color-override.png -->
 - **On a file,** an override lasts until you open another file. **On SRT, WHEP, HLS and NDI streams,** you can save it with the saved stream so it comes back every time you connect.
 
 An override changes the picture, so the window, scopes, SDI color tag and readout all change together. The readout warns when an H.264 or HEVC file's container tags disagree with its own video stream; the container's tags are used unless you override them.
@@ -223,11 +245,14 @@ An override changes the picture, so the window, scopes, SDI color tag and readou
 - **Display or calibration LUTs** made for one particular monitor aren't supported in this slot.
 - **Recent LUTs** remembers each LUT with its output space. **Bypass LUT** turns it off without unloading it.
 - A file that isn't a valid `.cube` is refused with a message saying why.
+<!-- IMAGE: the Color control with a LUT loaded: its name, LUT Outputs, Interpolation, Bypass LUT and Recent LUTs, control bar ▸ Color, lut-outputs.png -->
+
 
 ### What reaches SDI and HDMI
 
 - **Always the picture,** after any override or LUT, and never the window's display transform or calibration setting.
 - **Each frame is labelled** with its color space and transfer (SDR, PQ or HLG), so a reference monitor that follows the signal can switch on its own. PQ also sends HDR10 metadata: the source's own values, or standard defaults when it has none, and the DeckLink menu says which.
+<!-- IMAGE: the DeckLink menu with PQ output, showing which HDR10 metadata goes out (the source's own or the defaults), control bar ▸ DeckLink menu, decklink-hdr-metadata.png -->
 - **P3-D65 and DCI-P3 sources are converted to Rec. 2020 for SDI,** so a monitor following the Rec. 2020 label shows them correctly. The window, scopes and exports are unaffected.
 - **Known limitation:** over HDMI, an HLG picture goes out without its HLG signal. SDI carries HLG.
 

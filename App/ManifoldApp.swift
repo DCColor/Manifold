@@ -272,6 +272,14 @@ struct ManifoldApp: App {
                     }
                 }
             }
+            // Help ▸ the bundled guides, at the top of Help where a Mac app's help goes (HelpGuides.swift). It replaces
+            // the stock "Manifold Help" item: the app has no Help Book, so that item only said help was unavailable.
+            // Every `HelpGuide` is listed, so the Manifold User Guide arrives as a case, not as a menu edit.
+            CommandGroup(replacing: .help) {
+                ForEach(HelpGuide.allCases) { guide in
+                    Button(guide.title) { openWindow(id: guide.windowID) }
+                }
+            }
             // Help ▸ Download Sync Clips… — the free sync clips for calibration mode
             // (docs/AUDIO_RESAMPLER_DESIGN.md §19.10). Opens the one download link in the browser;
             // `SyncClipLibrary.downloadURL` is the single source of truth (A/V ▸ Download ProRes Sync
@@ -382,6 +390,13 @@ struct ManifoldApp: App {
         Window("Keyboard Shortcuts", id: KeyboardShortcutsScene.windowID) {
             KeyboardShortcutsView(registry: ShortcutCenter.shared.registry)
         }
+        .commandsRemoved()
+
+        // Help ▸ Sync and Color Guide. Single-instance, like Keyboard Shortcuts: choosing it again raises the window.
+        Window(HelpGuide.syncAndColor.title, id: HelpGuide.syncAndColor.windowID) {
+            HelpGuideView(guide: .syncAndColor)
+        }
+        .defaultSize(width: 820, height: 900)
         .commandsRemoved()
 
         Window("About Manifold", id: AboutScene.windowID) {

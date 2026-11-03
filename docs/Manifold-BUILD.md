@@ -108,6 +108,9 @@ They are reproducible from the pins, but reproducing them takes real time.
 - [ ] A release that legitimately grows the DMG past 150% of the previous one is published with
       `RELEASE_ALLOW_SIZE_JUMP="<reason>"` (Graviton-Releases `DISTRIBUTION.md`, *Size check, and its
       override*); 0.9.0 used it for the bundled sync clips (25.9 MB)
+- [ ] Review the bundled guide's content for this release: `docs/guides/manifold-0.9-sync-and-color-guide.md`
+      (Help ▸ Sync and Color Guide; every build converts it). Its date line is not filled in by the app: the
+      version is (`{{VERSION}}`). The build log's "Guide shot list" names the screenshots still to take
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
