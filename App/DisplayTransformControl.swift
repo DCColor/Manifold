@@ -397,25 +397,32 @@ struct DisplayCalibrationSection: View {
                 Text("This display — \(screen.localizedName)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                // Greyed, with one note, where the record does nothing: outside Reference, and for an HDR picture.
-                let inactiveNote: String? = !applies ? "Applies in Reference mode only."
-                    : hdrPicture ? "Applies to SDR sources. HDR is shown absolute (1.0 = 100 nits)." : nil
+                // Greyed, with one note, where the record does nothing: outside Reference, and for an HDR picture. The note
+                // comes first, directly under the display's name, so it is read before the greyed controls (Robbie, 2026-11-03).
+                let inactiveNote: String? = !applies ? "These settings apply in Reference mode only."
+                    : hdrPicture ? "These settings apply to SDR sources only. HDR is shown absolute (1.0 = 100 nits)." : nil
+                if let inactiveNote { caption(inactiveNote) }
                 // An AppKit checkbox, not a SwiftUI Toggle: in this popover a Toggle's name never reached Accessibility,
                 // neither its title nor `.accessibilityLabel` (MEASURED twice, 2026-11-02: only its role and value).
                 // NSButton's title is its AXTitle. The fields below are named with `.accessibilityLabel`, which works.
-                CalibratedCheckbox(title: "This display is calibrated to BT.1886 (Rec. 709)", isOn: cal.calibrated,
-                                   enabled: inactiveNote == nil) { var c = cal; c.calibrated = $0; store.set(c, for: screen) }
-                    .fixedSize()
+                CalibratedCheckbox(title: "This display is calibrated to BT.1886 (Rec. 709)", isOn: cal.calibrated) {
+                    var c = cal; c.calibrated = $0; store.set(c, for: screen)
+                }
+                .disabled(inactiveNote != nil)
+                .fixedSize()
                 if inactiveNote == nil {
                     caption("Tick only if the monitor itself applies BT.1886, e.g. hardware-calibrated. "
                             + "Manifold then sends the picture untouched.")
                 }
+                let fieldsGreyed = inactiveNote != nil || cal.calibrated
                 VStack(alignment: .leading, spacing: 4) {
-                    nitsField("Display white (cd/m²)", value: cal.whiteNits) { var c = cal; c.whiteNits = $0; store.set(c, for: screen) }
-                    nitsField("Display black (cd/m²)", value: cal.blackNits) { var c = cal; c.blackNits = $0; store.set(c, for: screen) }
+                    nitsField("Display white (cd/m²)", value: cal.whiteNits, dimmed: fieldsGreyed) { var c = cal; c.whiteNits = $0; store.set(c, for: screen) }
+                    nitsField("Display black (cd/m²)", value: cal.blackNits, dimmed: fieldsGreyed) { var c = cal; c.blackNits = $0; store.set(c, for: screen) }
                 }
-                .disabled(inactiveNote != nil || cal.calibrated)
-                caption(inactiveNote ?? "From your calibration report. Black 0 = gamma 2.4.")
+                .disabled(fieldsGreyed)
+                if inactiveNote == nil {
+                    caption("From your calibration report. Black 0 = gamma 2.4.")
+                }
             } else {
                 Text("No display").font(.caption).foregroundStyle(.secondary)
             }
@@ -429,9 +436,11 @@ struct DisplayCalibrationSection: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func nitsField(_ label: String, value: Double, set: @escaping (Double) -> Void) -> some View {
+    /// `dimmed`: the field is greyed, the section being inactive or the display calibrated. `.disabled` does not grey a `Text`, so its label takes the checkbox title's colour.
+    private func nitsField(_ label: String, value: Double, dimmed: Bool, set: @escaping (Double) -> Void) -> some View {
         HStack(spacing: 6) {
             Text(label).font(.caption)
+                .foregroundStyle(dimmed ? Color(nsColor: .disabledControlTextColor) : Color.primary)
                 .accessibilityHidden(true)   // the field carries the name; read once, not twice
             TextField(label, value: Binding(get: { value }, set: set),
                       format: .number.precision(.fractionLength(0...3)))
@@ -444,10 +453,15 @@ struct DisplayCalibrationSection: View {
 }
 
 /// The This display checkbox: an `NSButton` checkbox at the caption size, so its title is its accessible name.
+///
+/// ⚠️ ITS ENABLED STATE IS `.disabled` AT THE CALL SITE, READ FROM THE ENVIRONMENT, AND NEVER A PROPERTY OF ITS OWN.
+/// SwiftUI's host writes `environment.isEnabled` onto a hosted `NSControl` on every environment change, without calling
+/// `updateNSView`, and also when a popover first shows. A separate `enabled` property therefore lost to the host (0.9.1:
+/// clickable in macOS mode, then greyed after a click until the next environment change). MEASURED 2026-11-03, offscreen
+/// probe, in a window and in an `NSPopover`.
 private struct CalibratedCheckbox: NSViewRepresentable {
     let title: String
     let isOn: Bool
-    let enabled: Bool
     let set: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -463,7 +477,7 @@ private struct CalibratedCheckbox: NSViewRepresentable {
         context.coordinator.set = set
         button.title = title
         button.state = isOn ? .on : .off
-        button.isEnabled = enabled
+        button.isEnabled = context.environment.isEnabled
     }
 
     final class Coordinator: NSObject {

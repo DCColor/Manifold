@@ -483,7 +483,7 @@ scope's item 3).
   - ⚠️ **Fails silently** if ticked on a display that is not calibrated to BT.1886: Manifold trusts the tick and
     converts nothing, so the picture is wrong and nothing says so.
   - **macOS and Bypass ignore it.** In macOS mode ColorSync converts for the display; Bypass sends the codes
-    untouched. The section is greyed in both and reads "Applies in Reference mode only."; the values are kept and
+    untouched. The section is greyed in both and reads "These settings apply in Reference mode only."; the values are kept and
     apply as soon as Reference is chosen.
   - **Why macOS mode can look different from Reference:** macOS decodes Rec.709 at about γ1.961 (the curve every
     SDR colorspace `makeColorSpace` makes carries, `COLOR_MANAGEMENT_FINDINGS.md` §2), not BT.1886's 2.4.
