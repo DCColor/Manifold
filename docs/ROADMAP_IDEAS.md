@@ -11,6 +11,17 @@ secrets by default; optional password-protected credentials.
 Next: audit and plan after 0.9.1 ships.
 Size guess: ?
 
+## Reference HDR: SDR white and an optional tone map
+Status: idea (2026-11-02)
+Version: 0.9.2
+
+What: (1) use the display's White (Lw) as SDR white, so absolute PQ/HLG holds when SDR white isn't 100 nits;
+(2) opt-in 'Tone map to display peak' in Reference: BT.2390 EETF from the file's mastering peak to a typed target
+in nits; off = absolute with clipping; named in the readout; window only, never SDI/scopes/export.
+
+Next: plan after 0.9.1.
+Size guess: ?
+
 ## 4:4:4 SDI output
 Status: idea (2026-10-10)
 Version: ?
