@@ -210,6 +210,11 @@ for tool in xcodegen xcodebuild create-dmg codesign hdiutil python3; do
 done
 xcrun --find notarytool >/dev/null 2>&1 || die "notarytool not found in the active Xcode"
 xcrun --find stapler    >/dev/null 2>&1 || die "stapler not found in the active Xcode"
+# The Metal Toolchain is a separate Xcode component since Xcode 26 and is not installed with Xcode:
+# without it the archive fails at CompileMetalFile (App/PassthroughShader.metal). `--version` runs
+# the compiler rather than only finding it, because that is what the build needs.
+xcrun metal --version >/dev/null 2>&1 \
+    || die "Metal Toolchain missing from the active Xcode — install it with: xcodebuild -downloadComponent MetalToolchain"
 # `awk NR==1` and not `head -1`: head exits after the first line and SIGPIPEs xcodebuild. See
 # the note on `contains` — this is the same hazard, and awk reads to EOF.
 ok "toolchain present (Xcode $(xcodebuild -version 2>/dev/null | awk 'NR==1{print $2}'))"
