@@ -3785,7 +3785,7 @@ the 2026-10-30 measurements and in SDR mode here) is UNKNOWN.
 window's `didChangeScreen`, `MetalVideoRenderer.swift:1284-1331` at `91b09c2`). Verify: open on the LG, move to the ASUS, and the ramp reads the second row with no mode change; both
 LG modes.
 
-## ✅ FIXED 2026-11-03, HOVER CHECK BY EYE PENDING — 0.9.2 — 0.9.1, FROM `e36976d` — the This display checkbox could be clicked while greyed, and a click silently changed the stored calibration
+## ✅ FIXED AND VERIFIED 2026-11-03 (`71d168d`) — 0.9.1 BUILD 23 — 0.9.1 BUILD 22, FROM `e36976d` — the This display checkbox could be clicked while greyed, and a click silently changed the stored calibration
 
 **What is wrong (0.9.1).** In As macOS Shows It, Bypass, and Reference with a PQ or HLG picture, the "This display is calibrated to
 BT.1886 (Rec. 709)" checkbox was clickable though the section is meant to be greyed. After a click it drew greyed and unclickable until
@@ -3823,10 +3823,29 @@ holds three `[REFERENCE] display` writes in the launch, the three clicks made in
 Reference: calibrated, Lw 100, Lb 0, read back after quit. The ASUS has no record (defaults). Other preferences: only `displayCalibrations`
 and the window frame changed.
 
-**Not verified.** The hover behaviour by eye (Robbie's check; AX does not move the pointer). Which environment change the pointer caused:
-UNKNOWN, the probe showed any change does it. The launch logged 86 `AttributeGraph: cycle detected` lines, the first at a mode change with
-the readout open. Whether 0.9.1 logs them too: UNKNOWN, no earlier log exists. The offscreen probe logged 5 with the 0.9.1 shape and 0 with
-the fixed one, so this fix is not the likely source.
+**Verified by eye 2026-11-03 (Robbie):** the hover behaviour, and the section's new layout (the note at the top, the labels dimmed), in As
+macOS Shows It, Reference-PQ, and Reference-SDR ticked and unticked. Which environment change the pointer caused: UNKNOWN; the probe showed
+any change does it.
+
+**Section layout by AX 2026-11-03**, the build 23 prep launch (Profile, `.build-cc`, on the LG, record ticked). The note sits directly under
+"This display — <name>" and above the checkbox, with the new wording, in As macOS Shows It and Bypass ("These settings apply in Reference
+mode only.") and Reference-PQ ("These settings apply to SDR sources only. HDR is shown absolute (1.0 = 100 nits)."). Reference-SDR is normal:
+no note, "Tick only…" under the checkbox, "From your calibration report…" last. AXEnabled false in macOS and Bypass, true in Reference-SDR;
+in Reference-PQ it was not re-read in this launch (the popover closed first), so its last reading is the fix launch's false. AX does not
+report the labels' dimming; that is the by-eye check above, which did not include Bypass. No store writes in the launch.
+
+## ☐ 0.9.2 INVESTIGATION 2026-11-03 — `AttributeGraph: cycle detected` in the log, with the chain readout open
+
+**What was seen.** The AX launch that verified the This display checkbox (Profile, `.build-cc`, HEAD with that fix) logged 86
+`=== AttributeGraph: cycle detected through attribute … ===` lines. The first came straight after a mode change (`[EDR] display transform →
+BYPASS`) while the mode was being driven with the chain readout opening and closing. No visible effect was seen. The next launch (the build
+23 prep launch, the same driving of modes and the readout, without pressing the checkbox) logged 0, so it is not every run.
+
+**Not known.** Whether 0.9.1 build 22 logs them too (no earlier log exists to compare), and which view is the cycle. The offscreen checkbox
+probe logged 5 in an `NSPopover` with the build 22 checkbox shape and 0 with the fixed one, so the checkbox fix is not the likely source; but
+the probe is not the app.
+
+**Next.** Count them in a build 22 launch with the same steps, then break on `AG::Graph::print_cycle` to name the view.
 
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
