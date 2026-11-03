@@ -1,6 +1,6 @@
 # Manifold 0.9 Guide
 
-**Live stream sync and color management · Manifold {{VERSION}} · October 2026**
+**Live stream sync and color management · Manifold {{VERSION}} · November 2026**
 
 > **Two ideas run through this whole guide.** Manifold never guesses: it plays sound and picture exactly as the stream stamps them, and shows color exactly as the source declares it, and it tells you when something has been changed. And what you see in the window is not always what goes out: the display transform changes only the window, while the scopes, SDI/HDMI output and exported frames always carry the picture itself.
 

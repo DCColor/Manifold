@@ -5,6 +5,20 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.9.1
+
+The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the
+rest behind "Show more". The full notes for testers are `docs/release-notes/0.9.1.md`; the internal
+changelog is `docs/release-notes/0.9.1-changelog.md`.
+
+- SDI no longer stutters with a 60 Hz main display: output is timed by its own frame rate, and 1080p119.88 is frame-accurate.
+- HDR in As macOS Shows It now matches QuickTime: HLG and PQ highlights roll off instead of clipping.
+- HLG in Reference is no longer far too bright. It follows BT.2408, with reference white at 203 nits.
+- iPhone 120 fps clips and other high-frame-rate files play instead of freezing.
+- Each window keeps time with the display it is on, and live 59.94 plays smoothly on a 60 Hz display.
+- The control bar fits narrow and vertical windows, and Help ▸ Sync and Color Guide is built in.
+- Saved streams and their A/V offsets carry over; there's no need to recalibrate.
+
 ## 0.9.0
 
 The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the
