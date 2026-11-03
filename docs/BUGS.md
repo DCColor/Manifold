@@ -1629,6 +1629,11 @@ causes to tell apart: the CPU copy at P010/P216, the HEVC encoder, or the scene 
 - **Done when:** both figures are recorded in §6.10, and either:
   - SRT Local reads as the earlier local OBS figures and HEVC SRT on the SYNC-only collection names the cause, or
   - the offset turns out to be Manifold's, which then becomes a defect entry here.
+- **Step 1, data point (2026-11-02, attended, the fix build of the display-link work; `DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.10):**
+  SRT Local, H.264 SDR, measure-only (Cancel), but at about 1 min, not ≥ +120 s. Calibration `heard A/V −45.81 ms`; in the stream's
+  timestamps the flash is **+46.3 ms after its beep**; Manifold's heard − clock −0.5 ms. So OBS's H.264 path sends about 46 ms, against
+  77–78 ms on HEVC, and Manifold adds about 0 on both. No earlier local OBS figure was found to compare with, and HEVC SRT on a
+  SYNC-only collection was not run, so the item stays open.
 
 ---
 
@@ -3635,7 +3640,14 @@ input; the 10-minute 1080p59.94 soak on the ASUS gave 36 000 completed, late 0, 
 frame-exact (today's code: 61 repeats, 61 skips). **Open from these runs** (entries below): a live 59.94 stream in a window on the
 60 Hz display presents 46–51 a second; pacer-mode desktop presents at 100 / 119.88 fps on the 120 Hz LG are 57–103 a second. Not
 run: NDI (no source discovered on either build), A/V sync (attended), the 60 Hz-main baseline (attended, tomorrow), the wire
-(cable).
+(cable). "Repeats/skips at the card's input" above are the frames Manifold handed the card (`[CADENCE]` pulls), not the SDI input
+connector, which on 2026-11-01 carried the Omniscope system's feed (Robbie, 2026-11-02).
+**2026-11-02, on the wire (device 0 looped into its own SDI input, confirmed by frame numbers; ASUS main; `DISPLAY_LINK_PER_WINDOW_PLAN.md`
+§7.9).** The 60 Hz-main baseline: today's pre-fix code at 1080p59.94 for 600 s with the window on the ASUS put **192 repeats and 193
+skips on the wire**, with the card reporting late 0 / dropped 0. HEAD: 0 repeats / 1 skip. Every other HEAD mode (1080p23.98, 59.94 on
+the LG and moved ASUS → LG → ASUS, 119.88 and 100 on either display) was 0 / 0 or a single slip, late 0 / dropped 0. Each single slip
+matches the card-clock drift measured in its own session (entry below), not pacing. 2160p59.94 cannot be read on the wire by
+`capture` (it drops frames at 4K60); the card's own counts are 0 / 0.
 
 **Found 2026-10-31** while measuring the 120 fps freeze (above; a separate issue, not part of that fix). The renderer's display link is
 created with `CVDisplayLinkCreateWithActiveCGDisplays` (`MetalVideoRenderer.makeDisplayLink`, `MetalVideoRenderer.swift:3153`
@@ -3654,7 +3666,22 @@ window would update at the main display's slower rate. Frame selection is by clo
 move to the window's own `CADisplayLink` (`NSView.displayLink(target:selector:)`, macOS 14), which follows the window by design. The
 second is the post-release item *`CVDisplayLink` → `CADisplayLink`*; the first is the small 0.9.1-sized change. Target: 0.9.1.
 
-## ☐ OPEN 2026-11-01 — 0.9.1, FROM THE DISPLAY-LINK FIX — a live 59.94 stream in a window on a 60 Hz display presents 46–51 frames a second
+## ✅ FIXED 2026-11-02 (display-link window fixes) — 0.9.1, FROM THE DISPLAY-LINK FIX — a live 59.94 stream in a window on a 60 Hz display presents 46–51 frames a second
+
+**Measured 2026-11-02 (`DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9).** SRT (local ffmpeg listener), 1080p59.94, window on the ASUS: HEAD
+48 … 57 46 54 47 a second, 49 superseded in 30 s; the fix 60–61 every second, 0 superseded. **The A/V shift, in-app (`[AV-LAG]` `av`,
+median):** SRT on the ASUS +45.4 → +13.0 ms, SRT on the LG +29.4 → +13.3 ms, the 59.94 file on the ASUS +30.8 → +11.5 ms (the file's
+audio − clock taken as 0, `MANIFOLD_AVLAG_FILE=1`). The picture is 16–32 ms earlier against its sound and now sits about +12 ms
+behind it. **Device level (attended, Robbie, OBS recorder, the 59.94 file in a window on the ASUS; plan §7.10):** beep − flash
+HEAD −2.7 → fix +23.6 ms, a **+26.3 ms** shift, inside the in-app range. A saved stream's calibration does not move with the fix
+(Manifold's part −0.5 ms), so saved offsets need no re-run. SDI unchanged on the wire (the entry above). The `MANIFOLD_AVLAG_FILE` hook
+(`WindowDeck.attachDeviceHooks`, DEBUG) is measurement only and goes with `[AV-LAG]` at the pre-ship removal.
+
+**Implemented 2026-11-02.** A display-link tick selects against the clock carried forward to the link's output time
+(`WindowPresentTiming.selectionTime`, `OutputPacing`; `MetalVideoRenderer.performDisplayTick`), so the selection instants are the
+display's vsync grid, not the callback's arrival. Only while the clock runs at 1× (judged from the previous tick); a pause, step,
+seek, shuttle, unanchored live clock or pacer tick selects at the tick as before. The "A/V sync is not affected" in the original entry below was wrong: this
+moves the window's picture earlier against the clock by about the tick → glass lead, for files as well as live (measured above). SDI is not affected by construction (pacer ticks carry no output time). Unit tests: 5 (`WindowPresentTimingTests`).
 
 **Found 2026-11-01** in the display-link runs (`DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.6). SRT from a local ffmpeg listener,
 1080p59.94, window on the ASUS (59.936 Hz link), no SDI: 46 51 46 49 48 49 48 presented a second, 85 superseded in 7 s, late 0. The
@@ -3667,7 +3694,17 @@ is at connect; a file's is set at Play. **Direction (not decided, not tuned):** 
 glass (the link's output time) rather than the tick's `now`, so a due time cannot straddle a tick by jitter alone. A/V sync is not
 affected (selection is by clock).
 
-## ☐ OPEN 2026-11-01 — 0.9.1, FROM THE DISPLAY-LINK FIX — in pacer mode, 100 and 119.88 fps reach a 120 Hz window at 57–103 frames a second
+## ✅ FIXED 2026-11-02 (display-link window fixes) — 0.9.1, FROM THE DISPLAY-LINK FIX — in pacer mode, 100 and 119.88 fps reach a 120 Hz window at 57–103 frames a second
+
+**Measured 2026-11-02 (§7.9).** Output running, window on the LG: 1080p119.88 86–92 → 119.8–119.9 presented a second, 1080p100 82–93
+→ 100.0–100.1; `nextDrawable()` max ≤ 0.09 ms, nil drawables 0, gate timeouts 0; SDI 0 / 0 on the wire and late 0 / dropped 0 on both
+builds. The ASUS is unchanged (limit 1).
+
+**Implemented 2026-11-02.** The gate allows a second waiting present on a
+display above 60 Hz (`WindowPresentTiming.presentsWaitingLimit`; one at 60 Hz and below, as measured). **The risk the SDI re-runs
+must check:** when both presents really are waiting (not one already on the glass with its handler late), the third drawable is
+in use and `nextDrawable()` waits for the next vsync (≤ 8.4 ms at 120 Hz). This tick's SDI frame is committed before that, but the
+next pacer tick can be late or skipped. If any SDI result is worse than HEAD's, revert this one.
 
 **Found 2026-11-01** (§7.5). With SDI output running, the window's presents are gated (one waiting for the glass at most; ¾ of the
 display period apart). On the LG (120 Hz): 1080p119.88 presented 65–103 a second, 1080p100 57–91, 2160p119.88 64, 2160p100 55; on the
@@ -3676,6 +3713,26 @@ these runs. **Cause, by inference:** the in-flight limit: a present's handler ar
 120 Hz display the gate is often still closed at the next frame. Held back counts: 26–1578 "in flight" per 10 s. **Direction (not
 decided):** a second drawable in flight on displays above 60 Hz (the pool of three still leaves one free), or present from the most
 recent frame at the vsync rather than per frame. Window only; SDI must stay as measured.
+
+## ☐ RECORDED 2026-11-02 — PRE-EXISTING, ALL BUILDS — SDI from a file slips one frame whenever the card's clock and the file clock drift a frame apart
+
+On the loop, `DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9: in 17 file runs on HEAD and on the window-fix build, every wire repeat or skip
+that remained was a lone one-frame slip with no pacer deadline missed. Each run's count matches the drift between the file clock
+and the card measured in that run: a skip when the card runs slow, a repeat when it runs fast. The 600 s fix-build run had 4 skips
+164.6 s apart at +101.4 ppm, which predicts one every 164 s; HEAD's 600 s run had 1 at +19.0 ppm. **The card's frame rate against the
+host differed in every output session (−64 to +121 ppm, on the same build)**; the file clock was at 0.0 ppm in all of them. Why the
+card's rate moves between sessions is UNKNOWN (reference, temperature or the measurement over pulls, not separated). The card
+reports none of it (late 0, dropped 0). **Direction:** the 1.1 card-clock work (pace the output from the card's clock,
+`DISPLAY_LINK_PER_WINDOW_PLAN.md` §4.5). Not a 0.9.1 item.
+
+**Hypothesis to test in 1.1 (Robbie, 2026-11-02): a file's clock follows the Mac's audio device, so the drift may be the audio
+device's clock against the DeckLink's.** The file clock is the `AVSampleBufferRenderSynchronizer`'s timebase, which an attached
+audio renderer drives from its output device. **What these runs can and cannot say:** the linkpace fixtures have no audio track,
+and their file clock read 0.0 ppm against the host in every run, so here the clock behaved as the host clock, and the measured
+drift was host against card. With a file that carries sound, the clock may move to the audio device's rate, which would add
+(or cancel) its own offset from the host. **Test:** the same `linkpace.sh run` with a marked fixture that has an audio track, on
+the built-in output and on the Scarlett, logging clock/host and card/host per run as in §7.9; and, separately, why the card's own
+rate against the host changed between output sessions.
 
 ## ☐ RECORDED 2026-11-01 — PRE-EXISTING — 2160p100 and 2160p119.88: the card reports every frame late, on today's code too
 

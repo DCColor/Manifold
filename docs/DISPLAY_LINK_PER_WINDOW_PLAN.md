@@ -537,7 +537,141 @@ does nothing. That was a driver fault, not an app fault. **Not run:** an SDI own
   Today's code is built from `26f7794` (a `git archive` into any folder, its own derived data).
 - **The loop:** device 0's SDI output into device 0's own SDI input (profile `1dfd`, one full-duplex sub-device, as on 2026-10-23).
   The read-only probe tonight found device 0's SDI input **locked (`4k23`)**: a cable is already on its input, apparently the loop.
+  **Correction (Robbie, 2026-11-02): it was not the loop.** That input carried the Omniscope system's feed. Every "card input"
+  count in §7 is the frames Manifold handed the card (`[CADENCE]` pulls), never the SDI input connector.
   Which BNCs carry device 0's output and input on the 8K Pro in `1dfd` is **UNKNOWN** from software. Use the pair from last week; the
   probe's `InputSignalLocked YES` and a `capture` that reads the marker band confirm it.
 - Wire counts come from the marker band's picture number (the I2 band, progressive) via `capture --marks`: repeats, skips and pictures
   missing, beside the card's own counts and `[PACER]`.
+
+### 7.9 2026-11-02, unattended: the wire, the 60 Hz-main baseline, and the two window fixes
+
+Setup by Robbie: device 0's SDI output looped into its own SDI input (the Omniscope feed unplugged); the ASUS (59.936 Hz) is the MAIN
+display, the LG (120 Hz) secondary. A first attempt was stopped by the guard (the installed app was running); Robbie quit it and
+the runs below were made after that. Every launch: `manifold-proc.sh guard` → launch by absolute path, held by PID → quit by PID →
+guard. No guard tripped. One launch by a relative path was refused by `manifold-proc.sh check` (it requires an absolute path);
+that build was quit by its PID through the same terminate call the helper sends. `linkpace.sh` now makes both paths absolute.
+
+**Builds.** Pre-fix `26f7794` and HEAD `149fd25`: `git archive` exports in `build/linkpace-src/<commit>/`, Profile, own `.build-cc`.
+HEAD + `[AV-LAG]` file hook: `build/linkpace-src/149fd25-avlag/` (HEAD plus only the `MANIFOLD_AVLAG_FILE` hook below, for the
+before side of the A/V measurement; the SDI runs used plain HEAD). Fix: this tree, `./.build-cc`.
+
+**Method.** `linkpace.sh run` (SDI, Follow source) and `linkpace.sh window` (no output, `MANIFOLD_PLAYBACK_STATS=1`). The wire is
+counted by the picture number in the marker band of every received frame (`capture --marks`). It is counted only up to the file's
+end, because `capture` runs past `--seconds` (650–685 s for 600, about 70 s for 25), so a run can read past the end of a 30 s file. Card:
+late/dropped from DeckLink D3; card input: `[CADENCE]` pulls in the file, from 1 s after Play. **Drift** is clock − card in ppm: the
+file clock's advance against the host, minus the card's slots (pulls × frame duration) against the host, over the run. Its
+prediction (span × drift / frame) is the number of one-frame slips a run should show from that alone.
+
+#### Step 1, the loop: confirmed by frame numbers
+
+HEAD, `mark-1080p2398-60s.mov`, 10 s: the input read the fixture's own picture numbers **22 → 278 in order, 257 frames, 0 unread,
+0 repeats, 0 skips**. The input is device 0's own output. The probe agreed (`1dfd`, locked, detected mode = output mode).
+
+#### Steps 2–4 and the step-5 re-runs: SDI on the wire
+
+| Run (window) | Build | Wire repeats / skips | Card late / dropped | Card input repeats / skips | Drift (ppm) → slips predicted | Desktop presents a second |
+|---|---|---|---|---|---|---|
+| 1080p59.94, 600 s, ASUS (**baseline A**) | pre-fix | **192 / 193** | 0 / 0 | 192 / 193 | +19.1 → 0.7 | — |
+| same | HEAD | 0 / 1 | 0 / 0 | 0 / 1 | +19.0 → 0.7 | 59.9–60.0 |
+| same | fix | 0 / 4 | 0 / 1 (frame 4, before Play) | 0 / 4 | **+101.4 → 4.0** | 59.9–60.0 |
+| 1080p23.98, 50 s, ASUS | HEAD / fix | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | +88 / +12 → 0.1 / 0.0 | 24.0 |
+| 1080p59.94, 120 s, LG | HEAD / fix | 0 / 1 · 0 / 1 | 0 / 0 · 0 / 0 | 0 / 1 · 0 / 1 | +121 / +90 → 0.9 / 0.7 | 59.9–60.0 |
+| 1080p59.94, 120 s, ASUS → LG → ASUS | HEAD / fix | 1 / 0 · 1 / 0 | 0 / 0 · 0 / 0 | 1 / 0 · 1 / 0 | −64 / −49 → 0.5 / 0.4 | 59.9–60.0 |
+| 2160p59.94, 25 s, ASUS | HEAD / fix | **not readable**: `capture` dropped 931 / 963 frames | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | +62 / +65 → 0.1 | 59.9–60.0 |
+| 1080p119.88, 25 s, ASUS | HEAD / fix | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | +48 / +58 → 0.2 | 59.9–60.0 |
+| 1080p119.88, 25 s, LG | HEAD / fix | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | +103 / +33 → 0.3 / 0.1 | **86–92 → 119.8–119.9** |
+| 1080p100, 25 s, LG (new fixture `mark-1080p100-30s.mov`) | HEAD / fix | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | 0 / 0 · 0 / 0 | +102 / +90 → 0.3 | **82–93 → 100.0–100.1** |
+
+Pacer over every run: median within 0.01 ms of P, p99 within 0.02 ms, missed deadlines 0 (one, at 1080p119.88 on the LG, HEAD).
+
+- **Baseline A (the question of addition A): pre-fix code with the 60 Hz display main repeats and skips about one frame every 3.3 s on
+  the wire** (192 / 193 in 646 s), and the card reports none of it (late 0, dropped 0). HEAD removes it.
+- **The remaining single slips are clock slips, not pacing.** HEAD and the fix both show them. Each comes as a lone skip, or a lone
+  repeat when the card runs fast (the move runs, negative drift), with no deadline missed. Their count matches the drift predicted
+  in every run. The fix 600 s run's 4 skips were 164.6 s apart, where its +101.4 ppm predicts one every 164 s. **The card's rate
+  against the host was different in every output session** (−64 to +121 ppm on the same build). The file clock was at 0.0 ppm in
+  all of them. Why the card's rate moves between sessions is **UNKNOWN**. Pacing to the card's clock is the 1.1 card-clock work
+  (§4.5). Neither window fix is active on the SDI path in these runs: pacer ticks carry no glass time, and the second waiting
+  present applies above 61 Hz only.
+- **Rule check:** no SDI result is worse on the fix build except in its clock slips, and those follow the session's drift.
+  Reverting would not touch that path, so neither fix was reverted. The card's one `dropped` (fix 600 s run) was frame 4,
+  scheduled at output start before Play; no other run of either build had one.
+- **2160p59.94 on the wire cannot be counted with `capture`:** it hashes every frame and drops about a third at 4K60. The card's own
+  counts are 0 / 0 on both builds.
+
+#### Window tick rates, ASUS main (HEAD; the fix the same within one frame a second)
+
+| File | ASUS: tick (median, max) · presented a second · superseded | LG: tick · presented · superseded |
+|---|---|---|
+| 1080p23.98 | 16.68, 17.70 · 24–25 · 0 | 8.33, 9.34 · 24–26 · 0 |
+| 1080p59.94 | 16.68, 17.70 · 60–61 · 0 | 8.33, 9.33 · 60–62 · 0 |
+| 1080p100 | 16.68, 17.70 · 60–61 · 562 (correct: 40 a second cannot be shown) | 8.33, 9.34 · 100–102 · 0 |
+| 1080p119.88 | 16.68, 17.69 · 60–61 · 841 (correct) | 8.33, 9.34 · 115–122 · 10 (fix: 120–122 · 2) |
+
+The link follows the display with the ASUS main as it did with the LG main (§7.3): 16.68 ms on the ASUS, 8.33 ms on the LG.
+
+#### Fix (a): live 59.94 on the 59.936 Hz display, and the A/V shift
+
+`window`, 30 s on the ASUS (20 s on the LG), SRT from a local ffmpeg listener (`srt://127.0.0.1:9000`, 1080p59.94 + 1 kHz, dialled
+through `MANIFOLD_DEBUG_DIAL_URL`; no bookmark read or written), and the 59.94 file. Before: HEAD + hook; after: the fix.
+
+| Case | Presented a second, superseded: before → after | `[AV-LAG]` `av` median (min–max), before → after | now − pts | tick → glass |
+|---|---|---|---|---|
+| SRT, ASUS | **48, 60 … 60, 57 46 54 47 · 49 superseded → 60–61 every second · 0** | +45.4 (+22.4 … +69.8) → **+13.0** (+5.5 … +38.2) ms | +16.0 → −17.5 | +24.0 → +24.0 |
+| SRT, LG | 60–61 · 0 → 60–61 · 0 | +29.4 (+15.5 … +53.1) → +13.3 (+1.5 … +30.8) ms | +2.9 → −7.5 | +11.6 → +11.6 |
+| File 59.94, ASUS | 60–61 · 0 → 60–61 · 1 | +30.8 (+29.9 … +31.7) → +11.5 (+10.6 … +12.4) ms | +6.7 → −12.5 | +24.0 → +24.0 |
+
+- **The beat is gone** on the ASUS. HEAD showed it at the start and the end of the 30 s, the fix in no second.
+- **The A/V shift, measured in-app:** `av` is the audio heard when the picture reaches the glass, minus that picture's pts. Positive
+  means the picture is behind its sound. With the fix the picture is **16–32 ms earlier against its sound**, about the tick → glass lead less
+  the frame-choice margin, and sits about +12 to +13 ms behind it in every case. For the file, `audio − now` is 0 by construction
+  (`MANIFOLD_AVLAG_FILE=1`: a file's clock is the synchronizer's audio timeline), so the file row measures the picture against
+  that timeline, not the audio device. **The device-level check (§7.10) measured a +26.3 ms shift, inside this range.**
+
+#### Fix (b): pacer-mode presents above 60 Hz
+
+With output running on the LG, 1080p119.88 presented **86–92 → 119.8–119.9 a second**, and 1080p100 **82–93 → 100.0–100.1**. `nextDrawable()`
+max ≤ 0.09 ms on both builds, nil drawables 0, gate timeouts 0. SDI was 0 / 0 · 0 / 0 on the wire in both. On the ASUS nothing changes
+(limit 1): 119.88 presented 59.9–60.0 a second on both builds.
+
+**Not run:** NDI, two windows, and MediaMTX WHIP/WHEP for (a). (a) was verified against the local SRT listener and a file, both
+non-Cloudflare.
+
+### 7.10 2026-11-02, attended (Robbie): device-level A/V for fix (a), and a saved stream's calibration
+
+Shortened plan, by Robbie: the ASUS only (HEAD 149fd25, then the fix), no LG runs, no duplicate collection; the saved stream on the
+fix build only. Each build was launched by its binary after `manifold-proc.sh guard`, quit by PID, and guarded again; every guard was clean.
+
+#### Picture against sound in the window (OBS Recorder profile, `OBS_TEST_PROFILES.md`)
+
+**Method.** The 59.94 sync clip played from a file in a window on the ASUS. The OBS Recorder (Display Capture of the ASUS and
+Manifold's app audio, one clock) recorded 60 s per build. Manifold was re-picked as the audio source after each launch. A
+numpy-free analyser (the Desktop `avsync.py` needs numpy, which no Python on this Mac has) found flashes from `signalstats` YAVG and
+beep onsets from `silencedetect` on a 1 kHz band at the capture's own peak − 12 dB, and paired each flash with its nearest beep within 0.4 s.
+**Gate, on the clip itself and `adelay` copies:** 0 → +2.7, +250 → +252.7, −120 → −117.3 ms, sd 0.0. So +2.7 ms is a constant term
+of the analyser. The recordings were deleted once read.
+
+| Build | Beep − flash, median | sd | Pairs |
+|---|---|---|---|
+| HEAD 149fd25 | −2.7 ms | 5.8 | 66 |
+| Fix | +23.6 ms | 6.2 | 64 |
+| **Shift** | **+26.3 ms: the picture is earlier against its sound** | | |
+
+- **Only the shift is a measurement.** Each absolute figure includes the recorder's capture-chain term (the compositor, Display
+  Capture's own video/audio alignment), which is UNKNOWN. The in-app prediction for this case was +19.3 ms (`[AV-LAG]`, file on the
+  ASUS, §7.9) within the 16–32 ms range. The device figure is in that range and agrees in direction.
+
+#### A saved stream's calibration on the fix build ("Local SRT" bookmark, SRT Local profile)
+
+OBS was relaunched fresh with SRT Local (its row checked before the run) streaming SYNC. A/V ▸ Calibrate… ▸ Start ran at about 1 min,
+then was Cancelled; no `APPLIED` line was logged and nothing was saved.
+
+- **Result:** `heard A/V −45.81 ms` (10/10 pairs, p10 −46.48, p90 −45.68 ms, frame 41.708 ms) · `O 0 ms → proposed +46 ms`.
+- **Where the 46 ms is:** the clip's flash pts is **+46.3 ms after its beep's pts in the stream OBS sent** (e.g. 84.8370 − 84.7907,
+  86.1300 − 86.0837 s). Manifold's own part, heard − clock, was **−0.49 to −0.89 ms**. That is OBS's offset, of the same kind as the
+  77–78 ms on the HEVC profiles (`BUGS.md`, OBS offset re-check).
+- **So the fix does not move a calibration**, as predicted: calibration pairs flash pts with heard − clock
+  (`CalibrationMode.swift`, header) and does not include the display path, which is what the fix changed. Saved offsets need no
+  re-run after the update. The bookmark had no saved offset (O = 0), so no earlier value exists to compare with. An earlier SRT
+  Local calibration figure was not found in `docs/`: UNKNOWN.
