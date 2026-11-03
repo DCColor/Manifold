@@ -3207,9 +3207,11 @@ final class MetalVideoRenderer {
             let rc = CVDisplayLinkSetCurrentCGDisplay(link, target)
             if rc != kCVReturnSuccess { print("[LINK] ⚠️ new link: display \(target) refused (\(rc)) — on display \(CVDisplayLinkGetCurrentCGDisplay(link))") }
         }
-        let callback: CVDisplayLinkOutputCallback = { _, _, _, _, _, userInfo in
+        let callback: CVDisplayLinkOutputCallback = { _, _, outputTime, _, _, userInfo in
             let renderer = Unmanaged<MetalVideoRenderer>.fromOpaque(userInfo!).takeUnretainedValue()
-            renderer.displayTick()
+            // When this tick's present will reach the glass, for the frame selection (`WindowPresentTiming.selectionTime`).
+            let glass = Double(outputTime.pointee.hostTime) / CVGetHostClockFrequency()
+            renderer.displayTick(glassHost: glass > 0 ? glass : nil)
             return kCVReturnSuccess
         }
         CVDisplayLinkSetOutputCallback(link, callback, Unmanaged.passUnretained(self).toOpaque())
@@ -3333,9 +3335,11 @@ final class MetalVideoRenderer {
 
     // MARK: - Per-refresh presentation
 
-    /// Called each display refresh (on the CVDisplayLink thread). Picks the
-    /// newest frame whose PTS <= current playback time and renders it.
-    private func displayTick() {
+    /// Called each display refresh (on the CVDisplayLink thread), or by the output pacer. Picks the
+    /// newest frame whose PTS <= current playback time and renders it. `glassHost`: the link's output time
+    /// (host seconds) for a display-link tick; nil for a pacer tick.
+    private func displayTick(glassHost: CFTimeInterval? = nil) {
+        tickGlassHost = glassHost
         noteDeckLinkTick(CACurrentMediaTime())   // the pull margin's tick (`deckLinkPullMarginLocked`)
         #if DEBUG
         // DISPLAY-LINK CADENCE: stamp the interval since the previous tick BEFORE any work, so it
@@ -3567,9 +3571,19 @@ final class MetalVideoRenderer {
         }
 
         guard let now = clock?() else { return }
+        // WHICH INSTANT THE FRAME IS CHOSEN FOR (docs/BUGS.md 2026-11-01, a live 59.94 stream on a 60 Hz display). On a
+        // display-link tick, the clock carried forward to the time this tick's present reaches the glass, so a due time
+        // on a tick boundary cannot fall either side by the callback's jitter. A pacer tick (it feeds SDI), a clock not
+        // running at 1× and an unanchored clock select at `now`, as before. Only the selection uses it: the depth
+        // sample, the calibration tap and [AV-LAG] keep the clock as read.
+        let clockHost = CACurrentMediaTime()
+        let selectNow = WindowPresentTiming.selectionTime(clock: now, clockHost: clockHost,
+                                                          glassHost: pacerPresentsOn ? nil : tickGlassHost,
+                                                          previous: lastClockReading)
+        lastClockReading = (now, clockHost)
         #if DEBUG
         let statsPrevNow = playbackStatsLastNow
-        playbackStatsLastNow = now
+        playbackStatsLastNow = selectNow
         #endif
         // A live clock measuring its start-up window holds the picture (`LiveClock.presentationHoldFloor`).
         // Read before the queue lock, like the clock: it takes the clock's lock.
@@ -3590,7 +3604,7 @@ final class MetalVideoRenderer {
             if stale > 0 { frameQueue.removeFirst(stale) }
         } else {
             for (i, frame) in frameQueue.enumerated() {
-                if frame.pts <= now {
+                if frame.pts <= selectNow {
                     chosen = frame.pixelBuffer
                     chosenPts = frame.pts
                     dropCount = i
@@ -3641,7 +3655,7 @@ final class MetalVideoRenderer {
         // can only wait for the clock; if the clock moves half a second on without reaching the oldest, the queue has
         // slid away from it (the 0.9.1 120 fps freeze), or the clock has. Captured here, logged after the lock.
         let queueFullAhead = holdFloor == nil && chosen == nil && onQueueOverflow == nil
-            && isPausedProvider?() != true && frameQueue.count >= maxQueued && (oldest.map { $0 > now } ?? false)
+            && isPausedProvider?() != true && frameQueue.count >= maxQueued && (oldest.map { $0 > selectNow } ?? false)
         let guardCount = frameQueue.count, guardMax = maxQueued
         queueLock.unlock()
         if chosen != nil { onQueueRoom?() }
@@ -3705,7 +3719,7 @@ final class MetalVideoRenderer {
             #if DEBUG
             avLagProbe = nil
             onFrameSelected?(chosenPts, dropCount)
-            notePlaybackStats(pts: chosenPts, dropped: dropCount, now: now, prevNow: statsPrevNow)
+            notePlaybackStats(pts: chosenPts, dropped: dropCount, now: selectNow, prevNow: statsPrevNow)
             #endif
             // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
             // so a seek that resolves normally (incl. seek-and-play) never touches the
@@ -4276,9 +4290,6 @@ final class MetalVideoRenderer {
 
     // MARK: - The gated desktop present (pacer mode; addition B, docs/DISPLAY_LINK_PER_WINDOW_PLAN.md)
 
-    /// More presents than this waiting for the glass and `nextDrawable()` could block: one on the glass + this many
-    /// queued + the one we ask for = the layer's default pool of three.
-    private static let presentsInFlightLimit = 1
     /// A present whose presented handler has not come in this long is taken as landed (a hidden window may never
     /// report one). Counted, so a run says whether it happened.
     private static let presentGateTimeout: CFTimeInterval = 0.5
@@ -4316,7 +4327,10 @@ final class MetalVideoRenderer {
         }
         let inFlight = presentsInFlight, period = windowDisplayPeriod
         presentGateLock.unlock()
-        if inFlight > Self.presentsInFlightLimit { pacerPresentStats.heldInFlight += 1; return nil }
+        // One waiting, or two on a display above 60 Hz (`WindowPresentTiming.presentsWaitingLimit`; docs/BUGS.md 2026-11-01).
+        if inFlight > WindowPresentTiming.presentsWaitingLimit(displayPeriod: period) {
+            pacerPresentStats.heldInFlight += 1; return nil
+        }
         if period > 0, now - lastGatedPresentAt < period * 0.75 { pacerPresentStats.heldRate += 1; return nil }
         guard let cb = commandQueue.makeCommandBuffer() else { return nil }
         let t0 = CACurrentMediaTime()
@@ -4349,6 +4363,10 @@ final class MetalVideoRenderer {
     private var pacerPresentStats = PacerPresentStats()   // render thread
     /// The tick that is running: its start, for the tick → SDI ring lag. Render thread.
     private var currentTickStart: CFTimeInterval = 0
+    /// RENDER THREAD. This tick's glass time (the display link's output time; nil on a pacer tick), and the clock and
+    /// host time read by the previous tick, for `WindowPresentTiming.selectionTime`.
+    private var tickGlassHost: CFTimeInterval?
+    private var lastClockReading: (clock: Double, host: CFTimeInterval)?
     private let pacerStatsLock = NSLock()                 // a leaf: taken under `deckLinkLock`, never around it
     private var pacerConvertProbe: [(pts: Double, tick: CFTimeInterval)] = []   // pacerStatsLock
     private var pacerConvertLag = IntervalStats()                                // pacerStatsLock

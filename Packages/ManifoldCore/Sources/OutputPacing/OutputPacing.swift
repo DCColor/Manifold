@@ -77,3 +77,41 @@ public struct IntervalStats {
         return String(format: "n=%d median %.2f p99 %.2f max %.2f ms", count, median * 1000, p99 * 1000, maximum * 1000)
     }
 }
+
+/// The window's own timing, beside the pacer's (0.9.1, the two window-side entries of 2026-11-01 in docs/BUGS.md).
+public enum WindowPresentTiming {
+    /// A display faster than this (in Hz) may hold a second present waiting for the glass in pacer mode.
+    public static let secondWaitingPresentAbove = 61.0
+
+    /// PACER MODE. How many presents may be waiting for the glass when the window asks for another drawable. One (the
+    /// gate as measured on 2026-11-01): with the one on the glass, two of the layer's three drawables are in use and
+    /// `nextDrawable()` finds the third. On a display above 60 Hz, two: a present's handler lands a vsync or more after
+    /// it reaches the glass, so a count of two is usually one waiting and one already shown, and the window can then
+    /// keep up with a 100 or 119.88 fps file. When both really are waiting, `nextDrawable()` waits for the next vsync
+    /// (one display period, ≤ 8.4 ms at 120 Hz), after this tick's SDI frame is committed. Unknown period: one.
+    public static func presentsWaitingLimit(displayPeriod: Double) -> Int {
+        guard displayPeriod.isFinite, displayPeriod > 0 else { return 1 }
+        return 1 / displayPeriod > secondWaitingPresentAbove ? 2 : 1
+    }
+
+    /// The longest tick → glass lead taken; a longer one (a stalled link, a bad timestamp) selects at the tick.
+    public static let maximumGlassLead = 0.1
+
+    /// The clock reading a display-link tick selects its frame against: the clock carried forward to the time this
+    /// tick's present will reach the glass (the link's output time), not the time the callback ran. The output times
+    /// are the display's own vsync grid, so a frame due near a tick boundary is no longer put on one side or the other by
+    /// the callback's jitter (a 59.94 source on a 59.936 Hz display; docs/BUGS.md 2026-11-01).
+    ///
+    /// Carried forward only while the clock runs at 1× (judged from the previous tick's reading, within 5 %), so a pause,
+    /// a step, a seek or a shuttle selects at the tick as before. No output time (a pacer tick, which feeds SDI), a lead
+    /// outside 0…`maximumGlassLead`, or an unanchored clock: the clock as read.
+    public static func selectionTime(clock: Double, clockHost: Double, glassHost: Double?,
+                                     previous: (clock: Double, host: Double)?) -> Double {
+        guard let glassHost, let previous, clock.isFinite, previous.clock.isFinite else { return clock }
+        let lead = glassHost - clockHost, dt = clockHost - previous.host
+        guard lead >= 0, lead <= maximumGlassLead, dt > 0, dt <= 0.1 else { return clock }
+        let rate = (clock - previous.clock) / dt
+        guard abs(rate - 1) <= 0.05 else { return clock }
+        return clock + lead
+    }
+}

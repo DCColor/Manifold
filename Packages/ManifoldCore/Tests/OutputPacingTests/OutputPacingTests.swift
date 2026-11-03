@@ -62,3 +62,57 @@ final class OutputPacingTests: XCTestCase {
         XCTAssertEqual(s.count, 0)
     }
 }
+
+/// The window's present gate and frame selection (docs/BUGS.md, the two window-side entries of 2026-11-01).
+final class WindowPresentTimingTests: XCTestCase {
+    func testASecondWaitingPresentOnlyAboveSixtyHertz() {
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: 1 / 59.936), 1)
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: 1 / 60.0), 1)
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: 1 / 100.0), 2)
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: 1 / 120.0), 2)
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: 0), 1)
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: .nan), 1)
+    }
+
+    func testARunningClockIsCarriedToTheGlass() {
+        let t = WindowPresentTiming.selectionTime(clock: 10.0, clockHost: 500.0, glassHost: 500.025,
+                                                  previous: (clock: 9.98332, host: 499.98332))
+        XCTAssertEqual(t, 10.025, accuracy: 1e-9)
+    }
+
+    func testJitterInTheCallbackDoesNotMoveTheSelection() {
+        // The same vsync, the callback 0.2 ms or 1.8 ms after it: the clock is read later, the lead is shorter, and the
+        // selection time is the clock at the glass either way.
+        let early = WindowPresentTiming.selectionTime(clock: 10.0002, clockHost: 500.0002, glassHost: 500.0334,
+                                                      previous: (clock: 9.9835, host: 499.9835))
+        let late = WindowPresentTiming.selectionTime(clock: 10.0018, clockHost: 500.0018, glassHost: 500.0334,
+                                                     previous: (clock: 9.9835, host: 499.9835))
+        XCTAssertEqual(early, late, accuracy: 1e-9)
+        XCTAssertEqual(early, 10.0334, accuracy: 1e-9)
+    }
+
+    func testPausedSteppedSeekedOrShuttledSelectsAtTheTick() {
+        let glass = 500.025
+        // Paused: the clock did not move.
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 10, clockHost: 500, glassHost: glass,
+                                                         previous: (clock: 10, host: 499.983)), 10)
+        // A seek: the clock jumped.
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 42, clockHost: 500, glassHost: glass,
+                                                         previous: (clock: 10, host: 499.983)), 42)
+        // A shuttle at 2×.
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 10.034, clockHost: 500, glassHost: glass,
+                                                         previous: (clock: 10, host: 499.983)), 10.034)
+        // No previous reading.
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 10, clockHost: 500, glassHost: glass, previous: nil), 10)
+    }
+
+    func testAPacerTickOrABadLeadSelectsAtTheTick() {
+        let prev = (clock: 9.983, host: 499.983)
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 10, clockHost: 500, glassHost: nil, previous: prev), 10)
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 10, clockHost: 500, glassHost: 499.99, previous: prev), 10)
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: 10, clockHost: 500, glassHost: 500.2, previous: prev), 10)
+        // An unanchored live clock (−∞) stays −∞: nothing is due.
+        XCTAssertEqual(WindowPresentTiming.selectionTime(clock: -.infinity, clockHost: 500, glassHost: 500.02,
+                                                         previous: prev), -.infinity)
+    }
+}
