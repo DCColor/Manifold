@@ -75,12 +75,12 @@ final class DNxHRVideoToolboxDecoder {
     /// wrong with their file, so no string says "failed", "invalid" or "unsupported file".
     enum PictureCaveat {
         /// The inspector's standing row — true for as long as the file is open.
-        static let short = "Colour unreliable — needs Pro Video Formats"
+        static let short = "Color unreliable — needs Pro Video Formats"
         /// The banner, shown once at load. Longer because it has to name the fix and, just as
         /// importantly, say what IS still good: a colourist may want the timecode, the audio or
         /// the captions from a file whose picture is unusable, and we do not refuse the file.
         static let banner = "This file is DNxHR 4:4:4, which Manifold’s built-in decoder renders "
-            + "with the wrong colour. Apple’s Pro Video Formats package decodes it correctly — "
+            + "with the wrong color. Apple’s Pro Video Formats package decodes it correctly — "
             + "install it and relaunch. Timecode, audio and captions are unaffected."
     }
 

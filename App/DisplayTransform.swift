@@ -84,7 +84,7 @@ enum DisplayTransformMode: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .os:        return "As macOS Shows It"
         case .reference: return "Reference (BT.1886)"
-        case .bypass:    return "Bypass — No Colour Management"
+        case .bypass:    return "Bypass — No Color Management"
         }
     }
 

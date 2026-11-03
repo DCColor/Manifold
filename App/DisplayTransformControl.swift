@@ -88,7 +88,7 @@ struct DisplayTransformControl: View {
             .fixedSize()
         }
         .help(isBypass
-              ? "Display transform: BYPASS — no colour management. Diagnostic only."
+              ? "Display transform: BYPASS — no color management. Diagnostic only."
               : (mode == .reference
                  ? "Display transform: Reference — BT.1886 for this display"
                  : "Display transform: as macOS shows it — what your client will see"))
@@ -131,7 +131,7 @@ struct DisplayTransformControl: View {
         .padding(.vertical, 3)
         .background(Capsule().fill(Color.orange))
         .foregroundStyle(.black)
-        .accessibilityLabel("Display transform: Bypass, no colour management")
+        .accessibilityLabel("Display transform: Bypass, no color management")
         .accessibilityAddTraits(.isStaticText)
     }
 
@@ -165,7 +165,7 @@ struct DisplayTransformControl: View {
                 .fixedSize()
         }
         .accessibilityLabel(isBypass
-                            ? "Display transform: Bypass, no colour management"
+                            ? "Display transform: Bypass, no color management"
                             : (mode == .reference ? "Display transform: Reference, BT.1886"
                                                   : "Display transform: as macOS shows it"))
     }
@@ -186,7 +186,7 @@ struct DisplayTransformControl: View {
         }
         Divider()
         Toggle(isOn: binding(for: .bypass)) {
-            Text(Self.rowLabel("Bypass", "no colour management"))
+            Text(Self.rowLabel("Bypass", "no color management"))
         }
         Divider()
         // Tier 3 lives behind one more step, per §6.3's progressive disclosure: "available, not

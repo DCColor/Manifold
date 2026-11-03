@@ -277,7 +277,7 @@ public enum ShortcutCatalog {
         // ── Colour ──────────────────────────────────────────────────────────────────────────────
         .init(.displayOS, "As macOS Shows It", .color, .window, .menu, .char("1", optCmd)),
         .init(.displayReference, "Reference (BT.1886)", .color, .window, .menu, .char("2", optCmd)),
-        .init(.displayBypass, "Bypass — No Colour Management", .color, .window, .menu, .char("3", optCmd)),
+        .init(.displayBypass, "Bypass — No Color Management", .color, .window, .menu, .char("3", optCmd)),
         .init(.transformChain, "Show/Hide Transform Chain", .color, .window, .menu, .char("4", optCmd)),
         // C for Compare (Robbie, 2026-10-24); D is free.
         .init(.holdCompare, "Hold to Compare: macOS ↔ Reference", .color, .window, .hold, .char("c"),
