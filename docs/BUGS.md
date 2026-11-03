@@ -3785,6 +3785,49 @@ the 2026-10-30 measurements and in SDR mode here) is UNKNOWN.
 window's `didChangeScreen`, `MetalVideoRenderer.swift:1284-1331` at `91b09c2`). Verify: open on the LG, move to the ASUS, and the ramp reads the second row with no mode change; both
 LG modes.
 
+## ✅ FIXED 2026-11-03, HOVER CHECK BY EYE PENDING — 0.9.2 — 0.9.1, FROM `e36976d` — the This display checkbox could be clicked while greyed, and a click silently changed the stored calibration
+
+**What is wrong (0.9.1).** In As macOS Shows It, Bypass, and Reference with a PQ or HLG picture, the "This display is calibrated to
+BT.1886 (Rec. 709)" checkbox was clickable though the section is meant to be greyed. After a click it drew greyed and unclickable until
+the pointer moved over the picture.
+
+**⚠️ It could silently change a stored setting.** The click was not cosmetic. It wrote the record while the section said it does nothing,
+and nothing on screen in that mode shows the effect: the record is only read in Reference. Robbie's LG, ticked calibrated (white 100,
+black 0), lost its record this way on 2026-11-03: clicks in macOS mode left it unticked, and an unticked record equal to the default is
+deleted, so `displayCalibrations` was absent. Reference then treats that display as not calibrated, so the picture changes with no
+warning. **0.9.1 testers who clicked this checkbox outside Reference may need to re-set it:** open the chain readout in Reference with
+an SDR picture, on each display, and check the box. Clicking twice restores it, an odd number of clicks does not.
+
+**Why.** `e36976d` replaced a SwiftUI `Toggle` carrying `.disabled(inactiveNote != nil)` with an `NSButton` representable carrying its own
+`enabled` property, and dropped `.disabled`; `2249009` and earlier are not affected. `updateNSView` did apply `enabled`, but SwiftUI's host
+also writes `environment.isEnabled` onto a hosted `NSControl`, on every environment change, without calling `updateNSView`, and when a
+popover first shows. With `.disabled` gone that value was always true. So the box was enabled on opening, greyed by the update a click
+caused, and enabled again by the next environment change. Measured in an offscreen probe, in a window and in a real `NSPopover`, Xcode 27.2.
+
+**Fix.** `.disabled(inactiveNote != nil)` is back at the call site and `updateNSView` reads `context.environment.isEnabled`, as
+`TransportScrubber` does, so there is one value and the host agrees with it (`DisplayCalibrationSection`, `CalibratedCheckbox`). The white
+and black fields were never affected.
+
+**Verified 2026-11-03**, by AX in one launch (Profile, `.build-cc`, on the LG). `wedge.mov` for SDR (ProRes `apch`, 1-1-1 assumed),
+`wedge-pq-24track.mov` for PQ (9-16-9 tagged). A press was also sent in each greyed state, and did nothing:
+
+| State | AXEnabled | Value (record off / on) | Press while greyed |
+|---|---|---|---|
+| As macOS Shows It | false | 0 / 1 | no write |
+| Bypass | false | 1 (on only; the off read did not run) | no write |
+| Reference, SDR | true | 0 / 1 | toggles, see below |
+| Reference, PQ | false | 1 (on only) | no write |
+
+In Reference-SDR, two AX toggles: value 0 → 1 → 0, enabled throughout, the store following each (record written, then removed). The log
+holds three `[REFERENCE] display` writes in the launch, the three clicks made in Reference. The LG was then restored by a real tick in
+Reference: calibrated, Lw 100, Lb 0, read back after quit. The ASUS has no record (defaults). Other preferences: only `displayCalibrations`
+and the window frame changed.
+
+**Not verified.** The hover behaviour by eye (Robbie's check; AX does not move the pointer). Which environment change the pointer caused:
+UNKNOWN, the probe showed any change does it. The launch logged 86 `AttributeGraph: cycle detected` lines, the first at a mode change with
+the readout open. Whether 0.9.1 logs them too: UNKNOWN, no earlier log exists. The offscreen probe logged 5 with the 0.9.1 shape and 0 with
+the fixed one, so this fix is not the likely source.
+
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
 **Question (Robbie, 2026-10-31).** Would handing a Dolby Vision file's sample buffers to an `AVSampleBufferDisplayLayer` give
