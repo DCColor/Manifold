@@ -59,6 +59,10 @@ struct DisplayChain: Equatable {
     /// The window's chosen mode is Reference, the only mode that reads the display's calibration: the calibration
     /// section is enabled only then (Robbie, 2026-10-24). The chosen mode, not a hold's.
     var calibrationApplies: Bool = false
+    /// The PICTURE is PQ or HLG (`pictureTransferCode` 16 or 18: an override or a LUT stated as PQ/HLG counts). Reference
+    /// shows it absolute and never reads the display's calibration record (`ReferencePlan.make` returns from its PQ and HLG
+    /// arms before it), so the This display section is greyed whole (0.9.1).
+    var pictureIsHDR: Bool = false
     /// Interlaced I4: the window's field view (docs/INTERLACED_FINDINGS.md §14). nil unless the source is interlaced.
     var fields: String? = nil
 }
@@ -338,6 +342,7 @@ final class DisplayChainModel: ObservableObject {
                                 overriddenWords: overriddenWords,
                                 lutApplied: deck.lut.isApplied,
                                 calibrationApplies: deck.chrome?.displayTransform == .reference,
+                                pictureIsHDR: transfer == 16 || transfer == 18,
                                 fields: Self.fieldsLine(scan: scan, chrome: deck.chrome))
         // Equality guard: `@Published` publishes on every assignment, and this can fire from a
         // notification during a view update.

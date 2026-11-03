@@ -107,13 +107,13 @@ struct ReferencePlan: Equatable {
                 p.row2 = SIMD4(Float(m[2][0]), Float(m[2][1]), Float(m[2][2]), 0)
                 return ReferencePlan(
                     layerColorSpace: nil, shader: p,
-                    summary: "Reference — display calibrated to Rec.709 / BT.1886: \(gamut) converted to "
+                    summary: "Reference — display calibrated to BT.1886 (Rec. 709): \(gamut) converted to "
                            + "Rec.709 in 2.4-linear, no colorspace declared (Lb/Lw applied by the display)",
                     logLine: "[REFERENCE] calibrated display\(on): \(gamut) → Rec.709 in 2.4-linear, layer colorspace nil")
             }
             return ReferencePlan(
                 layerColorSpace: nil, shader: nil,
-                summary: "Reference — display calibrated to Rec.709 / BT.1886: code values sent untouched, "
+                summary: "Reference — display calibrated to BT.1886 (Rec. 709): code values sent untouched, "
                        + "no colorspace declared (Lb/Lw applied by the display)",
                 logLine: "[REFERENCE] calibrated display\(on): code values untouched, layer colorspace nil, identity copy")
         }

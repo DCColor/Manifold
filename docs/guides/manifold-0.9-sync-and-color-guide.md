@@ -207,11 +207,12 @@ Let go and the window is back where it was. A badge and the window title say wha
 
 Reference promises the light a BT.1886 reference monitor would put out. How it gets there depends on one per-display setting in the transform chain, under **This display**:
 
-- **Unchecked (the default):** Manifold reads your display's macOS profile and converts the picture so that, after the display's own curve, the light lands on BT.1886. **White** and **Black** are the display's white and black levels in cd/m²; Black 0 gives exactly gamma 2.4.
-- **Checked, "Calibrated to Rec. 709 / BT.1886 in the display":** the display itself applies BT.1886 (a hardware-calibrated monitor, or a TV in a calibrated picture mode), so Manifold sends the values untouched. White and Black are greyed out.
+- **Unchecked (the default):** Manifold reads your display's macOS profile and converts the picture so that, after the display's own curve, the light lands on BT.1886. **Display white** and **Display black** are the display's white and black levels in cd/m², from your calibration report; Black 0 gives exactly gamma 2.4.
+- **Checked, "This display is calibrated to BT.1886 (Rec. 709)":** tick it only if the monitor itself applies BT.1886 (a hardware-calibrated monitor, or a TV in a calibrated picture mode). Manifold then sends the picture untouched, and Display white and Display black are greyed out.
 - **It's remembered per display,** not per window, so moving a window to another display can change the picture.
 - **It applies in Reference only.** In As macOS Shows It and Bypass the section is greyed and reads "Applies in Reference mode only".
-<!-- IMAGE: the transform chain's This display section in Reference: the Calibrated to Rec. 709 / BT.1886 checkbox with White and Black, Color ▸ Show/Hide Transform Chain, reference-this-display.png -->
+- **The section applies to SDR sources only.** HDR in Reference is shown absolute (1.0 = 100 nits), so with a PQ or HLG picture the whole section, the checkbox as well as Display white and Display black, is greyed out and reads "Applies to SDR sources. HDR is shown absolute (1.0 = 100 nits)." What you set comes back into use for the next SDR source. Absolute HDR is exact on a display whose SDR white is 100 nits (for example a reference preset); on any other display it's scaled by the display's SDR brightness.
+<!-- IMAGE: the transform chain's This display section in Reference: the This display is calibrated to BT.1886 (Rec. 709) checkbox with Display white and Display black, Color ▸ Show/Hide Transform Chain, reference-this-display.png -->
 
 
 > **Only tick it if the display really is calibrated to BT.1886.** Manifold trusts the setting. On a display that isn't, the picture will be wrong in Reference mode and nothing will say so.

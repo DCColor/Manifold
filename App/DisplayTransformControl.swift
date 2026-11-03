@@ -312,7 +312,8 @@ struct DisplayChainReadout: View {
             // as a bug."
             // Colour S1: this display's calibration — per DISPLAY, not per window (§6.11 decision 1).
             Divider()
-            DisplayCalibrationSection(screen: model.currentScreen, applies: model.chain.calibrationApplies)
+            DisplayCalibrationSection(screen: model.currentScreen, applies: model.chain.calibrationApplies,
+                                      hdrPicture: model.chain.pictureIsHDR)
 
             Divider()
             Text(model.chain.fields == nil
@@ -361,7 +362,7 @@ struct DisplayChainReadout: View {
 
 // MARK: - Colour S1: this display's calibration
 
-/// "Is this display calibrated to Rec.709 / BT.1886, and what are its white and black?" — §6.11,
+/// "Is this display calibrated to BT.1886 (Rec. 709), and what are its white and black?" — §6.11,
 /// decisions 1 and 2. Inside the chain readout because that is where the display is already named,
 /// so the statement is made about the display the user is looking at, and it costs no new surface:
 /// no new control-bar item, no new modifier on `ContentView`.
@@ -374,10 +375,19 @@ struct DisplayChainReadout: View {
 /// untouched), so outside Reference the whole section is disabled and says so (Robbie, 2026-10-24). `.disabled`
 /// reaches Accessibility as each control's enabled state. Nothing is written: the stored record is untouched and
 /// takes effect the moment Reference is chosen.
+///
+/// The whole record applies to SDR pictures only: Reference shows PQ and HLG absolute (1.0 = 100 nits), and
+/// `ReferencePlan.make` returns from its PQ and HLG arms before it reads `calibrated`, `whiteNits` or `blackNits` (the
+/// renderer's only use of the record, `MetalVideoRenderer`'s plan). So for an HDR picture the whole section is greyed
+/// with one note (0.9.1). The stored values are kept and apply again to the next SDR picture.
+///
+/// The labels say what they ask for (Robbie, 2026-11-02); the stored keys are unchanged (`DisplayCalibrationStore`).
 struct DisplayCalibrationSection: View {
     let screen: NSScreen?
     /// The window is in Reference. `DisplayChain.calibrationApplies`.
     let applies: Bool
+    /// The picture is PQ or HLG. `DisplayChain.pictureIsHDR`.
+    let hdrPicture: Bool
     @ObservedObject private var store = DisplayCalibrationStore.shared
 
     var body: some View {
@@ -387,39 +397,45 @@ struct DisplayCalibrationSection: View {
                 Text("This display — \(screen.localizedName)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Toggle("Calibrated to Rec.709 / BT.1886 in the display", isOn: Binding(
+                // Greyed, with one note, where the record does nothing: outside Reference, and for an HDR picture.
+                let inactiveNote: String? = !applies ? "Applies in Reference mode only."
+                    : hdrPicture ? "Applies to SDR sources. HDR is shown absolute (1.0 = 100 nits)." : nil
+                Toggle("This display is calibrated to BT.1886 (Rec. 709)", isOn: Binding(
                     get: { cal.calibrated },
                     set: { var c = cal; c.calibrated = $0; store.set(c, for: screen) }))
                     .font(.caption)
-                    .disabled(!applies)
-                HStack(spacing: 12) {
-                    nitsField("White", value: cal.whiteNits) { var c = cal; c.whiteNits = $0; store.set(c, for: screen) }
-                    nitsField("Black", value: cal.blackNits) { var c = cal; c.blackNits = $0; store.set(c, for: screen) }
+                    .disabled(inactiveNote != nil)
+                if inactiveNote == nil {
+                    caption("Tick only if the monitor itself applies BT.1886, e.g. hardware-calibrated. "
+                            + "Manifold then sends the picture untouched.")
                 }
-                .disabled(!applies || cal.calibrated)
-                Text(!applies
-                     ? "Applies in Reference mode only."
-                     : cal.calibrated
-                     ? "Reference sends the code values untouched; the display applies BT.1886."
-                     : "Reference applies BT.1886 from these values. Black 0 is exactly gamma 2.4.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    nitsField("Display white (cd/m²)", value: cal.whiteNits) { var c = cal; c.whiteNits = $0; store.set(c, for: screen) }
+                    nitsField("Display black (cd/m²)", value: cal.blackNits) { var c = cal; c.blackNits = $0; store.set(c, for: screen) }
+                }
+                .disabled(inactiveNote != nil || cal.calibrated)
+                caption(inactiveNote ?? "From your calibration report. Black 0 = gamma 2.4.")
             } else {
                 Text("No display").font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func nitsField(_ label: String, value: Double, set: @escaping (Double) -> Void) -> some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
             Text(label).font(.caption)
             TextField(label, value: Binding(get: { value }, set: set),
                       format: .number.precision(.fractionLength(0...3)))
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.caption, design: .monospaced))
                 .frame(width: 64)
-            Text("cd/m²").font(.caption2).foregroundStyle(.secondary)
         }
     }
 }

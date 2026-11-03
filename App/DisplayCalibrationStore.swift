@@ -116,7 +116,7 @@ final class DisplayCalibrationStore: ObservableObject, @unchecked Sendable {
         lock.unlock()
         // The key is vendor-model-SERIAL; the serial is not printed (privacy P1).
         print("[REFERENCE] display \"\(screen.localizedName)\" (\(Self.keyWithoutSerial(key))): "
-            + (value.calibrated ? "calibrated to Rec.709 / BT.1886" : "described by its profile")
+            + (value.calibrated ? "calibrated to BT.1886 (Rec. 709)" : "described by its profile")
             + String(format: ", Lw %g, Lb %g", value.whiteNits, value.blackNits))
         objectWillChange.send()
         NotificationCenter.default.post(name: Self.didChange, object: key)
