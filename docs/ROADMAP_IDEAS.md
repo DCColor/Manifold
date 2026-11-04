@@ -2,14 +2,15 @@
 Moved into the plan (2026-10-07): COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3b.
 
 ## Export/Import Settings
-Status: idea (2026-11-02)
+Status: planned, shortcuts built (2026-11-03). Plan: docs/SETTINGS_EXPORT_PLAN.md
 Version: 0.9.2
 
-What: Export/Import Settings (shortcuts + streams) for moving between workstations. Streams export without
-secrets by default; optional password-protected credentials.
+What: Export/Import Settings (shortcuts + streams) for moving between workstations. Decided 2026-11-03: streams export
+complete, URLs and passphrases included, in a file encrypted with a password the user chooses (AES-GCM-256, PBKDF2-HMAC-SHA256).
+A shortcuts-only file stays plain JSON. Stream import is add-only. The automatic backup covers shortcuts only.
 
-Next: audit and plan after 0.9.1 ships.
-Size guess: ?
+Next: Robbie reviews the stream design, then stages A3-A6.
+Size guess: about 6 sessions
 
 ## Reference HDR: SDR white and an optional tone map
 Status: idea (2026-11-02)
@@ -94,8 +95,8 @@ Depends on: unsure
 Size guess: large
 
 ## Load Audio Files Only
-Status: idea (2026-10-06)
-Version: 1.5?
+Status: planned (2026-11-03). Plan: docs/STILLS_AND_AUDIO_ONLY_PLAN.md
+Version: 0.9.2 in the window (B4); 0.9.3 on SDI (B5)
 
 What: Ability to load audio files with no video - stereo, mono, 5.1 etc
 
@@ -115,8 +116,8 @@ Depends on: unsure
 Size guess: medium
 
 ## Load Still Images
-Status: idea (2026-10-06)
-Version: 1.5?
+Status: planned (2026-11-03). Plan: docs/STILLS_AND_AUDIO_ONLY_PLAN.md
+Version: 0.9.2. No Manifold color management: shown as macOS shows it. Not sent to SDI or HDMI in v1. DPX out for v1
 
 What: Ability to load stills - png, jpeg, tiff and HDR image formats like AVIF, JPEGR
 

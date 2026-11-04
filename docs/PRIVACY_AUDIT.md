@@ -94,6 +94,19 @@ per bookmark keyed by its stable id; deleting a bookmark deletes its item, renam
   blank keeps the saved URL, and "Show saved URL" reads it on request. Chosen as the conservative
   option overnight; Robbie to confirm.
 
+**Export/Import Settings (decided by Robbie, 2026-11-03; `docs/SETTINGS_EXPORT_PLAN.md`):**
+- **Built, not yet shipped (A1, A2):** a shortcuts file, plain JSON, holds only shortcut bindings and the app version, build and
+  export date. Before an import, Manifold saves the current shortcuts to the backup folder (§1). Neither holds a stream address,
+  a passphrase or licence data.
+- **later (A3, A4):** this reverses "stream secrets never leave the Keychain" for one user action. A user who exports streams gets
+  a file holding their names, URLs and SRT passphrases, encrypted (AES-GCM-256, key by PBKDF2-HMAC-SHA256) with a password they
+  choose, which Manifold never stores. There is never a plaintext file with stream URLs or passphrases. Readable without the
+  password: app version, export date, section names, counts, KDF parameters and salt. The file can be attacked offline, so it is
+  only as strong as that password. Import is add-only and saves to the Keychain as a new stream is saved. Backups never hold a
+  secret. Diagnostics never include an export or a backup.
+
+The note above that "there is no bookmark export or import" was true at P2, and stays true until A4 ships.
+
 ---
 
 ## 1. Local storage
@@ -137,8 +150,10 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 
 ### Files and caches
 
-- **The app writes nothing to Application Support, Caches or tmp.** There is no thumbnail or
-  waveform cache, and no WebKit.
+- **The app writes nothing else to Application Support, Caches or tmp.** There is no thumbnail or
+  waveform cache, and no WebKit. **Settings backups (A2, not yet shipped):** the last 10 shortcut backups, in
+  `~/Library/Application Support/com.graviton.manifold/Settings Backups/`, written only when the user imports. Shortcut
+  bindings only.
 - **`~/Library/Caches/com.graviton.manifold/Cache.db` (+ `-wal`, `-shm`, `fsCachedData`)** was the
   `URLSession.shared` disk cache.
   - At the audit it held:
@@ -166,6 +181,7 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 | Frame still PNG (pixels, ICC, optional DPI) | The export folder, else `~/Desktop`, with no panel (`MetalVideoRenderer.swift:4186-4196`) |
 | Diagnostics `.txt` | Save panel (`DiagnosticsExport.swift:976-986`) |
 | Sync clip `.mov` | Save panel |
+| Settings file `.manifoldsettings` (A2, not yet shipped; shortcuts only, plain JSON) | Save panel |
 | v210/rgba16f dump next to each still; live and NDI WAV captures to `~/Desktop` | **Debug builds only — which every Profile build is** (item 8, later) |
 
 ---
@@ -310,6 +326,7 @@ installed copies do until they update.
 | Window state | `~/Library/Saved Application State/com.graviton.manifold.savedState/` |
 | Keychain | Services `tools.graviton.manifold.license` (key, record, **trial clock**) and `tools.graviton.manifold.streams` (since P2, every saved stream's URL and passphrase) |
 | Recent files | `…/ApplicationRecentDocuments/com.graviton.manifold.sfl*` |
+| Settings backups (once A2 ships) | `~/Library/Application Support/com.graviton.manifold/Settings Backups/` |
 | The user's exports | Export folder, Desktop, wherever diagnostics were saved |
 | Machine registration | On the licence server |
 
