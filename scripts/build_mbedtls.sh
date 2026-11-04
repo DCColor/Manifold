@@ -73,7 +73,8 @@ ARCH="arm64"                  # arm64 ONLY — Manifold is Apple-Silicon-only (F
 MACOS_MIN="15.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="${HOME}/manifold-webrtc-build"     # space-free scratch (repo path has spaces)
+CODE_ROOT="${CODE_ROOT:-${HOME}/Code}"
+WORK="${CODE_ROOT}/Manifold/manifold-webrtc-build"
 PREFIX="${WORK}/prefix"                  # ISOLATED prefix; no overlap with ThirdParty/ffmpeg
 SRC="${WORK}/mbedtls"
 

@@ -20,6 +20,7 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import pathlib
 import sys
 import zipfile
@@ -33,7 +34,8 @@ except ImportError:
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 OUT = REPO / "build" / "settings-fixtures"
-ZIP = pathlib.Path.home() / "Builds" / "Manifold" / "manifold-settings-test-fixtures-v1.zip"
+CODE_ROOT = pathlib.Path(os.environ.get("CODE_ROOT") or pathlib.Path.home() / "Code")
+ZIP = CODE_ROOT / "Manifold" / "Builds" / "Manifold" / "manifold-settings-test-fixtures-v1.zip"
 FOLDER = "manifold-settings-test-fixtures-v1"
 
 PASSWORD = "manifold-test-fixture"

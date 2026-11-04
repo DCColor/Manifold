@@ -25,7 +25,7 @@
 #    isolation-tail argument in build_mbedtls.sh applies here verbatim: OpenSSL
 #    has the largest collision surface with a brew copy, GnuTLS drags in
 #    nettle + gmp + libtasn1. Neither is being added for SRT's sake.
-#  * This script only READS ${HOME}/manifold-webrtc-build/prefix. It installs
+#  * This script only READS ${CODE_ROOT}/Manifold/manifold-webrtc-build/prefix. It installs
 #    into its OWN prefix so the WebRTC prefix stays exactly as build_mbedtls.sh
 #    and build_libdatachannel.sh left it.
 #  * Static only, arm64 only, macOS 15.0 — matched to Manifold's app target.
@@ -87,9 +87,10 @@ MACOS_MIN="15.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${REPO_ROOT}/ThirdParty/libsrt"           # final home, in-repo (gitignored)
-WORK="${HOME}/manifold-srt-build"               # space-free scratch (repo path has spaces)
+CODE_ROOT="${CODE_ROOT:-${HOME}/Code}"
+WORK="${CODE_ROOT}/Manifold/manifold-srt-build"
 PREFIX="${WORK}/prefix"                         # THIS script's install prefix
-MBED_PREFIX="${HOME}/manifold-webrtc-build/prefix"   # READ-ONLY: built by build_mbedtls.sh
+MBED_PREFIX="${CODE_ROOT}/Manifold/manifold-webrtc-build/prefix"   # READ-ONLY: built by build_mbedtls.sh
 SRC="${WORK}/srt"
 
 echo "── libsrt ${SRT_TAG} (SRT transport; MPEG-TS demux stays in FFmpeg) ────"

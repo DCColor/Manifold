@@ -71,7 +71,8 @@ MACOS_MIN="15.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${REPO_ROOT}/ThirdParty/libdatachannel"   # final home, in-repo (gitignored)
-WORK="${HOME}/manifold-webrtc-build"            # space-free scratch
+CODE_ROOT="${CODE_ROOT:-${HOME}/Code}"
+WORK="${CODE_ROOT}/Manifold/manifold-webrtc-build"
 PREFIX="${WORK}/prefix"                         # ISOLATED prefix from build_mbedtls.sh
 
 echo "── libdatachannel ${LDC_TAG} (WHEP WebRTC transport) ──────────────────"

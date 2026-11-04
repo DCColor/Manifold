@@ -87,7 +87,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_YML="${REPO_ROOT}/project.yml"
 XCODEPROJ="${REPO_ROOT}/${SCHEME}.xcodeproj"
 
-DIST_DIR="${MANIFOLD_DIST_DIR:-${HOME}/Builds/Manifold}"
+CODE_ROOT="${CODE_ROOT:-${HOME}/Code}"
+DIST_DIR="${MANIFOLD_DIST_DIR:-${CODE_ROOT}/Manifold/Builds/Manifold}"
 # The export options plist is tiny and belongs with the project, per spec. build/ is gitignored.
 EXPORT_PLIST="${REPO_ROOT}/build/ExportOptions.plist"
 

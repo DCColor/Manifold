@@ -127,13 +127,14 @@ MACOS_MIN="15.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${REPO_ROOT}/ThirdParty/ffmpeg"             # final home, in-repo (gitignored)
-WORK="${HOME}/manifold-ffmpeg-build"              # space-free scratch (the repo path has spaces)
+CODE_ROOT="${CODE_ROOT:-${HOME}/Code}"
+WORK="${CODE_ROOT}/Manifold/manifold-ffmpeg-build"   # pinned clone, install prefix and logs
 SRC="${WORK}/ffmpeg"
 PREFIX="${WORK}/prefix"
 PROBE_DIR="${WORK}/probe"
 
 # The by-hand build this script replaces. Read-only, and only for the one-time provenance diff.
-LEGACY_TREE="${HOME}/manifold-ffmpeg-srt/FFmpeg-n8.1.1"
+LEGACY_TREE="${CODE_ROOT}/Manifold/manifold-ffmpeg-srt/FFmpeg-n8.1.1"
 
 # The five libraries Manifold actually ships. libavdevice and libavfilter are BUILT by this
 # configure (CONFIG_AVDEVICE/CONFIG_AVFILTER are 1) and deliberately NOT staged: nothing in
