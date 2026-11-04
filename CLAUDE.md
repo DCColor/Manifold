@@ -7,7 +7,7 @@ Native macOS Swift/SwiftUI app. arm64 only. Product slug: `manifold`.
 Procedure is NOT documented in this repo. It lives in the Graviton-Releases repo
 (github.com/DCColor/Graviton-Releases, private), checked out somewhere ABOVE this repo —
 `release-mac.sh` finds it by walking up, so the exact depth is not fixed. On this machine
-it is at `~/Nextcloud/Vibe Code Output/Graviton-Releases`. Read it before answering
+it is at `~/Code/Graviton-Releases`. Read it before answering
 anything about build, signing, release, or distribution:
 
 - `docs/stacks/swift.md` — xcodegen/xcodebuild, direct codesign, notarytool, this app's

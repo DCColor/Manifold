@@ -11,8 +11,8 @@ Build, signing, release, and distribution **procedure is not documented here.** 
 the Graviton-Releases repo (github.com/DCColor/Graviton-Releases, private), checked out in
 some directory ABOVE this repo — `release-mac.sh` locates it by walking up the tree, so no
 fixed depth is assumed. On the current build Mac it sits at
-`~/Nextcloud/Vibe Code Output/Graviton-Releases`, with this repo at
-`~/Nextcloud/Vibe Code Output/Manifold/Manifold`:
+`~/Code/Graviton-Releases`, with this repo at
+`~/Code/Manifold/Manifold`:
 
 | Document | Covers |
 |---|---|
