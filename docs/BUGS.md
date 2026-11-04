@@ -3834,6 +3834,22 @@ no note, "Tick only…" under the checkbox, "From your calibration report…" la
 in Reference-PQ it was not re-read in this launch (the popover closed first), so its last reading is the fix launch's false. AX does not
 report the labels' dimming; that is the by-eye check above, which did not include Bypass. No store writes in the launch.
 
+## ☐ OPEN 2026-11-03 — 0.9.2 — `MenuKeyKeeper` ignores case, so a system ⇧⌘L Services item loses its shortcut inside Manifold
+
+**What was seen.** The shortcut export launch of 2026-11-03 logged `[SHORTCUTS] menu key: 'Search With Google' had Loop Playback's key;
+cleared`, with Loop Playback on its default ⌘L. Search With Google is a system Services item, which is ⇧⌘L.
+
+**Why, by reading.** `MenuKeyKeeper.keep` (`App/Shortcuts/ShortcutCenter.swift`) takes a key off any item that is not a registry action's
+when `keyEquivalent.lowercased()` and the modifier mask both match. AppKit can state ⇧ as an uppercase key with no shift in the mask, so
+"L" with ⌘ reads as Loop's ⌘L. That spelling on this item is not measured: it is what the log line implies. The comparison was written
+for SwiftUI's own spellings of a key it kept (⇧⌘D as "d" or "D"), which is right for an item of ours and wrong for one that isn't.
+
+**Effect.** Inside Manifold only, the item loses its shortcut while the app runs. Nothing is stored and other apps are unaffected.
+Any uppercase-spelled item could be hit the same way. Pre-existing since `bc735c3`; not caused by Export/Import.
+
+**Fix.** Treat an uppercase `keyEquivalent` as holding ⇧ before comparing it with a key the keeper wants to clear, and add a case to the
+`MenuKeyAudit` tests.
+
 ## ☐ 0.9.2 INVESTIGATION 2026-11-03 — `AttributeGraph: cycle detected` in the log, with the chain readout open
 
 **What was seen.** The AX launch that verified the This display checkbox (Profile, `.build-cc`, HEAD with that fix) logged 86

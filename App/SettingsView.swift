@@ -360,7 +360,7 @@ private struct GeneralSettingsPane: View {
                         Button("Restore from Backup…") { transfer.chooseBackupToRestore() }
                     }
                 }
-                SettingsCaption("Moves your keyboard shortcuts to another Mac. Before any import, Manifold saves a backup of your shortcuts.")
+                SettingsCaption("Moves your keyboard shortcuts and saved streams to another Mac. Before any import, Manifold saves a backup of your shortcuts.")
             }
         }
         .sheet(isPresented: $transfer.showingExport) { ExportSettingsSheet() }

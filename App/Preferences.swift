@@ -588,7 +588,7 @@ final class StreamBookmarkStore: ObservableObject {
     /// URL is stripped, so exactly one of them survives and it is never the plist's copy.
     @discardableResult
     func add(name: String, urlString: String, passphrase: String? = nil,
-             audioOffsetMs: Int? = nil) -> Result<StreamBookmark, StreamValidationError> {
+             audioOffsetMs: Int? = nil, colorOverride: String? = nil) -> Result<StreamBookmark, StreamValidationError> {
         // ⚠️ BEFORE VALIDATION, AND BEFORE ANY KEYCHAIN WRITE. This is the one path that can reach
         // `persist()` while the list is empty, so it is the path on which the user's undecodable
         // saved streams actually get destroyed — see `storedDataUnreadable`. Refusing here (rather
@@ -624,7 +624,8 @@ final class StreamBookmarkStore: ObservableObject {
             // would have nothing to dial. The plist entry is built from the secret: name, type and
             // `address` only.
             let fresh = StreamBookmark(name: finalName, urlString: "", type: type,
-                                       audioOffsetMs: Self.storedAudioOffset(audioOffsetMs))
+                                       audioOffsetMs: Self.storedAudioOffset(audioOffsetMs),
+                                       colorOverride: colorOverride)
             let account = fresh.id.uuidString
             let streamSecret = StreamSecret(url: sanitized.absoluteString, passphrase: secret)
             guard let bookmark = StreamSecrets.migrated(fresh, secret: streamSecret, account: account) else {

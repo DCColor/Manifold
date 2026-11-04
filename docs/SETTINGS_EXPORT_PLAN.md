@@ -1,7 +1,8 @@
 # Export/Import Settings (shortcuts + streams) — PLAN
 
-Status: revised 2026-11-03 after Robbie's decisions. **A1 and A2 (shortcuts end to end) are built. No stream code exists. The
-stream design (§2.4–§4.2) is settled, R1–R6 below.** First version at `884cce3`, and line
+Status: revised 2026-11-03 after Robbie's decisions. **A1 and A2 (shortcuts end to end) are built and passed their attended
+check. A3 and A4 (the encrypted file and streams) are built and passed the attended sandbox pass, on fake URLs. The stream
+design (§2.4–§4.2) is settled, R1–R6 below.** First version at `884cce3`, and line
 references are to that commit unless they name new code. **By reading** means established from the code and not run.
 **Measured** means run on this Mac (M4 Max, macOS 26.7.1). **UNKNOWN** means not established. Companion:
 `docs/STILLS_AND_AUDIO_ONLY_PLAN.md`.
@@ -160,15 +161,17 @@ name, user name, email, path or display identity is written.
 
 ### 2.3 Where the code is
 
-`SettingsTransfer`, a Foundation-only target, holds the file, its reader and refusals, and the backups. The set-level judge is
-`ShortcutImport.swift` in `ShortcutRegistry`, because it needs that target's rules. `App/SettingsTransferUI.swift` presents
-plans and applies them. Nothing in the package touches defaults or the Keychain.
+`SettingsTransfer` (Foundation, CryptoKit, CommonCrypto, Security, and `StreamBookmarkModel` for the secret types) holds the file,
+its reader and refusals, the backups, the encryption (`SettingsEncryption.swift`) and the stream rules (`StreamTransfer.swift`). The
+set-level judge is `ShortcutImport.swift` in `ShortcutRegistry`, because it needs that target's rules.
+`App/SettingsTransferUI.swift` presents plans and applies them. Nothing in the package touches defaults, and it reaches the Keychain
+only through a `StreamSecretStore` the app passes in.
 
-**The seam for streams:** `SettingsFile.read` already refuses a file with an `encryption` key by name
-(`ReadError.encrypted`), and `parseSections` is one parser for a `sections` object. The encrypted payload is that same object, so
-A3 adds a decrypt step in front of it and A4 adds one `streams` case. Nothing built for shortcuts changes shape.
+**Two readers:** `SettingsFile.inspect` takes either kind of file, for a file the user chose. `SettingsFile.read` takes plain files
+only, which is what a backup is, and refuses an encrypted file by name. `parseSections` is one parser for a `sections` object. It
+reads `streams` from a decrypted payload only: a plain file's `streams` section is listed as "Not encrypted, so not imported".
 
-### 2.4 A file with streams (not built)
+### 2.4 A file with streams (built)
 
 ```json
 {
@@ -295,7 +298,7 @@ Refused before the preview: unreadable JSON, wrong `kind`, over 1 MB, higher `fo
 shown: streams while `storedDataUnreadable` is true (`Preferences.swift:400`), shortcuts while the stored value cannot be read
 (`ShortcutStore.swift:61-65`). The preview has a checkbox per section and writes nothing.
 
-### 4.2 Streams: add-only (not built)
+### 4.2 Streams: add-only (built)
 
 No per-stream questions. For each entry, in file order:
 
@@ -354,7 +357,7 @@ is refused (`plan.revision`).
 The last 10 are kept. "Undo Import" in the summary restores the backup. **Restore from Backup…** under Export and Import opens one
 through the same preview, with no Merge, and it takes its own backup first.
 
-**Streams (not built):** the import keeps the ids it added. Undo Import deletes those through `delete`, entry and Keychain item, and
+**Streams (built):** the import keeps the ids it added. Undo Import deletes those through `delete`, entry and Keychain item, and
 touches nothing else. A stream the import did not add cannot be affected. Lasts while the summary is open (R5).
 
 ### 4.5 What import never touches
@@ -431,7 +434,9 @@ stash `manifold.shortcuts` first and restore it after, read before write, chaine
 | Store | Nothing written over an unreadable stored value. Entries this build cannot read survive Replace All |
 | Backup | Read back, newest first, two in one second, keeps 10 and touches nothing else, failed folder stops it, restore gives the exact prior state |
 
-**Unit, stream stages (A3, A4):**
+**Unit, stream stages (A3, A4), built and passing.** The frozen vector was made by Python's `hashlib` and `cryptography`, so the
+KDF, the authenticated header and the payload are checked against a second implementation. Still to add in A5: the test that
+nothing in `DiagnosticsExport` opens the backup folder (§7).
 
 | Area | Check |
 |---|---|
@@ -472,6 +477,20 @@ Streams, sandbox only (A6):
 8. Wrong password. A file edited by hand in the payload and in the header.
 9. Undo Import. `streamBookmarks` of the real install unchanged, by presence check.
 
+Result, steps 6-9, 2026-11-03 (Robbie attended, Profile, sandboxes `xfer-a` and `xfer-b`, fake URLs and passphrases only): passed, with
+one limit. A Keychain prompt Denied gave the left-out sheet, Export Without Them wrote 3 streams, and Try Again with Allow wrote 4.
+Both files decrypted in Python, with entries and header counts correct and no stream text in the file bytes. Wrong password, a changed
+payload and a changed header gave the one message; cut JSON was refused before the prompt. The preview showed Added, Renamed
+(different URL, passphrase differs, could not compare), Already here and Not imported. Undo returned the list to the four seeded streams.
+Into an empty sandbox: 4 added, a repeat said Already here (4), all four dial URLs matched by hash, and no stream prompt appeared. The
+real `streamBookmarks`, the 8 real stream items and the licence key names were unchanged by hash and name.
+
+**Limit:** with fake URLs, step 6's real connection against local OBS SRT and MediaMTX has not run. A connect to a fake host read its item
+with no prompt and failed at DNS, as expected. Still to run, with Robbie's say on which URLs.
+
+Found and fixed in the pass: the password fields' hints read as labels and Export gave no reason for being greyed. Both fields now have a
+title above them and a line says what Export is waiting for. The Export and Import caption now names streams.
+
 The Air, signed build (A6):
 
 10. **Run the PBKDF2 timing probe, and freeze the iteration count.**
@@ -487,11 +506,11 @@ Effort is in working sessions, and is a guess, not a measurement.
 
 | Stage | Content | Effort | State |
 |---|---|---|---|
-| A1 Shortcuts core | `SettingsTransfer`, file format, set-level judge, backups, tests | 1 | **Built, uncommitted** |
-| A2 Shortcuts UI | Settings section, export sheet, import preview, Undo, Restore | 1 | **Built, uncommitted, not yet seen running** |
-| A3 Encrypted file | Header, KDF, seal and open, password sheets, tests | 1 | Design settled, not started |
-| A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | Design settled, not started |
+| A1 Shortcuts core | `SettingsTransfer`, file format, set-level judge, backups, tests | 1 | **Done** |
+| A2 Shortcuts UI | Settings section, export sheet, import preview, Undo, Restore | 1 | **Done, attended pass passed** |
+| A3 Encrypted file | Header, KDF, seal and open, password sheets, tests | 1 | **Built, sandbox pass passed** |
+| A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | **Built, sandbox pass passed; a real connection is still to run (step 6)** |
 | A5 Identity | UTI, double-click, PRIVACY_AUDIT, user guide | 0.5 | |
-| A6 Attended | Sandbox pass, Air pass, iteration count frozen | 0.5 | |
+| A6 Attended | Sandbox pass, Air pass, iteration count frozen | 0.5 | **Pending: the Air iteration measurement (step 10); the count is not frozen until it runs** |
 
 Sources for the iteration figure: [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).

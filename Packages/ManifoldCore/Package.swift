@@ -548,6 +548,7 @@ let package = Package(
         // and applies them; nothing here touches defaults or the Keychain.
         .target(
             name: "SettingsTransfer",
+            dependencies: ["StreamBookmarkModel"],
             path: "Sources/SettingsTransfer",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
@@ -555,7 +556,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SettingsTransferTests",
-            dependencies: ["SettingsTransfer", "ShortcutRegistry"],
+            dependencies: ["SettingsTransfer", "ShortcutRegistry", "StreamBookmarkModel"],
             path: "Tests/SettingsTransferTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)

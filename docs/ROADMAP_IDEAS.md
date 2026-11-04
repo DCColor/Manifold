@@ -2,15 +2,27 @@
 Moved into the plan (2026-10-07): COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3b.
 
 ## Export/Import Settings
-Status: planned, shortcuts built (2026-11-03). Plan: docs/SETTINGS_EXPORT_PLAN.md
+Status: planned, shortcuts done, streams built (2026-11-03). Plan: docs/SETTINGS_EXPORT_PLAN.md
 Version: 0.9.2
 
 What: Export/Import Settings (shortcuts + streams) for moving between workstations. Decided 2026-11-03: streams export
 complete, URLs and passphrases included, in a file encrypted with a password the user chooses (AES-GCM-256, PBKDF2-HMAC-SHA256).
 A shortcuts-only file stays plain JSON. Stream import is add-only. The automatic backup covers shortcuts only.
 
-Next: Robbie reviews the stream design, then stages A3-A6.
+Next: A5 (file type, privacy audit, user guide), then the Air timing and the signed-build checks in A6.
 Size guess: about 6 sessions
+
+## Keyboard Shortcuts search: NSTableView reentrancy warning
+Status: idea (2026-11-03)
+Version: unscheduled
+
+What: AppKit logged "Application performed a reentrant operation in its NSTableView delegate. This warning will become an assert in
+the future." while Robbie typed "Loop" in the Keyboard Shortcuts search box (2026-11-03, confirmed by him). Typing filters the `List`,
+which adds and removes whole `Section`s (`KeyboardShortcutsView.swift`). Seen once in seven days of logs and not on every search, so
+it is intermittent. No visible effect today. The risk is that a future macOS turns it into a crash on typing in that box.
+
+Next: reproduce it, then keep the sections' structure stable while filtering, or debounce the filter out of the delegate pass.
+Check on each macOS beta.
 
 ## Reference HDR: SDR white and an optional tone map
 Status: idea (2026-11-02)
