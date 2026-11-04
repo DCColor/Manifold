@@ -58,6 +58,9 @@ let package = Package(
         // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
         // key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4).
         .library(name: "ShortcutRegistry", targets: ["ShortcutRegistry"]),
+        // Linked by the APP target directly (project.yml): the settings file and its backups
+        // (docs/SETTINGS_EXPORT_PLAN.md).
+        .library(name: "SettingsTransfer", targets: ["SettingsTransfer"]),
         // Linked by the APP target directly (project.yml): log and diagnostics redaction (privacy P1).
         .library(name: "PrivacyRedaction", targets: ["PrivacyRedaction"]),
         // Linked by the APP target directly (project.yml): the NDI source list's order and change test (the
@@ -536,6 +539,24 @@ let package = Package(
             name: "ShortcutRegistryTests",
             dependencies: ["ShortcutRegistry"],
             path: "Tests/ShortcutRegistryTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The settings file: its format, its reader and refusals, and the automatic backups
+        // (docs/SETTINGS_EXPORT_PLAN.md). Foundation only, so `swift test` reaches every rule. The app presents plans
+        // and applies them; nothing here touches defaults or the Keychain.
+        .target(
+            name: "SettingsTransfer",
+            path: "Sources/SettingsTransfer",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "SettingsTransferTests",
+            dependencies: ["SettingsTransfer", "ShortcutRegistry"],
+            path: "Tests/SettingsTransferTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

@@ -35,8 +35,8 @@ public final class ShortcutRegistry: ObservableObject {
     /// While the window records a key, the dispatcher takes nothing.
     @Published public var isRecording = false
 
-    private var overrides: [ShortcutID: KeyChord?]
-    private let store: ShortcutStore
+    private(set) var overrides: [ShortcutID: KeyChord?]
+    let store: ShortcutStore
     private let debugTierEnabled: (DebugTier) -> Bool
     private let layout: KeyLayout
 
@@ -132,15 +132,7 @@ public final class ShortcutRegistry: ObservableObject {
         guard def.rebindable else { return .refused("This shortcut cannot be changed.") }
         guard let chord else { return self.chord(for: id) == nil ? .unchanged : .accepted(warnings: []) }
         if chord == self.chord(for: id) { return .unchanged }
-        if let reason = Self.reserved[normalized(chord)] ?? Self.reserved[chord] {
-            return .refused("\(label(chord)) is used by macOS (\(reason)).")
-        }
-        if def.dispatch == .menu, chord.isArrow, chord.isBare {
-            return .refused("A menu shortcut cannot tell ⇧ + an arrow from the arrow alone. Add ⌘, ⌃ or ⌥.")
-        }
-        if def.dispatch == .hold, chord.modifiers.contains(.command) {
-            return .refused("macOS does not report releasing a ⌘ key, so a ⌘ shortcut cannot be held.")
-        }
+        if let reason = unusableReason(chord, on: def) { return .refused(reason) }
         let clashes = conflicts(for: chord, scope: def.scope, excluding: id)
         let fixed = clashes.filter { !definition($0).rebindable }
         if let first = fixed.first {
@@ -150,15 +142,36 @@ public final class ShortcutRegistry: ObservableObject {
         return clashes.isEmpty ? .accepted(warnings: w) : .conflict(with: clashes, warnings: w)
     }
 
+    /// Why `chord` can never be `def`'s key, whatever else is bound: nil when it can. The part of `propose` that does
+    /// not depend on other bindings, so a file's whole set can be judged too (`importPlan`).
+    func unusableReason(_ chord: KeyChord, on def: ShortcutDefinition) -> String? {
+        if let reason = Self.reserved[normalized(chord)] ?? Self.reserved[chord] {
+            return "\(label(chord)) is used by macOS (\(reason))."
+        }
+        if def.dispatch == .menu, chord.isArrow, chord.isBare {
+            return "A menu shortcut cannot tell ⇧ + an arrow from the arrow alone. Add ⌘, ⌃ or ⌥."
+        }
+        if def.dispatch == .hold, chord.modifiers.contains(.command) {
+            return "macOS does not report releasing a ⌘ key, so a ⌘ shortcut cannot be held."
+        }
+        return nil
+    }
+
     /// Every other action holding `chord` in a scope that overlaps `scope`. Debug actions count only when their tier
     /// is on: a key a Release build never answers is not taken there.
     public func conflicts(for chord: KeyChord, scope: ShortcutScope, excluding id: ShortcutID? = nil) -> [ShortcutID] {
+        conflicts(for: chord, scope: scope, excluding: id, holding: { self.chord(for: $0) })
+    }
+
+    /// The same question against a binding set that may not be the current one (`importPlan`).
+    func conflicts(for chord: KeyChord, scope: ShortcutScope, excluding id: ShortcutID?,
+                   holding held: (ShortcutID) -> KeyChord?) -> [ShortcutID] {
         let wanted = normalized(chord)
         return definitions.compactMap { other in
             guard other.id != id, other.scope.overlaps(scope) else { return nil }
             if let tier = other.debug, !debugTierEnabled(tier) { return nil }
-            let held = (self.chord(for: other.id).map { [$0] } ?? []) + other.fixedChords
-            return held.contains { normalized($0) == wanted } ? other.id : nil
+            let chords = (held(other.id).map { [$0] } ?? []) + other.fixedChords
+            return chords.contains { normalized($0) == wanted } ? other.id : nil
         }
     }
 
@@ -225,11 +238,11 @@ public final class ShortcutRegistry: ObservableObject {
         definitions.contains { $0.category == category && overrides[$0.id] != nil }
     }
 
-    private enum Change { case reset, set(KeyChord?) }
+    enum Change { case reset, set(KeyChord?) }
 
     /// A `.set` equal to the default is stored as no override, so it reads as not customised.
     @discardableResult
-    private func commit(_ changes: [ShortcutID: Change]) -> Bool {
+    func commit(_ changes: [ShortcutID: Change]) -> Bool {
         guard !changes.isEmpty else { return true }
         var stored: [ShortcutID: KeyChord??] = [:]
         for (id, change) in changes {
