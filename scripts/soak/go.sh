@@ -18,18 +18,18 @@
 # Environment (all optional):
 #   MANIFOLD_APP   the Manifold.app to run   (default: .build-cc/soak-Profile/…/Profile/Manifold.app)
 #   SOAK_PREFIX    label prefix              (default: soak → soak-whep-mediamtx, …)
-#   SOAK_LOG_DIR   where Manifold's log goes (default: ~/Desktop)
-#   SOAK_OUT       timelines, probe, watcher (default: ~/Desktop/manifold-soak)
+#   SOAK_LOG_DIR   where Manifold's log goes (default: $CODE_ROOT/_scratch/manifold-soak)
+#   SOAK_OUT       timelines, probe, watcher (default: $CODE_ROOT/_scratch/manifold-soak)
 #   MEDIAMTX_DIR   folder with the mediamtx binary (default: ~/Desktop/mediamtx)
 set -u
 S=${0:A:h}
 REPO=${S:h:h}
 APP="${MANIFOLD_APP:-$REPO/.build-cc/soak-Profile/Build/Products/Profile/Manifold.app}"
 PREFIX="${SOAK_PREFIX:-soak}"
-LOG_DIR="${SOAK_LOG_DIR:-$HOME/Desktop}"
-export SOAK_OUT="${SOAK_OUT:-$HOME/Desktop/manifold-soak}"
+LOG_DIR="${SOAK_LOG_DIR:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}"
+export SOAK_OUT="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}"
 MEDIAMTX_DIR="${MEDIAMTX_DIR:-$HOME/Desktop/mediamtx}"
-mkdir -p "$SOAK_OUT"
+mkdir -p "$SOAK_OUT" "$LOG_DIR"
 
 case "${1:-}" in
   mediamtx)        LABEL=$PREFIX-whep-mediamtx;        TR=whep ;;

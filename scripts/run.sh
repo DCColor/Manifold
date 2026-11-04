@@ -10,7 +10,7 @@
 #  affordances are reachable), its own derived-data folder. .build-run/ is gitignored (`.build-*/`) and separate from
 #  .build-cc/, so this never collides with a test session's build or with Xcode's Run button.
 #
-#  The app's output goes to ~/Desktop/manifold-run.log, overwritten on each launch. Not signed for release: the
+#  The app's output goes to $CODE_ROOT/_scratch/manifold-run/manifold-run.log (CODE_ROOT defaults to ~/Code), overwritten on each launch. Not signed for release: the
 #  licence Keychain prompt may appear (CLAUDE.md, docs/BUGS.md).
 #
 #  Refuses to launch while a Manifold from .build-run/ is still running: quit it first (Manifold ▸ Quit). Another
@@ -22,7 +22,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DERIVED="${REPO_ROOT}/.build-run"
 APP="${DERIVED}/Build/Products/Profile/Manifold.app"
 BIN="${APP}/Contents/MacOS/Manifold"
-LOG="${HOME}/Desktop/manifold-run.log"
+LOG_DIR="${CODE_ROOT:-${HOME}/Code}/_scratch/manifold-run"
+LOG="${LOG_DIR}/manifold-run.log"
 BUILD_LOG="${DERIVED}/build.log"
 
 die() { echo "run.sh: $*" >&2; exit 1; }
@@ -61,6 +62,7 @@ fi
 
 [[ -x "$BIN" ]] || die "no build at ${APP} — run without --no-build first"
 
+mkdir -p "$LOG_DIR" || die "cannot create ${LOG_DIR}"
 : > "$LOG" || die "cannot write ${LOG}"
 nohup "$BIN" > "$LOG" 2>&1 < /dev/null &
 disown

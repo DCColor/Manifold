@@ -23,7 +23,7 @@
 #   LOSS          packet-loss outages, "<s after connect>:<ms>" pairs, space-separated (e.g. "20:300 40:600"):
 #                 the session runs through lossrelay.py (Manifold → :9000 relay → :9001 listener), which
 #                 drops every packet both ways for <ms>. Logged to <label>.loss.log (§6.10, Stage 4).
-#   SOAK_OUT      where <label>.manifold.log / .ffmpeg.log go (default ~/Desktop/manifold-soak/repro)
+#   SOAK_OUT      where <label>.manifold.log / .ffmpeg.log go (default $CODE_ROOT/_scratch/manifold-soak/repro)
 # Needs UI scripting (Accessibility) for the process running it; osascript fails loudly without it.
 set -u
 LABEL=$1; FILE=$2
@@ -32,7 +32,7 @@ APP_BUNDLE="${MANIFOLD_APP:-$REPO/.build-cc/soak-Profile/Build/Products/Profile/
 APP="$APP_BUNDLE/Contents/MacOS/Manifold"
 [[ -x "$APP" ]] || { echo "build missing: $APP_BUNDLE (set MANIFOLD_APP)"; exit 2; }
 [[ -f "$FILE" ]] || { echo "no such file: $FILE"; exit 2; }
-D="${SOAK_OUT:-$HOME/Desktop/manifold-soak}/repro"; mkdir -p "$D"
+D="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}/repro"; mkdir -p "$D"
 LOG="$D/$LABEL.manifold.log"; FLOG="$D/$LABEL.ffmpeg.log"
 [[ -e "$LOG" ]] && { echo "$LOG already exists — pick another label"; exit 2; }
 say_() { echo "$(date +%H:%M:%S) $*"; }

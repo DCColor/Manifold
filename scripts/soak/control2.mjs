@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 const logPath = process.argv[2];
 if (!logPath || !existsSync(logPath)) { console.error('usage: node control2.mjs <manifold-log> [label]'); process.exit(2); }
 const label = process.argv[3] ?? basename(logPath, '.log');
-const DIR = (process.env.SOAK_OUT ?? `${homedir()}/Desktop/manifold-soak`).replace(/\/?$/, '/');
+const DIR = (process.env.SOAK_OUT ?? `${process.env.CODE_ROOT || `${homedir()}/Code`}/_scratch/manifold-soak`).replace(/\/?$/, '/');
 const tl = `${DIR}soak-${label}-timeline.json`;
 const sleep = s => new Promise(r => setTimeout(r, s * 1000));
 function mark(event, extra = {}) {

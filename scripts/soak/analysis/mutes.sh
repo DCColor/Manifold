@@ -8,7 +8,7 @@ set -eu
 A=${0:A:h}
 W=${1:?capture.wav}
 AE="${AUDIBLE_EVENTS_DIR:-$HOME/Desktop/manifold-audible-events}"
-OUT="${SOAK_OUT:-$HOME/Desktop/manifold-soak}"; mkdir -p "$OUT"
+OUT="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}"; mkdir -p "$OUT"
 PY="$AE/venv/bin/python"
 START=${2:-$("$PY" "$A/noise_start.py" "$W")}
 B=${W:t:r}

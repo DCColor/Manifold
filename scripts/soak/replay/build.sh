@@ -8,7 +8,7 @@
 set -eu
 R=${0:A:h}; REPO=${R:h:h:h}
 SRC="$REPO/Packages/ManifoldCore/Sources/LiveAudioResample"
-BIN="${SOAK_OUT:-$HOME/Desktop/manifold-soak}/replay-bin"; mkdir -p "$BIN"
+BIN="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}/replay-bin"; mkdir -p "$BIN"
 BEFORE=${1:-61d6f28}
 git -C "$REPO" show "${BEFORE}:Packages/ManifoldCore/Sources/LiveAudioResample/SenderReportLineFit.swift" > "$BIN/before-fit.swift"
 swiftc -O -o "$BIN/replay-before" "$R/lock.swift" "$BIN/before-fit.swift" "$R/open-loop/main.swift"

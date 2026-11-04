@@ -92,9 +92,10 @@ rather than discovering it is broken after a 20-minute archive.
 | libdatachannel + juice + srtp2 + usrsctp + Mbed TLS | `ThirdParty/libdatachannel/` | `build_mbedtls.sh` → `build_libdatachannel.sh` | v0.24.5 / v3.6.7 |
 | libsrt | `ThirdParty/libsrt/` | `scripts/build_libsrt.sh` | v1.5.6 |
 
-Scratch trees live in `$HOME` (`~/manifold-ffmpeg-build`, `~/Code/Manifold/manifold-webrtc-build`,
-`~/Code/Manifold/manifold-srt-build`) because the repo path contains spaces. **None are backed up.**
-They are reproducible from the pins, but reproducing them takes real time.
+Scratch trees live under `$CODE_ROOT/Manifold/` (`manifold-ffmpeg-build`, `manifold-webrtc-build`,
+`manifold-srt-build`), and `CODE_ROOT` defaults to `~/Code`. **None are in git.** Whether TrueNAS
+covers them is tracked in Graviton-Releases `docs/MACHINE-STATE.md`. They are reproducible from
+the pins, but reproducing them takes real time.
 
 ---
 

@@ -7,7 +7,7 @@
 import glob, os, re, subprocess, time
 
 HOME = os.path.expanduser('~')
-OUT = os.environ.get('SOAK_OUT', os.path.join(HOME, 'Desktop', 'manifold-soak'))
+OUT = os.environ.get('SOAK_OUT', os.path.join(os.environ.get('CODE_ROOT') or os.path.join(HOME, 'Code'), '_scratch', 'manifold-soak'))
 os.makedirs(OUT, exist_ok=True)
 WATCH = [os.path.join(HOME, 'Movies', '*.mov'), os.path.join(HOME, 'Music', 'Audio Hijack', '*.wav')]
 LOG = os.path.join(OUT, 'watcher.log')

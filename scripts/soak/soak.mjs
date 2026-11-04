@@ -11,7 +11,7 @@ const [label, logPath, transport] = process.argv.slice(2);
 if (!label || !logPath || !['ndi', 'srt', 'srt-cf', 'whep', 'whep-cf', 'whep-cf-long', 'hls'].includes(transport)) { console.error('usage: node soak.mjs <label> <manifold-log> <ndi|srt|srt-cf|whep|whep-cf|whep-cf-long|hls>'); process.exit(2); }
 if (existsSync(logPath) && process.env.SOAK_ATTACH !== '1') { console.error(`${logPath} already exists — use a fresh log name (or SOAK_ATTACH=1 for a Manifold launched just now)`); process.exit(2); }
 // Timelines, probes and stdout captures go to SOAK_OUT, never into the repo.
-const DIR = (process.env.SOAK_OUT ?? `${homedir()}/Desktop/manifold-soak`).replace(/\/?$/, '/');
+const DIR = (process.env.SOAK_OUT ?? `${process.env.CODE_ROOT || `${homedir()}/Code`}/_scratch/manifold-soak`).replace(/\/?$/, '/');
 mkdirSync(DIR, { recursive: true });
 const timelinePath = `${DIR}soak-${label}-timeline.json`;
 const timeline = { label, log: logPath, events: [] };

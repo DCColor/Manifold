@@ -30,8 +30,9 @@ SR fit (§18.7). Nothing here is part of the app build.
     `$AUDIBLE_EVENTS_DIR` (default `~/Desktop/manifold-audible-events`).
 
 Outputs (timelines, stdout captures, the RTSP sender probe, the watcher's CPU log, analysis cuts,
-replay binaries) go to `$SOAK_OUT` (default `~/Desktop/manifold-soak`), never into the repo.
-Manifold's log goes to `$SOAK_LOG_DIR/<label>.log` (default `~/Desktop`).
+replay binaries) go to `$SOAK_OUT` (default `$CODE_ROOT/_scratch/manifold-soak`, with `CODE_ROOT` defaulting to
+`~/Code`), never into the repo.
+Manifold's log goes to `$SOAK_LOG_DIR/<label>.log` (default `$CODE_ROOT/_scratch/manifold-soak`).
 
 ## Running a soak
 
@@ -164,7 +165,7 @@ fixture (§18.10). For Cloudflare SRT, with the passphrase in `$CF_SRT_PASS` and
 ```sh
 node scripts/soak/obsws.mjs 4455 StartStream
 ffmpeg -hide_banner -loglevel warning -i "${CF_SRT_URL}&passphrase=${CF_SRT_PASS}" -map 0:v -map 0:a \
-  -c copy -copyts -t 1500 -f mpegts ~/Desktop/manifold-soak/cfsrt-probe.ts
+  -c copy -copyts -t 1500 -f mpegts "${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak/cfsrt-probe.ts"
 node scripts/soak/obsws.mjs 4455 StopStream
 ```
 
@@ -186,7 +187,7 @@ STALLS="60:200 120:400" zsh scripts/soak/repro/run.sh <label> <file.ts>  # sende
 PES_PAYLOAD=default zsh scripts/soak/repro/run.sh <label> <file.ts>    # ffmpeg's own PES packing (several AAC frames)
 LOSS="20:300 60:1000" zsh scripts/soak/repro/run.sh <label> <file.ts>  # every packet dropped both ways for 300 ms at +20 s, … (lossrelay.py)
 zsh scripts/soak/repro/restamp.sh <in.ts> <out.ts>                     # video onto the exact frame grid
-python3 scripts/soak/analysis/avlag.py ~/Desktop/manifold-soak/repro/<label>.manifold.log
+python3 scripts/soak/analysis/avlag.py "${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak/repro/<label>.manifold.log"
 ```
 
 - **Needs a DEBUG (Profile) build:** the `MANIFOLD_SRT_DEBUG_URL` override and `[AV-LAG]` are
@@ -204,7 +205,7 @@ python3 scripts/soak/analysis/avlag.py ~/Desktop/manifold-soak/repro/<label>.man
 
 ```sh
 zsh scripts/soak/replay/build.sh [revision]   # before-fit from git (default 61d6f28)
-cd "$SOAK_OUT" && python3 <repo>/scripts/soak/analysis/extract.py ~/Desktop/<log>.log <name>
+cd "$SOAK_OUT" && python3 <repo>/scripts/soak/analysis/extract.py "${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak/<log>.log" <name>
 replay-bin/replay-before <name>; replay-bin/replay-after <name>
 replay-bin/replay-closed <name> [logonly]
 replay-bin/replay-closed synth <label> <media ppm> <depth noise ms> <seconds> [logonly]

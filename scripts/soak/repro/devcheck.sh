@@ -12,7 +12,7 @@
 set -u
 LABEL=${1:?label}; FILE=${2:-$HOME/Desktop/manifold-soak/repro/ref-nob.ts}
 REPO=${0:A:h:h:h:h}
-D="${SOAK_OUT:-$HOME/Desktop/manifold-soak}/repro"; mkdir -p "$D"
+D="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}/repro"; mkdir -p "$D"
 export STALLS="${STALLS:-90:300 130:400 180:1000 240:300}"
 export MANIFOLD_APP="${MANIFOLD_APP:-$REPO/.build-cc/recut4-Profile/Build/Products/Profile/Manifold.app}"
 OUT="$D/$LABEL.devcheck.out"

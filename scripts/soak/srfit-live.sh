@@ -1,7 +1,7 @@
 #!/bin/zsh
 # The SR fit's state in a running (or finished) Manifold log: its events, the latest window line,
 # the latest cross-check, and the session END lines. Read-only.
-#   zsh scripts/soak/srfit-live.sh ~/Desktop/soak-whep-mediamtx.log
+#   zsh scripts/soak/srfit-live.sh ~/Code/_scratch/manifold-soak/soak-whep-mediamtx.log
 L=${1:?log}
 echo "── events"
 grep -a -E "\[WHEP-SRFIT\] (FIRST LINE|slope IN USE|slope LEFT|⚠️|line STABLE|SR pairs RESUMED)" "$L" | cut -c12-260 | tail -15
