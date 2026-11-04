@@ -5452,7 +5452,7 @@ prediction says, even though (b) did not scatter.
    contain the marker, and the Release check holds (0 hits).
 3. **The DMG grows by ~22 MB** (the MP4s do not compress): from ~6–9 MB to ~30 MB.
    - The script's "probably under Nextcloud's threshold" reasoning no longer applies.
-   - Its default output is outside Nextcloud (`~/Builds/Manifold`), so nothing breaks.
+   - Its default output is outside Nextcloud (`~/Code/Manifold/Builds/Manifold`), so nothing breaks.
 4. **ffmpeg is now a release build tool** (Homebrew 8.1.1 here, with libx264), as is the label font
    `/System/Library/Fonts/Menlo.ttc`. Both are checked at preflight.
    - The clips' bytes depend on that ffmpeg/x264. On another build Mac they would differ in bytes,

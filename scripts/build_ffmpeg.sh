@@ -34,7 +34,7 @@
 # asserted in LAYER 2 below.
 #
 # ── WHY THIS SCRIPT: THE RECIPE HAD NO HOME ─────────────────────────────────
-# Until this file, the FFmpeg build was performed BY HAND in ~/manifold-ffmpeg-srt/ and the
+# Until this file, the FFmpeg build was performed BY HAND in ~/Code/Manifold/manifold-ffmpeg-srt/ and the
 # exact configure line survived only as line 1 of ffbuild/config.log inside that untracked
 # directory. The source was an extracted tarball with no .git, no tag, no checksum — so a
 # rebuild could silently pick up different source and nothing would notice. Both of those are
@@ -163,7 +163,7 @@ major_for() {
 # THE CONFIGURE LINE — THE ONE THING IN THIS FILE THAT MUST NOT DRIFT
 #
 # BASELINE is the line that produced the shipping 0.5.1 static archives, recovered verbatim
-# from line 1 of ~/manifold-ffmpeg-srt/FFmpeg-n8.1.1/ffbuild/config.log. It is recorded here
+# from line 1 of ~/Code/Manifold/manifold-ffmpeg-srt/FFmpeg-n8.1.1/ffbuild/config.log. It is recorded here
 # as documentation and as the thing the deltas are stated RELATIVE TO. It is not executed.
 #
 #   --prefix=<prefix> --enable-static --disable-shared --disable-programs --disable-doc

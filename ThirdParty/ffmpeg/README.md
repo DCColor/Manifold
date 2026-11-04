@@ -132,7 +132,7 @@ build if `HEAD` does not match it or if the working tree has local modifications
 
 ### What came before, and what was settled
 
-Until 2026-07-28 this build was performed **by hand** in `~/manifold-ffmpeg-srt/`, from an
+Until 2026-07-28 this build was performed **by hand** in `~/Code/Manifold/manifold-ffmpeg-srt/`, from an
 **extracted tarball with no `.git`, no tag and no checksum**. The exact configure line survived
 only as line 1 of `ffbuild/config.log` inside that untracked directory. Both gaps are now closed.
 

@@ -26,7 +26,7 @@
 #  The repo is under ~/Nextcloud, and Nextcloud's chunked upload has a documented history of
 #  corrupting large files on the sibling products. Manifold's DMG is ~6-9 MB so it is very
 #  probably under the threshold — but "probably" is not a reason to sync build output at all,
-#  so everything lands in ~/Builds/Manifold by default. If you ever point MANIFOLD_DIST_DIR
+#  so everything lands in ~/Code/Manifold/Builds/Manifold by default. If you ever point MANIFOLD_DIST_DIR
 #  back inside the Nextcloud tree, exclude it from sync first.
 #
 #  ── THE FAILURE MODE THIS SCRIPT IS BUILT AROUND ───────────────────────────────────────
@@ -59,7 +59,7 @@ Usage: scripts/release-mac.sh [Profile|Release] [--no-upload]
   --no-upload  build, sign, notarize, staple and verify, but do NOT publish
 
 Environment:
-  MANIFOLD_DIST_DIR       where artefacts are written (default: ~/Builds/Manifold)
+  MANIFOLD_DIST_DIR       where artefacts are written (default: ~/Code/Manifold/Builds/Manifold)
   GRAVITON_RELEASES_DIR   the Graviton-Releases checkout holding the shared uploader.
                           Default: searched for by walking up from the repo root.
 USAGE

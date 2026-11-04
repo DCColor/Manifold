@@ -15,13 +15,13 @@ re-copy it from the source tree — do not edit the copy.
 | Component | Version | Licence | Copied from |
 |---|---|---|---|
 | FFmpeg (libavformat, libavcodec, libavutil, libswscale, libswresample) | n8.1.1 @ `239f2c733de4` | LGPL-2.1-or-later | `git.ffmpeg.org/ffmpeg.git` at the pinned commit — `LICENSE.md`, `COPYING.LGPLv2.1` |
-| libsrt | 1.5.6 | MPL-2.0 | `~/manifold-srt-build/srt/LICENSE` |
-| libdatachannel | 0.24.5 | MPL-2.0 | `~/manifold-webrtc-build/libdatachannel/LICENSE` |
+| libsrt | 1.5.6 | MPL-2.0 | `~/Code/Manifold/manifold-srt-build/srt/LICENSE` |
+| libdatachannel | 0.24.5 | MPL-2.0 | `~/Code/Manifold/manifold-webrtc-build/libdatachannel/LICENSE` |
 | libjuice | 1.7.2 | MPL-2.0 | `…/libdatachannel/deps/libjuice/LICENSE` |
 | usrsctp | no version string in tree | BSD-3-Clause | `…/libdatachannel/deps/usrsctp/LICENSE.md` |
 | libsrtp2 | 2.8.0 | BSD-3-Clause | `…/libdatachannel/deps/libsrtp/LICENSE` |
 | plog | bundled with libdatachannel 0.24.5 | MIT | `…/libdatachannel/deps/plog/LICENSE` |
-| Mbed TLS | 3.6.7 | Apache-2.0 (dual, see below) | `~/manifold-webrtc-build/mbedtls/LICENSE` |
+| Mbed TLS | 3.6.7 | Apache-2.0 (dual, see below) | `~/Code/Manifold/manifold-webrtc-build/mbedtls/LICENSE` |
 | NDI SDK (Vizrt NDI AB) | 6.3.2.0 | proprietary — NDI SDK License Agreement | `/Library/NDI SDK for Apple/licenses/libndi_licenses.txt` |
 | Blackmagic DeckLink SDK | 16.0 | per-file notice; SDK under Blackmagic EULA | header of `docs/BlackmagicDeckLinkSDK16.0/Mac/include/DeckLinkAPIDispatch.cpp` |
 

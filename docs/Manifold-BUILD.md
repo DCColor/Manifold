@@ -43,7 +43,7 @@ scripts/release-mac.sh [Profile|Release] [--no-upload]
 - `Release` — public build, per-second telemetry compiled out
 - `--no-upload` — build, sign, notarize, staple, and verify, but do not publish
 
-`MANIFOLD_DIST_DIR` overrides the output directory (default `~/Builds/Manifold/`).
+`MANIFOLD_DIST_DIR` overrides the output directory (default `~/Code/Manifold/Builds/Manifold/`).
 `GRAVITON_RELEASES_DIR` overrides where the shared uploader is found (default: searched
 for by walking up from the repo root — see **Fragilities**).
 
@@ -55,7 +55,7 @@ is a hard failure.
 **No CI.** Every release is cut by hand from the build Mac. Mac-only, so there is no
 Windows runner and no GitHub Actions workflow in this repo at all.
 
-**Output goes outside the repo** — `~/Builds/Manifold/<version>-<build>-<config>-<stamp>/`
+**Output goes outside the repo** — `~/Code/Manifold/Builds/Manifold/<version>-<build>-<config>-<stamp>/`
 — because the repo lives inside a Nextcloud sync tree whose chunked upload has corrupted
 large artifacts on sibling products. This is the pattern the Electron apps should copy.
 
@@ -91,8 +91,8 @@ rather than discovering it is broken after a 20-minute archive.
 | libdatachannel + juice + srtp2 + usrsctp + Mbed TLS | `ThirdParty/libdatachannel/` | `build_mbedtls.sh` → `build_libdatachannel.sh` | v0.24.5 / v3.6.7 |
 | libsrt | `ThirdParty/libsrt/` | `scripts/build_libsrt.sh` | v1.5.6 |
 
-Scratch trees live in `$HOME` (`~/manifold-ffmpeg-build`, `~/manifold-webrtc-build`,
-`~/manifold-srt-build`) because the repo path contains spaces. **None are backed up.**
+Scratch trees live in `$HOME` (`~/manifold-ffmpeg-build`, `~/Code/Manifold/manifold-webrtc-build`,
+`~/Code/Manifold/manifold-srt-build`) because the repo path contains spaces. **None are backed up.**
 They are reproducible from the pins, but reproducing them takes real time.
 
 ---
@@ -128,7 +128,7 @@ They are reproducible from the pins, but reproducing them takes real time.
 
 **Unless someone types `Release`, Profile is what gets published to the public
 `releases.graviton.tools/manifold/mac-arm64` URL.** Every build cut to date has been
-Profile — confirmed from `~/Builds/Manifold/`, which holds 0.5.0 builds 2–4 and 0.5.1
+Profile — confirmed from `~/Code/Manifold/Builds/Manifold/`, which holds 0.5.0 builds 2–4 and 0.5.1
 builds 5–6, all Profile.
 
 That is currently fine — everyone downloading is a tester — and stops being fine the moment
@@ -245,8 +245,8 @@ a confusing way.
 **Absolute-path `.a` entries in `OTHER_LDFLAGS`** are wrapped as `'"$(SRCROOT)/…"'` because
 the repo path contains spaces. Brittle if quoting behaviour changes.
 
-**Hardcoded paths:** `~/Builds/Manifold`, the three `$HOME` scratch trees, the legacy
-`~/manifold-ffmpeg-srt/FFmpeg-n8.1.1` provenance tree, `/Library/NDI SDK for Apple/include`,
+**Hardcoded paths:** `~/Code/Manifold/Builds/Manifold`, the three `$HOME` scratch trees, the legacy
+`~/Code/Manifold/manifold-ffmpeg-srt/FFmpeg-n8.1.1` provenance tree, `/Library/NDI SDK for Apple/include`,
 `/usr/local/lib/libndi.dylib`, `/Library/Frameworks/DeckLinkAPI.framework`, and
 `docs/BlackmagicDeckLinkSDK16.0/Mac/include`.
 
@@ -288,7 +288,7 @@ what takes effect. The script's own `-configuration` override means its behaviou
 unaffected, but the comment is wrong and should be corrected.
 
 **Toolchain versions are recorded nowhere.** Nothing pins Xcode, xcodegen, create-dmg, or
-wrangler. The archive logs live outside the checkout in `~/Builds/Manifold/*/logs/`.
+wrangler. The archive logs live outside the checkout in `~/Code/Manifold/Builds/Manifold/*/logs/`.
 
 **No git tags.** Release state lives in the `CURRENT_PROJECT_VERSION` bump commit and the
 R2 archive path. Consistent with the rest of the estate.

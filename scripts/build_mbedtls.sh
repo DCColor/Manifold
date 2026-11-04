@@ -5,7 +5,7 @@
 #
 #   ./scripts/build_mbedtls.sh
 #
-# Installs into an isolated prefix ($HOME/manifold-webrtc-build/prefix) which
+# Installs into an isolated prefix ($HOME/Code/Manifold/manifold-webrtc-build/prefix) which
 # scripts/build_libdatachannel.sh then points CMAKE_PREFIX_PATH at. Nothing is
 # staged into the repo by this script — libdatachannel's script does that.
 #

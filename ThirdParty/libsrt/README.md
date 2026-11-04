@@ -49,7 +49,7 @@ robust against either side's flags drifting later, and it is free.
 
 ## Encryption: Mbed TLS, reusing the one already built
 Configured with `-DENABLE_ENCRYPTION=ON -DUSE_ENCLIB=mbedtls` against the **existing**
-isolated Mbed TLS 3.6.7 in `~/manifold-webrtc-build/prefix` — the same one
+isolated Mbed TLS 3.6.7 in `~/Code/Manifold/manifold-webrtc-build/prefix` — the same one
 `scripts/build_mbedtls.sh` built for libdatachannel's DTLS. No second crypto library
 is built, and **no OpenSSL and no GnuTLS enter this project**: OpenSSL has the
 largest collision surface with a Homebrew copy, GnuTLS drags in nettle + gmp +
@@ -123,9 +123,9 @@ redundancy Manifold does not use), `ENABLE_AEAD_API_PREVIEW` and `ENABLE_MAXREXM
 ./scripts/build_mbedtls.sh          # only if the isolated prefix is missing
 ./scripts/build_libsrt.sh           # libsrt -> its own prefix -> staged here
 ```
-`build_libsrt.sh` compiles in `~/manifold-srt-build` (a space-free scratch dir; the
-repo path contains spaces) and installs into `~/manifold-srt-build/prefix`. It only
-**reads** `~/manifold-webrtc-build/prefix`, so the WebRTC prefix stays exactly as
+`build_libsrt.sh` compiles in `~/Code/Manifold/manifold-srt-build` (a space-free scratch dir; the
+repo path contains spaces) and installs into `~/Code/Manifold/manifold-srt-build/prefix`. It only
+**reads** `~/Code/Manifold/manifold-webrtc-build/prefix`, so the WebRTC prefix stays exactly as
 `build_mbedtls.sh` and `build_libdatachannel.sh` left it, and it shares no directory
 with `ThirdParty/ffmpeg`.
 

@@ -317,7 +317,7 @@ enum Attributions {
             role: "The SRT transport",
             tier: .primary,
             license: "MPL-2.0",
-            provenance: "~/manifold-srt-build/srt/LICENSE",
+            provenance: "~/Code/Manifold/manifold-srt-build/srt/LICENSE",
             note: "Statically linked. Its LICENSE file is byte-identical to the MPL-2.0 text "
                 + "below (verified by SHA-1), shared with libdatachannel and libjuice — one copy "
                 + "ships and all three point at it.",
@@ -331,7 +331,7 @@ enum Attributions {
             role: "The WHEP / WebRTC transport",
             tier: .primary,
             license: "MPL-2.0",
-            provenance: "~/manifold-webrtc-build/libdatachannel/LICENSE",
+            provenance: "~/Code/Manifold/manifold-webrtc-build/libdatachannel/LICENSE",
             note: "Statically linked. Same MPL-2.0 text as libsrt and libjuice.",
             documents: [LicenseDoc(title: "Mozilla Public License 2.0 — full text",
                                    resource: "MPL-2.0")]),
@@ -343,7 +343,7 @@ enum Attributions {
             role: "DTLS for WHEP; AES for SRT passphrases",
             tier: .primary,
             license: "Apache-2.0 (dual-licensed Apache-2.0 OR GPL-2.0-or-later)",
-            provenance: "~/manifold-webrtc-build/mbedtls/LICENSE",
+            provenance: "~/Code/Manifold/manifold-webrtc-build/mbedtls/LICENSE",
             note: "Statically linked; the DTLS backend for libdatachannel and the AES/PBKDF2 "
                 + "provider for libsrt's stream passphrase. Mbed TLS lets the user choose which "
                 + "license to take it under — WE TAKE APACHE-2.0. The upstream LICENSE file "
@@ -405,7 +405,7 @@ enum Attributions {
             role: "ICE candidate gathering",
             tier: .transitive,
             license: "MPL-2.0",
-            provenance: "~/manifold-webrtc-build/libdatachannel/deps/libjuice/LICENSE",
+            provenance: "~/Code/Manifold/manifold-webrtc-build/libdatachannel/deps/libjuice/LICENSE",
             note: "Statically linked. Same MPL-2.0 text as libsrt and libdatachannel.",
             documents: [LicenseDoc(title: "Mozilla Public License 2.0 — full text",
                                    resource: "MPL-2.0")]),
@@ -417,7 +417,7 @@ enum Attributions {
             role: "SCTP data channels",
             tier: .transitive,
             license: "BSD-3-Clause",
-            provenance: "~/manifold-webrtc-build/libdatachannel/deps/usrsctp/LICENSE.md",
+            provenance: "~/Code/Manifold/manifold-webrtc-build/libdatachannel/deps/usrsctp/LICENSE.md",
             note: "Statically linked. Vendored as a libdatachannel submodule; its CMakeLists "
                 + "declares no project version, so NO VERSION IS CLAIMED rather than one guessed.",
             documents: [LicenseDoc(title: "usrsctp LICENSE.md", resource: "usrsctp-LICENSE")]),
@@ -429,7 +429,7 @@ enum Attributions {
             role: "SRTP media encryption",
             tier: .transitive,
             license: "BSD-3-Clause",
-            provenance: "~/manifold-webrtc-build/libdatachannel/deps/libsrtp/LICENSE",
+            provenance: "~/Code/Manifold/manifold-webrtc-build/libdatachannel/deps/libsrtp/LICENSE",
             note: "Statically linked.",
             documents: [LicenseDoc(title: "libsrtp LICENSE", resource: "libsrtp-LICENSE")]),
         Attribution(
@@ -440,7 +440,7 @@ enum Attributions {
             role: "Logging inside libdatachannel",
             tier: .transitive,
             license: "MIT",
-            provenance: "~/manifold-webrtc-build/libdatachannel/deps/plog/LICENSE",
+            provenance: "~/Code/Manifold/manifold-webrtc-build/libdatachannel/deps/plog/LICENSE",
             note: "Header-only; confirmed present in the shipped archive (its symbols appear in "
                 + "libdatachannel.a). nlohmann/json is vendored alongside it but is NOT compiled "
                 + "in — no symbols — so it is not credited.",

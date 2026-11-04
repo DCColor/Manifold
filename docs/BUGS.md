@@ -7052,7 +7052,7 @@ Manifold sends its own PLI and RR, like its NACK, through `rtcSendMessage`. Upst
 should pass NACK, RR and PLI alike, and the patch would be dead code.
 
 **The evidence so far.** Source reading only: `impl::Track::outgoing` and `Track::incoming` in the
-v0.24.5 tree at `~/manifold-webrtc-build/libdatachannel` (the patched copy; `git diff` shows the one
+v0.24.5 tree at `~/Code/Manifold/manifold-webrtc-build/libdatachannel` (the patched copy; `git diff` shows the one
 hunk), and the 4e-1 bridge, which no longer calls `rtcChainRtcpReceivingSession` (confirmed absent
 from the Profile binary's undefined symbols). **Not tested against an unpatched archive.**
 
@@ -11571,7 +11571,7 @@ it, none of which is a provenance chain:
 3. `nacks built` vs `toWire` vs `refused` in the session summary separates "the library refused
    it" from "the server did not retransmit".
 
-**State as of 2026-08-25.** Both working trees — `~/manifold-webrtc-build/libdatachannel` (the
+**State as of 2026-08-25.** Both working trees — `~/Code/Manifold/manifold-webrtc-build/libdatachannel` (the
 script's own) and `~/ldc-nack` (a manual clone) — are patched, and the patched archive is staged
 in `ThirdParty/libdatachannel/lib/`. That state was reached by a hand-driven build, not by a
 script run, which is exactly the gap this entry is about.

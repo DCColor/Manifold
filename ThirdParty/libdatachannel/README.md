@@ -152,7 +152,7 @@ Two scripts, in this order (the second refuses to run without the first):
 ./scripts/build_mbedtls.sh          # DTLS backend -> isolated prefix
 ./scripts/build_libdatachannel.sh   # transport + deps -> isolated prefix -> staged here
 ```
-Both compile in `~/manifold-webrtc-build` (a space-free scratch dir; the repo path
+Both compile in `~/Code/Manifold/manifold-webrtc-build` (a space-free scratch dir; the repo path
 contains spaces) into an isolated prefix that shares no directory with
 `ThirdParty/ffmpeg`. The second stages `lib/` + `include/` here and verifies arch,
 Homebrew-path cleanliness, FFmpeg-symbol absence, and DTLS-SRTP support.

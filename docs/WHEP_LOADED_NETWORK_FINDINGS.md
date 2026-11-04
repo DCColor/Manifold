@@ -553,7 +553,7 @@ error, and it came from prioritising on the evidence that happened to arrive fir
 
 **Was: "our SDP offer advertises `nack`; whether libdatachannel acts on it has never been
 verified."** It is verified now, in three parts. Read against the libdatachannel v0.24.5 sources
-(`~/manifold-webrtc-build/libdatachannel`) and the vendored archive's symbol table.
+(`~/Code/Manifold/manifold-webrtc-build/libdatachannel`) and the vendored archive's symbol table.
 
 **1. Cloudflare agrees to retransmit.** The answer SDP carries both `a=rtcp-fb:96 nack` and
 `a=rtcp-fb:96 nack pli`. An earlier reading of "no feedback lines in the answer" was a PARSER

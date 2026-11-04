@@ -2,7 +2,7 @@
 """Fixtures for docs/testing/SETTINGS_TRANSFER_TEST_PROCEDURE.md: every file an outside tester imports.
 
     python3 scripts/settings-fixtures/make_fixtures.py            # writes build/settings-fixtures/ and checks it
-    python3 scripts/settings-fixtures/make_fixtures.py --zip      # and writes the zip to ~/Builds/Manifold/
+    python3 scripts/settings-fixtures/make_fixtures.py --zip      # and writes the zip to ~/Code/Manifold/Builds/Manifold/
     python3 scripts/settings-fixtures/make_fixtures.py --zip --force   # replaces an existing zip
 
 NEEDS: Python 3.9 or later and the `cryptography` package (`pip install cryptography`; 49.0.0 was used). The standard
