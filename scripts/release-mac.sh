@@ -23,11 +23,12 @@
 #
 #  ── WHY THE OUTPUT LIVES OUTSIDE THE REPO ──────────────────────────────────────────────
 #
-#  The repo is under ~/Nextcloud, and Nextcloud's chunked upload has a documented history of
-#  corrupting large files on the sibling products. Manifold's DMG is ~6-9 MB so it is very
-#  probably under the threshold — but "probably" is not a reason to sync build output at all,
-#  so everything lands in ~/Code/Manifold/Builds/Manifold by default. If you ever point MANIFOLD_DIST_DIR
-#  back inside the Nextcloud tree, exclude it from sync first.
+#  The repo lives in ~/Code, outside any sync folder, and build output stays out of the repo:
+#  everything lands in ~/Code/Manifold/Builds/Manifold by default. Nextcloud's chunked upload has
+#  a documented history of corrupting large files on the sibling products. Manifold's DMG is
+#  ~6-9 MB so it is very probably under the threshold — but "probably" is not a reason to sync
+#  build output at all. If you ever point MANIFOLD_DIST_DIR inside a Nextcloud tree, exclude it
+#  from sync first.
 #
 #  ── THE FAILURE MODE THIS SCRIPT IS BUILT AROUND ───────────────────────────────────────
 #

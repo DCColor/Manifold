@@ -56,8 +56,9 @@ is a hard failure.
 Windows runner and no GitHub Actions workflow in this repo at all.
 
 **Output goes outside the repo** — `~/Code/Manifold/Builds/Manifold/<version>-<build>-<config>-<stamp>/`
-— because the repo lives inside a Nextcloud sync tree whose chunked upload has corrupted
-large artifacts on sibling products. This is the pattern the Electron apps should copy.
+— so build artifacts stay out of the repo. The repo lives in `~/Code`, outside any sync
+folder; Nextcloud's chunked upload has corrupted large artifacts on sibling products, so
+build output must never land in a sync folder. This is the pattern the Electron apps should copy.
 
 ---
 

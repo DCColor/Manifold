@@ -13,7 +13,7 @@
 #   verify-4e1.sh compare <headlog> <newlog>   steering / A/V lines side by side
 
 REPO="/Users/robbiecarman/Code/Manifold/Manifold"
-SCRATCH="/private/tmp/claude-501/-Users-robbiecarman-Nextcloud-Vibe-Code-Output-Manifold-Manifold/6dc017b2-3055-4478-af24-2d3545731f3a/scratchpad"
+SCRATCH="$(mktemp -d)"
 NEW="$REPO/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"
 OLD="$SCRATCH/head/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"
 
