@@ -6,7 +6,7 @@ stream copy first: a copy cut starts video at a keyframe and audio anywhere, whi
 offset. Needs avsync.py ($AVSYNC_DIR) and numpy (the audible-events venv).
 Usage: probe_av.py <file.ts|.mov> [window start s …, default 180 1260]"""
 import sys, os
-sys.path.insert(0, os.environ.get('AVSYNC_DIR', os.path.expanduser('~/Desktop/manifold-avsync')))
+sys.path.insert(0, os.environ.get('AVSYNC_DIR', os.path.join(os.environ.get('CODE_ROOT') or os.path.expanduser('~/Code'), 'Manifold', 'fixtures', 'manifold-avsync')))
 import numpy as np
 from avsync import frame_luma, flash_times, audio, beep_times, FIXTURE_OFFSET_MS
 T = 1001 / 24000.0; PERIOD = 1.0 / abs(round(1.0 / T) - 1.0 / T)

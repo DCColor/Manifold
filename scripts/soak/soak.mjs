@@ -37,7 +37,7 @@ const T = { captureA: 180, noiseOn: 330, noiseOff: 1530, captureB: 1560, end: 17
 const DIAG = process.env.SOAK_DIAG === '1';
 const PROBE_S = 135;   // ≥ 130 s: three whole 41.7 s fixture grid periods, as the captures
 const DIAG_DIR = `${DIR}soak-${label}-diag/`;
-const PROBE_PY = `${homedir()}/Desktop/manifold-audible-events/venv/bin/python`;
+const PROBE_PY = `${process.env.CODE_ROOT || `${homedir()}/Code`}/Manifold/fixtures/manifold-audible-events/venv/bin/python`;
 const PROBE_AV = new URL('./analysis/probe_av.py', import.meta.url).pathname;
 
 const sleep = s => new Promise(r => setTimeout(r, s * 1000));

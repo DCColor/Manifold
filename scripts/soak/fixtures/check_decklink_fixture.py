@@ -10,7 +10,7 @@ Usage: check_decklink_fixture.py [file.mov]"""
 import os, subprocess, sys
 import numpy as np
 
-SRC = os.path.expanduser('~/Desktop/Manifold-Test-Sources')
+SRC = os.path.join(os.environ.get('CODE_ROOT') or os.path.expanduser('~/Code'), 'Manifold', 'fixtures', 'Manifold-Test-Sources')
 F = sys.argv[1] if len(sys.argv) > 1 else f'{SRC}/decklink-flash-beep-noise-2398-45m.mov'
 FS, SPF, FRAMES, T = 48000, 2002, 64735, 1001 / 24000
 NOISE_ON, NOISE_OFF, BEEP_LEN = 330, 1530, 1920

@@ -10,7 +10,7 @@
 # Manifold (§6.1), and a relaunched copy has no debug SRT URL. This script stops the run if
 # Manifold quits or a second copy appears.
 set -u
-LABEL=${1:?label}; FILE=${2:-$HOME/Desktop/manifold-soak/repro/ref-nob.ts}
+LABEL=${1:?label}; FILE=${2:-${CODE_ROOT:-$HOME/Code}/Manifold/fixtures/ref-nob.ts}
 REPO=${0:A:h:h:h:h}
 D="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}/repro"; mkdir -p "$D"
 export STALLS="${STALLS:-90:300 130:400 180:1000 240:300}"
@@ -54,7 +54,7 @@ cat "$OUT"
 cat <<EOT
 
 Analyse (the tracker's venv has numpy):
-  ~/Desktop/manifold-audible-events/venv/bin/python $REPO/scripts/soak/analysis/devicecheck.py <audio-hijack.wav> $D/$LABEL.manifold.log
+  ${CODE_ROOT:-$HOME/Code}/Manifold/fixtures/manifold-audible-events/venv/bin/python $REPO/scripts/soak/analysis/devicecheck.py <audio-hijack.wav> $D/$LABEL.manifold.log
   ffmpeg -i <obs-recording.mov> -vn -ac 2 -c:a pcm_f32le $D/$LABEL.obs.wav
-  ~/Desktop/manifold-audible-events/venv/bin/python $REPO/scripts/soak/analysis/devicecheck.py $D/$LABEL.obs.wav $D/$LABEL.manifold.log
+  ${CODE_ROOT:-$HOME/Code}/Manifold/fixtures/manifold-audible-events/venv/bin/python $REPO/scripts/soak/analysis/devicecheck.py $D/$LABEL.obs.wav $D/$LABEL.manifold.log
 EOT

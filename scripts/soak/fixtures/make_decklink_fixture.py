@@ -22,11 +22,11 @@ boundary at or after it. Grid-corrected, beep − flash is 0. As written it is �
 0…41.7 ms, mean T/2 = 20.854 ms over whole 41.7 s grid periods.
 
 Usage: make_decklink_fixture.py [out.mov]   (needs numpy and ffmpeg; the audible-events venv has numpy)
-Writes ~/Desktop/Manifold-Test-Sources/decklink-flash-beep-noise-2398-45m.mov by default."""
+Writes $CODE_ROOT/Manifold/fixtures/Manifold-Test-Sources/decklink-flash-beep-noise-2398-45m.mov by default."""
 import os, subprocess, sys
 import numpy as np
 
-SRC = os.path.expanduser('~/Desktop/Manifold-Test-Sources')
+SRC = os.path.join(os.environ.get('CODE_ROOT') or os.path.expanduser('~/Code'), 'Manifold', 'fixtures', 'Manifold-Test-Sources')
 OUT = sys.argv[1] if len(sys.argv) > 1 else f'{SRC}/decklink-flash-beep-noise-2398-45m.mov'
 FIXTURE = f'{SRC}/criterion12-flash-beep-25p-60s.mov'
 NOISE = f'{SRC}/mutes-pitch-ref-1200s.wav'

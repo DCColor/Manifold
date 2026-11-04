@@ -1,13 +1,13 @@
 #!/bin/zsh
 # Mutes and dropouts in a soak's 20-min noise segment (criterion 1), via the device-output tracker.
 #   zsh scripts/soak/analysis/mutes.sh <audio-hijack.wav> [start-seconds]
-# Needs $AUDIBLE_EVENTS_DIR (default ~/Desktop/manifold-audible-events): reference_track.py, its
+# Needs $AUDIBLE_EVENTS_DIR (default $CODE_ROOT/Manifold/fixtures/manifold-audible-events): reference_track.py, its
 # venv, and ref-1200s.wav. Writes the cut, events JSON and track into $SOAK_OUT.
 # Hits within ~1 s of either end of the segment are its edges, not mutes.
 set -eu
 A=${0:A:h}
 W=${1:?capture.wav}
-AE="${AUDIBLE_EVENTS_DIR:-$HOME/Desktop/manifold-audible-events}"
+AE="${AUDIBLE_EVENTS_DIR:-${CODE_ROOT:-$HOME/Code}/Manifold/fixtures/manifold-audible-events}"
 OUT="${SOAK_OUT:-${CODE_ROOT:-$HOME/Code}/_scratch/manifold-soak}"; mkdir -p "$OUT"
 PY="$AE/venv/bin/python"
 START=${2:-$("$PY" "$A/noise_start.py" "$W")}

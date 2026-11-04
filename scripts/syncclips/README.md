@@ -23,7 +23,7 @@ python3 scripts/syncclips/pairing_check.py /tmp/syncclips.json
 ```
 
 - `verify.py` needs numpy (as `scripts/soak/analysis/c12.py` does). On this Mac that is the
-  audible-events venv's python (`~/Desktop/manifold-audible-events/venv/bin/python`). Nothing is
+  audible-events venv's python (`$CODE_ROOT/Manifold/fixtures/manifold-audible-events/venv/bin/python`, with `CODE_ROOT` defaulting to `~/Code`). Nothing is
   installed for it.
 - `FFPROBE` defaults to `ffprobe` on PATH.
 - `pairing_check.py` uses the MEDIAN score. The app's matcher uses the MEAN score (§19.9 Decisions 5);
@@ -73,7 +73,8 @@ The template's media paths are placeholders. Make a filled COPY, then import the
 (Scene Collection ▸ Import):
 
 ```sh
-sed "s#__SYNCCLIPS_DIR__#$PWD/build/syncclips#g" scripts/syncclips/obs-scene-collection.json > ~/Desktop/manifold-sync-clips.obs.json
+OUT="${CODE_ROOT:-$HOME/Code}/_scratch/manifold-syncclips"; mkdir -p "$OUT"
+sed "s#__SYNCCLIPS_DIR__#$PWD/build/syncclips#g" scripts/syncclips/obs-scene-collection.json > "$OUT/manifold-sync-clips.obs.json"
 ```
 
 Set OBS's video frame rate to the clip's rate before streaming it.

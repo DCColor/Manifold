@@ -16,18 +16,18 @@ SR fit (§18.7). Nothing here is part of the app build.
     `open -n -a OBS --args --multi --profile Recorder --collection "AV Capture" --websocket_port 4456`.
     It captures the display and, through a `macOS Audio Capture` source, Manifold's audio. That
     source must be re-picked by hand after every Manifold launch; the orchestrator's voice asks.
-- **`~/Desktop/Manifold-Test-Sources/`**: `criterion12-flash-beep-25p-60s.mov`, the file control
-  played in Manifold.
+- **`$CODE_ROOT/Manifold/fixtures/Manifold-Test-Sources/`** (`CODE_ROOT` defaults to `~/Code`):
+  `criterion12-flash-beep-25p-60s.mov`, the file control played in Manifold.
 - **Audio Hijack** recording Manifold's output, for the mute count.
 - **A Manifold build.**
   `xcodebuild -project Manifold.xcodeproj -scheme Manifold -configuration Profile -derivedDataPath ./.build-cc/soak-Profile CODE_SIGNING_ALLOWED=NO build`,
   or point `MANIFOLD_APP` at any `Manifold.app`.
-- **For MediaMTX runs:** the `mediamtx` binary in `$MEDIAMTX_DIR` (default `~/Desktop/mediamtx`).
+- **For MediaMTX runs:** the `mediamtx` binary in `$MEDIAMTX_DIR` (default `$CODE_ROOT/Manifold/fixtures/mediamtx`).
 - `node` (≥ 22, for its built-in WebSocket), `python3`, `ffmpeg`, `swiftc`.
 - **Analysis dependencies kept outside the repo on purpose** (BUGS.md, "Sync calibration mode"):
-  - `avsync.py`, the flash/beep detector, in `$AVSYNC_DIR` (default `~/Desktop/manifold-avsync`);
+  - `avsync.py`, the flash/beep detector, in `$AVSYNC_DIR` (default `$CODE_ROOT/Manifold/fixtures/manifold-avsync`);
   - the device-output mute tracker `reference_track.py`, its venv and `ref-1200s.wav`, in
-    `$AUDIBLE_EVENTS_DIR` (default `~/Desktop/manifold-audible-events`).
+    `$AUDIBLE_EVENTS_DIR` (default `$CODE_ROOT/Manifold/fixtures/manifold-audible-events`).
 
 Outputs (timelines, stdout captures, the RTSP sender probe, the watcher's CPU log, analysis cuts,
 replay binaries) go to `$SOAK_OUT` (default `$CODE_ROOT/_scratch/manifold-soak`, with `CODE_ROOT` defaulting to
@@ -94,7 +94,7 @@ zsh scripts/soak/go.sh mediamtx --sender decklink     # label <prefix>-decklink-
 ```
 
 **The fixture** is made once by `fixtures/make_decklink_fixture.py` (the audible-events venv's python):
-`~/Desktop/Manifold-Test-Sources/decklink-flash-beep-noise-2398-45m.mov`.
+`$CODE_ROOT/Manifold/fixtures/Manifold-Test-Sources/decklink-flash-beep-noise-2398-45m.mov`.
 - **Video:** ProRes 422 Proxy, 1920×1080 at 24000/1001, 64 735 frames (≈ 45 min). Black, with one
   white frame per whole second (the first frame at or after it).
 - **Audio:** pcm_s24le 48 kHz stereo.

@@ -8,7 +8,7 @@
 Usage: c12.py <capture.mov> [--file]   (--file: a disk-playback control, no sender grid)"""
 import sys
 import os
-sys.path.insert(0, os.environ.get('AVSYNC_DIR', os.path.expanduser('~/Desktop/manifold-avsync')))
+sys.path.insert(0, os.environ.get('AVSYNC_DIR', os.path.join(os.environ.get('CODE_ROOT') or os.path.expanduser('~/Code'), 'Manifold', 'fixtures', 'manifold-avsync')))
 import numpy as np
 from avsync import frame_luma, flash_times, audio, beep_times, FIXTURE_OFFSET_MS
 
