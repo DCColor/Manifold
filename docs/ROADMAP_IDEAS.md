@@ -9,7 +9,7 @@ What: Export/Import Settings (shortcuts + streams) for moving between workstatio
 complete, URLs and passphrases included, in a file encrypted with a password the user chooses (AES-GCM-256, PBKDF2-HMAC-SHA256).
 A shortcuts-only file stays plain JSON. Stream import is add-only. The automatic backup covers shortcuts only.
 
-Next: A5 (file type, privacy audit, user guide), then the Air timing and the signed-build checks in A6.
+Next: A5 (file type, privacy audit, user guide), then the Studio-to-Air round trip and the signed-build checks in A6.
 Size guess: about 6 sessions
 
 ## Keyboard Shortcuts search: NSTableView reentrancy warning

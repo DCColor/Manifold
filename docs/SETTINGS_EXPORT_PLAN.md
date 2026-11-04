@@ -39,7 +39,7 @@ first-connect prompt, conflict rows, and `id` in the file. Decision 6 is a much 
   preview says "passphrase differs". The file's passphrase is never silently dropped.
 - **R3. An existing stream whose URL cannot be read during the comparison (§4.2).** Treated as different. The worst case is a
   duplicate "(copy)" the user can delete, and the preview says the comparison could not be made.
-- **R4. Iterations and password length (§2.5).** 1,000,000 iterations, 12 characters. The Air is measured before the count is frozen.
+- **R4. Iterations and password length (§2.5).** 1,000,000 iterations, 12 characters. The count is frozen (Robbie, 2026-11-03; reasoning in §2.5).
 - **R5. Undo Import (§4.4).** Lasts while the summary is open. After that, stream removal is by hand and shortcuts use Restore from
   Backup…
 - **R6. Damaged JSON (§2.5).** A file that cannot be read as a header is refused before any prompt with "This file is damaged, or it
@@ -213,21 +213,25 @@ go inside it, shortcuts included, so there is one payload. Each stream entry:
 | Cipher | AES-GCM-256, CryptoKit `AES.GCM` | Measured: 12-byte nonce, 16-byte tag |
 | KDF | `CCKeyDerivationPBKDF`, `kCCPRFHmacAlgSHA256`, 32-byte key | CommonCrypto |
 | Salt, nonce | 16 and 12 random bytes, fresh for every export | `SecRandomCopyBytes` |
-| Iterations | **1,000,000 (R4)**, frozen after the Air is measured | OWASP's current figure for PBKDF2-HMAC-SHA256 is 600,000. The cost is once per export or import, so going above it is cheap, and the file may sit somewhere for years |
+| Iterations | **1,000,000 (R4), frozen** | OWASP's current figure for PBKDF2-HMAC-SHA256 is 600,000. The cost is once per export or import, so going above it is cheap, and the file may sit somewhere for years |
 | Accepted on import | 600,000 to 10,000,000 | Outside this, the one failure message, with no KDF run. The ceiling stops a tampered header from hanging the app |
 | Password | **At least 12 characters (R4)**, no composition rules, Unicode NFC before UTF-8 | NFC so the same password typed on two Macs gives the same bytes |
 | Authenticated data | The header: every top-level field except `payload`, as sorted-keys JSON, pinned by a frozen test vector | Changing any header field fails the open, including the salt, count or iterations |
 
 **Measured time, one derivation, median of five:**
 
-| Iterations | This Mac (M4 Max) | The Air |
-|---|---|---|
-| 600,000 | 82 ms | UNKNOWN, measured in A6 |
-| 1,000,000 | 134 ms | UNKNOWN, measured in A6 |
-| 2,000,000 | 272 ms | UNKNOWN, measured in A6 |
+| Iterations | This Mac (M4 Max) |
+|---|---|
+| 600,000 | 82 ms |
+| 1,000,000 | 134 ms |
+| 2,000,000 | 272 ms |
 
-The KDF is single-threaded, and it stays off the main thread regardless. A6 runs the same probe on the Air before the value is
-frozen. It is stated in the header, so raising it later needs no format change.
+The KDF is single-threaded, and it stays off the main thread regardless.
+
+**Frozen at 1,000,000 (Robbie, 2026-11-03). The Air measurement is not needed.** The Air is an M4, with the same cores as the Studio, so
+a single-threaded derivation should take about the 134 ms measured here. The slowest supported Mac, an M1, works out to roughly 220 ms.
+That is an estimate, not a measurement, and it is paid once per export or import. The count is stated in the header, so raising it later
+needs no format change.
 
 **Failure:** `AES.GCM.open` cannot tell a wrong password from a changed file, which is why the message is one message. Nothing is
 written, and nothing distinguishes the cases in the log (R6 for what happens before the prompt).
@@ -493,7 +497,7 @@ title above them and a line says what Export is waiting for. The Export and Impo
 
 The Air, signed build (A6):
 
-10. **Run the PBKDF2 timing probe, and freeze the iteration count.**
+10. ~~Run the PBKDF2 timing probe.~~ **Not needed:** the count is frozen at 1,000,000 (§2.5).
 11. Export on the Studio, import on the Air, and the reverse. Streams connect with nothing asked.
 12. Confirm a signed build reads its own items without a prompt.
 13. `.code` nudge binding and the Fn warning on the Air's keyboard. Licence unaffected on both, by presence only.
@@ -511,6 +515,6 @@ Effort is in working sessions, and is a guess, not a measurement.
 | A3 Encrypted file | Header, KDF, seal and open, password sheets, tests | 1 | **Built, sandbox pass passed** |
 | A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | **Built, sandbox pass passed; a real connection is still to run (step 6)** |
 | A5 Identity | UTI, double-click, PRIVACY_AUDIT, user guide | 0.5 | |
-| A6 Attended | Sandbox pass, Air pass, iteration count frozen | 0.5 | **Pending: the Air iteration measurement (step 10); the count is not frozen until it runs** |
+| A6 Attended | Sandbox pass, Air pass | 0.5 | **Sandbox pass passed; iteration count frozen, no Air measurement needed (§2.5). Pending: a real connection (step 6) and the Air pass (steps 11-13)** |
 
 Sources for the iteration figure: [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).

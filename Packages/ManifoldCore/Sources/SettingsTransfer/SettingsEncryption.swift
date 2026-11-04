@@ -17,7 +17,7 @@ import Security
 public enum SettingsEncryption {
     public static let cipher = "AES-GCM-256"
     public static let kdf = "PBKDF2-HMAC-SHA256"
-    /// R4. Stated in the header, so raising it later needs no format change. Frozen once the Air is measured (A6).
+    /// R4, frozen (docs/SETTINGS_EXPORT_PLAN.md §2.5). Stated in the header, so raising it later needs no format change.
     public static let iterations = 1_000_000
     /// What an import will run. The ceiling stops a changed header from hanging the app.
     public static let acceptedIterations = 600_000...10_000_000
