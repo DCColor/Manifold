@@ -302,6 +302,8 @@ private struct GeneralSettingsPane: View {
     // windows deliberately set to different sizes must survive a visit to Settings.
     @AppStorage(RasterSize.defaultsKey) private var rasterDefault: RasterSize = .automatic
 
+    @StateObject private var transfer = SettingsTransferModel()
+
     private var highlight: Binding<Color> {
         Binding(get: { ScopeColorCodec.color(fromHex: AppHighlight.shared.hex) },
                 set: { AppHighlight.shared.set(ScopeColorCodec.hex(from: $0)) })
@@ -344,6 +346,30 @@ private struct GeneralSettingsPane: View {
                 }
                 SettingsCaption("Also in the Manifold and Help menus.")
             }
+
+            // docs/SETTINGS_EXPORT_PLAN.md §5: here and not in the File menu, as a once-per-machine action.
+            Section("Export and Import") {
+                LabeledContent("Settings") {
+                    HStack {
+                        Button("Export Settings…") { transfer.showingExport = true }
+                        Button("Import Settings…") { transfer.chooseFileToImport() }
+                    }
+                }
+                if transfer.hasBackups {
+                    LabeledContent("Backups") {
+                        Button("Restore from Backup…") { transfer.chooseBackupToRestore() }
+                    }
+                }
+                SettingsCaption("Moves your keyboard shortcuts to another Mac. Before any import, Manifold saves a backup of your shortcuts.")
+            }
+        }
+        .sheet(isPresented: $transfer.showingExport) { ExportSettingsSheet() }
+        .sheet(item: $transfer.importing) { ImportSettingsSheet(session: $0) }
+        .alert("Can’t Import This File", isPresented: Binding(get: { transfer.refusal != nil },
+                                                              set: { if !$0 { transfer.refusal = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(transfer.refusal ?? "")
         }
     }
 }

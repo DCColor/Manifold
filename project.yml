@@ -205,6 +205,10 @@ targets:
       # target so `swift test` can drive the dispatcher with synthesized NSEvents. Used by App/Shortcuts and the menus.
       - package: ManifoldCore
         product: ShortcutRegistry
+      # The settings file and its backups (docs/SETTINGS_EXPORT_PLAN.md) — a leaf target so `swift test` reaches every
+      # refusal. Used by App/SettingsTransferUI.swift only.
+      - package: ManifoldCore
+        product: SettingsTransfer
       # Log and diagnostics redaction (docs/PRIVACY_AUDIT.md, stage P1) — a leaf target so `swift test`
       # can run every rule against real log lines. Used by DiagnosticsExport, WHEPClient, SRTClient, NDI.
       - package: ManifoldCore
