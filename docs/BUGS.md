@@ -6927,12 +6927,14 @@ a local OBS sender and NDI is on-machine; **WHIP/WHEP had no non-vendor referenc
 ### The runbook
 
 ```sh
-~/Desktop/mediamtx/            # outside the repo, deliberately — it is a test rig, not a dependency
+# paths moved to $HOME/Code/Manifold/fixtures/ on 2026-11-04
+$HOME/Code/Manifold/fixtures/mediamtx/            # outside the repo, deliberately — it is a test rig, not a dependency
   mediamtx                     # v1.21.1 darwin_arm64, official GitHub release, no Homebrew
   mediamtx.yml                 # minimal: WHIP/WHEP + SRT only, everything else off
   mediamtx.yml.dist            # the shipped 38 KB reference, kept for looking keys up
 
-cd ~/Desktop/mediamtx && ./mediamtx mediamtx.yml
+# paths moved to $HOME/Code/Manifold/fixtures/ on 2026-11-04
+cd $HOME/Code/Manifold/fixtures/mediamtx && ./mediamtx mediamtx.yml
 ```
 
 | | | |

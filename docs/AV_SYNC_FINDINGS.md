@@ -967,8 +967,9 @@ docs/WHEP_TIMESTAMP_ROBUSTNESS.md.**
 
 ```
 # fixture (regenerates identically; verify its own offset before trusting it)
-~/Desktop/manifold-avsync/flash-beep-25p-60s.mov
-~/Desktop/manifold-avsync/avsync.py <capture.mov> --label "..."
+# paths moved to $HOME/Code/Manifold/fixtures/ on 2026-11-04
+$HOME/Code/Manifold/fixtures/manifold-avsync/flash-beep-25p-60s.mov
+$HOME/Code/Manifold/fixtures/manifold-avsync/avsync.py <capture.mov> --label "..."
 
 # the recorder: second OBS instance, 60 fps, then the 5-second volumedetect preflight (§1.2)
 open -n -a OBS --args --multi --profile "Recorder" --collection "AV Capture"
@@ -978,8 +979,9 @@ ffmpeg -i flash-beep-25p-60s.mov -af "adelay=250|250" -c:v copy gate_250.mkv
 python3 avsync.py gate_250.mkv       # must report +250.0 ms, sd 0.0
 
 # the AVFoundation harness (cases A, F, F+, G, E)
-~/Desktop/manifold-audible-events/harness-fg/MuteTestFG.app     # launched BY Audio Hijack
-~/Desktop/manifold-audible-events/harness-fg/analyse_fg.py --capture <recording.wav>
+# paths moved to $HOME/Code/Manifold/fixtures/ on 2026-11-04
+$HOME/Code/Manifold/fixtures/manifold-audible-events/harness-fg/MuteTestFG.app     # launched BY Audio Hijack
+$HOME/Code/Manifold/fixtures/manifold-audible-events/harness-fg/analyse_fg.py --capture <recording.wav>
 ```
 
 ```
@@ -989,7 +991,7 @@ ffmpeg -y -i "<stream URL>" -t 40 -c copy ~/Desktop/sender_probe.mkv
 ```
 
 The minimal WHEP reference player used for runs 6–7 is at
-`~/Desktop/manifold-avsync/whep-player/` — one HTML file, no libraries, with a stdlib proxy that
+`$HOME/Code/Manifold/fixtures/manifold-avsync/whep-player/` (paths moved to $HOME/Code/Manifold/fixtures/ on 2026-11-04) — one HTML file, no libraries, with a stdlib proxy that
 holds the endpoint so the page stays same-origin and the URL never reaches the browser.
 
 ⚠️ **ONE THING THAT WILL WASTE AN HOUR IF IT IS NOT WRITTEN DOWN.** Cloudflare's WAF returns
