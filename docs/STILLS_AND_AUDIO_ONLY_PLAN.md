@@ -17,7 +17,7 @@ from `updateHeldPicture`.
 - `ContainerSlackRoute` gained `.noVideoDeclared`. Only "no video track declared" may become audio-only; a video track that exists and
   cannot be read stays refused. A movie type the scan cannot see into (.avi, .mts) with an audio track also stays refused.
 - **The Mac plays an audio-only file even when the audio destination is SDI** (`applyAudioMute`). The card is silent, so otherwise it
-  would be heard nowhere. Not in the plan: Robbie to confirm.
+  would be heard nowhere. Not in the plan; confirmed by Robbie, 2026-11-05.
 - `audioFormatChanged` is ignored while held. Without that, a 44.1 kHz WAV would re-establish the output, and the monitor would re-lock.
 - Both hold edges drop the renderer's staged frames (`dropDeckLinkFrames`).
 - `displaySize` is 1280 × 720 for the sizer, so the raster, Color menu and hold-to-compare gates moved from `displaySize != nil` to

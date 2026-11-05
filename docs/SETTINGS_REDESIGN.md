@@ -27,6 +27,7 @@ The tree's file is `App/SettingsView.swift`; HEAD's view was `App/Preferences.sw
 | | Pro Video Formats | status row | none | — | `ProVideoWorkflow.availability` | Sources |
 | | Download / Reinstall Pro Video Formats… | button | none | — | `ProVideoWorkflow.downloadURL` | Sources |
 | DeckLink Output | Enable output on launch | toggle | `manifold.decklink.enableOnLaunch` | off | `DeckLinkService.swift:838` | DeckLink Output |
+| | Audio at launch (added 2026-11-05, not in HEAD) | segmented | `manifold.decklink.audioDestination` | SDI (follows video) | `DeckLinkService.audioDestinationPreference` | DeckLink Output |
 | | SDI scaling | segmented | `manifold.decklink.sdiScaling` | Fit to mode | `DeckLinkService.swift:721` | DeckLink Output |
 | | SDI output modes | segmented | `manifold.decklink.outputModeSet` | HD/UHD only | `DeckLinkService.swift:716` | DeckLink Output |
 | Interface Options | Controls | inline picker | `controlDisplayMode` | overlay | `WindowChrome.swift:240, 273` | General |
@@ -58,7 +59,7 @@ read-only): Debug menu, Live audio WAV capture, DeckLink audio trim.
 | CIE options, meter marker, caption position | the scope or overlay's own menu | `manifold.cie.*`, `manifold.meters.marker.*`, `manifold.caption.positionPreset` | Stay, same reason |
 | Guide mode, aspect, social and broadcast percentages | the framing guides popover | `guideMode`, `guideAspect`, `broadcastActionPct` … | Stay: framing decisions, not styling (HEAD's own note) |
 | LUT interpolation | the Color control's Interpretation menu | `lutInterpolation` | Stays: chosen with the LUT |
-| DeckLink manual output mode | the DeckLink menu | `manifold.decklink.manualOutputMode` | Stays: per session, set with the output |
+| DeckLink manual output mode | the DeckLink menu | `manifold.decklink.manualOutputMode` | Stays: set with the output, and kept across launches (`DeckLinkService.setManualMode`, `restoreManualMode`) |
 | Volume, tray, slots, raster per window | the window | `playbackVolume`, `showTray`, `manifold.scope.slot*` … | Stay: window state, not preferences |
 | Include file names | Export Diagnostics sheet | none (per export, not stored) | Stays: privacy P1 made it a per-export choice on purpose |
 | Keyboard shortcuts | their own window | `manifold.shortcuts` | Stays its own window (brief); General links to it |
