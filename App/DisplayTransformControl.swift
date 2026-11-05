@@ -276,6 +276,17 @@ struct DisplayChainReadout: View {
 #if DEBUG
         let _ = ScopePerf.count("body.DisplayChainReadout")
 #endif
+        if let sole = model.chain.soleLine {
+            Text(sole)
+                .font(.callout)
+                .padding(14)
+                .frame(width: 430, alignment: .leading)
+        } else {
+            chainBody
+        }
+    }
+
+    private var chainBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Transform chain")
                 .font(.headline)

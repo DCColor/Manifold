@@ -3,6 +3,7 @@ import ManifoldCore
 import FileScan   // FieldView — the Window View row (interlaced I4)
 import PictureGeometry   // the Orientation row (docs/BUGS.md, iPhone clips, 2026-10-29)
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
+import AudioFileInfo      // AudioCardText — the audio-only rows
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
@@ -31,7 +32,9 @@ struct InspectorPanel: View {
                 .foregroundStyle(.white.opacity(0.6))
                 .padding(.bottom, 8)
 
-            if let m = metadata {
+            if let m = metadata, engine.mediaKind == .audioOnly {
+                audioOnlyRows(m)
+            } else if let m = metadata {
                 SectionHeader("File Name")
                 Text(m.fileName)
                     .font(.system(.caption, design: .monospaced))
@@ -162,33 +165,7 @@ struct InspectorPanel: View {
                     ContentLightSection(hdr10: m.hdr10, transferCode: m.transferFunctionCode)
                 }
 
-                if !m.audioTracks.isEmpty || engine.audioCaveat != nil {
-                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    SectionHeader(m.audioTracks.count <= 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
-                    // ⚠️ THE STANDING STATEMENT THAT NOTHING IS BEING HEARD, the audio twin of the "Picture" row: the
-                    // banner says it once and goes after 9 s, and this stays for as long as the file is open. Read
-                    // off the ENGINE — a fact about this decode, not about the file, which is fine. Orange for the
-                    // same reason as "Picture": attention, not an error the user made.
-                    if let caveat = engine.audioCaveat {
-                        MetadataRow(label: "Playback", value: caveat)
-                            .foregroundStyle(.orange)
-                    }
-                    ForEach(Array(m.audioTracks.enumerated()), id: \.offset) { index, track in
-                        // Second entry point for the SAME state the control bar's selector drives —
-                        // the tracks are already described here, so making the description clickable
-                        // is a shorter path than reading it here and then going to the toolbar.
-                        // `selectable` is gated on the ENGINE's count, not the inspector's: the
-                        // inspector enumerates the asset and is complete even on paths where the
-                        // engine cannot honour a switch, and a row that looks clickable and does
-                        // nothing is worse than one that plainly isn't.
-                        AudioTrackRow(index: index, track: track,
-                                      showIndex: m.audioTracks.count > 1,
-                                      isMonitored: engine.audioTrackCount > 0
-                                                   && index == engine.selectedAudioTrackIndex,
-                                      selectable: engine.audioTrackCount > 1,
-                                      select: { engine.selectAudioTrack(index) })
-                    }
-                }
+                audioSection(m)
 
                 if !m.textTracks.isEmpty {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
@@ -203,21 +180,7 @@ struct InspectorPanel: View {
                     MetadataRow(label: "Markers", value: "\(m.chapters.count)")
                 }
 
-                if hasFileInfo(m) {
-                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    SectionHeader("File")
-                    if let s = m.software { MetadataRow(label: "Software", value: s) }
-                    if let c = m.creator { MetadataRow(label: "Creator", value: c) }
-                    if m.creationDate != nil {
-                        MetadataRow(label: "Encoded", value: VideoMetadata.dateString(m.creationDate))
-                    }
-                    if m.fileCreatedDate != nil {
-                        MetadataRow(label: "Added to Disk", value: VideoMetadata.dateString(m.fileCreatedDate))
-                    }
-                    if m.fileModifiedDate != nil {
-                        MetadataRow(label: "Modified", value: VideoMetadata.dateString(m.fileModifiedDate))
-                    }
-                }
+                fileSection(m)
             } else {
                 Text("No media loaded")
                     .font(.system(.caption, design: .default))
@@ -231,6 +194,86 @@ struct InspectorPanel: View {
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(.white.opacity(0.12), lineWidth: 0.5)
         )
+    }
+
+    /// An audio-only file: no raster, rate, scan or colour rows, because each of them would be a dash (docs/STILLS_AND_AUDIO_ONLY_PLAN.md
+    /// §5.2). The format and the card's other words come from `AudioOnlyFacts`, so the two agree.
+    @ViewBuilder private func audioOnlyRows(_ m: VideoMetadata) -> some View {
+        SectionHeader("File Name")
+        Text(m.fileName)
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.92))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 8)
+
+        Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
+
+        if let facts = AudioOnlyFacts(engine: engine) {
+            MetadataRow(label: "Format", value: facts.format)
+        }
+        MetadataRow(label: "Duration", value: AudioCardText.duration(engine.duration))
+        MetadataRow(label: "Container", value: m.container)
+
+        // Timecode only when the file states a rate, else Time Reference: `bext` carries no frame rate.
+        if let rows = m.broadcastWave?.inspectorRows(fallbackSampleRate: m.audioTracks.first?.sampleRate ?? 0), !rows.isEmpty {
+            Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+            SectionHeader("Broadcast Wave")
+            ForEach(rows, id: \.label) { row in
+                MetadataRow(label: row.label, value: row.value)
+            }
+        }
+
+        audioSection(m)
+        fileSection(m)
+    }
+
+    @ViewBuilder private func audioSection(_ m: VideoMetadata) -> some View {
+        if !m.audioTracks.isEmpty || engine.audioCaveat != nil {
+            Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+            SectionHeader(m.audioTracks.count <= 1 ? "Audio" : "Audio (\(m.audioTracks.count))")
+            // ⚠️ THE STANDING STATEMENT THAT NOTHING IS BEING HEARD, the audio twin of the "Picture" row: the
+            // banner says it once and goes after 9 s, and this stays for as long as the file is open. Read
+            // off the ENGINE — a fact about this decode, not about the file, which is fine. Orange for the
+            // same reason as "Picture": attention, not an error the user made.
+            if let caveat = engine.audioCaveat {
+                MetadataRow(label: "Playback", value: caveat)
+                    .foregroundStyle(.orange)
+            }
+            ForEach(Array(m.audioTracks.enumerated()), id: \.offset) { index, track in
+                // Second entry point for the SAME state the control bar's selector drives —
+                // the tracks are already described here, so making the description clickable
+                // is a shorter path than reading it here and then going to the toolbar.
+                // `selectable` is gated on the ENGINE's count, not the inspector's: the
+                // inspector enumerates the asset and is complete even on paths where the
+                // engine cannot honour a switch, and a row that looks clickable and does
+                // nothing is worse than one that plainly isn't.
+                AudioTrackRow(index: index, track: track,
+                              showIndex: m.audioTracks.count > 1,
+                              isMonitored: engine.audioTrackCount > 0
+                                           && index == engine.selectedAudioTrackIndex,
+                              selectable: engine.audioTrackCount > 1,
+                              select: { engine.selectAudioTrack(index) })
+            }
+        }
+    }
+
+    @ViewBuilder private func fileSection(_ m: VideoMetadata) -> some View {
+        if hasFileInfo(m) {
+            Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+            SectionHeader("File")
+            if let s = m.software { MetadataRow(label: "Software", value: s) }
+            if let c = m.creator { MetadataRow(label: "Creator", value: c) }
+            if m.creationDate != nil {
+                MetadataRow(label: "Encoded", value: VideoMetadata.dateString(m.creationDate))
+            }
+            if m.fileCreatedDate != nil {
+                MetadataRow(label: "Added to Disk", value: VideoMetadata.dateString(m.fileCreatedDate))
+            }
+            if m.fileModifiedDate != nil {
+                MetadataRow(label: "Modified", value: VideoMetadata.dateString(m.fileModifiedDate))
+            }
+        }
     }
 
     private func hasFileInfo(_ m: VideoMetadata) -> Bool {

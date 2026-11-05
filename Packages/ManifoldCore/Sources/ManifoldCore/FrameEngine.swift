@@ -214,6 +214,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Optional: called when the engine flushes for a seek/reload, so a parallel
     /// renderer can clear its frame queue. Called on the main actor.
     public var onFlush: (() -> Void)?
+    /// Wipe this window's picture to black: a commit that leaves the renderer nothing to draw (an audio-only file). Wired
+    /// beside `onFlush`.
+    public var onClearPicture: (() -> Void)?
 
     /// THE SOURCE'S CICP COLOUR CODES, PUBLISHED BEFORE THE FIRST FRAME CAN BE ENQUEUED.
     ///
@@ -708,6 +711,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.tcInfo = newTc
         self.metadata = newMeta
 
+        // An audio-only file has no colour tags to compare. Its reader is rebuilt when the audio itself changed, for the
+        // same reason as below: the old asset may serve cached descriptions of the rewritten file.
+        if mediaKind == .audioOnly {
+            let newDuration = (try? await freshAsset.load(.duration)).map(CMTimeGetSeconds) ?? duration
+            guard old?.audioTracks != newMeta.audioTracks || newDuration != duration else { return }
+            self.asset = freshAsset
+            self.audioTracks = (try? await freshAsset.loadTracks(withMediaType: .audio)) ?? []
+            if !self.audioTracks.indices.contains(self.selectedAudioTrackIndex) { self.selectedAudioTrackIndex = 0 }
+            self.duration = newDuration.isFinite ? newDuration : 0
+            await beginReading(from: min(currentTime, self.duration), resumePlaying: isPlaying)
+            return
+        }
+
         // Re-derive the render path ONLY when a color-relevant tag changed, so a
         // no-op refresh (or a non-color metadata edit) never disturbs playback.
         let colorChanged =
@@ -916,7 +932,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Zero pauses. Negative rates start a best-effort reverse jog (the
     /// forward-only reader can't decode backward — see startReverseJog).
     public func setShuttleRate(_ rate: Float) {
-        let clamped = max(-maxShuttleRate, min(maxShuttleRate, rate))
+        // Reverse is a video pump (`startReverseJog`), so an audio-only file has none: J pauses it, as K does.
+        let floor = mediaKind == .audioOnly ? 0 : -maxShuttleRate
+        let clamped = max(floor, min(maxShuttleRate, rate))
         if clamped != 0 { releaseStepPosition() }   // the playhead is about to move by itself
         if clamped >= 0 { stopReverseJog() }
         shuttleRate = clamped
@@ -1658,6 +1676,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // All of it is asked BEFORE anything is torn down, which is what makes a refusal cost the
         // user nothing.
         //
+        // ── AND THEN, AN AUDIO-ONLY FILE ──────────────────────────────────────────────────────
+        // The vet comes first, so a video track hidden by `stsd` slack still wins. A file is audio-only when it has an
+        // audio track and either the box scan found no video track declared, or its type is not a movie at all (a WAV,
+        // an AIFF, an MP3, an M4A). A movie type the scan cannot see into (an .avi, a .mts) keeps its refusal: its video
+        // may simply be unreadable here, and a card saying "audio-only" would be false (docs/STILLS_AND_AUDIO_ONLY_PLAN.md
+        // §5.1). MXF never reaches this branch, so audio-only MXF behaves as it did, and that behaviour is UNKNOWN.
+        //
         // ⚠️ THE ASSET IS OPENED ONCE AND CARRIED INTO PHASE 2. Re-creating it after the commit
         // would ask the file system the same question twice and — worse — leave the possibility of
         // the two answers differing. A routed file carries it too, for its metadata only.
@@ -1686,11 +1711,30 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                           url.lastPathComponent)
                     rejectLoad(notice: notice)
                     return
+                case .noVideoDeclared(let notice):
+                    let hasAudio = await Self.hasAudioTrack(asset)
+                    if loadStopped(since: entryStops, url, at: "the audio track") { return }
+                    guard hasAudio else {
+                        NSLog("[PLAYBACK] no video or audio track — refusing %@. Not loading — the deck keeps what it had.",
+                              url.lastPathComponent)
+                        rejectLoad(notice: notice)
+                        return
+                    }
+                    vettedAsset = asset
+                    vettedKind = .audioOnly
                 case .notApplicable:
-                    NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for "
-                        + "%@. Not loading — the deck keeps what it had.", url.lastPathComponent)
-                    rejectLoad(notice: "This file couldn’t be opened — its video track is unreadable.")
-                    return
+                    let isMovie = UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) == true
+                    let hasAudio = await Self.hasAudioTrack(asset)
+                    if loadStopped(since: entryStops, url, at: "the audio track") { return }
+                    guard !isMovie, hasAudio else {
+                        NSLog("[PLAYBACK] no video track — AVFoundation exposes no readable video track for "
+                            + "%@. Not loading — the deck keeps what it had.", url.lastPathComponent)
+                        rejectLoad(notice: isMovie ? "This file couldn’t be opened — its video track is unreadable."
+                                                   : "This file couldn’t be opened — it has no readable audio track.")
+                        return
+                    }
+                    vettedAsset = asset
+                    vettedKind = .audioOnly
                 }
             }
         }
@@ -1729,6 +1773,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // second half of the same lifecycle, and the bump this performs is what makes an in-flight
         // frame from the outgoing file fail its delivery check instead of landing on the new one.
         installScrubProducer(for: nil, useLibav: false)
+
+        // An audio-only file has no picture, so no HDR10 metadata to read and no colour edge to publish it on.
+        if vettedKind == .audioOnly, let asset = vettedAsset {
+            await loadAudioOnly(asset: asset, url: url, autoplay: autoplay, generation: generation)
+            return
+        }
 
         // Colour S7 follow-up 2: the file's HDR10 static metadata, BEFORE any route below publishes the colour edge,
         // so the renderer's first colour state for this file carries it and SDI frame #0 goes out with the file's
@@ -1887,6 +1937,89 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         print("FrameEngine: loaded — duration \(self.duration)s, audio tracks: \(self.audioTracks.count) (monitoring \(self.audioTracks.isEmpty ? "none" : "#\(self.selectedAudioTrackIndex + 1)"))")
         if loadAbandoned(generation, url, at: "the first read") { return }
         await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// The shape an audio-only file publishes for the window sizer: the card's, and not a raster. Nothing reports it as a
+    /// picture size, because the raster sizes and their readout are gated off (`MediaKind.feedsRenderer`).
+    public static let audioOnlyCardSize = CGSize(width: 1280, height: 720)
+
+    private static func hasAudioTrack(_ asset: AVURLAsset) async -> Bool {
+        let tracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+        return !tracks.isEmpty
+    }
+
+    /// Phase 2 of an audio-only file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.1). Everything the video commit establishes
+    /// for a picture is stated here as "none", so the previous file's colour, geometry and frame cannot outlive it.
+    private func loadAudioOnly(asset: AVURLAsset, url: URL, autoplay: Bool, generation: Int) async {
+        // THE PREVIOUS VIDEO SOURCE ENDS HERE, because no `beginReading` video branch will retire it. Bumped first, so its
+        // pump sees it is no longer current and cannot land a frame after the wipe. The libav sources went at the commit.
+        _ = sessionToken.next()
+        synchronizer.rate = 0
+        currentSource?.stop()
+        currentSource = nil
+        videoSinkGate.roomAvailable()   // a pump parked on a full queue goes now, as in `stop()`
+        let oldReader = reader
+        reader = nil
+        videoPumpQueue.async {
+            self.audioPumpQueue.async { oldReader?.cancelReading() }
+        }
+        videoRenderer?.flush()
+        onClearPicture?()
+
+        self.asset = asset
+        self.videoTrack = nil
+        useLibav = false
+        libavFileFormatDescription = nil
+        loadedHDR10 = nil
+        onSourceColorTags?(nil, nil, nil, nil)
+        onSourceColorNote?(nil)
+        onSourceGeometry?(0, 0, .undeclared, .undeclared, .identity)
+        onSourceScan?(.notRead)
+        fileChroma = .undetermined
+        onSourceChroma?(.notStated, nil)
+        rangeOverride = .auto
+        sourceRange = .untagged
+        updateEffectiveRange()
+        displaySize = Self.audioOnlyCardSize
+
+        self.tcInfo = MediaInspector.timecode(for: url)
+        Task { [weak self] in
+            let meta = await MediaInspector.metadata(for: asset, url: url)
+            await MainActor.run {
+                guard let self, self.loadGeneration == generation else { return }
+                self.metadata = meta
+            }
+        }
+
+        let loadedDuration = try? await asset.load(.duration)
+        if loadAbandoned(generation, url, at: "the duration") { return }
+        let seconds = loadedDuration.map(CMTimeGetSeconds) ?? 0
+        self.duration = seconds.isFinite ? seconds : 0
+
+        self.hasMedia = true
+        let loadedAudioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+        if loadAbandoned(generation, url, at: "the audio tracks") { return }
+        self.audioTracks = loadedAudioTracks
+        self.selectedAudioTrackIndex = 0
+
+        installTimeObserverIfNeeded()
+        print("FrameEngine: loaded audio-only — duration \(self.duration)s, audio tracks: \(self.audioTracks.count)")
+        await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// The audio-only half of `beginReading`: the same audio steps, with no video reader, pump or frame grid. Seek, loop
+    /// and step all come through `beginReading`, so they follow.
+    private func beginAudioOnlyReading(from time: Double, resumePlaying: Bool, exactStart: CMTime?) async {
+        let token = sessionToken.next()
+        synchronizer.rate = 0
+        teardownAudioReading()
+        let start = exactStart ?? CMTime(seconds: time, preferredTimescale: 600)
+        synchronizer.setRate(0, time: start)
+        // The clock observer publishes `currentTime` while it moves; a paused seek has to say so itself.
+        currentTime = CMTimeGetSeconds(start)
+        await beginAudioReading(from: start)
+        guard sessionToken.isCurrent(token) else { return }
+        if resumePlaying { play() }
     }
 
     /// True — and logged — when the load that started at `generation` has been overtaken while it was suspended:
@@ -4152,10 +4285,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func audioUnreadable(_ reason: String, channels: Int) {
         NSLog("[PLAYBACK] audio not read: %@", reason)
         audioPresence = .unreadable(channels: channels)
-        audioCaveat = "Couldn’t be read (\(reason)) — video only"
+        let audioOnly = mediaKind == .audioOnly
+        audioCaveat = "Couldn’t be read (\(reason))" + (audioOnly ? "" : " — video only")
         if !audioFallbackAnnounced {
             audioFallbackAnnounced = true
-            playbackNotice = "This file’s audio track couldn’t be read — playing video only."
+            playbackNotice = "This file’s audio track couldn’t be read" + (audioOnly ? "." : " — playing video only.")
         }
     }
 
@@ -4231,6 +4365,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // A STOPPED ENGINE NEVER BUILDS READERS. `stop()` clears `hasMedia`; a loop wrap, a seek or a
         // re-inspection queued just before a window closed must not start the file again behind it.
         guard hasMedia else { return }
+        if mediaKind == .audioOnly {
+            await beginAudioOnlyReading(from: time, resumePlaying: resumePlaying, exactStart: exactStart)
+            return
+        }
         if useLibav {
             await beginLibavReading(from: time, resumePlaying: resumePlaying)
             return

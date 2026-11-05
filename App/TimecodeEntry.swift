@@ -166,7 +166,8 @@ struct TimecodeContext: Equatable {
         // Same precedence the rest of the app uses: the metadata rate is authoritative, the timecode
         // track's own rate is the fallback for a file whose video rate did not read.
         let resolved = declared > 0 ? declared : (tc?.fps ?? 0)
-        guard resolved > 0, engine.duration > 0, engine.hasMedia else { return nil }
+        // `.video`: an audio-only .mov can carry a timecode track and still has no frames to land on.
+        guard resolved > 0, engine.duration > 0, engine.mediaKind == .video else { return nil }
         rate = resolved
         nfr = max(Int(resolved.rounded()), 1)
         dropFrame = tc?.dropFrame ?? false
@@ -366,6 +367,11 @@ final class TransportKeyMonitor: ObservableObject {
 
     /// Home / End: the first or the last frame, by the same quarter-frame landing `commit` uses (see there).
     func goToEdge(end: Bool) {
+        // An audio-only file has no last frame: its edges are its ends.
+        if let engine, engine.mediaKind == .audioOnly {
+            engine.exactSeek(to: end ? engine.duration : 0)
+            return
+        }
         guard let engine, let ctx = TimecodeContext(engine: engine) else { return }
         let frame = end ? ctx.lastFrame : 0
         engine.exactSeek(to: min(max((Double(frame) + 0.25) / ctx.rate, 0), engine.duration))

@@ -925,6 +925,13 @@ struct ContentView: View {
             // arithmetic — its rate, its start timecode, its last frame — and commit it against the
             // new one. The entry belonged to the file that just left.
             transportKeys.cancel()
+            // The Color and View menus ask `mediaKind`, and a 1280×720 video after an audio-only file changes it with no
+            // `displaySize` edge to carry the news.
+            RasterMenuState.shared.setNeedsRefresh()
+            DisplayTransformMenuState.shared.setNeedsRefresh()
+            // An audio-only file has no picture for the scopes: blank the last trace and say "no source" in the headers.
+            if !engine.mediaKind.feedsRenderer { clearScopes() }
+            scopeColorFeed.refresh()
             #if DEBUG
             DebugStepHook.run(engine: engine, renderer: metalRenderer)   // measurement only, env-gated
             #endif
@@ -1233,6 +1240,13 @@ struct ContentView: View {
             // Interlaced I4: the field-view marker, on the same picture-rect layer, so it stays with the picture in full
             // screen and with the controls hidden. Nothing in Weave or for a source that offers no field views (§14.8).
             .overlay(alignment: .topTrailing) { FieldViewMarker(chrome: chrome) }
+            // An audio-only file's card, on the picture rect like the guides. The floating controls sit over this rect
+            // and can take three rows in a narrow window, so the card keeps above them; the docked bar is below it.
+            .overlay {
+                if engine.mediaKind == .audioOnly {
+                    AudioOnlyCard(engine: engine, bottomClearance: isDocked ? 0 : 170)
+                }
+            }
 
             if hasSource {
                 // Full control surface for ANY active source (file OR NDI stream). Streaming is a
@@ -1701,8 +1715,9 @@ struct ContentView: View {
             .shuttleReverse: DeckShortcut(enabled: position) { engine.shuttleBackward() },
             .shuttlePause: DeckShortcut(enabled: position) { engine.shuttlePause() },
             .shuttleForward: DeckShortcut(enabled: position) { engine.shuttleForward() },
-            .stepBackFrame: DeckShortcut(enabled: playhead) { engine.stepFrame(by: -1) },
-            .stepForwardFrame: DeckShortcut(enabled: playhead) { engine.stepFrame(by: 1) },
+            // An audio-only file has no frames to step. ⇧←/⇧→ below stay: a second is still a second.
+            .stepBackFrame: DeckShortcut(enabled: { playhead() && engine.mediaKind != .audioOnly }) { engine.stepFrame(by: -1) },
+            .stepForwardFrame: DeckShortcut(enabled: { playhead() && engine.mediaKind != .audioOnly }) { engine.stepFrame(by: 1) },
             .stepBackSecond: DeckShortcut(enabled: playhead) { engine.stepFrame(by: -transportKeys.framesPerSecondStep) },
             .stepForwardSecond: DeckShortcut(enabled: playhead) { engine.stepFrame(by: transportKeys.framesPerSecondStep) },
             .goToStart: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: false) },
@@ -3611,14 +3626,18 @@ struct ContentView: View {
         if readoutMode == .source && engine.currentSourceTimecode(at: 0) == nil {
             return .elapsed
         }
+        // `frameRateOrDefault` would invent 24 fps for a file that has no frames.
+        if readoutMode == .frame && engine.mediaKind == .audioOnly {
+            return .elapsed
+        }
         return readoutMode
     }
 
     private func cycleReadout() {
-        let all = ReadoutMode.allCases
-        if let i = all.firstIndex(of: readoutMode) {
-            readoutMode = all[(i + 1) % all.count]
-        }
+        let all = ReadoutMode.allCases.filter { $0 != .frame || engine.mediaKind != .audioOnly }
+        // A stored mode this file skips counts as the one before it, so the next press still moves on.
+        let i = all.firstIndex(of: readoutMode) ?? all.startIndex
+        readoutMode = all[(i + 1) % all.count]
     }
 
     private func timeString(_ seconds: Double) -> String {

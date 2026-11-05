@@ -221,6 +221,10 @@ targets:
       # leaf target so `swift test` reaches both. Used by MetalVideoRenderer, WindowSizer and WindowDeck.
       - package: ManifoldCore
         product: PictureGeometry
+      # Broadcast Wave chunks and the words for an audio-only file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.2) — a leaf
+      # target so `swift test` reaches the chunk walk. Used by ManifoldCore, and by App/AudioOnlyCard.swift for the words.
+      - package: ManifoldCore
+        product: AudioFileInfo
       # The licence's Keychain activation record and the move of the email and machine id out of the
       # preferences plist (stage P1) — a leaf target so `swift test` can run the migration against a
       # scratch Keychain service. Used by App/LicenseManager.swift only.

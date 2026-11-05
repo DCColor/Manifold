@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreMedia
 import AudioToolbox
+import AudioFileInfo      // BroadcastWaveReader — the Inspector's BWF rows (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.2)
 import ColorimetryModel   // ColorimetryTable — the CICP names (colour S3)
 import PictureGeometry    // the track matrix as one of eight (docs/BUGS.md, iPhone clips, 2026-10-29)
 
@@ -17,6 +18,11 @@ public enum MediaInspector {
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) {
             meta.fileCreatedDate = attrs[.creationDate] as? Date
             meta.fileModifiedDate = attrs[.modificationDate] as? Date
+        }
+
+        // What AVFoundation does not report about a WAV. The scanner refuses anything that is not RIFF-family WAVE.
+        if ["wav", "wave", "bwf", "rf64"].contains(url.pathExtension.lowercased()) {
+            meta.broadcastWave = BroadcastWaveReader.read(url: url)
         }
 
         if let track = try? await asset.loadTracks(withMediaType: .video).first {
@@ -431,6 +437,7 @@ public enum MediaInspector {
                     if asbd.mBitsPerChannel > 0 {
                         info.bitDepth = Int(asbd.mBitsPerChannel)
                     }
+                    info.isFloat = asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0
                 }
                 let layout = audioLayout(from: fmt, channelCount: info.channelCount)
                 info.layoutName = layout.name
@@ -465,6 +472,7 @@ public enum MediaInspector {
         case kAudioFormatEnhancedAC3: return "E-AC-3"
         case kAudioFormatFLAC: return "FLAC"
         case kAudioFormatOpus: return "Opus"
+        case kAudioFormatMPEGLayer3: return "MP3"
         default: return fourCCString(code)
         }
     }

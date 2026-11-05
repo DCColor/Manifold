@@ -1124,6 +1124,8 @@ final class DeckRegistry {
         // …and the engine feeds this window's renderer, and only this one.
         engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
         engine.onFlush = { [weak renderer] in renderer?.flush() }
+        // A paused window's display link has stopped, and the one-shot wipe runs on its next tick.
+        engine.onClearPicture = { [weak renderer] in renderer?.clearToBlack(); renderer?.wakeDisplayLink() }
         // The renderer's queue paces this engine's file decode (0.9.1, docs/BUGS.md, the 120 fps freeze): a full queue parks
         // the pump, and each frame the queue gives up resumes it. Weak to the renderer for the same reason as above.
         let sinkGate = engine.videoSinkGate

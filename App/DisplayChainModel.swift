@@ -29,6 +29,8 @@ import FileScan   // FieldView — the Fields row and the Source row's scan (int
 
 /// The three lines of the chain readout, plus the sentence underneath them.
 struct DisplayChain: Equatable {
+    /// The whole readout, in place of the chain, for a file that never reaches the renderer: "Audio-only file".
+    var soleLine: String? = nil
     var source: String
     var transform: String
     var display: String
@@ -206,7 +208,7 @@ final class DisplayChainModel: ObservableObject {
         // Colour S6, L3: a cleared deck holds nil codes, as an untagged file does, so the codes cannot say there is
         // no source; the deck can (`hasSource`). Without it the line named the 709 defaults, and with a LUT stated
         // the scopes named the LUT's space, over no picture at all.
-        let present = deck.hasSource
+        let present = deck.hasPicture
         // Interlaced I4: the deck's scan, which an unload clears (`.notRead`); the file's metadata is never cleared.
         let scan = present ? deck.lastSourceScan : nil
         if !present || (sourceCS == nil && pCode == nil && tCode == nil && mCode == nil) {
@@ -328,7 +330,7 @@ final class DisplayChainModel: ObservableObject {
             }
         }
 
-        let next = DisplayChain(source: sourceLine, transform: transformLine,
+        var next = DisplayChain(source: sourceLine, transform: transformLine,
                                 display: displayLine, verdict: verdict, isConverting: converting,
                                 buffer: LiveBufferReadout.report(for: renderer)?.text,
                                 chroma: renderer.map {
@@ -366,6 +368,7 @@ final class DisplayChainModel: ObservableObject {
         if next.headroom != chain.headroom || next.display != chain.display {
             print("[CHAIN] Headroom: \(next.headroom)" + (screen.map { " on \"\($0.localizedName)\"" } ?? ""))
         }
+        if deck.engine?.mediaKind == .audioOnly { next.soleLine = "Audio-only file" }
         if next != chain { chain = next }
     }
 

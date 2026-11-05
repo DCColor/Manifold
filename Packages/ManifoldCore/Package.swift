@@ -69,6 +69,9 @@ let package = Package(
         // Linked by the APP target directly (project.yml) and used by ManifoldCore: a file's picture orientation (the
         // display matrix reduced to one of eight) and the player window's size solve (docs/BUGS.md, iPhone clips, 2026-10-29).
         .library(name: "PictureGeometry", targets: ["PictureGeometry"]),
+        // Linked by the APP target directly (project.yml) and used by ManifoldCore: Broadcast Wave chunks and the words
+        // for an audio-only file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.2).
+        .library(name: "AudioFileInfo", targets: ["AudioFileInfo"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
         // one-way move of the licence email and machine id out of the preferences plist (privacy P1).
         .library(name: "LicenseRecord", targets: ["LicenseRecord"]),
@@ -618,6 +621,23 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // Broadcast Wave `bext` and iXML, and the words the card and the Inspector use for an audio-only file. Foundation
+        // only, so `swift test` reaches the chunk walk (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.2).
+        .target(
+            name: "AudioFileInfo",
+            path: "Sources/AudioFileInfo",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "AudioFileInfoTests",
+            dependencies: ["AudioFileInfo"],
+            path: "Tests/AudioFileInfoTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The licence's Keychain activation record and the migration that takes `license.email` and
         // `license.machineId` out of the preferences plist (docs/PRIVACY_AUDIT.md, stage P1). Foundation
         // only. The tests run the migration against a SCRATCH Keychain service and a SCRATCH defaults
@@ -661,7 +681,8 @@ let package = Package(
             name: "ManifoldCore",
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
-                           "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry"],
+                           "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
+                           "AudioFileInfo"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

@@ -34,6 +34,10 @@ enum ContainerSlackRoute {
         case route(slacks: [VideoSampleDescriptionSlack], codec: String, sampleEntry: FourCharCode)
         /// Refuse, with this banner.
         case refuse(notice: String)
+        /// The container declares no video track at all, so nothing is hidden. The engine opens the file as audio-only
+        /// when it has an audio track, and otherwise refuses with this banner. Kept apart from `refuse`, whose cases all
+        /// mean a video track exists and cannot be read: a broken video track must not pass for an audio file.
+        case noVideoDeclared(notice: String)
         /// Not a container this decides about: the engine's own refusal applies.
         case notApplicable
     }
@@ -73,7 +77,7 @@ enum ContainerSlackRoute {
             return .refuse(notice: "This file couldn’t be opened — macOS can’t read its video track, though "
                 + "the container declares one. Remuxing it (for example ffmpeg -c copy) may fix it.")
         case .noVideoTrack:
-            return .refuse(notice: "This file couldn’t be opened — it has no video track.")
+            return .noVideoDeclared(notice: "This file couldn’t be opened — it has no video or audio track.")
         case .noMovieBox:
             return .refuse(notice: "This file couldn’t be opened — it has no movie header, so it may be "
                 + "incomplete or still being written.")
