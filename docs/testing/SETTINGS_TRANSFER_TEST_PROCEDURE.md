@@ -5,8 +5,8 @@
 > You'll run this on your normal Manifold, with your real shortcuts and real saved streams, so please take these seriously:
 >
 > - **Do Step 0 before anything else.** It makes a safety copy of your settings.
-> - **The trash button in Stream Sources deletes a stream at once, with no "Are you sure?".** Only ever delete streams named
->   "Fixture …".
+> - **Deleting a stream can't be undone.** The trash button in Stream Sources asks you to confirm first, so read the name it shows.
+>   Only ever delete streams named "Fixture …".
 > - **Your own settings file holds your real stream addresses and passphrases.** Never send it to anyone, including us, and never
 >   tell anyone its password.
 > - **If you forget that password, nobody can open the file.** Not even Graviton can recover it.
@@ -263,7 +263,12 @@ Keychain prompt, note it.
 
 **You should see:** "3 streams added." and a note that 1 stream kept its saved A/V offset.
 
-3. Click **Undo Import**, then **Done**.
+3. Click **Undo Import**.
+
+**You should see:** "Undo this import?", saying the 3 streams it added will be removed from this Mac and that you can import the file again
+to bring them back. The buttons are **Undo Import** and **Cancel**, and **Cancel** is the default.
+
+4. Click **Undo Import** in that message, then **Done**.
 
 **You should see:** "Everything is back as it was."
 
@@ -274,8 +279,14 @@ Keychain prompt, note it.
 1. In a player window, open the stream menu (the **Connect Stream…** button, or the arrow beside the stream button in the toolbar), and
    choose **Manage…**. The **Stream Sources** sheet opens.
 2. Check the list: Fixture Alpha, Fixture Bravo and Fixture Charlie, with **no** "(copy)" entries and no Fixture Delta.
-3. **Carefully**, click the trash button on those three rows only. There's no confirmation.
-4. Click **Done**.
+3. **Carefully**, click the trash button on those three rows only. Each click asks first.
+
+**You should see:** "Delete "Fixture Alpha"?" (with that row's name), saying its saved URL and passphrase will be removed from this Mac and
+that this can't be undone. The buttons are **Delete** and **Cancel**, and **Cancel** is the default.
+
+4. On the first one, click **Cancel**. The stream stays in the list. Click its trash button again.
+5. Check the name each time, and click **Delete**.
+6. Click **Done**.
 
 **You should see:** only your own streams, all still there.
 

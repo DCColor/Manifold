@@ -491,6 +491,15 @@ final class SettingsImportSession: ObservableObject, Identifiable {
         phase = .done(done)
     }
 
+    /// The confirmation's message for `undo`, or nil when it removes no stream, as for a shortcuts-only
+    /// import or a restore, which need none.
+    var undoConfirmation: String? {
+        guard case .done(let done) = phase else { return nil }
+        let count = done.streams.added.filter { id in streams.bookmarks.contains { $0.id == id } }.count
+        guard count > 0 else { return nil }
+        return StreamDeletePrompt.undoImportMessage(streams: count, shortcutsReverted: done.changed > 0)
+    }
+
     func undo() {
         failure = nil
         guard case .done(var done) = phase else { return }
@@ -519,6 +528,8 @@ struct ImportSettingsSheet: View {
     @ObservedObject var session: SettingsImportSession
     @ObservedObject private var registry = ShortcutCenter.shared.registry
     @State private var password = ""
+    /// The message of the confirmation before Undo Import removes streams. Non-nil while it is up.
+    @State private var pendingUndo: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -534,6 +545,17 @@ struct ImportSettingsSheet: View {
         }
         .padding(20)
         .frame(width: 540)
+        .alert(StreamDeletePrompt.undoImportTitle,
+               isPresented: Binding(get: { pendingUndo != nil }, set: { if !$0 { pendingUndo = nil } }),
+               presenting: pendingUndo) { _ in
+            Button("Undo Import", role: .destructive) { session.undo() }
+            // Cancel takes Return, as in Stream Sources, and leaves the whole import in place.
+            Button("Cancel", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+        } message: { message in
+            Text(message)
+        }
+        .modifier(EscapeCancelsAlert(isPresented: pendingUndo != nil) { pendingUndo = nil })
     }
 
     // MARK: Password
@@ -734,7 +756,9 @@ struct ImportSettingsSheet: View {
             if let failure = session.failure { caption(failure, color: .orange) }
             HStack {
                 if backedUp || added > 0 {
-                    Button(session.restoring ? "Undo Restore" : "Undo Import") { session.undo() }
+                    Button(session.restoring ? "Undo Restore" : "Undo Import") {
+                        if let message = session.undoConfirmation { pendingUndo = message } else { session.undo() }
+                    }
                 }
                 Spacer()
                 Button("Done") { dismiss() }

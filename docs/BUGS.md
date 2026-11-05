@@ -3863,6 +3863,47 @@ the probe is not the app.
 
 **Next.** Count them in a build 22 launch with the same steps, then break on `AG::Graph::print_cycle` to name the view.
 
+## ✅ FIXED AND VERIFIED 2026-11-04 — 0.9.2 — deleting a saved stream had no confirmation, and it can't be undone
+
+**What was wrong.** The trash button in Stream Sources deleted at once. Delete also removes the stream's Keychain item, which holds its URL
+and passphrase since privacy P2, and nothing can bring that back. One misclick next to Edit lost a stream for good.
+
+**Delete paths.** Every one goes through `StreamBookmarkStore.delete` (`App/Preferences.swift:864`). The audit found two a user can reach:
+
+| Path | Where | Now |
+|---|---|---|
+| Trash button, Stream Sources | `App/StreamBookmarksSheet.swift`, `pendingDelete`, `confirmDelete` | Confirms, naming the stream |
+| Undo Import | `App/SettingsTransferUI.swift`, `pendingUndo`, `undoConfirmation`, then `undo()` | Confirms when it would delete a stream, with its own wording: importing the file again brings them back. A shortcuts-only undo and Undo Restore delete none and don't ask |
+| `delete:<i>`, `purge` in `StreamSecretsSandbox` | `App/Preferences.swift`, DEBUG | Unchanged: headless, sandbox only, pre-ship removal |
+
+Not delete paths: a save that removes only the passphrase (`passphraseRemovalControl`, or a non-SRT URL, which already warns), and the
+rollback in `StreamSecrets.store`, which removes only an item it has just written. The list has no multiple selection, so Undo Import is
+the only place several go at once.
+
+**The fix.** The wording is in `StreamDeletePrompt` (`StreamBookmarkModel`, unit tested). Stream Sources: "Delete “<name>”?", Delete (destructive) and
+Cancel. Undo Import: "Undo this import?", Undo Import (destructive) and Cancel; it counts the streams, mentions shortcuts only if the import
+changed any, and says the file can bring them back. Leaving edit mode moved from the trash button to `confirmDelete`, so cancelling leaves an
+edit as it was. Cancel on Undo Import leaves the whole import in place, shortcuts included.
+
+**Keys.** In both, Return and Esc cancel, and the destructive button has no key. A button has one key equivalent, so Cancel can't hold both:
+AppKit gives a button titled Cancel Esc, and `.keyboardShortcut(.defaultAction)` replaces it with Return. Measured in a throwaway harness of
+real alerts with synthesized events to its own window: `.defaultAction` gave Return only, `role: .cancel` alone or an `NSAlert` gave Esc only.
+So Return stays on Cancel and `EscapeCancelsAlert` (`App/StreamBookmarksSheet.swift`) catches Esc, only while the alert is up and only in the
+alert's window. Do not "simplify" it away.
+
+**Verified 2026-11-04.** Profile, `.build-cc`, one windowed launch, sandbox `del092`, fake `.invalid` streams, AX clicks only (the seed and the
+purge were headless). The list was read from the sandbox suite and the items from the Keychain by attributes, from outside the app.
+- Trash: the dialog's title and message exact, `AXDefaultButton` = Cancel. Cancel kept the entry and item. With that row being edited, Cancel
+  kept the edit; Delete removed the entry and item, left edit mode, and left the other stream and item alone.
+- Undo Import (fixture 4, before its wording changed): `AXDefaultButton` = Cancel. Cancel kept all 3 and their items, and Undo Import stayed
+  offered. Confirming removed them: "Everything is back as it was", 1 item left.
+- The real `streamBookmarks` hash and the 8 real stream items were unchanged. Guard clean before and after.
+- `EscapeCancelsAlert`, the shipped source, in the harness: Return cancelled, Esc cancelled and closed the alert, Esc in the parent window did
+  nothing, another key did nothing, Cancel stayed the default and the destructive button had no key.
+
+**Not yet run in the app.** The final build (the Undo wording and the Esc modifier) has not been launched. Real Return and Esc presses in both
+dialogs are Robbie's by-hand check; no keystroke may be sent from a session.
+
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
 **Question (Robbie, 2026-10-31).** Would handing a Dolby Vision file's sample buffers to an `AVSampleBufferDisplayLayer` give

@@ -362,7 +362,9 @@ The last 10 are kept. "Undo Import" in the summary restores the backup. **Restor
 through the same preview, with no Merge, and it takes its own backup first.
 
 **Streams (built):** the import keeps the ids it added. Undo Import deletes those through `delete`, entry and Keychain item, and
-touches nothing else. A stream the import did not add cannot be affected. Lasts while the summary is open (R5).
+touches nothing else. A stream the import did not add cannot be affected. Lasts while the summary is open (R5). Since 0.9.2 it asks first
+when it would delete a stream, in its own words because the file can bring them back, and Cancel leaves the whole import in place
+(`docs/BUGS.md`).
 
 ### 4.5 What import never touches
 

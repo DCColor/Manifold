@@ -23,6 +23,7 @@
 //
 
 import SwiftUI
+import AppKit
 import StreamBookmarkModel
 import ManifoldCore
 
@@ -57,6 +58,10 @@ struct StreamBookmarksSheet: View {
     /// that distinguishes "delete the secret" from "the field is blank because we never loaded it" —
     /// a distinction a lone text field cannot make. Reset on every entry to and exit from edit mode.
     @State private var removePassphrase = false
+
+    /// Non-nil while the delete confirmation is up. Deleting takes the entry's URL and passphrase out of
+    /// the Keychain, which nothing can bring back, so the trash button only ever sets this.
+    @State private var pendingDelete: StreamBookmark?
 
     /// ── THE REVEAL IS MOMENTARY, AND THAT IS A DESIGN DECISION, NOT A DEFAULT ───────────────
     ///
@@ -107,6 +112,27 @@ struct StreamBookmarksSheet: View {
             }
         }
         .frame(width: 460, height: 540)
+        .alert(pendingDelete.map { StreamDeletePrompt.title(name: $0.name) } ?? "",
+               isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+               presenting: pendingDelete) { bookmark in
+            Button("Delete", role: .destructive) { confirmDelete(bookmark) }
+            // Cancel takes Return: a stray Return must never be what deletes a stream.
+            Button("Cancel", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+        } message: { _ in
+            Text(StreamDeletePrompt.message)
+        }
+        .modifier(EscapeCancelsAlert(isPresented: pendingDelete != nil) { pendingDelete = nil })
+    }
+
+    /// The Delete button of the confirmation: the only place this sheet deletes.
+    private func confirmDelete(_ bookmark: StreamBookmark) {
+        // Exit the mode FIRST if this is the row being edited, or the composer would keep offering to
+        // save changes to an entry that no longer exists (`update` would answer `.noLongerSaved`, which
+        // is a correct but pointless place to end up). Here and not at the trash button, so that
+        // cancelling the confirmation leaves the edit as it was.
+        if editing?.id == bookmark.id { cancelEditing() }
+        store.delete(bookmark)
     }
 
     // MARK: Saved list
@@ -185,13 +211,7 @@ struct StreamBookmarksSheet: View {
             Button { beginEditing(bookmark) } label: { Image(systemName: "pencil") }
                 .buttonStyle(.borderless)
                 .help("Edit this stream")
-            Button {
-                // Exit the mode FIRST if this is the row being edited, or the composer would keep
-                // offering to save changes to an entry that no longer exists (`update` would answer
-                // `.noLongerSaved`, which is a correct but pointless place to end up).
-                if isEditing { cancelEditing() }
-                store.delete(bookmark)
-            } label: { Image(systemName: "trash") }
+            Button { pendingDelete = bookmark } label: { Image(systemName: "trash") }
                 .buttonStyle(.borderless)
                 .help("Delete this stream")
         }
@@ -643,5 +663,37 @@ private extension View {
     /// table on `composerFooter` before adding another modifier here.
     func wrapsInsteadOfClipping() -> some View {
         fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Esc cancels a confirmation whose Cancel button holds Return.
+///
+/// A button has one key equivalent. `.keyboardShortcut(.defaultAction)` replaces the Esc that AppKit gives a
+/// button titled Cancel, and giving Cancel Esc instead leaves Return doing nothing (measured 2026-11-04,
+/// `docs/BUGS.md`). So Return stays on the button and Esc is caught here, only while the alert is up and only
+/// in an attached window with nothing attached to it, which is the alert: an Esc in another window is untouched.
+struct EscapeCancelsAlert: ViewModifier {
+    let isPresented: Bool
+    let cancel: () -> Void
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: isPresented) { _, presented in
+                removeMonitor()
+                guard presented else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    guard event.keyCode == 53, let window = event.window,
+                          window.sheetParent != nil, window.attachedSheet == nil else { return event }
+                    cancel()
+                    return nil
+                }
+            }
+            .onDisappear { removeMonitor() }
+    }
+
+    private func removeMonitor() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }

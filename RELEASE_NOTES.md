@@ -5,6 +5,10 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.9.2
+
+- Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too.
+
 ## 0.9.1
 
 The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the

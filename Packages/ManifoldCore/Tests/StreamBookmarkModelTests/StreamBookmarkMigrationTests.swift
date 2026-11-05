@@ -256,3 +256,34 @@ final class StreamBookmarkMigrationTests: XCTestCase {
         XCTAssertEqual(list[2].urlString, "https://h/whep"); XCTAssertEqual(list[4].type, .hls)
     }
 }
+
+/// The confirmations' words, shown before Stream Sources or Undo Import removes a stream.
+final class StreamDeletePromptTests: XCTestCase {
+    func testDeleteNamesTheStream() {
+        XCTAssertEqual(StreamDeletePrompt.title(name: "Studio A"), "Delete “Studio A”?")
+        XCTAssertEqual(StreamDeletePrompt.message,
+                       "Its saved URL and passphrase will be removed from this Mac. This can’t be undone.")
+    }
+
+    func testUndoImportCountsStreamsAndSaysTheyCanComeBack() {
+        XCTAssertEqual(StreamDeletePrompt.undoImportTitle, "Undo this import?")
+        XCTAssertEqual(StreamDeletePrompt.undoImportMessage(streams: 3, shortcutsReverted: true),
+                       "The 3 streams it added will be removed from this Mac, and any shortcut changes reverted. "
+                       + "You can import the file again to bring them back.")
+    }
+
+    func testUndoImportLeavesOutShortcutsWhenNoneChanged() {
+        XCTAssertEqual(StreamDeletePrompt.undoImportMessage(streams: 3, shortcutsReverted: false),
+                       "The 3 streams it added will be removed from this Mac. "
+                       + "You can import the file again to bring them back.")
+    }
+
+    func testUndoImportSingular() {
+        XCTAssertEqual(StreamDeletePrompt.undoImportMessage(streams: 1, shortcutsReverted: true),
+                       "The stream it added will be removed from this Mac, and any shortcut changes reverted. "
+                       + "You can import the file again to bring it back.")
+        XCTAssertEqual(StreamDeletePrompt.undoImportMessage(streams: 1, shortcutsReverted: false),
+                       "The stream it added will be removed from this Mac. "
+                       + "You can import the file again to bring it back.")
+    }
+}

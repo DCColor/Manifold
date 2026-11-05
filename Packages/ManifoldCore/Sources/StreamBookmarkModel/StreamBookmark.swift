@@ -176,3 +176,21 @@ extension StreamBookmark {
         return try encoder.encode(list)
     }
 }
+
+/// The words of the two confirmations before saved streams are removed. Stream Sources can't be taken
+/// back; Undo Import can, by importing the file again, so it says that instead.
+public enum StreamDeletePrompt {
+    public static func title(name: String) -> String { "Delete “\(name)”?" }
+
+    public static let message = "Its saved URL and passphrase will be removed from this Mac. This can’t be undone."
+
+    public static let undoImportTitle = "Undo this import?"
+
+    /// `shortcutsReverted` is whether the import changed any shortcut.
+    public static func undoImportMessage(streams count: Int, shortcutsReverted: Bool) -> String {
+        let subject = count == 1 ? "The stream it added" : "The \(count) streams it added"
+        let shortcuts = shortcutsReverted ? ", and any shortcut changes reverted" : ""
+        return "\(subject) will be removed from this Mac\(shortcuts). "
+            + "You can import the file again to bring \(count == 1 ? "it" : "them") back."
+    }
+}
