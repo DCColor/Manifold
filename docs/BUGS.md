@@ -3749,7 +3749,7 @@ should not choose a 2160p mode above 60 on a card that cannot run it (refuse or 
 §7.3, one in about 30 windows). The recovery (`ensureRunningOnQueue`) recreated the link at once. Seen once on the display-link
 build; not seen in the shorter HEAD runs, which is not evidence either way. The recovery logs the display of every recreated link now.
 
-## ☐ OPEN 2026-11-03 — 0.9.2 — PQ in As macOS Shows It: the colour state isn't reinstalled when the window moves to another display
+## ✅ FIXED AND VERIFIED 2026-11-04 — 0.9.2 — PQ in As macOS Shows It: the colour state isn't reinstalled when the window moves to another display
 
 **What is wrong.** PQ in As macOS Shows It: the colour state isn't reinstalled when the window moves to another display, so macOS
 keeps the HDR10 tone map set up for the first display (1–3 codes low on the ASUS after opening on the LG; exact after any reinstall).
@@ -3784,6 +3784,21 @@ the 2026-10-30 measurements and in SDR mode here) is UNKNOWN.
 **Fix:** republish the colour state on a screen change, as the display link already retargets (`retargetDisplayLink`, on the
 window's `didChangeScreen`, `MetalVideoRenderer.swift:1284-1331` at `91b09c2`). Verify: open on the LG, move to the ASUS, and the ramp reads the second row with no mode change; both
 LG modes.
+
+**Fixed.** `installLinkTargetObservers` calls `publishColorState()` on the window's `didChangeScreen`, in `.os` only: Reference republishes in its
+own observer, and Bypass has no tone map. A plain republish is enough. The values are unchanged, but `CAEDRMetadata.hdr10` is a new object each time.
+
+**Verified 2026-11-04.** Profile, `.build-cc`, one launch, sandbox `pqm`, a regenerated `pq_ramp_14.mov` (same codes, 9-16-9 read back through
+AVFoundation). Opened on the LG (SDR mode, current = potential = 1.0), moved by AX to the ASUS at 1011 × 520. Window-only captures by id, G at a
+12 × 12 box per bar centre, deleted after recording:
+
+| PQ ramp, As macOS Shows It, ASUS | 0 | 1 | 10 | 50 | **100** | 150 | **203** | 300 | 400 | 600 | 1000+ nits |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| After opening on the LG and moving (+0 s and +5 s) | 0 | 26 | 64 | 119 | **152** | 172 | **187** | 205 | 217 | 234 | 255 |
+
+The second row above, with no mode switch: no `display transform` line in the log, and `colour state #2 installed on the layer (same source: …)` at
+the move. **Not run:** the LG in HDR mode (the entry asks for both), and an SDR or HLG picture across a move. By reading, they install the values
+they already had.
 
 ## ✅ FIXED AND VERIFIED 2026-11-03 (`71d168d`) — 0.9.1 BUILD 23 — 0.9.1 BUILD 22, FROM `e36976d` — the This display checkbox could be clicked while greyed, and a click silently changed the stored calibration
 

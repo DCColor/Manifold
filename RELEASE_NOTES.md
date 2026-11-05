@@ -9,6 +9,7 @@ changelog page. Format notes are at the bottom.
 
 - Double-click a Manifold settings file, or drop one on a player window, to preview its import. Nothing changes until you click Import.
 - Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too.
+- PQ in As macOS Shows It stays correct when you move a window to another display. No mode switch needed.
 
 ## 0.9.1
 

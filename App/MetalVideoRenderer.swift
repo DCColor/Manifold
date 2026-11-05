@@ -1329,6 +1329,10 @@ final class MetalVideoRenderer {
             // A window notification for ANOTHER window says nothing about this one.
             guard let self, let w = note.object as? NSWindow, w === self.hostView?.window else { return }
             self.retargetDisplayLink(reason: "window moved")
+            // The system's tone map is set up for the display the layer's state was installed on, and stays set up for it
+            // until the state is installed again: a PQ picture opened on one display read 1–3 codes low on the next
+            // (docs/BUGS.md, 2026-11-03). Reference republishes in its own observer, and Bypass has no tone map.
+            if self.displayTransform == .os { self.publishColorState() }
         })
         linkTargetObservers.append(nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                   object: nil, queue: .main) { [weak self] _ in
@@ -2030,7 +2034,8 @@ final class MetalVideoRenderer {
         let hlgAdjust = displayTransform == .os && pictureTransferCode == 18 && Self.edrMetadataAvailable
         // PQ in As macOS Shows It (docs/HLG_MACOS_MODE_PLAN.md §3.10c): the system's HDR10 tone map, `.automatic` + `hdr10`,
         // measured to reproduce QuickTime Player at headroom 1.0 (ASUS, every grey bar) and 4.48 (LG, by eye). At ANY
-        // headroom: the compositor adapts to the display, so nothing here changes when the window moves or HDR is toggled.
+        // headroom: the compositor adapts to the display, so these values don't change when the window moves or HDR is
+        // toggled. They are installed again on a move all the same (`installLinkTargetObservers`).
         // The picture's transfer, as for HLG. Reference and Bypass never get it: Reference is absolute, 1.0 = 100 nits.
         let pqToneMap = displayTransform == .os && pictureTransferCode == 16 && Self.edrMetadataAvailable
         // The source's mastering luminance, only when it describes the picture: a LUT's stated output is not the graded
