@@ -138,6 +138,8 @@ final class DisplayTransformMenuState: ObservableObject {
     /// Whether the menu items are live. A display transform is a transform OF something, so the
     /// menu is dead until the key window has a source — the same rule `RasterMenuState` applies.
     @Published private(set) var enabled = false
+    /// The key window's file gives the renderer no picture, so there is nothing to reinterpret.
+    @Published private(set) var interpretationGreyed = false
 
     /// Interlaced I4: the key window's field view, and whether its source offers the views (else the items are disabled).
     @Published private(set) var fieldView: FieldView?
@@ -161,9 +163,11 @@ final class DisplayTransformMenuState: ObservableObject {
     private func refresh() {
         let deck = DeckRegistry.shared.keyDeck
         let newCurrent = deck?.chrome?.displayTransform
-        let newEnabled = (deck?.engine?.displaySize != nil)
+        let newEnabled = deck?.colorControlsEnabled ?? false
         if current != newCurrent { current = newCurrent }
         if enabled != newEnabled { enabled = newEnabled }
+        let newGreyed = deck?.engine?.mediaKind.feedsRenderer == false
+        if interpretationGreyed != newGreyed { interpretationGreyed = newGreyed }
         let newFieldView = deck?.chrome?.fieldView
         let newFieldsOffered = deck?.chrome?.fieldViewOffered ?? false
         if fieldView != newFieldView { fieldView = newFieldView }
@@ -217,7 +221,9 @@ struct DisplayTransformCommands: Commands {
             ShortcutMenuItem(id: .transformChain, registry: shortcuts)
             Divider()
             ShortcutMenuItem(id: .cycleInterpretation, registry: shortcuts)
+                .disabled(state.interpretationGreyed)
             ShortcutMenuItem(id: .resetInterpretation, registry: shortcuts)
+                .disabled(state.interpretationGreyed)
             // Interlaced I4 (docs/INTERLACED_FINDINGS.md §14): the key window's field view. Disabled unless its source is a
             // woven interlaced file. No default key (§14.2 decision 8).
             Divider()

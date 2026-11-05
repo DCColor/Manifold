@@ -382,6 +382,14 @@ targets:
             # ours to assert at install time. `Owner`/`Default` here would have a video
             # player quietly displace whatever the user already chose.
             LSHandlerRank: Alternate
+          # Audio-only files, viewer and Alternate for the same reason as above. `public.audio` is the honest claim:
+          # what plays is what AVFoundation exposes an audio track for, and FrameEngine's phase-1 vet decides.
+          # An Image entry joins with stage B2 (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.1).
+          - CFBundleTypeName: Audio
+            LSItemContentTypes:
+              - public.audio
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
           # ⚠️ THE ONE `Owner`, AND THE COMMENT ABOVE DOES NOT ARGUE AGAINST IT. That rule is about other people's
           # media types. This type is ours: Manifold defines it, writes it and is the only app that can read it
           # (docs/SETTINGS_EXPORT_PLAN.md §2.1). Editor, because Manifold writes these files as well as reading them.

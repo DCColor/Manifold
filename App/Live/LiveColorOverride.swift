@@ -218,13 +218,19 @@ struct ColorInterpretationSlot: View {
     let deck: WindowDeck
     let live: LiveSource?
     let hasFile: Bool
+    /// The file gives the renderer no picture (audio-only), so there is nothing to interpret. Passed in rather than read
+    /// off the deck: SwiftUI re-draws this view only when an input changes.
+    var greyed = false
     var face: ColorInterpretationFace = .full
 
     var body: some View {
         if let live, LiveColorOverrideModel.offersOverride(live) {
             ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face)
         } else if live == nil, hasFile {
+            // Opacity as well: `.disabled` does not grey a borderless menu's label (see `controls` in ContentView).
             ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face)
+                .disabled(greyed)
+                .opacity(greyed ? 0.35 : 1)
         }
     }
 }

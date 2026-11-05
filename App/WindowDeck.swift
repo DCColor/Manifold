@@ -490,6 +490,15 @@ final class WindowDeck: ObservableObject {
     }
     private var lastHasSource: Bool?
 
+    /// This window shows a source AND that source reaches the renderer: a video file or a live stream, and not an
+    /// audio-only file. It is what scopes, frame export and every colour control ask (docs/STILLS_AND_AUDIO_ONLY_PLAN.md
+    /// §3.2). `hasSource` is true for an audio-only file, because `currentURL` is set.
+    var hasPicture: Bool { hasSource && engine?.mediaKind.feedsRenderer != false }
+
+    /// The raster sizes and display modes can act: there is a shape to size to and a picture to transform. An
+    /// audio-only file publishes a fixed shape for the window sizer, so `displaySize` alone no longer says so.
+    var colorControlsEnabled: Bool { engine?.displaySize != nil && engine?.mediaKind.feedsRenderer != false }
+
     /// Coalesce a title re-derivation onto the next main-actor turn.
     ///
     /// ⚠️ THE HOP IS REQUIRED, NOT TIDINESS. `@Published` fires its publisher from `willSet` — the
@@ -924,11 +933,11 @@ final class DeckRegistry {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
-        panel.message = "Choose a video file"
-        // `.movie` and not `.audiovisualContent`: the latter also admits audio-only files (a
-        // .wav conforms to it), which this app has nothing to do with. Measured conformance —
-        // .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d all conform to `public.movie`.
-        panel.allowedContentTypes = [.movie]
+        panel.message = "Choose a video or audio file"
+        // `.movie` and `.audio`. Measured conformance: .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d conform to `public.movie`, and
+        // .wav/.aif/.mp3/.m4a to `public.audio` and to neither `.movie` nor `.image`. `.image` joins with stage B2:
+        // until then a panel that offered stills would only lead to a refusal.
+        panel.allowedContentTypes = [.movie, .audio]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         openFromUserAction(url, preferring: deck)
     }

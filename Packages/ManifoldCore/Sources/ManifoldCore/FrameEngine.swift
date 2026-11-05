@@ -105,6 +105,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     @Published public private(set) var hasMedia = false {
         didSet { applyAudioMute() }
     }
+    /// Which kind of file is loaded (`MediaKind`). Written with `currentURL` at the commit, so anything observing the
+    /// URL edge already sees the new kind, and cleared with `hasMedia` by `stop()`.
+    @Published public private(set) var mediaKind: MediaKind = .none
     @Published public private(set) var metadata: VideoMetadata?
     @Published public private(set) var currentURL: URL?
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
@@ -1210,6 +1213,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         duration = 0
         tcInfo = nil
         hasMedia = false
+        mediaKind = .none
         currentURL = nil
         // …AND THE SHAPE IS A TRANSPORT READOUT TOO, for exactly the reason the block above gives.
         // It was missed when that reasoning was applied to duration and tcInfo, and the omission
@@ -1607,48 +1611,25 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // ══════════ PHASE 1 — VET. NOTHING BELOW THIS LINE MAY WRITE STATE. ══════════
 
-        // ── A STILL IMAGE, REFUSED BY NAME ────────────────────────────────────────────────────
+        // ── WHAT KIND OF FILE THIS IS, AS FAR AS THE TYPE CAN SAY ─────────────────────────────
         //
-        // Same refusal PATH as every other file this engine cannot play — `rejectLoad`, which
-        // raises the one banner — and a different SENTENCE, because the reason is different and the
-        // generic one would be a lie. "Its video track is unreadable" says the file is damaged or
-        // its codec is beyond us; a PNG's lack of a video track is neither. It is a correct,
-        // healthy file of a kind this app does not open.
-        //
-        // Caught HERE rather than at the drop or the open panel because this is the one place every
-        // entry point passes through — a drop, ⌘O, a Finder double-click, a drag to the Dock icon.
-        // The alternative was a second refusal mechanism sitting in the view layer, which is what
-        // produced the bug this replaces: the drop's own type filter returned false for an image
-        // and nothing happened at all, no message, no log, nothing to distinguish it from a dead
-        // window.
-        //
-        // ── WHY STILLS ARE NOT SUPPORTED, AND WHAT WOULD HAVE TO HAPPEN FIRST ────────────────
-        //
-        // ⚠️ THIS IS BANKED AS POST-1.0 AND IT IS GATED ON THE COLOUR PIPELINE, NOT ON EFFORT.
-        // Decoding a PNG is trivial; showing one HONESTLY is not, and this app's whole claim is
-        // that what it puts on screen is what the file says.
-        //
-        // A still can carry an EMBEDDED ICC PROFILE. Video does not work that way: a video file
-        // declares its colour through NCLC/CICP codes drawn from a small closed set of primaries,
-        // transfer functions and matrices, and every path in this app — the shader's conversion,
-        // the layer's colorspace, the scopes' math, the inspector's readout — is built on picking
-        // from that set. An arbitrary ICC profile is a different problem: an arbitrary source
-        // primaries triangle and an arbitrary tone curve, which have to be converted to the display
-        // rather than looked up.
-        //
-        // Doing that correctly means the SHADER owns the display transform instead of handing the
-        // layer a colorspace and letting ColorSync convert. That is exactly Reference mode, which
-        // is currently open work blocked on the MacBook Air measurement — see
-        // docs/AIR-COLOUR-TEST.md for the test and docs/COLOR_MANAGEMENT_FINDINGS.md for the state
-        // of the question ("Reference mode needs a declared destination — open, the real work").
-        //
-        // So the order is: settle Reference mode, then stills. Adding stills first would mean
-        // either drawing them through the video path with their profile ignored — a picture this
-        // app cannot stand behind — or a second colour path beside the one being rebuilt.
+        // Every entry point passes through here (a drop, ⌘O, a Finder double-click, a drag to the Dock icon), so this
+        // is the one place the answer is made. The vet below can still move a file with no video track to `.audioOnly`.
+        var vettedKind: MediaKind = .video
         if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .image) {
-            NSLog("[PLAYBACK] refusing %@ — still image (%@). Manifold plays video; see the note at "
-                + "this refusal for why stills are gated on the colour pipeline.",
-                  url.lastPathComponent, type.identifier)
+            vettedKind = .still
+        }
+
+        // ── A STILL IMAGE, REFUSED BY NAME, FOR NOW ───────────────────────────────────────────
+        //
+        // Same refusal PATH as every other file this engine cannot play — `rejectLoad`, which raises the one banner —
+        // and its own sentence, because "its video track is unreadable" would be false of a healthy PNG. Stage B2
+        // replaces this block with the ImageIO vet and `loadStill` (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.1).
+        //
+        // Stills do not wait on the colour pipeline: the plan draws them in an `NSImageView`, as macOS shows them, and
+        // Manifold's renderer never touches one. The refusal stands only until B2 lands.
+        if vettedKind == .still {
+            NSLog("[PLAYBACK] refusing %@ — still image, not opened yet (stage B2)", url.lastPathComponent)
             rejectLoad(notice: "Manifold plays video — still images aren’t supported.")
             return
         }
@@ -1716,6 +1697,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // ══════════ PHASE 2 — COMMIT. THE PREVIOUS SOURCE ENDS HERE. ══════════
 
+        mediaKind = vettedKind
         currentURL = url
         onSourceCommitted?(url)
         // A new file gets a clean slate for the degraded-playback notice: the previous file's

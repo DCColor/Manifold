@@ -112,7 +112,8 @@ final class ScopeColorFeed: ObservableObject {
         // a LUT's stated space if one is loaded (the LUT stays across sources), so the cleared SOURCE codes are
         // written instead, and the header says "no source" rather than naming that space. With a source: the
         // picture codes, as since L2.
-        let present = deck.hasSource
+        // `hasPicture`, not `hasSource`: an audio-only file is a source with no picture for a scope to describe.
+        let present = deck.hasPicture
         let now = present
             ? Written(primaries: renderer.picturePrimariesCode, transfer: renderer.pictureTransferCode,
                       matrix: renderer.pictureMatrixCode, provenance: renderer.sourceColorProvenance,

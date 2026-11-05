@@ -184,8 +184,8 @@ final class ShortcutCenter: KeyDispatchHost {
     /// App-level actions are answered here; everything else is the window's.
     private func canPerform(_ id: ShortcutID, on deck: WindowDeck?) -> Bool {
         guard let deck else { return false }
-        if RasterSize.forShortcut(id) != nil { return deck.engine?.displaySize != nil }
-        if DisplayTransformMode.forShortcut(id) != nil { return deck.engine?.displaySize != nil }
+        if RasterSize.forShortcut(id) != nil { return deck.colorControlsEnabled }
+        if DisplayTransformMode.forShortcut(id) != nil { return deck.colorControlsEnabled }
         if id == .fullScreen { return deck.window != nil }
         return deck.shortcutHandlers[id]?.isEnabled() ?? false
     }

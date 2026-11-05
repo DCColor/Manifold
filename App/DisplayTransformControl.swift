@@ -35,6 +35,9 @@ import AppKit
 struct DisplayTransformControl: View {
     let deck: WindowDeck
     @ObservedObject var chrome: WindowChrome
+    /// The file gives the renderer no picture (audio-only). The pulldown greys; the chain popover stays reachable by its
+    /// key, and says why. An input, not read off the deck: SwiftUI re-draws this view only when an input changes.
+    var greyed = false
     /// Per window, owned here. Lifetime is this control's, which is the window's.
     @StateObject private var chainModel = DisplayChainModel()
 
@@ -86,6 +89,8 @@ struct DisplayTransformControl: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .disabled(greyed)
+            .opacity(greyed ? 0.35 : 1)
         }
         .help(isBypass
               ? "Display transform: BYPASS — no color management. Diagnostic only."
@@ -97,6 +102,7 @@ struct DisplayTransformControl: View {
         // rather than from this pulldown. `chrome` is observed, so this fires for both routes.
         .onChange(of: chrome.displayTransform) { _, _ in chainModel.refresh() }
         .onChange(of: chrome.heldDisplayTransform) { _, _ in chainModel.refresh() }
+        .onChange(of: greyed) { _, _ in chainModel.refresh() }
         // ⚠️ TIER 3 IS PRESENTED FROM HERE, NOT FROM `ContentView`. The presentation modifier has
         // to live on a view in this file — see the header on why `ContentView` cannot take one.
         .popover(isPresented: $chrome.showTransformChain, arrowEdge: .bottom) {

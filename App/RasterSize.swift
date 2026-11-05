@@ -289,7 +289,7 @@ final class RasterMenuState: ObservableObject {
     private func refresh() {
         let deck = DeckRegistry.shared.keyDeck
         let newCurrent = deck?.chrome?.rasterSize
-        let newEnabled = (deck?.engine?.displaySize != nil)
+        let newEnabled = deck?.colorControlsEnabled ?? false
         if current != newCurrent { current = newCurrent }
         if enabled != newEnabled { enabled = newEnabled }
     }

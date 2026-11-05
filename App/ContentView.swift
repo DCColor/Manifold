@@ -821,6 +821,9 @@ struct ContentView: View {
                 // "enable output, then load a file" order still works.
                 if deck.gate.drivesDevices {
                     DeckLinkService.shared.sourceColorChanged()
+                    // An audio-only file has no raster or rate to follow: the output keeps its mode. It would otherwise
+                    // read as a 0×0, 0 fps source (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.4).
+                    guard engine.mediaKind == .video else { return }
                     // D4a: derive the output display mode (video cadence) from the file's
                     // resolution + rate. Updates the status label; live-switches the output mode if
                     // it's running and changed.
@@ -913,7 +916,7 @@ struct ContentView: View {
             fileWatch.watch(url)
             // File ▸ Open Recent is recorded HERE and nowhere else, because this is the commit
             // edge: `currentURL` is assigned in `loadAsset`'s phase 2, so a file phase 1 refused
-            // (a still, an R3D, anything with no readable video track) never reaches this line and
+            // (a still, an R3D, anything with no readable track) never reaches this line and
             // never enters the list. Noting at the open panel would have listed every refusal.
             // Streams cannot arrive here at all — they never call `load(url:)` — so there is no
             // guard for them; see the note on `RecentFiles.note`.
@@ -1062,6 +1065,8 @@ struct ContentView: View {
     /// been chosen yet, or the user has chosen with their hands — and the window keeps its width in
     /// both cases.
     private var rasterRequest: RasterRequest {
+        // A percentage of a picture that does not exist is false, so an audio-only file keeps the window's width.
+        guard engine.mediaKind.feedsRenderer else { return .unconstrained }
         if chrome.rasterSize == .fitToScreen { return .fitToScreen }
         guard let fraction = chrome.rasterSize.fraction else { return .unconstrained }
         return .sourceFraction(fraction)
@@ -1154,33 +1159,26 @@ struct ContentView: View {
     /// Is this a file the app should ACCEPT and try to open — which is a different question from
     /// whether it can play it, and the difference is the point.
     ///
-    /// ⚠️ IMAGES ARE ACCEPTED HERE **SO THAT THEY CAN BE REFUSED PROPERLY**. That is not a
-    /// contradiction, it is the fix. This predicate used to be `public.movie` alone, so dropping a
-    /// PNG returned false and NOTHING HAPPENED — no message, no log, nothing to tell the user
-    /// apart from a window that ignored them. Meanwhile an .r3d, which does conform to
-    /// `public.movie`, was accepted and then refused by the engine with a message. Two ways of
-    /// saying "no", one of them silent, chosen by a UTType hierarchy that knows nothing about what
-    /// this app can decode.
+    /// Movies and audio go to `FrameEngine.loadAsset`, which vets them. An .r3d conforms to `public.movie` and is
+    /// refused there with a banner, which is why this is not a statement of what can play.
     ///
-    /// Letting images through means both land in the SAME place — `FrameEngine.loadAsset`, which
-    /// empties the deck and raises the one banner — and each gets the sentence that is true of it:
-    /// a still is named as a still, an unreadable video track is named as that. See the refusal in
-    /// FrameEngine, which is also where the reason stills are banked is written down.
+    /// ⚠️ IMAGES ARE ACCEPTED SO THAT THEY CAN BE REFUSED PROPERLY, until stage B2 opens them. This predicate was once
+    /// `public.movie` alone, so dropping a PNG returned false and nothing happened: no message, no log. Letting them
+    /// through gives them the engine's banner, with the sentence that is true of a still.
     ///
     /// Everything else (.pdf, .txt, a folder) is still declined here, silently, and that is
-    /// UNCHANGED rather than endorsed: this widening is deliberately the smallest one that closes
-    /// the reported case. A real capability filter — "what can this engine actually open", asked
-    /// once, ahead of acceptance — is the fix for the general problem, and it is the work the drop
-    /// commit already flags as needing to be BUILT rather than extended.
+    /// UNCHANGED rather than endorsed: a real capability filter, "what can this engine actually
+    /// open", asked once ahead of acceptance, is the fix for the general problem.
     private static func acceptsForLoad(_ url: URL) -> Bool {
         guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
-        return type.conforms(to: .movie) || type.conforms(to: .image)
+        return type.conforms(to: .movie) || type.conforms(to: .image) || type.conforms(to: .audio)
     }
 
     /// Show (or refresh) the readout from CURRENT facts. Never takes the text from its caller — the
     /// three triggers below know that something moved, not what it moved to.
     private func showRasterNotice() {
-        guard let text = RasterReadout.text(for: chrome.rasterSize,
+        guard engine.mediaKind.feedsRenderer,
+              let text = RasterReadout.text(for: chrome.rasterSize,
                                             displaySize: engine.displaySize,
                                             drawnPixels: drawnVideoPixels) else { return }
         rasterNotice = text
@@ -1691,6 +1689,9 @@ struct ContentView: View {
         // is the worst outcome available here.
         let device = { deck.gate.deviceControlsEnabled }
         let playhead = { transportKeys.canMovePlayhead }
+        // Colour keys need a picture: an audio-only file has none to reinterpret. The display modes are gated with the
+        // Color menu (`DeckRegistry.colorControlsEnabled` through `ShortcutCenter.canPerform`).
+        let colorControlsEnabled = { device() && engine.mediaKind.feedsRenderer }
         let nudge = { (ms: Int) in
             DeckShortcut(enabled: { DeckRegistry.shared.liveLabel(for: deck) != nil }) { deck.audioOffset.nudge(byMs: ms) }
         }
@@ -1713,7 +1714,7 @@ struct ContentView: View {
             .inspector: DeckShortcut { showInspector.toggle() },
             .fileName: DeckShortcut { showFileNameOverlay.toggle() },
             .alwaysShowControls: DeckShortcut(enabled: { hasSource && !isDocked }) { togglePin() },
-            .exportFrame: DeckShortcut(enabled: { metalRenderer != nil }) { metalRenderer?.exportCurrentFrame() },
+            .exportFrame: DeckShortcut(enabled: { metalRenderer != nil && engine.mediaKind.feedsRenderer }) { metalRenderer?.exportCurrentFrame() },
             // Help ▸ Export Frame for Support…: the diagnostic set through a save panel, on this window.
             .exportFrameForSupport: DeckShortcut(enabled: { metalRenderer != nil }) {
                 metalRenderer?.exportFrameForSupport(window: deck.window)
@@ -1744,8 +1745,8 @@ struct ContentView: View {
             .cieP3: DeckShortcut { cieShowP3.toggle() },
             .cie2020: DeckShortcut { cieShow2020.toggle() },
             // Colour interpretation: the control bar's Color control, for whatever this window shows.
-            .cycleInterpretation: DeckShortcut(enabled: device) { deck.cycleColorOverride(live: activeLiveSource) },
-            .resetInterpretation: DeckShortcut(enabled: device) {
+            .cycleInterpretation: DeckShortcut(enabled: colorControlsEnabled) { deck.cycleColorOverride(live: activeLiveSource) },
+            .resetInterpretation: DeckShortcut(enabled: colorControlsEnabled) {
                 if let live = activeLiveSource { deck.colorOverride.set(.auto, on: live) } else { deck.fileColor.reset() }
             },
             // Audio. The nudge acts only while this window shows a live source; otherwise ⌥[ / ⌥] go on (to a text
@@ -2333,8 +2334,9 @@ struct ContentView: View {
             .help("Subtitle options")
         }
         // File-only, same rule as loop: NDI takeover calls engine.stop(), which zeroes hasMedia,
-        // so this self-disables for live sources. Captions over no picture are meaningless.
-        .disabled(!engine.hasMedia)
+        // so this self-disables for live sources. Captions over no picture are meaningless,
+        // which also rules out an audio-only file.
+        .disabled(engine.mediaKind != .video)
     }
 
     /// Subtitle picker. NSOpenPanel directly, NOT SwiftUI's .fileImporter: .fileImporter silently
@@ -2937,7 +2939,8 @@ struct ContentView: View {
             // nothing's loaded yet), chevron loads/clears the sidecar and picks position.
             captionControl
             inspectorButton
-            flipButton
+            // D10: hidden for a file that is not video, as in `moreMenu`.
+            if engine.mediaKind.feedsRenderer { flipButton }
             reloadButton
             exportButton
 
@@ -2960,7 +2963,7 @@ struct ContentView: View {
             // what things ARE). The live stream's override on NDI, SRT, WHEP and HLS; the file's since
             // colour S5 (§6.11, decision 6). One element, no modifiers (§6.7): the slot picks which, so
             // this body does not grow a branch — see LiveColorOverride.swift.
-            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia)
+            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyed: !engine.mediaKind.feedsRenderer)
             displayTransformSlot
             audioOffsetSlot
 
@@ -3010,7 +3013,7 @@ struct ContentView: View {
             scopesButton
             deckLinkOutputControl
             streamingControl
-            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, face: .short)
+            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyed: !engine.mediaKind.feedsRenderer, face: .short)
             displayTransformSlot
             audioOffsetSlot
             moreMenu(g, includesLoop: true)
@@ -3049,7 +3052,7 @@ struct ContentView: View {
 
                 rowDivider
 
-                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, face: .icon)
+                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyed: !engine.mediaKind.feedsRenderer, face: .icon)
                 displayTransformSlot
 
                 rowDivider
@@ -3069,8 +3072,11 @@ struct ContentView: View {
     private func moreMenu(_ g: RowGates, includesLoop: Bool) -> some View {
         let on = moreOnStates(includesLoop: includesLoop)
         return Menu {
-            Button("Edit in Flip", action: editInFlip)
-                .disabled(engine.currentURL == nil)
+            // D10: hidden for a file that is not video, not greyed. Flip has nothing to do with one.
+            if engine.mediaKind.feedsRenderer {
+                Button("Edit in Flip", action: editInFlip)
+                    .disabled(engine.currentURL == nil)
+            }
             // The same press as the button: acknowledge, then re-read (see `reloadButton`).
             Button(fileWatch.isHighlighted ? reloadHelp : "Refresh Metadata") {
                 fileWatch.rebaseline()
@@ -3089,11 +3095,11 @@ struct ContentView: View {
                     }
                 }
             }
-            // File-only, as `captionControl` is.
-            .disabled(!engine.hasMedia)
+            // Video files only, as `captionControl` is.
+            .disabled(engine.mediaKind != .video)
             Section {
                 Button(keys.helpText("Export Frame", .exportFrame)) { metalRenderer?.exportCurrentFrame() }
-                    .disabled(engine.currentURL == nil)
+                    .disabled(engine.mediaKind != .video)
                 Button("Framing Guides…") { showGuidesPanel = true }
                 if includesLoop {
                     Toggle(keys.helpText("Loop Playback", .loop),
@@ -3318,7 +3324,7 @@ struct ContentView: View {
             Image(systemName: "square.and.arrow.down")
         }
         .help(keys.helpText("Export frame", .exportFrame))
-        .disabled(engine.currentURL == nil)
+        .disabled(engine.mediaKind != .video)
     }
 
     // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is
@@ -3347,7 +3353,7 @@ struct ContentView: View {
     // §6.7: this file's body is at the type-checker's limit.
     @ViewBuilder private var displayTransformSlot: some View {
         if hasSource {
-            DisplayTransformControl(deck: deck, chrome: chrome)
+            DisplayTransformControl(deck: deck, chrome: chrome, greyed: !engine.mediaKind.feedsRenderer)
         }
     }
 

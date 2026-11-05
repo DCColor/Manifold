@@ -53,7 +53,7 @@ final class HoldToCompare {
 
     /// ⌥C: the LUT off while held. With a key deck but no LUT applied it takes the key and does nothing.
     private func beginLUTOff() -> Bool {
-        guard let deck = DeckRegistry.shared.keyDeck else { return false }
+        guard let deck = DeckRegistry.shared.keyDeck, deck.colorControlsEnabled else { return false }
         guard deck.lut.isApplied else {
             print("[COMPARE] LUT hold — no LUT applied in this window, nothing to compare"); return true
         }
@@ -70,8 +70,8 @@ final class HoldToCompare {
         guard let deck = registry.keyDeck, let chrome = deck.chrome else {
             print("[COMPARE] key ignored — no key window with a deck"); return false
         }
-        guard deck.engine?.displaySize != nil else {
-            print("[COMPARE] key ignored — this window has no source"); return false
+        guard deck.colorControlsEnabled else {
+            print("[COMPARE] key ignored — this window has no picture"); return false
         }
         let chosen = chrome.displayTransform
         let target: DisplayTransformMode
