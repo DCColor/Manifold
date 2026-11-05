@@ -534,7 +534,7 @@ final class MetalVideoRenderer {
 
     /// v210 row stride: 128-byte aligned, 48 px per 128 bytes. Matches IDeckLinkOutput
     /// RowBytesForPixelFormat(bmdFormat10BitYUV, width) (e.g. 3840 → 10240, no padding).
-    private static func v210RowBytes(width: Int) -> Int { ((width + 47) / 48) * 128 }
+    static func v210RowBytes(width: Int) -> Int { ((width + 47) / 48) * 128 }
 
     // Offscreen render targets — the source of truth for display (1:1 blitted to the
     // drawable), frame export, and scopes. A RING (not a single texture): the render writes
@@ -5094,6 +5094,16 @@ final class MetalVideoRenderer {
         print(String(format: "DeckLink: SDI scaler released %@ — %.1f MB (%d×%d intermediate + taps); Metal device "
                              + "allocated %.1f → %.1f MB", when, Double(bytes) / 1e6, w, h,
                      Double(before) / 1e6, Double(after) / 1e6))
+    }
+
+    /// The staged frames describe a source that has gone: nothing may reach the card or anchor its audio until a new frame
+    /// is converted. `clearToBlack` does not touch this ring. The buffers and the armed convert stay, so the next frame
+    /// goes straight out (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §0, item 2).
+    func dropDeckLinkFrames() {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        deckLinkFrameReady = false
+        deckLinkFrontPts = .nan
+        resetDeckLinkRingLocked()
     }
 
     /// Stop DeckLink output: disarm the convert and release the staging buffers, and the scaler's (F5) — now, or when

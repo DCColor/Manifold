@@ -144,7 +144,7 @@ final class DeckLinkService: ObservableObject {
     /// D8: "SDI 1920×1080p23.98 · source 1280×720 1:1, windowboxed" — whenever the output is NOT the source 1:1 at its
     /// own raster; nil when it is (native) or output is off. Never silent about a placed or scaled picture.
     var placementLine: String? {
-        guard let p = placement, !p.isNative else { return nil }
+        guard heldReason == nil, let p = placement, !p.isNative else { return nil }
         return "SDI \(p.outputWidth)×\(p.outputHeight)\(Self.rateSuffix(modeLabel)) · \(p.summary)"
     }
 
@@ -160,7 +160,7 @@ final class DeckLinkService: ObservableObject {
     /// reading rather than sitting beside it: "2160p23.98 · 10-bit 4:2:2 · Rec. 709" is not a true
     /// statement about a black output, and showing both would let the reassuring half be the one
     /// that gets read.
-    var signalLineOrWarning: String { rasterMismatch ?? signalLine }
+    var signalLineOrWarning: String { heldReason == nil ? rasterMismatch ?? signalLine : signalLine }
 
     // MARK: - Driver readiness (the honest tri-state, plus the two "we don't know" cases)
 
@@ -632,6 +632,82 @@ final class DeckLinkService: ObservableObject {
     /// available. The menu greys the "Follow source" row and shows this beneath it.
     @Published private(set) var followSourceUnavailableReason: String?
 
+    // MARK: The held picture (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.4)
+
+    /// What the output sends while the window driving it has a file with no picture for the renderer: v210 for the
+    /// current mode and its signal. It bypasses the renderer completely, so no colour code, LUT or display mode reaches
+    /// it, and one mechanism answers both failures: the card's staging ring still holds the last video frame, and a
+    /// neutral fill would keep a previous PQ tag on black.
+    private struct HeldPicture {
+        let signal: OutputSignal
+        /// Empty until the serial queue has built it; the fill writes the same black directly until then.
+        var bytes: [UInt8] = []
+        var rowBytes = 0
+        var height = 0
+    }
+    /// Read by the fill block on the SDK's thread.
+    private let heldLock = NSLock()
+    private var heldPicture: HeldPicture?
+    /// What the menu says while the picture is held. Main actor only.
+    private var heldReason: String?
+
+    private var heldSignal: OutputSignal? {
+        heldLock.lock(); defer { heldLock.unlock() }
+        return heldPicture?.signal
+    }
+
+    /// Hold the output on black tagged Rec.709 SDR, saying `reason` in the menu, or release it with nil. The mode does
+    /// not change, so a recorder or monitor does not re-lock.
+    ///
+    /// ⚠️ BOTH EDGES DROP THE RENDERER'S STAGED FRAMES. Holding, because the frames describe a source that has gone;
+    /// releasing, because a convert in flight at the hold can have staged one since, and the next file's first frame has
+    /// not arrived: the wire would show the old file for a beat.
+    func setHeldBlack(reason: String?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard reason != heldReason else { return }
+        heldReason = reason
+        heldLock.lock()
+        heldPicture = reason == nil ? nil : HeldPicture(signal: .sdr709)
+        heldLock.unlock()
+        renderer?.dropDeckLinkFrames()
+        followSourceUnavailableReason = reason
+        print("DeckLink: held picture \(reason == nil ? "released" : "on — black, Rec. 709 SDR, silent")")
+        if reason != nil {
+            queue.async {
+                if let mode = self.activeStart?.1 { self.buildHeldPicture(for: mode) }
+            }
+        }
+        sourceColorChanged()
+    }
+
+    /// On the serial queue, never the card's callback.
+    private func buildHeldPicture(for mode: OutputMode) {
+        let rowBytes = MetalVideoRenderer.v210RowBytes(width: mode.width)
+        let bytes = [UInt8](unsafeUninitializedCapacity: rowBytes * mode.height) { buffer, count in
+            Self.fillNeutralV210(buffer.baseAddress!, rowBytes: rowBytes, width: mode.width, height: mode.height)
+            count = rowBytes * mode.height
+        }
+        heldLock.lock()
+        if heldPicture != nil {
+            heldPicture?.bytes = bytes
+            heldPicture?.rowBytes = rowBytes
+            heldPicture?.height = mode.height
+        }
+        heldLock.unlock()
+    }
+
+    /// The fill block's first question: the held signal, with the frame written, or nil when nothing is held.
+    private func copyHeldPicture(into buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) -> OutputSignal? {
+        heldLock.lock(); defer { heldLock.unlock() }
+        guard let held = heldPicture else { return nil }
+        if held.rowBytes == rowBytes, held.height == height {
+            held.bytes.withUnsafeBytes { memcpy(buffer, $0.baseAddress!, rowBytes * height) }
+        } else {
+            Self.fillNeutralV210(buffer, rowBytes: rowBytes, width: width, height: height)
+        }
+        return held.signal
+    }
+
     /// True when a source-derived mode exists to follow.
     var followSourceAvailable: Bool { sourceDerivedMode != nil }
 
@@ -902,13 +978,17 @@ final class DeckLinkService: ObservableObject {
         // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
         self.renderer?.beginDeckLinkOutput(width: mode.width, height: mode.height, frameDuration: 1 / mode.standardRate)
 
+        // A held picture is made for the mode, here on every start and mode change, and needs no priming below.
+        let holding = self.heldSignal != nil
+        if holding { self.buildHeldPicture(for: mode) }
+
         // A PAUSED picture reaches the card only if something renders it after the convert is armed: prime it here,
         // before the preroll, so frame #0 carries it (docs/BUGS.md, L4). Every start comes through here — a click,
         // ⌃⌥O, Enable output on launch, a mode change, an audio re-establish.
         // ⚠️ NOT WHILE PLAYING. Frames arrive within a frame period anyway, and a frame already staged at the card's
         // first audio callback is the case that snaps the SDI audio cursor (docs/BUGS.md, "the SDI audio cursor
         // snaps"): priming playing starts would make every one of them that case.
-        if let r = self.renderer, r.isPausedProvider?() == true {
+        if !holding, let r = self.renderer, r.isPausedProvider?() == true {
             if let ms = r.primeDeckLinkFrame(timeout: Self.primeTimeout) {
                 print(String(format: "DeckLink: primed — paused frame converted in %.1f ms, before the preroll", ms))
             } else {
@@ -927,6 +1007,14 @@ final class DeckLinkService: ObservableObject {
         let dump = FrameDump.directory.map { FrameDump(directory: $0, mode: mode.label) }
         #endif
         let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height, signal in
+            if let held = self?.copyHeldPicture(into: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+                signal.pointee = Self.bridgeSignal(held)
+                probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
+                #if DEBUG
+                trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: held)
+                #endif
+                return true
+            }
             if let r = self?.renderer,
                let s = r.copyLatestDeckLinkFrame(into: UnsafeMutableRawPointer(buffer),
                                                  rowBytes: Int(rowBytes), width: Int(width), height: Int(height),
@@ -963,7 +1051,7 @@ final class DeckLinkService: ObservableObject {
 
         // What frames carry until the first picture: the renderer's current signal, read now (D5). An audio
         // re-establish or a mode change reads it again here, never a value saved at an earlier start.
-        let startSignal = self.renderer?.deckLinkStartSignal() ?? .sdr709
+        let startSignal = self.heldSignal ?? self.renderer?.deckLinkStartSignal() ?? .sdr709
         print("DeckLink: output start — signal until the first picture: \(startSignal.logLine)")
         let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
                                                         initialSignal: Self.bridgeSignal(startSignal),
@@ -1098,6 +1186,9 @@ final class DeckLinkService: ObservableObject {
             // `activeStart` is the queue's own record of the live output, so no main-actor state is
             // touched from the decode thread this call arrives on.
             guard self.isOutputting, let start = self.activeStart else { return }
+            // A held output sends silence, so the file's format is no reason to stop it: a 44.1 kHz WAV would re-lock the
+            // monitor for nothing. The next source's first buffer brings this back through here.
+            guard self.heldSignal == nil else { return }
             let wanted = Self.isSupportedForSDI(format) ? format : nil
             // Only the wire-visible parts matter; the decode path (AVF vs libav) does not.
             let same = (wanted?.sampleRate == self.enabledAudioFormat?.sampleRate)
@@ -1121,7 +1212,8 @@ final class DeckLinkService: ObservableObject {
     /// under, so the tag changes on the first frame with the new pixels, and on no other.
     func sourceColorChanged() {
         let primariesCode = renderer?.picturePrimariesCode
-        let signal = renderer?.pictureOutputSignal ?? .sdr709
+        // The renderer's answer would describe a loaded LUT's space, which is not what the wire carries while held.
+        let signal = heldSignal ?? renderer?.pictureOutputSignal ?? .sdr709
         let label = signal.colorimetryLabel
         // Colour S5: the SDI tag in the log, once per change, so an unattended run reads what the output
         // tags (or would tag) beside the picture, scopes and readout it must agree with.

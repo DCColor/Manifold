@@ -1124,6 +1124,7 @@ final class DeckRegistry {
         // …and the engine feeds this window's renderer, and only this one.
         engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
         engine.onFlush = { [weak renderer] in renderer?.flush() }
+        engine.onMediaKindChanged = { [weak self] in self?.updateHeldPicture() }
         // A paused window's display link has stopped, and the one-shot wipe runs on its next tick.
         engine.onClearPicture = { [weak renderer] in renderer?.clearToBlack(); renderer?.wakeDisplayLink() }
         // The renderer's queue paces this engine's file decode (0.9.1, docs/BUGS.md, the 120 fps freeze): a full queue parks
@@ -1249,6 +1250,14 @@ final class DeckRegistry {
     ///      observes ownership ending — nothing auto-resumes).
     ///   5. Point the device hooks at the active deck, atomically.
     ///   6. Publish each deck's gate.
+    /// The output's picture follows the deck driving it: while that deck has an audio-only file the output holds black
+    /// (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.4), and a video or live source commit releases it, because either changes
+    /// `mediaKind` (a stream's takeover through `stop()`). Another window's file is not this output's business.
+    private func updateHeldPicture() {
+        let held = hostDeck?.engine?.mediaKind == .audioOnly
+        DeckLinkService.shared.setHeldBlack(reason: held ? "Audio-only files aren’t sent to SDI or HDMI yet. Output is black." : nil)
+    }
+
     private func applyArbitration(_ trigger: String) {
         prune()
 
@@ -1350,6 +1359,8 @@ final class DeckRegistry {
             // a file load, which is why ContentView observes the engine for that half.
             deck.applyWindowTitle()
         }
+
+        updateHeldPicture()
 
         // ── LAUNCH WORK THAT BELONGS TO THE APP ───────────────────────────────────────────
         //

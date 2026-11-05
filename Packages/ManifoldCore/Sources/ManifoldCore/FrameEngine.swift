@@ -107,7 +107,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
     /// Which kind of file is loaded (`MediaKind`). Written with `currentURL` at the commit, so anything observing the
     /// URL edge already sees the new kind, and cleared with `hasMedia` by `stop()`.
-    @Published public private(set) var mediaKind: MediaKind = .none
+    @Published public private(set) var mediaKind: MediaKind = .none {
+        didSet {
+            guard mediaKind != oldValue else { return }
+            applyAudioMute()
+            onMediaKindChanged?()
+        }
+    }
+    /// The kind changed, told after the new value is stored (a `@Published` sink would see the old one). The deck uses it
+    /// to hold or release the output's picture.
+    public var onMediaKindChanged: (() -> Void)?
     @Published public private(set) var metadata: VideoMetadata?
     @Published public private(set) var currentURL: URL?
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
@@ -857,7 +866,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// restore the user's choice when returning to 1× — standard NLE behavior.
     private func applyAudioMute() {
         let offSpeed = shuttleRate != 0 && shuttleRate != 1
-        let effectiveMute = isMuted || offSpeed || deckLinkOwnsAudio
+        // An audio-only file is not sent to the card in 0.9.2 (`setCardAudioSilent` below), so the card does not own it:
+        // with the Mac muted too, it would play with its meters moving and be heard nowhere.
+        let effectiveMute = isMuted || offSpeed || (deckLinkOwnsAudio && mediaKind != .audioOnly)
         audioRenderer.isMuted = effectiveMute
         // The SAME decision, handed to any transport that plays through its own output rather than
         // through `audioRenderer`. All three terms reach it because all three are already combined
@@ -892,7 +903,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // the two expressions match would silence HLS on the Mac.
         //
         // Net: real PCM at exactly 1× forward for a file, whenever unmuted for a live source.
-        setCardAudioSilent(isMuted || (hasMedia && shuttleRate != 1))
+        //
+        // An audio-only file: always silence, until B5 gives the card a clock (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.3).
+        setCardAudioSilent(isMuted || mediaKind == .audioOnly || (hasMedia && shuttleRate != 1))
     }
 
     /// D4b-2: thread-safe mirror of the SDI audio gate, readable from the DeckLink audio-callback
