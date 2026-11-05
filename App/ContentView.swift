@@ -472,6 +472,8 @@ struct ContentView: View {
     /// DeckLink output state (on/off + selected device) — shared singleton, observed so the toolbar
     /// control and File ▸ Start / Stop DeckLink Output always agree.
     @ObservedObject private var deckLink = DeckLinkService.shared
+    /// Settings ▸ DeckLink Output ▸ Audio at launch, observed so the DeckLink tooltip's session note follows it.
+    @AppStorage(DeckLinkAudioDestination.defaultsKey) private var deckLinkAudioAtLaunch: DeckLinkAudioDestination = .default
     /// External .srt sidecar state (cues + on/off). Per-window like the scope models, not a
     /// singleton: captions are view-level overlay state synced to the engine's clock, with no
     /// device/stream lifecycle to share. The engine stays unaware of them.
@@ -2099,6 +2101,7 @@ struct ContentView: View {
 
     /// D4b-3: route the destination picker through setAudioDestination — routing only, so a mid-session
     /// flip re-points the audio WITHOUT re-establishing the card (no video blip, no lost preroll depth).
+    /// It changes the session only; the starting value is Settings ▸ DeckLink Output ▸ Audio at launch.
     private var deckLinkAudioDestinationBinding: Binding<DeckLinkService.AudioDestination> {
         Binding(get: { deckLink.audioDestination },
                 set: { DeckLinkService.shared.setAudioDestination($0) })
@@ -2128,6 +2131,21 @@ struct ContentView: View {
                                                       : "DeckLink output — " + keys.helpText("click to start", .toggleDeckLink)
         let placedHelp: String? = deckLink.isOutputting
             ? deckLink.placementLine.map { "DeckLink output ON — \($0) — " + stopHelp } : nil
+        // Said whatever else the tooltip says: a session value away from the preference ends at the next launch.
+        let audioHelp: String = deckLink.audioDestination.sessionNote(preference: deckLinkAudioAtLaunch)
+            .map { " — " + $0 } ?? ""
+        let buttonHelp: String = (arbitrated ? deck.gate.reason : nil)
+            ?? (blocked ? status.blockedReason : nil)
+            // A mismatch means the card is ON and the picture is BLACK — the one state where
+            // the green tv.fill icon is actively misleading, so it is said in the tooltip
+            // rather than only inside the menu.
+            ?? deckLink.rasterMismatch
+            // A refused start (another app holds the card): output is off, and the button says why.
+            ?? (deckLink.isOutputting ? nil : deckLink.startRefusal)
+            // SDI scaling (D8): a placed or scaled picture is said here too, so the green icon is never
+            // taken for a native 1:1 output.
+            ?? placedHelp
+            ?? onOffHelp
         return HStack(spacing: 2) {
             Button { DeckRegistry.shared.toggleDeckLinkOutput(from: deck) } label: {
                 Image(systemName: deckLink.isOutputting ? "tv.fill" : "tv")
@@ -2135,18 +2153,7 @@ struct ContentView: View {
             .disabled(blocked)
             .foregroundStyle(deckLink.isOutputting && !arbitrated ? Color.green
                              : .white.opacity(blocked ? 0.35 : 0.9))
-            .help((arbitrated ? deck.gate.reason : nil)
-                  ?? (blocked ? status.blockedReason : nil)
-                  // A mismatch means the card is ON and the picture is BLACK — the one state where
-                  // the green tv.fill icon is actively misleading, so it is said in the tooltip
-                  // rather than only inside the menu.
-                  ?? deckLink.rasterMismatch
-                  // A refused start (another app holds the card): output is off, and the button says why.
-                  ?? (deckLink.isOutputting ? nil : deckLink.startRefusal)
-                  // SDI scaling (D8): a placed or scaled picture is said here too, so the green icon is never
-                  // taken for a native 1:1 output.
-                  ?? placedHelp
-                  ?? onOffHelp)
+            .help(buttonHelp + audioHelp)
 
             Menu {
                 Section("Output device") {
@@ -2163,16 +2170,16 @@ struct ContentView: View {
                     }
                 }
                 // D4b-3: a live operational choice (a client may want the room speakers for a minute),
-                // so it lives in the toolbar menu, not Settings. Mutually exclusive — there is no
-                // "Both": the same program on two paths is never wanted. Only meaningful while output
-                // is ON; with DeckLink off, audio is plain desktop playback governed by the mute button.
+                // so this changes the session only; Settings ▸ DeckLink Output ▸ Audio at launch holds the
+                // starting value. Mutually exclusive — there is no "Both": the same program on two paths is
+                // never wanted. It takes effect while output is ON; with DeckLink off, audio is plain desktop
+                // playback governed by the mute button, and a pick here waits for the next start.
                 Section("Audio") {
                     Picker("Audio destination", selection: deckLinkAudioDestinationBinding) {
                         Text("SDI (follows video)").tag(DeckLinkService.AudioDestination.sdi)
                         Text("Computer").tag(DeckLinkService.AudioDestination.computer)
                     }
                     .pickerStyle(.inline)
-                    .disabled(!deckLink.isOutputting)
                 }
                 // THE OUTPUT MODE. Above Signal deliberately: Signal READS the mode, so the control
                 // that sets it belongs before the readout, and a mismatch warning shown in Signal is

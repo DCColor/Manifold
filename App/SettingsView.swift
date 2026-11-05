@@ -593,6 +593,9 @@ private struct DeckLinkSettingsPane: View {
     // DeckLink output: explicit "start output on launch" opt-in (NOT last-session persistence).
     // Shared key with DeckLinkService so it can't drift. Default off.
     @AppStorage(DeckLinkService.enableOnLaunchKey) private var deckLinkEnableOnLaunch = false
+    // Where audio goes when Manifold starts. The STARTING value only: this write does not change the running session,
+    // and the toolbar picker does not write it. Default SDI.
+    @AppStorage(DeckLinkAudioDestination.defaultsKey) private var deckLinkAudioAtLaunch: DeckLinkAudioDestination = .default
     // SDI scaling (§6.11): which modes Follow source may choose. Default HD/UHD only. DeckLinkService observes the write.
     @AppStorage(SDIOutputModeSet.defaultsKey) private var deckLinkModeSet: SDIOutputModeSet = .default
     // SDI scaling follow-up F1: how a source that is not a mode fills it. Default Fit to mode.
@@ -631,6 +634,11 @@ private struct DeckLinkSettingsPane: View {
             Section("Output") {
                 Toggle("Enable output on launch", isOn: $deckLinkEnableOnLaunch)
                 SettingsCaption("When on, Manifold starts DeckLink output at launch if a capable device is connected. Otherwise it does nothing. Turning output on or off during a session doesn't change this setting.")
+                Picker("Audio at launch", selection: $deckLinkAudioAtLaunch) {
+                    ForEach(DeckLinkAudioDestination.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                SettingsCaption("Audio-only files play on the Mac until a later update.")
                 Picker("SDI scaling", selection: $deckLinkScaling) {
                     ForEach(SDIScaling.allCases, id: \.self) { Text($0.label).tag($0) }
                 }

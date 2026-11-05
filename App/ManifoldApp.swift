@@ -99,6 +99,8 @@ struct ManifoldApp: App {
         // file or stream arriving early cannot briefly establish the card at a mode the operator
         // already overrode. Cheap and synchronous: one UserDefaults read.
         DeckLinkService.shared.restoreManualMode()
+        // …and the audio destination, before Enable output on launch can start the card.
+        DeckLinkService.shared.restoreAudioDestination()
         // Quit ends the output on a final black frame tagged SDR, as a stop does, before the process exits (Robbie,
         // 2026-10-25). Nothing else runs at quit: the process used to exit with the card on its last frame.
         _ = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil,

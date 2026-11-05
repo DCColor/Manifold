@@ -385,4 +385,21 @@ final class SDIOutputModeTests: XCTestCase {
         XCTAssertEqual(SDIOutputModeSet.stored("includeDCI"), .includeDCI)
         XCTAssertEqual(SDIOutputModeSet.stored("garbage"), .hdUHD)
     }
+
+    func testAudioDestinationMissingOrUnknownIsSDI() {
+        XCTAssertEqual(DeckLinkAudioDestination.defaultsKey, "manifold.decklink.audioDestination")
+        XCTAssertEqual(DeckLinkAudioDestination.stored(nil), .sdi)
+        XCTAssertEqual(DeckLinkAudioDestination.stored("garbage"), .sdi)
+        XCTAssertEqual(DeckLinkAudioDestination.stored("sdi"), .sdi)
+        XCTAssertEqual(DeckLinkAudioDestination.stored("computer"), .computer)
+    }
+
+    func testAudioDestinationNoteOnlyWhenTheSessionDiffers() {
+        XCTAssertNil(DeckLinkAudioDestination.sdi.sessionNote(preference: .sdi))
+        XCTAssertNil(DeckLinkAudioDestination.computer.sessionNote(preference: .computer))
+        XCTAssertEqual(DeckLinkAudioDestination.computer.sessionNote(preference: .sdi),
+                       "Audio: Computer (this session)")
+        XCTAssertEqual(DeckLinkAudioDestination.sdi.sessionNote(preference: .computer),
+                       "Audio: SDI (this session)")
+    }
 }

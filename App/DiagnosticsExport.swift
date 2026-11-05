@@ -60,6 +60,7 @@ import Foundation
 import ManifoldCore   // ManifoldCoreBuild — the package reporting its OWN telemetry state
 import PrivacyRedaction // DiagnosticsRedaction — the scrub, moved to the package in privacy P1
 import LicenseRecord    // LicenseRecordSync — the legacy plist keys, reported by presence only
+import ColorimetryModel // DeckLinkAudioDestination.shortLabel — the DeckLink audio line
 import SwiftUI
 
 // MARK: - Line formatting
@@ -762,6 +763,8 @@ enum MachineContext {
         if dlStatus.canOutput, let hdr = deckLink.hdrMetadataLine { out.append("DeckLink HDMI    : \(hdr)") }
         if dlStatus.canOutput, let placed = deckLink.placementLine { out.append("DeckLink picture : \(placed)") }
         out.append("DeckLink modes   : \(DeckLinkService.currentModeSet.label)")
+        out.append("DeckLink audio   : preference \(DeckLinkService.audioDestinationPreference.shortLabel), "
+                 + "session \(deckLink.audioDestination.shortLabel)")
 
         let ndi = NDIService.shared
         out.append("NDI runtime      : \(ndi.runtimeAvailable ? "installed" : "NOT installed")"

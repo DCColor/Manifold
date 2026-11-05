@@ -443,16 +443,18 @@ final class DeckLinkService: ObservableObject {
 
     // MARK: - D4b-3: audio destination (SDI vs Computer — mutually exclusive)
 
-    /// Where the program audio goes while DeckLink output is enabled. There is deliberately no "Both":
-    /// the same program on two paths is never wanted (comb-filtered double audio, and the two clocks
-    /// drift apart). The choice only has authority while output is ON — with DeckLink off, audio is
-    /// plain desktop playback governed by the mute button alone.
-    enum AudioDestination: String {
-        case sdi        // embedded on the SDI signal, clock-locked to the video on the wire (default)
-        case computer   // the Mac's normal audio path; the SDI stream carries digital silence
+    /// Where the program audio goes while DeckLink output is enabled. The choice only has authority while
+    /// output is ON — with DeckLink off, audio is plain desktop playback governed by the mute button alone.
+    typealias AudioDestination = DeckLinkAudioDestination
+
+    /// Settings ▸ DeckLink Output ▸ Audio at launch (default SDI). The STARTING value only: read at launch and by the
+    /// tooltip and diagnostics, and written only by Settings.
+    static var audioDestinationPreference: AudioDestination {
+        AudioDestination.stored(UserDefaults.standard.string(forKey: AudioDestination.defaultsKey))
     }
 
-    /// Default .sdi: enabling a broadcast output and hearing the program from the laptop speakers,
+    /// THE SESSION VALUE. Starts at the preference (`restoreAudioDestination`), and the toolbar changes it for this
+    /// session only. Default .sdi: enabling a broadcast output and hearing the program from the laptop speakers,
     /// half a pipeline-depth out of sync with the monitor, is never what was meant.
     @Published private(set) var audioDestination: AudioDestination = .sdi
 
@@ -467,7 +469,20 @@ final class DeckLinkService: ObservableObject {
         return sdiIsAudioDestinationMirror
     }
 
-    /// Flip the destination live (toolbar menu). A destination change is ROUTING ONLY — it never
+    /// Start the session at the preference, before any output can start (`ManifoldApp`, beside `restoreManualMode`).
+    ///
+    /// ⚠️ THE MIRROR IS SET HERE TOO, AND MUST BE. The card's audio callback reads only the mirror: left at its initial
+    /// `true` under a restored .computer, the picker reads Computer and the Mac plays while the card still serves
+    /// PCM, so the program comes out of both.
+    func restoreAudioDestination() {
+        let stored = Self.audioDestinationPreference
+        audioDestination = stored
+        destinationLock.lock(); sdiIsAudioDestinationMirror = (stored == .sdi); destinationLock.unlock()
+        print("DeckLink D4b-3: audio destination at launch → \(stored.rawValue) (preference)")
+    }
+
+    /// Flip the destination live (toolbar menu), for this session only: it does not write the preference. It may be
+    /// flipped with output off, when it takes effect at the next start. A destination change is ROUTING ONLY — it never
     /// re-enables/prerolls/restarts the card (that would blip video and dump the preroll depth). The
     /// card's audio output stays enabled for BOTH destinations; only which path emits real PCM changes:
     ///   .sdi      → SDI serves PCM, system renderer muted.

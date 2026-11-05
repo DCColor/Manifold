@@ -58,6 +58,34 @@ public enum SDIScaling: String, CaseIterable, Sendable {
     public var label: String { self == .fit ? "Fit to mode" : "1:1 pixels" }
 }
 
+/// Where the program audio goes while DeckLink output is on. The stored value is the STARTING value only
+/// (Settings ▸ DeckLink Output ▸ Audio at launch, default SDI): the toolbar picker changes the session and never
+/// writes it. There is deliberately no "Both": the same program on two paths is never wanted (comb-filtered double
+/// audio, and the two clocks drift apart).
+public enum DeckLinkAudioDestination: String, CaseIterable, Sendable {
+    case sdi = "sdi"             // embedded on the SDI signal, clock-locked to the video on the wire (default)
+    case computer = "computer"   // the Mac's normal audio path; the SDI stream carries digital silence
+
+    public static let defaultsKey = "manifold.decklink.audioDestination"
+    public static let `default`: DeckLinkAudioDestination = .sdi
+
+    /// The stored value, or the default when absent or unrecognised.
+    public static func stored(_ raw: String?) -> DeckLinkAudioDestination {
+        raw.flatMap(Self.init(rawValue:)) ?? .default
+    }
+
+    /// The pickers' wording.
+    public var label: String { self == .sdi ? "SDI (follows video)" : "Computer" }
+
+    /// The short name, for the tooltip and diagnostics.
+    public var shortLabel: String { self == .sdi ? "SDI" : "Computer" }
+
+    /// The tooltip's note for a session value that differs from the preference, or nil when they match.
+    public func sessionNote(preference: DeckLinkAudioDestination) -> String? {
+        self == preference ? nil : "Audio: \(shortLabel) (this session)"
+    }
+}
+
 /// A raster the card can output (8K excluded). The raw value is the label's family part.
 public enum SDIModeFamily: String, CaseIterable, Sendable {
     case p720 = "720p"
