@@ -963,7 +963,7 @@ final class StreamBookmarkStore: ObservableObject {
 ///
 /// Each type gets its own instance, its own row and its own button, because taking `.mov` and
 /// taking `.mp4` are genuinely different decisions and a user may want one without the other.
-/// A single "make Manifold the default video player" action would collapse three deliberate
+/// A single "make Manifold the default player" action would collapse deliberate
 /// choices into one click that displaces associations the user made on purpose — which is exactly
 /// the aggressive move this design exists to avoid. There is deliberately no claim-all path.
 final class DefaultHandlerStatus: ObservableObject, Identifiable {
@@ -984,7 +984,7 @@ final class DefaultHandlerStatus: ObservableObject, Identifiable {
     ///      observes its own instance, which is what makes a single row re-render when its own
     ///      claim completes without the parent observing anything.
     ///
-    /// Lifetime is not a concern in either direction: these are three tiny objects that hold no
+    /// Lifetime is not a concern in either direction: these are tiny objects that hold no
     /// resources, and `refresh()` on appear means a stale read cannot survive the window opening.
     ///
     /// ⚠️ `.mov` AND `.mp4` ARE HERE BECAUSE THEY WERE ASKED FOR, NOT BECAUSE THEY ARE SAFE. On an
@@ -992,14 +992,23 @@ final class DefaultHandlerStatus: ObservableObject, Identifiable {
     /// argument for three separate buttons and against a claim-all, NOT an argument for hiding
     /// them — the row states the current holder by name, so the user can see what they would be
     /// displacing before they do it.
-    static let videoHandlers: [DefaultHandlerStatus] = [
+    static let fileHandlers: [DefaultHandlerStatus] = [
         // `org.smpte.mxf` is a string because macOS declares the type but the SDK exposes no
         // constant for it; the other two have constants whose identifiers were CHECKED against the
         // strings in project.yml's CFBundleDocumentTypes (com.apple.quicktime-movie, public.mpeg-4)
         // rather than assumed to match.
         DefaultHandlerStatus(contentType: UTType("org.smpte.mxf"), name: "MXF files"),
         DefaultHandlerStatus(contentType: .quickTimeMovie,         name: "QuickTime movies"),
-        DefaultHandlerStatus(contentType: .mpeg4Movie,             name: "MP4 files")
+        DefaultHandlerStatus(contentType: .mpeg4Movie,             name: "MP4 files"),
+        // The audio types, one row each for the same reason. These are what each extension RESOLVES to, measured with
+        // `UTType(filenameExtension:)`: .wav and .bwf are one type, so one row covers BWF. M4A and AAC are two: a .m4a is
+        // `com.apple.m4a-audio`, not `public.mpeg-4-audio` (the SDK's `.mpeg4Audio`), and a raw .aac is its own type, so
+        // a claim on one does not move the other. Neither has an SDK constant.
+        DefaultHandlerStatus(contentType: .wav,                         name: "WAV files"),
+        DefaultHandlerStatus(contentType: .aiff,                        name: "AIFF files"),
+        DefaultHandlerStatus(contentType: .mp3,                         name: "MP3 files"),
+        DefaultHandlerStatus(contentType: UTType("com.apple.m4a-audio"), name: "M4A files"),
+        DefaultHandlerStatus(contentType: UTType("public.aac-audio"),    name: "AAC files")
     ].filter { $0.contentType != nil }
 
     /// The type this row is about. Optional only because `UTType(_: String)` is; the array above

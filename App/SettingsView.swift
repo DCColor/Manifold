@@ -222,12 +222,12 @@ enum SettingsRefresh {
         DeckLinkService.shared.refreshDevices()
         ProVideoWorkflow.shared.refresh()
         // The default handlers are system state, not ours: they can change in Finder while Settings is shut.
-        DefaultHandlerStatus.videoHandlers.forEach { $0.refresh() }
+        DefaultHandlerStatus.fileHandlers.forEach { $0.refresh() }
     }
 
     static func pane(_ pane: SettingsPane) {
         switch pane {
-        case .files: DefaultHandlerStatus.videoHandlers.forEach { $0.refresh() }
+        case .files: DefaultHandlerStatus.fileHandlers.forEach { $0.refresh() }
         case .deckLink: DeckLinkService.shared.refreshDevices()
         case .sources:
             NDIService.shared.refreshRuntimeStatus()
@@ -387,13 +387,13 @@ private struct FilesSettingsPane: View {
                 }
                 SettingsCaption("Applies to Open… (⌘O) and the Open button. Dragging a file onto a window's picture always replaces that window, and an empty window is always re-used rather than left behind.")
 
-                // ── DEFAULT APP FOR VIDEO TYPES ─────────────────────────────────────────────
+                // ── DEFAULT APP FOR VIDEO AND AUDIO TYPES ─────────────────────────────────────────────
                 //
                 // With "Open files in", because this is the file-opening cluster — where someone looks
                 // for it. Built in the Sources pane's idiom instead: rows reporting system state, an
                 // action next to each, re-read on appear.
                 //
-                // ⚠️ THREE ROWS, THREE BUTTONS, THREE DECISIONS — AND NO CLAIM-ALL. Taking MXF is
+                // ⚠️ ONE ROW, ONE BUTTON, ONE DECISION PER TYPE — AND NO CLAIM-ALL. Taking MXF is
                 // an easy call (on a stock Mac nothing opens it well; QuickTime Player claims it
                 // through public.movie and then cannot play it). Taking .mov or .mp4 is not: on a
                 // working editorial machine those usually point somewhere on purpose. One control
@@ -405,15 +405,15 @@ private struct FilesSettingsPane: View {
                 // NSWorkspace can set a default; it cannot clear one. A checkbox that could be
                 // ticked but never unticked would be describing a capability this app does not
                 // have — the caption under the group says where the reverse actually lives.
-                if !DefaultHandlerStatus.videoHandlers.isEmpty {
-                    ForEach(DefaultHandlerStatus.videoHandlers) { handler in
+                if !DefaultHandlerStatus.fileHandlers.isEmpty {
+                    ForEach(DefaultHandlerStatus.fileHandlers) { handler in
                         DefaultHandlerRow(status: handler)
                     }
                     // ── ONE CAPTION FOR THE GROUP, NOT ONE PER ROW ──────────────────────────
                     // The per-row captions carry what differs (who holds the type, how many apps
                     // want it, how a claim went). This paragraph is a property of the MECHANISM
-                    // and is identical for all three, so printing it three times would read as
-                    // three separate warnings about three separate problems rather than one fact
+                    // and is identical for every row, so printing it per row would read as
+                    // separate warnings about separate problems rather than one fact
                     // about how macOS file associations work.
                     SettingsCaption("Manifold can take an association, but it can't hand it back — to undo one, select a file of that type in the Finder, press ⌘I, and change “Open with”.")
                 }

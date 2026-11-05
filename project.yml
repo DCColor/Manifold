@@ -388,10 +388,17 @@ targets:
             LSHandlerRank: Alternate
           # Audio-only files, viewer and Alternate for the same reason as above. `public.audio` is the honest claim:
           # what plays is what AVFoundation exposes an audio track for, and FrameEngine's phase-1 vet decides.
+          # The five types below it are the ones Settings ▸ Files offers (`DefaultHandlerStatus.fileHandlers`): named for
+          # the reason MXF is, since a direct claim ranks above one inherited through `public.audio`.
           # An Image entry joins with stage B2 (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.1).
           - CFBundleTypeName: Audio
             LSItemContentTypes:
               - public.audio
+              - com.microsoft.waveform-audio
+              - public.aiff-audio
+              - public.mp3
+              - com.apple.m4a-audio
+              - public.aac-audio
             CFBundleTypeRole: Viewer
             LSHandlerRank: Alternate
           # ⚠️ THE ONE `Owner`, AND THE COMMENT ABOVE DOES NOT ARGUE AGAINST IT. That rule is about other people's
