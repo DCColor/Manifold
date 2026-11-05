@@ -11,6 +11,7 @@ changelog page. Format notes are at the bottom.
 - Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too.
 - PQ in As macOS Shows It stays correct when you move a window to another display. No mode switch needed.
 - System Services shortcuts, such as ⇧⌘L for Search With Google, keep their keys inside Manifold.
+- The transform readout says "white and black" instead of "Lb/Lw".
 
 ## 0.9.1
 

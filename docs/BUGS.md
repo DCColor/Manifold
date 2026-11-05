@@ -3928,6 +3928,12 @@ purge were headless). The list was read from the sandbox suite and the items fro
 **Not yet run in the app.** The final build (the Undo wording and the Esc modifier) has not been launched. Real Return and Esc presses in both
 dialogs are Robbie's by-hand check; no keystroke may be sent from a session.
 
+## ✅ FIXED 2026-11-04 — 0.9.2 — the transform readout said "Lb/Lw"
+
+The Reference line of the chain readout used the jargon of BT.1886. `ReferencePlan` now reads "(white and black applied by the display)" on both
+calibrated lines, and "white 100 · black 0 cd/m²" where a profile-described display read "Lw 100 · Lb 0". The `[REFERENCE]` log lines keep Lw and Lb,
+as do code comments. The guide has neither term. Compiled, not read in the app: reaching these lines needs an SDR picture in Reference.
+
 ## ☐ 1.0 INVESTIGATION 2026-10-31 — Dolby Vision through `AVSampleBufferDisplayLayer` in As macOS Shows It?
 
 **Question (Robbie, 2026-10-31).** Would handing a Dolby Vision file's sample buffers to an `AVSampleBufferDisplayLayer` give

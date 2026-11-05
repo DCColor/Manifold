@@ -108,13 +108,13 @@ struct ReferencePlan: Equatable {
                 return ReferencePlan(
                     layerColorSpace: nil, shader: p,
                     summary: "Reference — display calibrated to BT.1886 (Rec. 709): \(gamut) converted to "
-                           + "Rec.709 in 2.4-linear, no colorspace declared (Lb/Lw applied by the display)",
+                           + "Rec.709 in 2.4-linear, no colorspace declared (white and black applied by the display)",
                     logLine: "[REFERENCE] calibrated display\(on): \(gamut) → Rec.709 in 2.4-linear, layer colorspace nil")
             }
             return ReferencePlan(
                 layerColorSpace: nil, shader: nil,
                 summary: "Reference — display calibrated to BT.1886 (Rec. 709): code values sent untouched, "
-                       + "no colorspace declared (Lb/Lw applied by the display)",
+                       + "no colorspace declared (white and black applied by the display)",
                 logLine: "[REFERENCE] calibrated display\(on): code values untouched, layer colorspace nil, identity copy")
         }
 
@@ -134,7 +134,9 @@ struct ReferencePlan: Equatable {
         let shape = c.isPurePower ? " (= γ2.4)" : ""
         return ReferencePlan(
             layerColorSpace: cs, shader: p,
-            summary: "Reference — BT.1886, \(lbLw)\(shape), encoded for the declared "
+            summary: "Reference — BT.1886, "
+                   + String(format: "white %g · black %g cd/m²", cal.whiteNits, cal.blackNits)
+                   + "\(shape), encoded for the declared "
                    + String(format: "γ%.3f", gamma) + ", source colorspace declared to the layer",
             logLine: "[REFERENCE] profile-described display\(on): BT.1886 \(lbLw)\(shape), a=\(c.a) b=\(c.b), "
                    + String(format: "encoded for declared γ%.6f (exponent 2.4/γ = %.6f at Lb 0)", gamma, 2.4 / gamma))
