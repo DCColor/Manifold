@@ -5,6 +5,36 @@ SDI) = 0.9.3.** No Manifold build was made, launched or committed for this plan.
 means run here as small standalone probes in the session scratchpad, on this Mac: macOS 26.7.1 (25G241), SDK 27.2.
 **UNKNOWN** means not established. Companion: `docs/SETTINGS_EXPORT_PLAN.md`.
 
+## Build status (2026-11-04)
+
+**Built and run:** B1 (audio parts and the shared `mediaKind`), B4, and the held picture for audio-only (B3's audio half). **Still to
+build:** B0, B2 and the still half of B3. Stills keep their refusal, which now goes through `mediaKind` in `loadAsset`: B2 replaces
+that one block, adds `.image` to the open panel and an Image entry to `project.yml`, and calls `setHeldBlack` with the still sentence
+from `updateHeldPicture`.
+
+**What changed from the plan while building:**
+
+- `ContainerSlackRoute` gained `.noVideoDeclared`. Only "no video track declared" may become audio-only; a video track that exists and
+  cannot be read stays refused. A movie type the scan cannot see into (.avi, .mts) with an audio track also stays refused.
+- **The Mac plays an audio-only file even when the audio destination is SDI** (`applyAudioMute`). The card is silent, so otherwise it
+  would be heard nowhere. Not in the plan: Robbie to confirm.
+- `audioFormatChanged` is ignored while held. Without that, a 44.1 kHz WAV would re-establish the output, and the monitor would re-lock.
+- Both hold edges drop the renderer's staged frames (`dropDeckLinkFrames`).
+- `displaySize` is 1280 × 720 for the sizer, so the raster, Color menu and hold-to-compare gates moved from `displaySize != nil` to
+  `WindowDeck.colorControlsEnabled`.
+- Home and End go to 0 and the duration on an audio-only file. `TimecodeContext` is nil there, and they would otherwise do nothing.
+- Audio-only rows use "Time Reference" and "Timecode … @ rate" under a "Broadcast Wave" Inspector section.
+
+**Measured 2026-11-04 (`scripts/make_audio_fixtures.sh`, AX, logs, SDI loopback `capture`):** all 15 fixtures open, show the card, play and
+stop at the end. Loop wraps, a mid-file seek plays on (by `MANIFOLD_DEBUG_STEPS`; AX cannot set the scrubber), meters move, BWF rows
+match the fixture's values. On the wire, after a playing video: one constant black hash for 134 frames, tagged Rec. 709 EOTF 0, then the
+new file's first frame, with no frame of the old file; 0 late, 0 dropped, 0 input gaps, no re-establish, across a 44.1 kHz WAV. Output
+started with a WAV already open gives the same black hash. The video afterwards restores PQ tags and Rec. 2020 Signal line (wedge file),
+and a moving 48 kHz clip restores scopes, meters and real PCM on SDI.
+
+**By reading only, not run:** the key gates (frame step, reverse-as-pause, timecode entry, frame readout): AX sends no keystrokes. A live
+source committing over a hold. The card at the 720 × 569 minimum. A file rewritten on disk while open (`reinspect`). Desktop sound, by ear.
+
 ## Decisions (Robbie, 2026-11-03)
 
 - **Version:** 0.9.2 takes B0–B4. B5 moves to 0.9.3 with its setting, its clock and its 48 kHz conversion.

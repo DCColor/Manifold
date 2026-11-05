@@ -15785,3 +15785,15 @@ should reach this entry first.
 `App/WindowChrome.swift:151-158`), which shipped and is a different thing entirely. The audit of
 2026-09-21 could not tell from source whether "borderless" named that shipped work or something
 else; this entry exists so the next reader does not have to ask.
+
+## ✅ FIXED 2026-11-04 — replacing a playing file with autoplay off left the transport stuck
+
+- **What:** with autoplay off, opening a file over one that was playing showed Pause over a stopped clock. There was no Play to press,
+  so the new file could not start until Pause then Play. `srcT` sat at -0.03 s, SDI audio logged an UNDERRUN every second, and the
+  picture held its first frame.
+- **Why:** every load route stops the synchronizer, and only `play()` starts it, but nothing cleared `isPlaying` and `shuttleRate`. This
+  is not specific to audio-only files, by reading: the video routes have the same shape. It was found on the wire while verifying
+  audio-only (docs/STILLS_AND_AUDIO_ONLY_PLAN.md). The first run missed it because its clip had ended before the swap.
+- **Fix:** `loadAsset`'s commit calls `setShuttleRate(0)`. Autoplay still plays, from `beginReading`.
+- **Verified:** moving 48 kHz clip → 44.1 kHz WAV → the clip, each swapped while playing, DeckLink output on: both start on Play, and
+  SDI carries real PCM after the return. **Not yet through a real session.**
