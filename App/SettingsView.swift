@@ -364,13 +364,7 @@ private struct GeneralSettingsPane: View {
             }
         }
         .sheet(isPresented: $transfer.showingExport) { ExportSettingsSheet() }
-        .sheet(item: $transfer.importing) { ImportSettingsSheet(session: $0) }
-        .alert("Can’t Import This File", isPresented: Binding(get: { transfer.refusal != nil },
-                                                              set: { if !$0 { transfer.refusal = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(transfer.refusal ?? "")
-        }
+        .modifier(SettingsImportHost(transfer: transfer))
     }
 }
 

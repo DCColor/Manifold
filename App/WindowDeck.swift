@@ -225,6 +225,9 @@ final class WindowDeck: ObservableObject {
     /// it opened, measured 2026-10-21).
     fileprivate(set) var hasClosed = false
 
+    /// The import preview for a settings file opened into this window. Per window because a sheet is.
+    let settingsImport = SettingsTransferModel()
+
     /// This window's engine and renderer. Populated by `WindowDeckRegistrar` before the window
     /// callback can run, so `DeckRegistry.register` always sees a complete deck.
     ///
@@ -1870,6 +1873,37 @@ final class DeckRegistry {
         }
         guard let device = owned?.key else { return }
         release(device, from: deck) { LiveSource.retireActive() }
+    }
+
+    /// A settings file from Finder or the Dock: show its import preview, and nothing else.
+    ///
+    /// SwiftUI made `deck`'s window for this open (docs/MULTIWINDOW_FINDINGS.md §3.2). A preview needs no window
+    /// of its own, so when another window can carry the sheet the new one closes, as for a file that re-uses an
+    /// empty window. Here any other window will do, even one that is playing: a sheet displaces nothing. Never
+    /// one already showing a sheet, because SwiftUI would drop the second without a word.
+    ///
+    /// The hop is `.onOpenURL`'s, for the same reason: the callback comes before the window is registered.
+    func previewSettingsFile(_ url: URL, openedInto deck: WindowDeck) {
+        Task { @MainActor in
+            guard !deck.hasClosed else { return }
+            // Behind the licence gate the sheet would sit on top of the gate, which disables everything else.
+            guard LicenseManager.shared.gateDecision != .gated else {
+                NSLog("[SETTINGS] a file was not opened: the app is gated")
+                return
+            }
+            prune()
+            let others = NSApp.orderedWindows.compactMap { entries[ObjectIdentifier($0)]?.deck }.filter { $0 !== deck }
+            // A window already showing an import comes first: it comes forward, and `previewFile` declines.
+            let target = others.first { $0.settingsImport.importing != nil }
+                ?? others.first { $0.window?.attachedSheet == nil }
+            if deck.window != nil, let target {
+                deck.window?.close()
+                target.window?.makeKeyAndOrderFront(nil)
+                target.settingsImport.previewFile(url)
+                return
+            }
+            deck.settingsImport.previewFile(url)
+        }
     }
 
     /// An empty deck a newly-opened file could be loaded into instead of leaving a stray window.

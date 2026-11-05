@@ -211,4 +211,12 @@ final class ShortcutTransferTests: XCTestCase {
         XCTAssertTrue(r.applyImport(plan))
         XCTAssertEqual(ShortcutCatalog.all.map { r.chord(for: $0.id) }, before)
     }
+
+    func testASettingsFileIsKnownByItsExtension() {
+        XCTAssertTrue(SettingsFile.isSettingsFile(URL(fileURLWithPath: "/tmp/My Mac.manifoldsettings")))
+        XCTAssertTrue(SettingsFile.isSettingsFile(URL(fileURLWithPath: "/tmp/SHOUT.MANIFOLDSETTINGS")))
+        XCTAssertFalse(SettingsFile.isSettingsFile(URL(fileURLWithPath: "/tmp/clip.mov")))
+        XCTAssertFalse(SettingsFile.isSettingsFile(URL(fileURLWithPath: "/tmp/settings.json")))
+        XCTAssertFalse(SettingsFile.isSettingsFile(URL(string: "https://example.invalid/a.manifoldsettings")!))
+    }
 }

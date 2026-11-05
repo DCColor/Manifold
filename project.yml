@@ -382,6 +382,23 @@ targets:
             # ours to assert at install time. `Owner`/`Default` here would have a video
             # player quietly displace whatever the user already chose.
             LSHandlerRank: Alternate
+          # ⚠️ THE ONE `Owner`, AND THE COMMENT ABOVE DOES NOT ARGUE AGAINST IT. That rule is about other people's
+          # media types. This type is ours: Manifold defines it, writes it and is the only app that can read it
+          # (docs/SETTINGS_EXPORT_PLAN.md §2.1). Editor, because Manifold writes these files as well as reading them.
+          - CFBundleTypeName: Manifold Settings
+            LSItemContentTypes:
+              - com.graviton.manifold.settings
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Owner
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.graviton.manifold.settings
+            UTTypeDescription: Manifold Settings
+            UTTypeConformsTo:
+              - public.json
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - manifoldsettings
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.graviton.manifold

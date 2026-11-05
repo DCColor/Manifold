@@ -130,8 +130,8 @@ The raw serial must not be in the file, since P1 stopped logging it and diagnost
 - Extension: **`.manifoldsettings`**, for both kinds of file. Suggested name: `Manifold Settings 2026-11-03.manifoldsettings`.
 - UTI (stage A5): **`com.graviton.manifold.settings`**, conforming to `public.json` and `public.data`, declared in
   `UTExportedTypeDeclarations` beside `CFBundleDocumentTypes` (`project.yml:336`), with a document entry at rank `Owner`. The
-  `Alternate` rule (`project.yml:376-380`) concerns other people's media types. Until A5 the panels use a dynamic type from the
-  extension, as the caption picker does (`ContentView.swift:2344`).
+  `Alternate` rule (`project.yml:376-380`) concerns other people's media types. **Built in A5**, role Editor. The panels still ask for the
+  type by its extension, which now resolves to this identifier, and still works on a build Launch Services doesn't know.
 
 ### 2.2 A shortcuts-only file (built)
 
@@ -383,8 +383,14 @@ import by presence only.
 - `Import Settings…`: an open panel, then §4.
 - `Restore from Backup…`: shown once a backup exists.
 
-No File menu items (D6). Double-click (D7, A5) must be caught at the top of `.onOpenURL` (`ContentView.swift:625`), before media
-routing, and only ever opens the preview.
+No File menu items (D6). **Built in A5:** a double-click or Open With (D7) is caught at the top of `.onOpenURL`, before media routing and
+before anything retires a stream, and a drop at the top of the picture's `.dropDestination`. Both only ever open the preview, through
+`SettingsTransferModel.previewFile`.
+- Each window has its own model and `SettingsImportHost`, the same sheet and refusal Settings uses.
+- SwiftUI makes a new window for an opened file. `DeckRegistry.previewSettingsFile` shows the preview on another window if one is free,
+  even one that is playing, and closes the new one.
+- One import at a time, across every window: a second file is declined with a beep, and the window showing the import comes forward.
+- Nothing opens while the licence gate is up, because the sheet would sit on top of it.
 
 ---
 
@@ -441,8 +447,9 @@ stash `manifold.shortcuts` first and restore it after, read before write, chaine
 | Backup | Read back, newest first, two in one second, keeps 10 and touches nothing else, failed folder stops it, restore gives the exact prior state |
 
 **Unit, stream stages (A3, A4), built and passing.** The frozen vector was made by Python's `hashlib` and `cryptography`, so the
-KDF, the authenticated header and the payload are checked against a second implementation. Still to add in A5: the test that
-nothing in `DiagnosticsExport` opens the backup folder (§7).
+KDF, the authenticated header and the payload are checked against a second implementation. `DiagnosticsBoundaryTests` (A5) holds the
+§7 rule. The report is app code a test can't link, so it reads the source: `DiagnosticsExport.swift` names no settings file or backup,
+lists no directory and reads no file, and only `SettingsTransferUI.swift` reaches `SettingsBackups`.
 
 | Area | Check |
 |---|---|
@@ -504,6 +511,30 @@ The Air, signed build (A6):
 12. Confirm a signed build reads its own items without a prompt.
 13. `.code` nudge binding and the Fn warning on the Air's keyboard. Licence unaffected on both, by presence only.
 
+**A5 result, 2026-11-04** (Profile, `.build-cc`, one windowed launch, sandbox `a5`, fixtures only, no keystrokes; real double-clicks and
+drags from a Finder window by synthesized pointer events):
+- **Type:** `com.graviton.manifold.settings`, not dynamic, kind "Manifold Settings", conforms to `public.json` and `public.data`, not
+  `public.movie`. **Icon:** the system's generic text document labelled MANIFOLDSETTINGS. No document artwork exists.
+- **Double-click:** encrypted asked for the password first, then the preview. Plain (through Launch Services to the pid) went straight to the
+  preview. Either way one process and one window: the window SwiftUI made closed, and the sheet was on the existing one. Damaged: the refusal
+  on the player window. A second file while a preview was up: declined, no stray window.
+- **Drop on the picture:** plain gave the preview, encrypted the password.
+- **Nothing written until Import:** `streamBookmarks`, `manifold.shortcuts`, the backup folder, the sandbox list and items, and the fixtures,
+  compared at each step, were unchanged through every preview, Cancel and refusal. Import wrote 3 streams; Undo removed them.
+- The new "Undo this import?" wording read exactly as specified, with Cancel the default. No media route ran, no log line named a fixture, and
+  no recent-items list named one.
+- All stores matched the baseline after cleanup. The real `streamBookmarks` and the 8 real stream items were unchanged.
+
+**Limits.** A cold double-click (no build running) did not run in this launch: nothing can start a build by double-click inside the sandbox, and
+the driver's attempt to imitate it arrived too early (`-600`). Robbie ran it by hand instead and it passed, 2026-11-04: one window, preview shown,
+Cancel, real stores unchanged. A preview over a live stream did not run; by reading, the route returns before the retire.
+A scripted `tell application "Finder" to open` did not reach the app and left a system dialog ("does not have permission to open"); a real
+double-click of the same file worked, so this looks like the script's, and it was not investigated further.
+
+**Launch Services note.** A build that changes the app registers it, and this type's only claimant is then that build. A double-click with no
+build running would start the dev build outside the sandbox. The run unregistered `.build-cc`. A rebuild that changes nothing skips registration
+(seen 2026-11-04); `lsregister -f <app>` is what registers it.
+
 ---
 
 ## 9. Stages
@@ -516,7 +547,7 @@ Effort is in working sessions, and is a guess, not a measurement.
 | A2 Shortcuts UI | Settings section, export sheet, import preview, Undo, Restore | 1 | **Done, attended pass passed** |
 | A3 Encrypted file | Header, KDF, seal and open, password sheets, tests | 1 | **Built, sandbox pass passed** |
 | A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | **Built, sandbox pass passed; a real connection is still to run (step 6)** |
-| A5 Identity | UTI, double-click, PRIVACY_AUDIT, user guide | 0.5 | |
+| A5 Identity | UTI, double-click, drop, PRIVACY_AUDIT, user guide | 0.5 | **Built, sandbox pass passed. Cold-launch double-click passed by Robbie, 2026-11-04. Pending: a live stream under a preview, and the user guide** |
 | A6 Attended | Sandbox pass, Air pass | 0.5 | **Sandbox pass passed; iteration count frozen, no Air measurement needed (§2.5). Pending: a real connection (step 6) and the Air pass (steps 11-13)** |
 
 Sources for the iteration figure: [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).

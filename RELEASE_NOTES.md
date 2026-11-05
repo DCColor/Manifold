@@ -7,6 +7,7 @@ changelog page. Format notes are at the bottom.
 
 ## 0.9.2
 
+- Double-click a Manifold settings file, or drop one on a player window, to preview its import. Nothing changes until you click Import.
 - Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too.
 
 ## 0.9.1

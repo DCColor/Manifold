@@ -23,6 +23,12 @@ public enum SettingsFile {
     /// Far above any real file. A larger one is refused before it is parsed.
     public static let maxBytes = 1_048_576
 
+    /// A settings file, going by its name alone: what sends a URL to the preview and not to media routing.
+    /// Its contents are judged later, by `inspect`.
+    public static func isSettingsFile(_ url: URL) -> Bool {
+        url.isFileURL && url.pathExtension.caseInsensitiveCompare(fileExtension) == .orderedSame
+    }
+
     public struct Provenance: Equatable {
         public var appVersion: String
         public var appBuild: String

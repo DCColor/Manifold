@@ -22,6 +22,18 @@
 				<string>org.smpte.mxf</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Manifold Settings</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.graviton.manifold.settings</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
@@ -39,5 +51,26 @@
 	<string>1</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Manifold uses your local network to find NDI video sources to play.</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Manifold Settings</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.graviton.manifold.settings</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>manifoldsettings</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

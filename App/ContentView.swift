@@ -3,6 +3,7 @@ import ShortcutRegistry
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 import StreamBookmarkModel
+import SettingsTransfer   // SettingsFile.isSettingsFile — a settings file is not media (docs/SETTINGS_EXPORT_PLAN.md §5)
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision banner (0.9.1)
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
@@ -623,6 +624,12 @@ struct ContentView: View {
         // MOVED HERE FROM ManifoldApp, which no longer has an engine to load into. SwiftUI routes
         // an opened URL to a window in the group, so it lands in THAT window's deck.
         .onOpenURL { url in
+            // ⚠️ FIRST, BEFORE THE RETIRE BELOW. A settings file is not a source: previewing one must not
+            // end this window's stream, and it must never reach the media path.
+            if SettingsFile.isSettingsFile(url) {
+                DeckRegistry.shared.previewSettingsFile(url, openedInto: deck)
+                return
+            }
             // Retire this deck's stream, through the arbiter so a stream another window owns is
             // left alone (and so the record of who owns what is updated, not just the transport).
             DeckRegistry.shared.retireLiveIfOwned(by: deck)
@@ -1316,6 +1323,11 @@ struct ContentView: View {
         // to the Dock icon or onto an empty area of the app still opens a NEW window, because that
         // path is LaunchServices → `.onOpenURL`, which this does not touch.
         .dropDestination(for: URL.self) { urls, _ in
+            // A settings file names this window too, but as the place to show the preview. Nothing here loads.
+            if let file = urls.first(where: { SettingsFile.isSettingsFile($0) }) {
+                deck.settingsImport.previewFile(file)
+                return true
+            }
             guard let url = urls.first(where: Self.acceptsForLoad) else { return false }
             DeckRegistry.shared.load(url, into: deck)
             wakeHUD()
@@ -1335,6 +1347,9 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.12), value: dropTargeted)
+        // A settings file opened from Finder or dropped here (docs/SETTINGS_EXPORT_PLAN.md §5). Here and not on
+        // `body`, which is at the type-checker's limit. A sheet belongs to the window, wherever it is attached.
+        .modifier(SettingsImportHost(transfer: deck.settingsImport))
         // TIMECODE ENTRY, CENTRED OVER THE PICTURE. On the video region and not on `body` for the
         // same reason the drop target is: the scopes tray is a sibling, and an entry overlay
         // centred over "the picture plus the waveforms" is centred over neither.

@@ -19,12 +19,21 @@ import SettingsTransfer
 import ShortcutRegistry
 import StreamBookmarkModel
 
-/// What Settings ▸ General presents: the two sheets and a refusal.
+/// What a host presents: Settings ▸ General (both sheets and a refusal), or a player window, for a file opened
+/// from outside (`previewFile`, the import sheet and a refusal).
 @MainActor
 final class SettingsTransferModel: ObservableObject {
     @Published var showingExport = false
-    @Published var importing: SettingsImportSession?
+    @Published var importing: SettingsImportSession? {
+        didSet {
+            if importing != nil { Self.presenting = self } else if Self.presenting === self { Self.presenting = nil }
+        }
+    }
     @Published var refusal: String?
+
+    /// The model showing the import sheet, across every window: one import at a time, so that one file opened
+    /// twice can't add its streams twice from two previews. Weak, so a host that has gone can't hold the place.
+    private static weak var presenting: SettingsTransferModel?
 
     static var fileType: UTType { UTType(filenameExtension: SettingsFile.fileExtension) ?? .json }
 
@@ -63,7 +72,18 @@ final class SettingsTransferModel: ObservableObject {
         open(url, restoring: true)
     }
 
+    /// A file from outside: Finder, the Dock or a drop. Only ever the preview: nothing is written until the
+    /// user clicks Import, there. The name stays out of the log (`docs/SETTINGS_EXPORT_PLAN.md` §7).
+    func previewFile(_ url: URL) {
+        open(url, restoring: false)
+    }
+
     private func open(_ url: URL, restoring: Bool) {
+        guard Self.presenting?.importing == nil else {
+            NSLog("[SETTINGS] a file was not opened: an import is already showing")
+            NSSound.beep()
+            return
+        }
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
         guard size <= SettingsFile.maxBytes else { refusal = SettingsFile.ReadError.tooLarge.message; return }
         guard let data = try? Data(contentsOf: url) else {
@@ -87,6 +107,22 @@ final class SettingsTransferModel: ObservableObject {
             }
             importing = SettingsImportSession(document: document, restoring: restoring)
         }
+    }
+}
+
+/// The import sheet and the refusal, for any window that opens a settings file.
+struct SettingsImportHost: ViewModifier {
+    @ObservedObject var transfer: SettingsTransferModel
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $transfer.importing) { ImportSettingsSheet(session: $0) }
+            .alert("Can’t Import This File", isPresented: Binding(get: { transfer.refusal != nil },
+                                                                  set: { if !$0 { transfer.refusal = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(transfer.refusal ?? "")
+            }
     }
 }
 

@@ -9,6 +9,7 @@ This is the input to the privacy policy. **The policy may describe only behaviou
 shipped.** Each finding below is marked:
 - **P1** — changed in stage P1;
 - **P2** — changed in stage P2;
+- **0.9.2** — Export/Import Settings, which ships in 0.9.2: describe it once 0.9.2 is out;
 - **later** — a decided later stage;
 - **open** — no decision yet;
 - no mark — unchanged and fine to describe as is.
@@ -86,26 +87,35 @@ per bookmark keyed by its stable id; deleting a bookmark deletes its item, renam
 - **WHEP/WHIP bearer tokens:** none exist. Manifold sends no Authorization header (§5) and does not
   publish (no WHIP). **NDI:** nothing is saved; NDI sources are not bookmarks.
 - **Diagnostics, bookmark export/import, "copy URL"** (each path checked; `docs/BUGS.md`, *P2*):
-  the export carries no bookmark field, only the captured log (redacted) and a new count line; there is
-  no bookmark export or import, and no pasteboard write anywhere in `App/`.
+  the export carries no bookmark field, only the captured log (redacted) and a new count line; there was
+  no bookmark export or import at P2 (since 0.9.2 there is: below), and no pasteboard write anywhere in `App/`.
 - **The edit form no longer shows the URL on Edit.** Since the URL is in the Keychain, showing it
   means a Keychain read, and pressing the pencil must not do one (`StreamBookmarksSheet.swift`,
   `passphraseRemovalControl`: a read can raise an authorization prompt). The field starts blank,
   blank keeps the saved URL, and "Show saved URL" reads it on request. Chosen as the conservative
   option overnight; Robbie to confirm.
 
-**Export/Import Settings (decided by Robbie, 2026-11-03; `docs/SETTINGS_EXPORT_PLAN.md`):**
-- **Built, not yet shipped (A1, A2):** a shortcuts file, plain JSON, holds only shortcut bindings and the app version, build and
-  export date. Before an import, Manifold saves the current shortcuts to the backup folder (§1). Neither holds a stream address,
-  a passphrase or licence data.
-- **later (A3, A4):** this reverses "stream secrets never leave the Keychain" for one user action. A user who exports streams gets
-  a file holding their names, URLs and SRT passphrases, encrypted (AES-GCM-256, key by PBKDF2-HMAC-SHA256) with a password they
-  choose, which Manifold never stores. There is never a plaintext file with stream URLs or passphrases. Readable without the
-  password: app version, export date, section names, counts, KDF parameters and salt. The file can be attacked offline, so it is
-  only as strong as that password. Import is add-only and saves to the Keychain as a new stream is saved. Backups never hold a
-  secret. Diagnostics never include an export or a backup.
+**Export/Import Settings (0.9.2; decided by Robbie, 2026-11-03; `docs/SETTINGS_EXPORT_PLAN.md` §7):**
+- **A file of shortcuts only** is plain JSON. It holds shortcut bindings and the app version, build and export date. No stream
+  address, passphrase or licence data.
+- **A file with streams** reverses "stream secrets never leave the Keychain" for one user action. It holds their names, URLs and SRT
+  passphrases, encrypted (AES-GCM-256, key by PBKDF2-HMAC-SHA256, 1,000,000 iterations) with a password the user chooses, of at least 12
+  characters. There is never a plaintext file with stream URLs or passphrases.
+- **Readable without the password:** app version, export date, section names, counts, KDF parameters and salt. No name, host or URL.
+- **The file can be attacked offline,** without limit, wherever it ends up, so it is only as strong as its password. That is the reason
+  for the minimum length, the iteration count and the warning at export. Nobody can recover a lost password.
+- **Manifold never sends the file anywhere, and never stores the password.** Decrypted values exist in memory only between the open and
+  the Keychain write. Import is add-only and saves to the Keychain as a new stream is saved.
+- **Opening a file is not importing it.** A double-click, Open With or a drop on a player window only reads the file and shows the
+  preview, after the password for an encrypted file. Nothing is written until the user clicks Import (run 2026-11-04,
+  `SETTINGS_EXPORT_PLAN.md` §8). The file does not join Manifold's recent files.
+- **Automatic backups** (§1) hold shortcut bindings only, never a secret, so nothing with stream data is written without the user
+  choosing a place for it.
+- **Diagnostics never include an export or a backup.** `DiagnosticsExport.swift` names neither, lists no directory and reads no file, and
+  only the settings UI reaches the backups (`DiagnosticsBoundaryTests`).
+- **Logs:** `[SETTINGS]` lines carry counts and positions only: no name, host, URL, path or password.
 
-The note above that "there is no bookmark export or import" was true at P2, and stays true until A4 ships.
+The note above that there was no bookmark export or import was true at P2 and until this feature.
 
 ---
 
@@ -151,7 +161,7 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 ### Files and caches
 
 - **The app writes nothing else to Application Support, Caches or tmp.** There is no thumbnail or
-  waveform cache, and no WebKit. **Settings backups (A2, not yet shipped):** the last 10 shortcut backups, in
+  waveform cache, and no WebKit. **Settings backups (0.9.2):** the last 10 shortcut backups, in
   `~/Library/Application Support/com.graviton.manifold/Settings Backups/`, written only when the user imports. Shortcut
   bindings only.
 - **`~/Library/Caches/com.graviton.manifold/Cache.db` (+ `-wal`, `-shm`, `fsCachedData`)** was the
@@ -181,7 +191,7 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 | Frame still PNG (pixels, ICC, optional DPI) | The export folder, else `~/Desktop`, with no panel (`MetalVideoRenderer.swift:4186-4196`) |
 | Diagnostics `.txt` | Save panel (`DiagnosticsExport.swift:976-986`) |
 | Sync clip `.mov` | Save panel |
-| Settings file `.manifoldsettings` (A2, not yet shipped; shortcuts only, plain JSON) | Save panel |
+| Settings file `.manifoldsettings` (0.9.2): plain JSON for shortcuts only, encrypted if it holds streams | Save panel |
 | v210/rgba16f dump next to each still; live and NDI WAV captures to `~/Desktop` | **Debug builds only — which every Profile build is** (item 8, later) |
 
 ---
@@ -326,7 +336,7 @@ installed copies do until they update.
 | Window state | `~/Library/Saved Application State/com.graviton.manifold.savedState/` |
 | Keychain | Services `tools.graviton.manifold.license` (key, record, **trial clock**) and `tools.graviton.manifold.streams` (since P2, every saved stream's URL and passphrase) |
 | Recent files | `…/ApplicationRecentDocuments/com.graviton.manifold.sfl*` |
-| Settings backups (once A2 ships) | `~/Library/Application Support/com.graviton.manifold/Settings Backups/` |
+| Settings backups (0.9.2) | `~/Library/Application Support/com.graviton.manifold/Settings Backups/` |
 | The user's exports | Export folder, Desktop, wherever diagnostics were saved |
 | Machine registration | On the licence server |
 
@@ -359,6 +369,11 @@ installed copies do until they update.
 > your Mac. Saved stream addresses, stream keys and stream passwords, and your license, are kept in
 > the macOS Keychain; Manifold's preferences file keeps only each saved stream's name and server name
 > [true once P2 ships]. Manifold's own network responses are not cached to disk.
+> [True once 0.9.2 ships:] If you export saved streams, their addresses and passwords are written to a
+> file encrypted with a password you choose. Anyone with that file and that password can read them.
+> Manifold can't recover the password. Before an import, Manifold keeps a backup of your keyboard
+> shortcuts on your Mac; it never holds a stream address or password. Exports and backups are never
+> sent anywhere, and are not part of a diagnostics report.
 > Diagnostics reports are created only when you choose Export Diagnostics, saved where you choose,
 > and never sent automatically. Network addresses, folder paths, machine names and display serial
 > numbers are removed, and file names unless you include them. Your trial start date is kept in the
@@ -366,8 +381,9 @@ installed copies do until they update.
 >
 > **Removing your data.** Delete the app. Then remove
 > `~/Library/Preferences/com.graviton.manifold.plist`, `~/Library/Caches/com.graviton.manifold`,
-> `~/Library/HTTPStorages/com.graviton.manifold`, and the Keychain items named
-> `tools.graviton.manifold`. To free a license seat, contact support.
+> `~/Library/HTTPStorages/com.graviton.manifold`, `~/Library/Application Support/com.graviton.manifold`
+> [once 0.9.2 ships], and the Keychain items named `tools.graviton.manifold`. Settings files you exported
+> stay where you saved them. To free a license seat, contact support.
 
 ## Open questions
 
