@@ -218,9 +218,10 @@ struct ColorInterpretationSlot: View {
     let deck: WindowDeck
     let live: LiveSource?
     let hasFile: Bool
-    /// The file gives the renderer no picture (audio-only), so there is nothing to interpret. Passed in rather than read
-    /// off the deck: SwiftUI re-draws this view only when an input changes.
-    var greyed = false
+    /// What the greyed control reads when the file gives the renderer no picture ("Audio"), so there is nothing to
+    /// interpret; nil for a source with a picture. Passed in rather than read off the deck: SwiftUI re-draws this view
+    /// only when an input changes.
+    var greyedFace: String? = nil
     var face: ColorInterpretationFace = .full
 
     var body: some View {
@@ -228,9 +229,10 @@ struct ColorInterpretationSlot: View {
             ColorInterpretationControl(subject: .live(live), model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face)
         } else if live == nil, hasFile {
             // Opacity as well: `.disabled` does not grey a borderless menu's label (see `controls` in ContentView).
-            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face)
-                .disabled(greyed)
-                .opacity(greyed ? 0.35 : 1)
+            ColorInterpretationControl(subject: .file, model: deck.colorOverride, fileModel: deck.fileColor, lut: deck.lut, face: face,
+                                       greyedFace: greyedFace)
+                .disabled(greyedFace != nil)
+                .opacity(greyedFace != nil ? 0.35 : 1)
         }
     }
 }
@@ -254,6 +256,8 @@ struct ColorInterpretationControl: View {
     /// Colour S6: the window's LUT slot, and the app-wide interpolation (D1).
     @ObservedObject var lut: InterpretationLUTModel
     var face: ColorInterpretationFace = .full
+    /// Replaces the face: colorimetry and a LUT describe a picture, and there is none. See `ColorInterpretationSlot`.
+    var greyedFace: String? = nil
     @ObservedObject private var lutSetting = LUTInterpolationSetting.shared
     @ObservedObject private var recentLUTs = RecentLUTStore.shared
     @ObservedObject private var ndi = NDIService.shared
@@ -354,6 +358,7 @@ struct ColorInterpretationControl: View {
     /// The face after the palette, as runs of the one `Text` (see the note on `body`), in the form `face` asks for.
     private var faceText: Text {
         let mono = Font.system(.caption, design: .monospaced)
+        if let greyedFace { return face == .icon ? Text("") : Text("  ") + Text(greyedFace).font(mono) }
         switch face {
         case .full:  return Text("  ") + Text(faceLabel + lut.faceSuffix).font(mono) + bypassedLUTFace
         case .short: return Text("  ") + Text(shortFaceLabel + lut.faceSuffix).font(mono) + bypassedLUTFace

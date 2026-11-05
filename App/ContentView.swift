@@ -2978,7 +2978,7 @@ struct ContentView: View {
             // what things ARE). The live stream's override on NDI, SRT, WHEP and HLS; the file's since
             // colour S5 (§6.11, decision 6). One element, no modifiers (§6.7): the slot picks which, so
             // this body does not grow a branch — see LiveColorOverride.swift.
-            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyed: !engine.mediaKind.feedsRenderer)
+            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyedFace: colorFaceWithNoPicture)
             displayTransformSlot
             audioOffsetSlot
 
@@ -3028,7 +3028,7 @@ struct ContentView: View {
             scopesButton
             deckLinkOutputControl
             streamingControl
-            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyed: !engine.mediaKind.feedsRenderer, face: .short)
+            ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyedFace: colorFaceWithNoPicture, face: .short)
             displayTransformSlot
             audioOffsetSlot
             moreMenu(g, includesLoop: true)
@@ -3067,7 +3067,7 @@ struct ContentView: View {
 
                 rowDivider
 
-                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyed: !engine.mediaKind.feedsRenderer, face: .icon)
+                ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyedFace: colorFaceWithNoPicture, face: .icon)
                 displayTransformSlot
 
                 rowDivider
@@ -3332,6 +3332,9 @@ struct ContentView: View {
         .help(reloadHelp)
         .disabled(engine.currentURL == nil)
     }
+
+    /// What the Color control reads for a file with no picture to interpret, or nil.
+    private var colorFaceWithNoPicture: String? { engine.mediaKind == .audioOnly ? "Audio" : nil }
 
     // Export the current frame (ACTION) — sits with the file/action controls.
     private var exportButton: some View {
