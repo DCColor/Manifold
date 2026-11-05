@@ -1755,6 +1755,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // ══════════ PHASE 2 — COMMIT. THE PREVIOUS SOURCE ENDS HERE. ══════════
 
         mediaKind = vettedKind
+        // THE OLD FILE'S TRANSPORT ENDS WITH IT. Every route below stops the clock, and only `play()` starts it again, so
+        // a file replaced while playing with autoplay off kept `isPlaying` and `shuttleRate`: Pause on the button, a
+        // stopped clock, and a Play that did nothing, because there was no Play to press.
+        setShuttleRate(0)
         currentURL = url
         onSourceCommitted?(url)
         // A new file gets a clean slate for the degraded-playback notice: the previous file's
