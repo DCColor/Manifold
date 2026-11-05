@@ -197,9 +197,12 @@ final class BroadcastWaveTests: XCTestCase {
     }
 
     func testChannelsLine() {
-        XCTAssertEqual(AudioCardText.channels(count: 1, declaredLayout: nil), "1 channel")
-        XCTAssertEqual(AudioCardText.channels(count: 2, declaredLayout: "Stereo"), "2 channels · Stereo")
-        XCTAssertEqual(AudioCardText.channels(count: 6, declaredLayout: "—"), "6 channels")
+        XCTAssertEqual(AudioCardText.channels(count: 1, statedLayout: nil), "1 channel")
+        XCTAssertEqual(AudioCardText.channels(count: 6, statedLayout: nil), "6 channels")
+        XCTAssertEqual(AudioCardText.channels(count: 2, statedLayout: "Stereo"), "Stereo")
+        XCTAssertEqual(AudioCardText.channels(count: 6, statedLayout: "5.1"), "5.1")
+        XCTAssertEqual(AudioCardText.channels(count: 8, statedLayout: "7.1 SMPTE"), "7.1 SMPTE")
+        XCTAssertEqual(AudioCardText.channels(count: 6, statedLayout: "—"), "6 channels")
     }
 
     func testSampleRateLine() {

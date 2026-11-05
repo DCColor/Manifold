@@ -24,12 +24,11 @@ public enum AudioCardText {
         return "\(container) · \(coding)"
     }
 
-    /// "1 channel", "2 channels · Stereo", "6 channels · 5.1". The layout is named only when the file declares one: a
-    /// name inferred from the count alone would read as a statement about the file.
-    public static func channels(count: Int, declaredLayout: String?) -> String {
-        let base = count == 1 ? "1 channel" : "\(count) channels"
-        guard let declaredLayout, !declaredLayout.isEmpty, declaredLayout != "—" else { return base }
-        return "\(base) · \(declaredLayout)"
+    /// "5.1", "7.1", "Stereo" when the file or Core Audio states a layout, else "1 channel", "6 channels". A name inferred
+    /// from the count alone must not reach here: it would read as a statement about the file.
+    public static func channels(count: Int, statedLayout: String?) -> String {
+        if let statedLayout, !statedLayout.isEmpty, statedLayout != "—" { return statedLayout }
+        return count == 1 ? "1 channel" : "\(count) channels"
     }
 
     /// "44.1 kHz", "48 kHz", "96 kHz", "22.05 kHz".

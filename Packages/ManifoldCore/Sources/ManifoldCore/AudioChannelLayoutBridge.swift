@@ -32,6 +32,24 @@ import AudioToolbox
 /// mislead a reader who matched on the string, and two of them appear in 7.1.
 public enum AudioChannelLayoutBridge {
 
+    /// Core Audio's short name for a stated layout: "5.1", "7.1", "Stereo". Nil with no layout, and for an Unknown or
+    /// DiscreteInOrder tag, which state a channel count and no arrangement (the ALEXA 0xFFFF0000 tag is one).
+    ///
+    /// MEASURED on WAVs: tags 0xBB0006 and 0xBD0008 give "5.1" and "7.1". Their channel order, L R C LFE Rls Rrs, is in no
+    /// entry of `MediaInspector.layoutName(forRoles:)`, so without this a stated 5.1 read as inferred.
+    static func simpleName(from fmt: CMFormatDescription) -> String? {
+        var size = 0
+        guard let layout = CMAudioFormatDescriptionGetChannelLayout(fmt, sizeOut: &size), size > 0 else { return nil }
+        let tag = layout.pointee.mChannelLayoutTag
+        guard tag & 0xFFFF_0000 != kAudioChannelLayoutTag_Unknown,
+              tag & 0xFFFF_0000 != kAudioChannelLayoutTag_DiscreteInOrder else { return nil }
+        var name: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioFormatGetProperty(kAudioFormatProperty_ChannelLayoutSimpleName, UInt32(size), layout,
+                                     &nameSize, &name) == noErr else { return nil }
+        return name?.takeRetainedValue() as String?
+    }
+
     // MARK: - The correspondence table
 
     /// One WAVE speaker position, in all three spellings this app has to move between.

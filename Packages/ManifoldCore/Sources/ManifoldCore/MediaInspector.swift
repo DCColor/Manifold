@@ -560,7 +560,7 @@ public enum MediaInspector {
         // Tier 1: real declaration via channel descriptions / known tag.
         if let roles = channelRoles(from: fmt) {
             let meaningful = roles.filter { $0 != "?" && !$0.hasPrefix("?(") && $0 != "—" }
-            if !meaningful.isEmpty, let name = layoutName(forRoles: roles) {
+            if !meaningful.isEmpty, let name = layoutName(forRoles: roles) ?? AudioChannelLayoutBridge.simpleName(from: fmt) {
                 return (name, .declared)
             }
         }

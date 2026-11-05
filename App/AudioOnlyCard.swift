@@ -30,7 +30,7 @@ struct AudioOnlyFacts: Equatable {
         format = AudioCardText.format(container: m.container, codec: track.codecName, bitDepth: track.bitDepth,
                                       isFloat: track.isFloat)
         channels = AudioCardText.channels(count: track.channelCount,
-                                          declaredLayout: track.layoutConfidence == .declared ? track.layoutName : nil)
+                                          statedLayout: track.layoutConfidence == .declared ? track.layoutName : nil)
         sampleRate = AudioCardText.sampleRate(track.sampleRate)
     }
 }
