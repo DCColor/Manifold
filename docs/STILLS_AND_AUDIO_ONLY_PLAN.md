@@ -279,6 +279,10 @@ sample-buffer surfaces stay behind it, black.
 
 This section and §5.4 are **0.9.3 (B5)**.
 
+**Revisit in B5:** in 0.9.2 an audio-only file plays on the Mac even when the audio destination is SDI, because the card is silent
+(`applyAudioMute`, the `deckLinkOwnsAudio && mediaKind != .audioOnly` term). Once the SDI card carries the sound, that exception
+must be reconsidered, or the same program plays from the Mac and the card at once. Likely it goes, and the destination rules again.
+
 **Setting:** Settings ▸ DeckLink Output ▸ Output (`SettingsView.swift:611`), **"Audio-only files on SDI: Show card / Black"**,
 default Show card, key `manifold.decklink.audioOnlyPicture`. A caption says Black is for recording the SDI feed.
 

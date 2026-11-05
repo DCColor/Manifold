@@ -8,7 +8,9 @@ changelog page. Format notes are at the bottom.
 ## 0.9.2
 
 - Manifold now opens audio-only files: WAV, AIFF, Broadcast WAV, MP3, M4A and audio-only movies. Play, seek, loop and meter them. The Inspector shows a BWF file's timecode.
+- Settings ▸ Files can now make Manifold the default app for WAV, AIFF, MP3, M4A and AAC, one type at a time. Nothing changes until you choose.
 - While an audio-only file is open, SDI and HDMI keep their mode and send black, and its sound plays on the Mac. Sending audio-only files to SDI comes in 0.9.3.
+- Audio files show their layout by name, such as 5.1 or 7.1, when the file states one. This applies to the Inspector for video files too.
 - Opening a file over one that is playing no longer leaves the transport stuck, with Pause showing and nothing moving.
 - Double-click a Manifold settings file, or drop one on a player window, to preview its import. Nothing changes until you click Import.
 - Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too.

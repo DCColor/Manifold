@@ -15797,3 +15797,21 @@ else; this entry exists so the next reader does not have to ask.
 - **Fix:** `loadAsset`'s commit calls `setShuttleRate(0)`. Autoplay still plays, from `beginReading`.
 - **Verified:** moving 48 kHz clip → 44.1 kHz WAV → the clip, each swapped while playing, DeckLink output on: both start on Play, and
   SDI carries real PCM after the return. **Not yet through a real session.**
+
+## ✅ FIXED 2026-11-04 — a stated 5.1 or 7.1 read as "inferred", and audio-only files read "709 709 · Assumed"
+
+- **Layout:** a WAV's Core Audio tag gives the order L R C LFE Rls Rrs, which is in no entry of `MediaInspector.layoutName(forRoles:)`, so a
+  stated 5.1 fell to the count-based guess: "5.1 (inferred)" in the Inspector, "6 channels" on the card. `audioLayout` now asks Core
+  Audio for the short name after the table (`AudioChannelLayoutBridge.simpleName`), except for Unknown and DiscreteInOrder tags. The
+  Inspector row of a video file with such a layout changes the same way. **Measured:** a 6-channel WAV with no channel mask also reads
+  5.1, because Core Audio itself supplies that layout. AIFF, MP3 and raw AAC state none and keep the count.
+- **Color control:** the greyed control named the renderer's default colorimetry for a file with no picture. It now reads "Audio".
+- **Verified:** by AX on the fixtures. **Not yet through a real session.**
+
+## Settings ▸ Files audio rows: the accept path has not been run (2026-11-04)
+
+The five audio rows extend `DefaultHandlerStatus.fileHandlers`. Each was pressed and answered Keep in the macOS consent dialog: each
+dialog names the right extensions (.wav/.wave, .aiff/.aif, .mp3/.mpga, .m4a, .aac/.adts), each row then reads "Kept …", and the handlers
+and the Launch Services plist stayed byte-identical. **Not run:** answering Use “Manifold”, which is the user's to answer. `.bwf` resolves
+to the WAV type by `UTType(filenameExtension:)`, but the dialog does not list it, so whether a claim moves `.bwf`-named files is UNKNOWN.
+Expected but not measured: undoing a claim leaves an explicit Launch Services entry where the system default had none.
