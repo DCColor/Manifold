@@ -107,4 +107,30 @@ final class MenuKeyAuditTests: XCTestCase {
         XCTAssertEqual(snap.first?.modifiers, NSEvent.ModifierFlags([.command, .option]).rawValue)
         XCTAssertEqual(snap.map(\.afterSeparator), [false, true, false])
     }
+
+    /// docs/BUGS.md, 2026-11-03: the system's Search With Google is ⇧⌘L, stated as "L" with ⌘, and lost its key to Loop's ⌘L.
+    func testAnUppercaseKeyHoldsShiftSoItIsNotTheLowercaseChord() {
+        XCTAssertFalse(MenuKeyAudit.sameChord("L", .command, "l", .command))
+        XCTAssertFalse(MenuKeyAudit.sameChord("l", [.command, .shift], "l", .command))
+    }
+
+    func testBothSpellingsOfAShiftedChordAreTheSameChord() {
+        XCTAssertTrue(MenuKeyAudit.sameChord("d", [.command, .shift], "D", [.command, .shift]))
+        XCTAssertTrue(MenuKeyAudit.sameChord("D", .command, "d", [.command, .shift]))
+    }
+
+    func testOtherModifiersAndKeysStillSeparateChords() {
+        XCTAssertTrue(MenuKeyAudit.sameChord("l", .command, "l", .command))
+        XCTAssertFalse(MenuKeyAudit.sameChord("l", [.command, .option], "l", .command))
+        XCTAssertFalse(MenuKeyAudit.sameChord("k", .command, "l", .command))
+        XCTAssertTrue(MenuKeyAudit.sameChord("\\", [.command, .shift], "\\", [.command, .shift]), "no case to read ⇧ from")
+    }
+
+    func testAnEmptyKeyIsNeverAChord() {
+        XCTAssertFalse(MenuKeyAudit.sameChord("", .command, "", .command))
+    }
+
+    func testModifiersOutsideTheFourAreIgnored() {
+        XCTAssertTrue(MenuKeyAudit.sameChord("l", [.command, .function], "l", .command))
+    }
 }

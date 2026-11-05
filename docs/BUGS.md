@@ -3849,7 +3849,7 @@ no note, "Tick only…" under the checkbox, "From your calibration report…" la
 in Reference-PQ it was not re-read in this launch (the popover closed first), so its last reading is the fix launch's false. AX does not
 report the labels' dimming; that is the by-eye check above, which did not include Bypass. No store writes in the launch.
 
-## ☐ OPEN 2026-11-03 — 0.9.2 — `MenuKeyKeeper` ignores case, so a system ⇧⌘L Services item loses its shortcut inside Manifold
+## ✅ FIXED 2026-11-04 — 0.9.2 — `MenuKeyKeeper` ignores case, so a system ⇧⌘L Services item loses its shortcut inside Manifold
 
 **What was seen.** The shortcut export launch of 2026-11-03 logged `[SHORTCUTS] menu key: 'Search With Google' had Loop Playback's key;
 cleared`, with Loop Playback on its default ⌘L. Search With Google is a system Services item, which is ⇧⌘L.
@@ -3864,6 +3864,15 @@ Any uppercase-spelled item could be hit the same way. Pre-existing since `bc735c
 
 **Fix.** Treat an uppercase `keyEquivalent` as holding ⇧ before comparing it with a key the keeper wants to clear, and add a case to the
 `MenuKeyAudit` tests.
+
+**Fixed.** `MenuKeyAudit.sameChord` compares the keypress: an uppercase key holds ⇧, so "L" with ⌘ is ⇧⌘L and not ⌘L, and SwiftUI's two spellings of
+⇧⌘D stay equal. The keeper and the audit both use it. A plain case-sensitive compare would have treated those two spellings as different keys. The
+keeper also skips everything under `NSApp.servicesMenu`, so it can never clear a Services item's key, even one that truly matches a registry key
+(`servicesMenu` measured set in a SwiftUI app). Five new `MenuKeyAuditTests` cases.
+
+**Verified 2026-11-04, in part.** Unit tests pass. In the app (the fix 1 launch, `MANIFOLD_MENU_AUDIT=1`): 13 audit passes with 0 problems and no key
+cleared. **The bug itself did not show in that launch:** the Services menu held 9 items, none with a key and no Search With Google, so the fixed
+path was not exercised in the app. The original line came from one launch, so watch for `'Search With Google' had Loop Playback's key` not returning.
 
 ## ☐ 0.9.2 INVESTIGATION 2026-11-03 — `AttributeGraph: cycle detected` in the log, with the chain readout open
 

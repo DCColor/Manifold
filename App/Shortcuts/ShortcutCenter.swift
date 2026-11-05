@@ -302,18 +302,18 @@ final class MenuKeyKeeper {
             guard let chord = registry.menuChord(for: def.id), let want = MenuKeyAudit.expected(chord) else { continue }
             wants.append((item, want.key, want.modifiers, def.title))
         }
-        let everything = items(bar)
+        // A Services item is the system's and the user's (System Settings ▸ Keyboard), never ours to take a key from.
+        let services = Set((NSApp.servicesMenu.map(items) ?? []).map(ObjectIdentifier.init))
+        let everything = items(bar).filter { !services.contains(ObjectIdentifier($0)) }
         for want in wants {
             for other in everything where !ours.contains(ObjectIdentifier(other))
-                && other.keyEquivalent.lowercased() == want.key.lowercased()
-                && other.keyEquivalentModifierMask.intersection(MenuKeyAudit.relevant) == want.mods {
+                && MenuKeyAudit.sameChord(other.keyEquivalent, other.keyEquivalentModifierMask, want.key, want.mods) {
                 other.keyEquivalent = ""
                 note("'\(other.title)'\(other.isHidden ? " (hidden)" : "") had \(want.title)'s key; cleared")
             }
-            // Case-insensitive, as `MenuKeyAudit` judges: only a key that is MISSING or different is put back; SwiftUI's
-            // own spelling of one it kept (⇧⌘D as "d" or "D") is left as SwiftUI set it.
-            if want.item.keyEquivalent.lowercased() != want.key.lowercased()
-                || want.item.keyEquivalentModifierMask.intersection(MenuKeyAudit.relevant) != want.mods {
+            // As `MenuKeyAudit` judges: only a key that is MISSING or different is put back; SwiftUI's own spelling of one
+            // it kept (⇧⌘D as "d" or "D") is left as SwiftUI set it.
+            if !MenuKeyAudit.sameChord(want.item.keyEquivalent, want.item.keyEquivalentModifierMask, want.key, want.mods) {
                 want.item.keyEquivalent = want.key
                 want.item.keyEquivalentModifierMask = want.mods
                 note("'\(want.title)' had lost its key; put back")

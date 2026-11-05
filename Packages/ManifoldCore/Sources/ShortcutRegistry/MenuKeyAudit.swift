@@ -144,8 +144,20 @@ public enum MenuKeyAudit {
     }
 
     private static func same(_ item: MenuItemSnapshot, _ want: (key: String, modifiers: NSEvent.ModifierFlags)) -> Bool {
-        !item.keyEquivalent.isEmpty && item.keyEquivalent.lowercased() == want.key.lowercased()
-            && item.modifiers == want.modifiers.intersection(relevant).rawValue
+        sameChord(item.keyEquivalent, NSEvent.ModifierFlags(rawValue: item.modifiers), want.key, want.modifiers)
+    }
+
+    /// Whether two key equivalents are the same keypress. AppKit can state ⇧ either way, in the mask or as an uppercase key
+    /// with no ⇧ in the mask, so "L" with ⌘ is ⇧⌘L and not ⌘L, and SwiftUI's "d" with ⇧⌘ and "D" with ⌘ are both ⇧⌘D.
+    /// No key is never a match.
+    public static func sameChord(_ keyA: String, _ modifiersA: NSEvent.ModifierFlags,
+                                 _ keyB: String, _ modifiersB: NSEvent.ModifierFlags) -> Bool {
+        func pressed(_ key: String, _ modifiers: NSEvent.ModifierFlags) -> (String, UInt) {
+            var flags = modifiers.intersection(relevant)
+            if key != key.lowercased() { flags.insert(.shift) }
+            return (key.lowercased(), flags.rawValue)
+        }
+        return !keyA.isEmpty && pressed(keyA, modifiersA) == pressed(keyB, modifiersB)
     }
 
     private static func describe(_ item: MenuItemSnapshot) -> String {
