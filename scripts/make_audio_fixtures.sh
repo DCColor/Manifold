@@ -21,7 +21,7 @@ CODE_ROOT="${CODE_ROOT:-$HOME/Code}"
 OUT="${FIXTURES_DIR:-$CODE_ROOT/Manifold/fixtures/audio}"
 DURATION=6
 FF=(ffmpeg -hide_banner -loglevel error -y)
-TONES=(440 660 880 110 1100 1320)
+TONES=(440 660 880 110 1100 1320 1540 1760)
 
 mkdir -p "$OUT"
 
@@ -50,11 +50,14 @@ for rate in 44100 48000 96000; do
     make_wav $rate 6 5.1    "wav-${rate}-5.1-24.wav"
 done
 
+make_wav 48000 8 7.1 "wav-48000-7.1-24.wav"
+
 STEREO48="$(tones 48000 2 stereo)"
 STEREO44="$(tones 44100 2 stereo)"
 "${FF[@]}" -filter_complex "$STEREO48" -c:a pcm_s24be "$OUT/aiff-48000-stereo-24.aif"
 "${FF[@]}" -filter_complex "$STEREO44" -c:a libmp3lame -b:a 192k "$OUT/mp3-44100-stereo.mp3"
 "${FF[@]}" -filter_complex "$STEREO48" -c:a aac -b:a 192k "$OUT/aac-48000-stereo.m4a"
+"${FF[@]}" -filter_complex "$STEREO48" -c:a aac -b:a 192k -f adts "$OUT/aac-48000-stereo.aac"
 "${FF[@]}" -filter_complex "$STEREO48" -c:a pcm_s24le -f mov "$OUT/audio-only.mov"
 
 BWF_META=(-metadata origination_date=2026-11-04 -metadata origination_time=12:30:15)
