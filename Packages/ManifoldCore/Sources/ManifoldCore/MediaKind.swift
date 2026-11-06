@@ -13,7 +13,7 @@
 public enum MediaKind: Sendable, Equatable {
     case none
     case video
-    /// Reserved for stage B2. Nothing commits a still yet: `FrameEngine.loadAsset` classifies one and refuses it.
+    /// Drawn by macOS in an `NSImageView`, never by the renderer (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §2).
     case still
     case audioOnly
 

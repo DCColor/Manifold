@@ -5,6 +5,7 @@ import CoreVideo
 import CoreMedia
 import QuartzCore
 import ImageIO
+import StillImageInfo
 import UniformTypeIdentifiers
 import ManifoldCore   // ScrubProducerFlags.stats — gates the [SETTLE] measurement
 #if DEBUG
@@ -4734,7 +4735,7 @@ final class MetalVideoRenderer {
         setParams: (MTLComputeCommandEncoder) -> Void,
         completion: @escaping (_ hist: [UInt32]) -> Void
     ) -> Bool {
-        guard let pipeline, let src = offscreenTexture, count > 0 else { return false }
+        guard let pipeline, let src = scopeTexture, count > 0 else { return false }
         let width = src.width
         let height = src.height
 
@@ -4774,6 +4775,76 @@ final class MetalVideoRenderer {
         return true
     }
 
+    // MARK: A still's frame for the scopes
+
+    /// A still reaches the scopes and nothing else: this texture holds the file's stored values, and only the four
+    /// `computeXGPU` calls read it, in place of the offscreen ring. Render, display, SDI and export never see it, and
+    /// its codes are deliberately NOT the source or picture codes: those set the layer's colourspace and EDR behind the
+    /// `NSImageView`, which is macOS's picture and stays as B0 measured it, and a loaded LUT would restate them as its
+    /// output, which says nothing about a file the LUT never touches (docs/STILLS_AND_AUDIO_ONLY_PLAN.md, B0 result).
+    private var stillScopeTexture: MTLTexture?
+    private(set) var stillScopeColor: StillScopeColor?
+
+    /// Main actor only, like the scope calls that read it. Nil when the source is anything but a still.
+    func setStillScopeFrame(_ frame: StillScopeFrame?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard frame != nil || stillScopeTexture != nil else { return }
+        stillScopeColor = frame?.color
+        stillScopeTexture = frame.flatMap(makeStillScopeTexture)
+        if stillScopeTexture == nil { stillScopeColor = nil }
+        // The headers, then one sample: nothing renders for a still, so nothing else would trigger it.
+        sourceColorStateChanged()
+        if stillScopeTexture != nil { onFrameRendered?() }
+    }
+
+    /// `rgba16Unorm`: the scope kernels read normalized floats, so the 16-bit stored values go in unchanged, and a
+    /// float texture would round them.
+    private func makeStillScopeTexture(_ frame: StillScopeFrame) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Unorm, width: frame.width,
+                                                                  height: frame.height, mipmapped: false)
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        frame.pixels.withUnsafeBytes { bytes in
+            texture.replace(region: MTLRegionMake2D(0, 0, frame.width, frame.height), mipmapLevel: 0,
+                            withBytes: bytes.baseAddress!, bytesPerRow: frame.bytesPerRow)
+        }
+        return texture
+    }
+
+    /// What the scopes read: a still's frame while one is held, else the readable offscreen.
+    private var scopeTexture: MTLTexture? { stillScopeTexture ?? offscreenTexture }
+
+    /// The codes the scope maths use, matching `scopeTexture`. `ScopeColorFeed` writes the headers from the same place.
+    private var scopeCodes: (primaries: Int?, transfer: Int?, matrix: Int?) {
+        if let c = stillScopeColor { return (c.primaries, c.transfer, c.matrix) }
+        return (picturePrimariesCode, pictureTransferCode, pictureMatrixCode)
+    }
+
+    #if DEBUG
+    /// `MANIFOLD_SCOPE_PROBE=1`: the code a scope actually binned, so a reading can be checked against the file. For each
+    /// fifth of the width, the mean bin; and the lowest and highest bin anywhere. Row 0 is the top bin.
+    private func probeScope(_ name: String, _ hist: [UInt32], columns: Int, bins: Int) {
+        guard ProcessInfo.processInfo.environment["MANIFOLD_SCOPE_PROBE"] != nil,
+              hist.count >= columns * bins else { return }
+        var lowest = bins, highest = -1
+        var samples: [String] = []
+        let wanted = Set([0, 1, 2, 3, 4].map { min(columns - 1, $0 * (columns - 1) / 4) })
+        for column in 0..<columns {
+            var sum = 0.0, count = 0.0
+            for row in 0..<bins {
+                let n = hist[row * columns + column]
+                guard n > 0 else { continue }
+                let bin = bins - 1 - row
+                lowest = min(lowest, bin); highest = max(highest, bin)
+                sum += Double(bin) * Double(n); count += Double(n)
+            }
+            if wanted.contains(column), count > 0 { samples.append(String(format: "%.1f", sum / count)) }
+        }
+        print("[SCOPE-PROBE] \(name): bins \(lowest)...\(highest) of \(bins - 1) · column means \(samples.joined(separator: " "))")
+    }
+    #endif
+
     /// GPU luma-waveform histogram (Phase 1). scopeW*bins buffer, layout hist[row*scopeW +
     /// bucket] matching the CPU path. Thin wrapper over dispatchScopeKernel.
     @discardableResult
@@ -4781,11 +4852,11 @@ final class MetalVideoRenderer {
         scopeW: Int, bins: Int, rowStride: Int,
         completion: @escaping (_ hist: [UInt32], _ scopeW: Int, _ bins: Int) -> Void
     ) -> Bool {
-        guard let src = offscreenTexture else { return false }
+        guard let src = scopeTexture else { return false }
         // Luma weights from the PICTURE's YCbCr matrix ONLY (never inferred from primaries) — read
         // live so a mid-session source change re-weights on the next sample. nil/2/unknown → 709.
         // Colour S6, L2: the picture codes, so a LUT's stated output is weighed as what it is.
-        let m = ycbcrKrKb(forMatrixCode: pictureMatrixCode)
+        let m = ycbcrKrKb(forMatrixCode: scopeCodes.matrix)
         var params = WaveformParams(width: UInt32(src.width), height: UInt32(src.height),
                                     scopeW: UInt32(scopeW), bins: UInt32(bins),
                                     rowStride: UInt32(max(1, rowStride)),
@@ -4793,7 +4864,12 @@ final class MetalVideoRenderer {
         return dispatchScopeKernel(
             pipeline: waveformPipelineState, buffer: &histogramBuffer, count: scopeW * bins,
             setParams: { $0.setBytes(&params, length: MemoryLayout<WaveformParams>.stride, index: 1) },
-            completion: { completion($0, scopeW, bins) })
+            completion: { [weak self] hist in
+                #if DEBUG
+                self?.probeScope("waveform", hist, columns: scopeW, bins: bins)
+                #endif
+                completion(hist, scopeW, bins)
+            })
     }
 
     /// GPU RGB-parade histograms (Phase 2). Three per-channel regions in ONE buffer, laid
@@ -4804,14 +4880,21 @@ final class MetalVideoRenderer {
         colW: Int, bins: Int, rowStride: Int,
         completion: @escaping (_ hist: [UInt32], _ colW: Int, _ bins: Int) -> Void
     ) -> Bool {
-        guard let src = offscreenTexture else { return false }
+        guard let src = scopeTexture else { return false }
         var params = ParadeParams(width: UInt32(src.width), height: UInt32(src.height),
                                   colW: UInt32(colW), bins: UInt32(bins),
                                   rowStride: UInt32(max(1, rowStride)))
         return dispatchScopeKernel(
             pipeline: paradePipelineState, buffer: &paradeHistogramBuffer, count: colW * bins * 3,
             setParams: { $0.setBytes(&params, length: MemoryLayout<ParadeParams>.stride, index: 1) },
-            completion: { completion($0, colW, bins) })
+            completion: { [weak self] hist in
+                #if DEBUG
+                for (i, name) in ["parade R", "parade G", "parade B"].enumerated() {
+                    self?.probeScope(name, Array(hist[(i * colW * bins)..<((i + 1) * colW * bins)]), columns: colW, bins: bins)
+                }
+                #endif
+                completion(hist, colW, bins)
+            })
     }
 
     /// GPU vectorscope histogram (Phase 3). A square plane×plane 2-D chroma histogram,
@@ -4822,10 +4905,10 @@ final class MetalVideoRenderer {
         plane: Int, chromaScale: Float, rowStride: Int,
         completion: @escaping (_ hist: [UInt32], _ plane: Int) -> Void
     ) -> Bool {
-        guard let src = offscreenTexture else { return false }
+        guard let src = scopeTexture else { return false }
         // Chroma matrix (Kr/Kb) from the picture's matrix code ONLY (never from primaries — that
         // drives the graticule, not the math). Read live; nil/2/unknown → 709. Picture codes since L2.
-        let m = ycbcrKrKb(forMatrixCode: pictureMatrixCode)
+        let m = ycbcrKrKb(forMatrixCode: scopeCodes.matrix)
         var params = VectorscopeParams(width: UInt32(src.width), height: UInt32(src.height),
                                        plane: UInt32(plane), rowStride: UInt32(max(1, rowStride)),
                                        chromaScale: chromaScale, kr: m.kr, kb: m.kb)
@@ -4845,16 +4928,16 @@ final class MetalVideoRenderer {
         planeW: Int, planeH: Int,
         completion: @escaping (_ hist: [UInt32], _ planeW: Int, _ planeH: Int) -> Void
     ) -> Bool {
-        guard let src = offscreenTexture else { return false }
+        guard let src = scopeTexture else { return false }
         // Mode + plane bounds from the single shared source of truth (also used by the graticule).
         let bounds = CIEPlaneBounds.forMode(useUV: cieUseUV)
         // Colour S3: the matrix and the curve from the one table — the same primaries the layer's
         // colorspace was built with (`makeColorSpace`), so the scope plots the picture that is shown.
         // Colour S6, L2: the PICTURE codes — a LUT's stated output space is what the CIE plots.
-        let m = ColorPrimaries.resolve(picturePrimariesCode).rendered.rgbToXYZ.flatMap { $0.map(Float.init) }
+        let m = ColorPrimaries.resolve(scopeCodes.primaries).rendered.rgbToXYZ.flatMap { $0.map(Float.init) }
         var params = CIEParams(width: UInt32(src.width), height: UInt32(src.height),
                                planeW: UInt32(planeW), planeH: UInt32(planeH),
-                               curve: ScopeCurve(transferCode: pictureTransferCode).rawValue,
+                               curve: ScopeCurve(transferCode: scopeCodes.transfer).rawValue,
                                useUV: cieUseUV ? 1 : 0,
                                uMin: bounds.aMin, uMax: bounds.aMax, vMin: bounds.bMin, vMax: bounds.bMax,
                                rgbToXYZ: (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))

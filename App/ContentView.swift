@@ -931,8 +931,9 @@ struct ContentView: View {
             // `displaySize` edge to carry the news.
             RasterMenuState.shared.setNeedsRefresh()
             DisplayTransformMenuState.shared.setNeedsRefresh()
-            // An audio-only file has no picture for the scopes: blank the last trace and say "no source" in the headers.
-            if !engine.mediaKind.feedsRenderer { clearScopes() }
+            // An audio-only file has no picture for the scopes, and a still with no RGB values none to read: blank the last
+            // trace and say "no source" in the headers. Any other still has already handed the renderer its frame.
+            if !engine.mediaKind.feedsRenderer, metalRenderer?.stillScopeColor == nil { clearScopes() }
             scopeColorFeed.refresh()
             #if DEBUG
             DebugStepHook.run(engine: engine, renderer: metalRenderer)   // measurement only, env-gated
@@ -1075,7 +1076,7 @@ struct ContentView: View {
     /// both cases.
     private var rasterRequest: RasterRequest {
         // A percentage of a picture that does not exist is false, so an audio-only file keeps the window's width.
-        guard engine.mediaKind.feedsRenderer else { return .unconstrained }
+        guard engine.mediaKind != .audioOnly else { return .unconstrained }
         if chrome.rasterSize == .fitToScreen { return .fitToScreen }
         guard let fraction = chrome.rasterSize.fraction else { return .unconstrained }
         return .sourceFraction(fraction)
@@ -1139,7 +1140,7 @@ struct ContentView: View {
         GeometryReader { geo in
             let centred = geo.size.width < 900
             // The file name's capsule: a callout line (15 pt) and 2 × 8 padding, at 24 from the top; then 8.
-            let belowFileName = showFileNameOverlay && engine.hasMedia && engine.metadata?.fileName != nil
+            let belowFileName = showFileNameOverlay && engine.hasMedia && overlayFileName != nil
             ViewThatFits(in: .horizontal) {
                 rasterLabel(Text(text), in: Capsule())
                 if let cut = text.range(of: " (") {
@@ -1168,12 +1169,8 @@ struct ContentView: View {
     /// Is this a file the app should ACCEPT and try to open — which is a different question from
     /// whether it can play it, and the difference is the point.
     ///
-    /// Movies and audio go to `FrameEngine.loadAsset`, which vets them. An .r3d conforms to `public.movie` and is
-    /// refused there with a banner, which is why this is not a statement of what can play.
-    ///
-    /// ⚠️ IMAGES ARE ACCEPTED SO THAT THEY CAN BE REFUSED PROPERLY, until stage B2 opens them. This predicate was once
-    /// `public.movie` alone, so dropping a PNG returned false and nothing happened: no message, no log. Letting them
-    /// through gives them the engine's banner, with the sentence that is true of a still.
+    /// Movies, images and audio go to `FrameEngine.loadAsset`, which vets them. An .r3d conforms to `public.movie` and is
+    /// refused there with a banner, and a DPX to `public.image`, which is why this is not a statement of what can open.
     ///
     /// Everything else (.pdf, .txt, a folder) is still declined here, silently, and that is
     /// UNCHANGED rather than endorsed: a real capability filter, "what can this engine actually
@@ -1186,7 +1183,7 @@ struct ContentView: View {
     /// Show (or refresh) the readout from CURRENT facts. Never takes the text from its caller — the
     /// three triggers below know that something moved, not what it moved to.
     private func showRasterNotice() {
-        guard engine.mediaKind.feedsRenderer,
+        guard engine.mediaKind != .audioOnly,
               let text = RasterReadout.text(for: chrome.rasterSize,
                                             displaySize: engine.displaySize,
                                             drawnPixels: drawnVideoPixels) else { return }
@@ -1215,6 +1212,10 @@ struct ContentView: View {
                 }
                 if let renderer = metalRenderer {
                     MetalSurfaceView(renderer: renderer)
+                }
+                // A still is macOS's picture, over the cleared surfaces. It inherits the fit, the measured rect and the guides.
+                if engine.mediaKind == .still {
+                    StillImageSurface(engine: engine)
                 }
             }
             .aspectRatio(videoAspect, contentMode: .fit)   // full image, aspect preserved
@@ -1312,7 +1313,7 @@ struct ContentView: View {
             }
         }
         .overlay(alignment: .top) {
-            if showFileNameOverlay, engine.hasMedia, let name = engine.metadata?.fileName {
+            if showFileNameOverlay, engine.hasMedia, let name = overlayFileName {
                 Text(name)
                     .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.95))
@@ -2796,11 +2797,11 @@ struct ContentView: View {
         let dim = Color.white.opacity(0.35)
         let gates = RowGates(transport: transport, position: position, positionWhy: positionWhy, live: live, dim: dim)
         return VStack(spacing: 10) {
-            scrubberRow(gates)
+            transportLineRow(gates)
                 // In the floating HUD the scrubber keeps the HUD's 760-pt width (less its padding) by itself, so the
                 // button rows below can be offered the whole window (`adaptiveButtonRows`). Docked, it spans the bar.
                 .frame(maxWidth: showPin ? 736 : .infinity)
-            adaptiveButtonRows(gates, showPin: showPin)
+            buttonRows(gates, showPin: showPin)
         }
         // THE NDI DISCOVERY HOLD BELONGS TO THE BAR, NOT TO THE STREAMING CONTROL IN IT. Each layout has its own
         // `streamingControl`, and `ViewThatFits` takes one off screen and puts another on whenever the window is resized
@@ -2821,6 +2822,70 @@ struct ContentView: View {
         let positionWhy: String?
         let live: Color
         let dim: Color
+    }
+
+    /// The file name a still shows: it has no `metadata`, which is what would say the output has something to follow.
+    private var overlayFileName: String? { engine.stillInfo?.fileName ?? engine.metadata?.fileName }
+
+    /// The scrubber, or a still's one line in its place: a still has no position to move.
+    @ViewBuilder private func transportLineRow(_ g: RowGates) -> some View {
+        if engine.mediaKind == .still {
+            StillTransportLine(engine: engine)
+        } else {
+            scrubberRow(g)
+        }
+    }
+
+    @ViewBuilder private func buttonRows(_ g: RowGates, showPin: Bool) -> some View {
+        if engine.mediaKind == .still {
+            stillButtonRows(g, showPin: showPin)
+        } else {
+            adaptiveButtonRows(g, showPin: showPin)
+        }
+    }
+
+    /// A still's controls (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.3): nothing that moves a position or plays sound. Colour
+    /// stays in place, greyed, so the bar does not rearrange and the reason has somewhere to sit.
+    private func stillButtonRows(_ g: RowGates, showPin: Bool) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                stillFileControls
+                rowDivider
+                stillOutputControls
+                Spacer()
+                if showPin { pinButton(g) }
+            }
+            .fixedSize(horizontal: showPin, vertical: false)
+            VStack(spacing: 10) {
+                HStack(spacing: 16) {
+                    stillFileControls
+                    Spacer()
+                    if showPin { pinButton(g) }
+                }
+                HStack(spacing: 16) {
+                    stillOutputControls
+                    Spacer()
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white.opacity(0.9))
+        .imageScale(.large)
+    }
+
+    @ViewBuilder private var stillFileControls: some View {
+        openButton
+        guidesButton
+        inspectorButton
+        reloadButton
+    }
+
+    @ViewBuilder private var stillOutputControls: some View {
+        scopesButton
+        deckLinkOutputControl
+        streamingControl
+        ColorInterpretationSlot(deck: deck, live: activeLiveSource, hasFile: engine.hasMedia, greyedFace: colorFaceWithNoPicture)
+        displayTransformSlot
     }
 
     /// The scrubber with its two readouts.
@@ -3341,7 +3406,13 @@ struct ContentView: View {
     }
 
     /// What the Color control reads for a file with no picture to interpret, or nil.
-    private var colorFaceWithNoPicture: String? { engine.mediaKind == .audioOnly ? "Audio" : nil }
+    private var colorFaceWithNoPicture: String? {
+        switch engine.mediaKind {
+        case .audioOnly: return "Audio"
+        case .still: return "Still"
+        default: return nil
+        }
+    }
 
     // Export the current frame (ACTION) — sits with the file/action controls.
     private var exportButton: some View {

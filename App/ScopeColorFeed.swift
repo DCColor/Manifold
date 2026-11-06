@@ -50,6 +50,9 @@ final class ScopeColorFeed: ObservableObject {
         let provenance: SourceColorProvenance
         let statedByLUT: Bool
         let sourcePresent: Bool
+        /// A still's own caveat, said on every header. Nil for everything else.
+        var note: String? = nil
+        var isStill = false
     }
     private var written: Written?
 
@@ -113,14 +116,19 @@ final class ScopeColorFeed: ObservableObject {
         // written instead, and the header says "no source" rather than naming that space. With a source: the
         // picture codes, as since L2.
         // `hasPicture`, not `hasSource`: an audio-only file is a source with no picture for a scope to describe.
+        // A still reaches the scopes without reaching the picture codes: its file's codes, from the renderer that holds
+        // its frame, because the picture codes would name a loaded LUT the still never went through.
         let present = deck.hasPicture
-        let now = present
+        let now = renderer.stillScopeColor.map {
+            Written(primaries: $0.primaries, transfer: $0.transfer, matrix: $0.matrix, provenance: .tagged,
+                    statedByLUT: false, sourcePresent: true, note: $0.note, isStill: true)
+        } ?? (present
             ? Written(primaries: renderer.picturePrimariesCode, transfer: renderer.pictureTransferCode,
                       matrix: renderer.pictureMatrixCode, provenance: renderer.sourceColorProvenance,
                       statedByLUT: renderer.pictureStatedByLUT, sourcePresent: true)
             : Written(primaries: renderer.sourcePrimariesCode, transfer: renderer.sourceTransferCode,
                       matrix: renderer.sourceMatrixCode, provenance: renderer.sourceColorProvenance,
-                      statedByLUT: false, sourcePresent: false)
+                      statedByLUT: false, sourcePresent: false))
         guard now != written else { return }
         written = now
 
@@ -129,10 +137,13 @@ final class ScopeColorFeed: ObservableObject {
         parade?.sourceTransferCode = now.transfer
         vectorscope?.sourceMatrixCode = now.matrix
         vectorscope?.sourcePrimariesCode = now.primaries
-        let header = now.sourcePresent
+        waveform?.headerNote = now.note
+        parade?.headerNote = now.note
+        vectorscope?.headerNote = now.note
+        let header = now.note ?? (now.sourcePresent
             ? Self.cieHeader(primaries: now.primaries, transfer: now.transfer,
                              provenance: now.provenance, statedByLUT: now.statedByLUT)
-            : "no source"
+            : "no source")
         cie?.spaceReadout = header
 
         func code(_ c: Int?) -> String { c.map(String.init) ?? "–" }

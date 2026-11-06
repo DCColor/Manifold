@@ -282,12 +282,13 @@ func resolveVerticalScale(override: ScopeVerticalScale, transferCode: Int?) -> A
 /// ("luma Rec. 709" for waveform, "RGB" for parade). A trailing `*` marks a FORCED (manual) ruler
 /// so it reads as an override, not an auto-detected one.
 func valueScopeHeaderSuffix(lead: String, active: ActiveVerticalScale,
-                            sdrScale: ScopeScale, forced: Bool) -> String {
+                            sdrScale: ScopeScale, forced: Bool, note: String? = nil) -> String {
     let star = forced ? "*" : ""
+    let tail = note.map { " · \($0)" } ?? ""
     switch active {
-    case .sdr: return " · \(lead) (\(sdrScale.headerTag))"
-    case .pq:  return " · \(lead) · PQ (nits)\(star)"
-    case .hlg: return " · \(lead) · HLG (%·nits)\(star)"
+    case .sdr: return " · \(lead) (\(sdrScale.headerTag))\(tail)"
+    case .pq:  return " · \(lead) · PQ (nits)\(star)\(tail)"
+    case .hlg: return " · \(lead) · HLG (%·nits)\(star)\(tail)"
     }
 }
 
@@ -560,6 +561,8 @@ final class WaveformScopeModel: ObservableObject {
     /// else SDR), INDEPENDENTLY of the matrix/primaries. Written by `ScopeColorFeed` the same way as
     /// sourceMatrixCode; the graticule is the only consumer (the TRACE is unaffected). nil/2 → SDR.
     @Published var sourceTransferCode: Int?
+    /// A still's caveat for the header, or nil. Written only by `ScopeColorFeed`.
+    @Published var headerNote: String?
 
     // Column buckets (histogram width) — tracks the rendered slot width, clamped, so a wider
     // scope computes more horizontal detail instead of upscaling a fixed buffer.
@@ -815,7 +818,7 @@ struct WaveformScopeView: View {
                     ScopeSlotHeader(name: "WAVEFORM",
                                     suffix: valueScopeHeaderSuffix(lead: "luma \(ycbcrMatrixLabel(model.sourceMatrixCode))",
                                                                    active: activeScale, sdrScale: scopeScale,
-                                                                   forced: verticalScale != .auto),
+                                                                   forced: verticalScale != .auto, note: model.headerNote),
                                     selection: slotSelection)
                     ScopeValueAxisGear(line1On: $line1On, line1Position: $line1Position,
                                        line2On: $line2On, line2Position: $line2Position,

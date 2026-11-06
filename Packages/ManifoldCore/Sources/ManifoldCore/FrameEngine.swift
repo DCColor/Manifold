@@ -1,8 +1,9 @@
 @preconcurrency import AVFoundation
 import Combine
-// UTType, for the still-image refusal in `loadAsset` — the engine has to answer "can I play this"
+// UTType, for the kind question in `loadAsset` — the engine has to answer "can I play this"
 // for every entry point, so the type question is asked here rather than in a view.
 import UniformTypeIdentifiers
+import StillImageInfo
 // The ASRC stage at the live-audio seam — `LiveAudioSink` is its only caller.
 import LiveAudioResample
 import SyncCalibration
@@ -117,6 +118,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The kind changed, told after the new value is stored (a `@Published` sink would see the old one). The deck uses it
     /// to hold or release the output's picture.
     public var onMediaKindChanged: (() -> Void)?
+    /// The open still and what is said about it, or nil. Written with `mediaKind` at the commit, so a view that sees
+    /// `.still` finds its picture. The renderer never sees this: `StillImageSurface` hands it to macOS.
+    @Published public private(set) var stillPicture: CGImage?
+    @Published public private(set) var stillInfo: StillImageInfo?
+    /// The still's stored values for the scopes, or nil. A separate path from `stillPicture`: the window shows macOS's
+    /// picture and the scopes show the file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md, B0 result).
+    public var onStillScopeFrame: ((StillScopeFrame?) -> Void)?
     @Published public private(set) var metadata: VideoMetadata?
     @Published public private(set) var currentURL: URL?
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
@@ -711,6 +719,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // AVFoundation read would replace both with an inspection that has no video track. Refresh the
         // AVFoundation rows only. A file rewritten in place (remuxed, which repairs it) needs reopening.
         if containerSlackRoute { mergeContainerRouteMetadata(url: url); return }
+        if mediaKind == .still { await reinspectStill(url: url); return }
         let freshAsset = AVURLAsset(url: url)
         let newTc = MediaInspector.timecode(for: url)
         let newMeta = await MediaInspector.metadata(for: freshAsset, url: url)
@@ -1244,6 +1253,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         duration = 0
         tcInfo = nil
         hasMedia = false
+        stillPicture = nil
+        stillInfo = nil
+        onStillScopeFrame?(nil)
         mediaKind = .none
         currentURL = nil
         // …AND THE SHAPE IS A TRANSPORT READOUT TOO, for exactly the reason the block above gives.
@@ -1651,18 +1663,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             vettedKind = .still
         }
 
-        // ── A STILL IMAGE, REFUSED BY NAME, FOR NOW ───────────────────────────────────────────
+        // ── A STILL IMAGE ─────────────────────────────────────────────────────────────────────
         //
-        // Same refusal PATH as every other file this engine cannot play — `rejectLoad`, which raises the one banner —
-        // and its own sentence, because "its video track is unreadable" would be false of a healthy PNG. Stage B2
-        // replaces this block with the ImageIO vet and `loadStill` (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.1).
-        //
-        // Stills do not wait on the colour pipeline: the plan draws them in an `NSImageView`, as macOS shows them, and
-        // Manifold's renderer never touches one. The refusal stands only until B2 lands.
+        // ImageIO opens and decodes it here, in the vet, off the main actor, so a file that fails is refused with the
+        // current file left playing, through the same `rejectLoad` as every other refusal. Manifold's colour path is not
+        // involved: the picture goes to an `NSImageView`, as macOS shows it (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §2).
+        var vettedStill: StillImage?
         if vettedKind == .still {
-            NSLog("[PLAYBACK] refusing %@ — still image, not opened yet (stage B2)", url.lastPathComponent)
-            rejectLoad(notice: "Manifold plays video — still images aren’t supported.")
-            return
+            let result = await Task.detached(priority: .userInitiated) { StillImageReader.read(url: url) }.value
+            if loadStopped(since: entryStops, url, at: "the still image") { return }
+            switch result {
+            case .refused(let notice, let reason):
+                NSLog("[PLAYBACK] refusing %@ — %@. Not loading — the deck keeps what it had.", url.lastPathComponent, reason)
+                rejectLoad(notice: notice)
+                return
+            case .image(let still):
+                vettedStill = still
+            }
         }
 
         // Is this the libav path? Asked here because the answer decides whether phase 1 has
@@ -1703,7 +1720,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         var vettedTrack: AVAssetTrack?
         var containerRoute = false
         var containerRouteEntry: FourCharCode = 0
-        if !isMXF {
+        if !isMXF, vettedKind != .still {
             let asset = AVURLAsset(url: url)
             let videoTrack = try? await asset.loadTracks(withMediaType: .video).first
             if loadStopped(since: entryStops, url, at: "the video track") { return }
@@ -1754,6 +1771,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // ══════════ PHASE 2 — COMMIT. THE PREVIOUS SOURCE ENDS HERE. ══════════
 
+        stillPicture = vettedStill?.picture
+        stillInfo = vettedStill?.info
+        onStillScopeFrame?(vettedStill?.scopeFrame)
         mediaKind = vettedKind
         // THE OLD FILE'S TRANSPORT ENDS WITH IT. Every route below stops the clock, and only `play()` starts it again, so
         // a file replaced while playing with autoplay off kept `isPlaying` and `shuttleRate`: Pause on the button, a
@@ -1790,6 +1810,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // second half of the same lifecycle, and the bump this performs is what makes an in-flight
         // frame from the outgoing file fail its delivery check instead of landing on the new one.
         installScrubProducer(for: nil, useLibav: false)
+
+        if let still = vettedStill {
+            loadStill(still)
+            return
+        }
 
         // An audio-only file has no picture, so no HDR10 metadata to read and no colour edge to publish it on.
         if vettedKind == .audioOnly, let asset = vettedAsset {
@@ -1968,35 +1993,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// Phase 2 of an audio-only file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.1). Everything the video commit establishes
     /// for a picture is stated here as "none", so the previous file's colour, geometry and frame cannot outlive it.
     private func loadAudioOnly(asset: AVURLAsset, url: URL, autoplay: Bool, generation: Int) async {
-        // THE PREVIOUS VIDEO SOURCE ENDS HERE, because no `beginReading` video branch will retire it. Bumped first, so its
-        // pump sees it is no longer current and cannot land a frame after the wipe. The libav sources went at the commit.
-        _ = sessionToken.next()
-        synchronizer.rate = 0
-        currentSource?.stop()
-        currentSource = nil
-        videoSinkGate.roomAvailable()   // a pump parked on a full queue goes now, as in `stop()`
-        let oldReader = reader
-        reader = nil
-        videoPumpQueue.async {
-            self.audioPumpQueue.async { oldReader?.cancelReading() }
-        }
-        videoRenderer?.flush()
-        onClearPicture?()
-
+        retirePreviousPicture()
         self.asset = asset
-        self.videoTrack = nil
-        useLibav = false
-        libavFileFormatDescription = nil
-        loadedHDR10 = nil
-        onSourceColorTags?(nil, nil, nil, nil)
-        onSourceColorNote?(nil)
-        onSourceGeometry?(0, 0, .undeclared, .undeclared, .identity)
-        onSourceScan?(.notRead)
-        fileChroma = .undetermined
-        onSourceChroma?(.notStated, nil)
-        rangeOverride = .auto
-        sourceRange = .untagged
-        updateEffectiveRange()
         displaySize = Self.audioOnlyCardSize
 
         self.tcInfo = MediaInspector.timecode(for: url)
@@ -2022,6 +2020,77 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         installTimeObserverIfNeeded()
         print("FrameEngine: loaded audio-only — duration \(self.duration)s, audio tracks: \(self.audioTracks.count)")
         await beginReading(from: 0, resumePlaying: autoplay)
+    }
+
+    /// Everything a file with nothing for the renderer has to end and state as "none", so the previous file's colour,
+    /// geometry and frame cannot outlive it.
+    private func retirePreviousPicture() {
+        // THE PREVIOUS VIDEO SOURCE ENDS HERE, because no `beginReading` video branch will retire it. Bumped first, so its
+        // pump sees it is no longer current and cannot land a frame after the wipe. The libav sources went at the commit.
+        _ = sessionToken.next()
+        synchronizer.rate = 0
+        currentSource?.stop()
+        currentSource = nil
+        videoSinkGate.roomAvailable()   // a pump parked on a full queue goes now, as in `stop()`
+        let oldReader = reader
+        reader = nil
+        videoPumpQueue.async {
+            self.audioPumpQueue.async { oldReader?.cancelReading() }
+        }
+        videoRenderer?.flush()
+        onClearPicture?()
+
+        self.videoTrack = nil
+        useLibav = false
+        libavFileFormatDescription = nil
+        loadedHDR10 = nil
+        onSourceColorTags?(nil, nil, nil, nil)
+        onSourceColorNote?(nil)
+        onSourceGeometry?(0, 0, .undeclared, .undeclared, .identity)
+        onSourceScan?(.notRead)
+        fileChroma = .undetermined
+        onSourceChroma?(.notStated, nil)
+        rangeOverride = .auto
+        sourceRange = .untagged
+        updateEffectiveRange()
+    }
+
+    /// Phase 2 of a still (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.1). The commit has stored the picture; this ends what
+    /// the previous file was doing. Nothing here reaches the renderer but "none", and `metadata` stays nil, so nothing
+    /// describes the still to the output: the output's picture is `DeckRegistry.updateHeldPicture`'s.
+    private func loadStill(_ still: StillImage) {
+        retirePreviousPicture()
+        teardownAudioReading()
+        asset = nil
+        metadata = nil
+        tcInfo = nil
+        duration = 0
+        currentTime = 0
+        isPlaying = false
+        audioTracks = []
+        selectedAudioTrackIndex = 0
+        audioPresence = .absent
+        synchronizer.setRate(0, time: .zero)
+        displaySize = CGSize(width: still.picture.width, height: still.picture.height)
+        hasMedia = true
+        print("[STILL] \(still.info.fileName): \(still.info.format) \(still.info.dimensions) · \(still.info.hdr.typeRow)"
+              + (still.info.headroomRow.map { " · \($0)" } ?? ""))
+    }
+
+    /// The file changed on disk. A rewrite that no longer opens leaves what is on screen, as a refusal does.
+    private func reinspectStill(url: URL) async {
+        let result = await Task.detached(priority: .userInitiated) { StillImageReader.read(url: url) }.value
+        guard currentURL == url, mediaKind == .still else { return }
+        switch result {
+        case .image(let still):
+            stillPicture = still.picture
+            stillInfo = still.info
+            onStillScopeFrame?(still.scopeFrame)
+            displaySize = CGSize(width: still.picture.width, height: still.picture.height)
+        case .refused(let notice, let reason):
+            NSLog("[PLAYBACK] re-reading %@ failed — %@", url.lastPathComponent, reason)
+            playbackNotice = notice
+        }
     }
 
     /// The audio-only half of `beginReading`: the same audio steps, with no video reader, pump or frame grid. Seek, loop

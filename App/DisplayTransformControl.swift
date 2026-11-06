@@ -59,6 +59,9 @@ struct DisplayTransformControl: View {
         }
     }
 
+    /// Greyed, the tooltip says why, in the chain readout's words (a still: "Still image: shown as macOS shows it").
+    private var greyedHelp: String? { greyed ? chainModel.chain.soleLine : nil }
+
     /// The display-transform item itself: badge, pulldown and the chain popover.
     private var transformItem: some View {
         HStack(spacing: 5) {
@@ -92,11 +95,11 @@ struct DisplayTransformControl: View {
             .disabled(greyed)
             .opacity(greyed ? 0.35 : 1)
         }
-        .help(isBypass
+        .help(greyedHelp ?? (isBypass
               ? "Display transform: BYPASS — no color management. Diagnostic only."
               : (mode == .reference
                  ? "Display transform: Reference — BT.1886 for this display"
-                 : "Display transform: as macOS shows it — what your client will see"))
+                 : "Display transform: as macOS shows it — what your client will see")))
         .onAppear { chainModel.bind(deck: deck) }
         // Keeps the chain's Transform line honest when the mode is changed from the Color MENU
         // rather than from this pulldown. `chrome` is observed, so this fires for both routes.

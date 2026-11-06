@@ -116,7 +116,9 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
   (`docs/COLOR_MANAGEMENT_FINDINGS.md` §6.11, S6 D3, amended in L2). Nothing writes scope colour state
   directly: the scope models' `sourceMatrixCode`, `sourceTransferCode`, `sourcePrimariesCode` and
   `spaceReadout` are written only by `ScopeColorFeed`, from the renderer's picture codes (with no source,
-  `WindowDeck.hasSource` false, from its cleared source codes, the header reading "no source"; L3). A new
+  `WindowDeck.hasSource` false, from its cleared source codes, the header reading "no source"; L3; for a still, from
+  `MetalVideoRenderer.stillScopeColor`, the file's own tags, which are neither source nor picture codes because a still
+  never reaches the layer, `docs/STILLS_AND_AUDIO_ONLY_PLAN.md` §3.5). A new
   transport, a colorimetry override or a LUT reaches the scope headers by reaching the renderer.
   Per-transport scope writes are how the headers came to describe a previous source (2026-10-06).
 - Chroma is native end to end. Manifold supports 4:2:0, 4:2:2 and 4:4:4 natively: every source is

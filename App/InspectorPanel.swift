@@ -4,6 +4,7 @@ import FileScan   // FieldView — the Window View row (interlaced I4)
 import PictureGeometry   // the Orientation row (docs/BUGS.md, iPhone clips, 2026-10-29)
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
 import AudioFileInfo      // AudioCardText — the audio-only rows
+import StillImageInfo     // a still's rows
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
@@ -32,7 +33,9 @@ struct InspectorPanel: View {
                 .foregroundStyle(.white.opacity(0.6))
                 .padding(.bottom, 8)
 
-            if let m = metadata, engine.mediaKind == .audioOnly {
+            if let still = engine.stillInfo {
+                stillRows(still)
+            } else if let m = metadata, engine.mediaKind == .audioOnly {
                 audioOnlyRows(m)
             } else if let m = metadata {
                 SectionHeader("File Name")
@@ -226,6 +229,34 @@ struct InspectorPanel: View {
 
         audioSection(m)
         fileSection(m)
+    }
+
+    /// A still's rows (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §4.3). GPS, camera serial and owner tags are never read into them.
+    @ViewBuilder private func stillRows(_ still: StillImageInfo) -> some View {
+        SectionHeader("File Name")
+        Text(still.fileName)
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.92))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 8)
+
+        Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
+
+        ForEach(still.inspectorRows, id: \.label) { row in
+            MetadataRow(label: row.label, value: row.value)
+        }
+
+        if still.fileCreated != nil || still.fileModified != nil {
+            Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+            SectionHeader("File")
+            if still.fileCreated != nil {
+                MetadataRow(label: "Added to Disk", value: VideoMetadata.dateString(still.fileCreated))
+            }
+            if still.fileModified != nil {
+                MetadataRow(label: "Modified", value: VideoMetadata.dateString(still.fileModified))
+            }
+        }
     }
 
     @ViewBuilder private func audioSection(_ m: VideoMetadata) -> some View {

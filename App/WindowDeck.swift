@@ -490,14 +490,19 @@ final class WindowDeck: ObservableObject {
     }
     private var lastHasSource: Bool?
 
-    /// This window shows a source AND that source reaches the renderer: a video file or a live stream, and not an
-    /// audio-only file. It is what scopes, frame export and every colour control ask (docs/STILLS_AND_AUDIO_ONLY_PLAN.md
-    /// §3.2). `hasSource` is true for an audio-only file, because `currentURL` is set.
+    /// This window shows a source AND that source reaches the renderer: a video file or a live stream, and not a still
+    /// or an audio-only file. It is what frame export and every colour control ask, and the scopes unless the renderer
+    /// holds a still's frame (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.2). `hasSource` is true for both, because `currentURL`
+    /// is set.
     var hasPicture: Bool { hasSource && engine?.mediaKind.feedsRenderer != false }
 
-    /// The raster sizes and display modes can act: there is a shape to size to and a picture to transform. An
-    /// audio-only file publishes a fixed shape for the window sizer, so `displaySize` alone no longer says so.
+    /// The display modes can act: there is a picture to transform. A still and an audio-only file publish a shape for
+    /// the window sizer, so `displaySize` alone no longer says so.
     var colorControlsEnabled: Bool { engine?.displaySize != nil && engine?.mediaKind.feedsRenderer != false }
+
+    /// The raster sizes can act: there is a picture to size to. They are window geometry, so a still has them. An
+    /// audio-only file does not: a percentage of nothing is false (§3.3, §5.2).
+    var rasterControlsEnabled: Bool { engine?.displaySize != nil && engine?.mediaKind != .audioOnly }
 
     /// Coalesce a title re-derivation onto the next main-actor turn.
     ///
@@ -933,11 +938,10 @@ final class DeckRegistry {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
-        panel.message = "Choose a video or audio file"
-        // `.movie` and `.audio`. Measured conformance: .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d conform to `public.movie`, and
-        // .wav/.aif/.mp3/.m4a to `public.audio` and to neither `.movie` nor `.image`. `.image` joins with stage B2:
-        // until then a panel that offered stills would only lead to a refusal.
-        panel.allowedContentTypes = [.movie, .audio]
+        panel.message = "Choose a file"
+        // Measured conformance: .mov/.mp4/.mxf/.mkv/.avi/.m4v/.r3d conform to `public.movie`, and .wav/.aif/.mp3/.m4a to
+        // `public.audio` and to neither `.movie` nor `.image`.
+        panel.allowedContentTypes = [.movie, .image, .audio]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         openFromUserAction(url, preferring: deck)
     }
@@ -1124,9 +1128,14 @@ final class DeckRegistry {
         // …and the engine feeds this window's renderer, and only this one.
         engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }
         engine.onFlush = { [weak renderer] in renderer?.flush() }
-        engine.onMediaKindChanged = { [weak self] in self?.updateHeldPicture() }
+        // The gate too: a still has no playback position. The held picture changes now, the gate on the next turn.
+        engine.onMediaKindChanged = { [weak self] in
+            self?.updateHeldPicture()
+            self?.setNeedsArbitration()
+        }
         // A paused window's display link has stopped, and the one-shot wipe runs on its next tick.
         engine.onClearPicture = { [weak renderer] in renderer?.clearToBlack(); renderer?.wakeDisplayLink() }
+        engine.onStillScopeFrame = { [weak renderer] in renderer?.setStillScopeFrame($0) }
         // The renderer's queue paces this engine's file decode (0.9.1, docs/BUGS.md, the 120 fps freeze): a full queue parks
         // the pump, and each frame the queue gives up resumes it. Weak to the renderer for the same reason as above.
         let sinkGate = engine.videoSinkGate
@@ -1250,12 +1259,17 @@ final class DeckRegistry {
     ///      observes ownership ending — nothing auto-resumes).
     ///   5. Point the device hooks at the active deck, atomically.
     ///   6. Publish each deck's gate.
-    /// The output's picture follows the deck driving it: while that deck has an audio-only file the output holds black
-    /// (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.4), and a video or live source commit releases it, because either changes
-    /// `mediaKind` (a stream's takeover through `stop()`). Another window's file is not this output's business.
+    /// The output's picture follows the deck driving it: while that deck has a still or an audio-only file the output
+    /// holds black (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.4), and a video or live source commit releases it, because either
+    /// changes `mediaKind` (a stream's takeover through `stop()`). Another window's file is not this output's business.
     private func updateHeldPicture() {
-        let held = hostDeck?.engine?.mediaKind == .audioOnly
-        DeckLinkService.shared.setHeldBlack(reason: held ? "Audio-only files aren’t sent to SDI or HDMI yet. Output is black." : nil)
+        let reason: String?
+        switch hostDeck?.engine?.mediaKind {
+        case .audioOnly: reason = "Audio-only files aren’t sent to SDI or HDMI yet. Output is black."
+        case .still: reason = "Still images aren’t sent to SDI or HDMI. Output is black."
+        default: reason = nil
+        }
+        DeckLinkService.shared.setHeldBlack(reason: reason)
     }
 
     private func applyArbitration(_ trigger: String) {
@@ -1340,6 +1354,10 @@ final class DeckRegistry {
                 gate.positionReason =
                     "\(live.displayLabel) is a live stream — there is no playback position to move to. "
                     + "Disconnect to return to file playback."
+            }
+            if deck.engine?.mediaKind == .still {
+                gate.positionControlsEnabled = false
+                gate.positionReason = "A still image has no playback position."
             }
             if let standing, !isOwner {
                 gate.reason = standing

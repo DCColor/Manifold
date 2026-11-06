@@ -72,6 +72,8 @@ let package = Package(
         // Linked by the APP target directly (project.yml) and used by ManifoldCore: Broadcast Wave chunks and the words
         // for an audio-only file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.2).
         .library(name: "AudioFileInfo", targets: ["AudioFileInfo"]),
+        // ManifoldCore uses it (opening a still); a product because the Inspector reads its words too.
+        .library(name: "StillImageInfo", targets: ["StillImageInfo"]),
         // Linked by the APP target directly (project.yml): the Keychain activation record and the
         // one-way move of the licence email and machine id out of the preferences plist (privacy P1).
         .library(name: "LicenseRecord", targets: ["LicenseRecord"]),
@@ -638,6 +640,23 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // Opens a still: the vet, the route C decode, what the file's bytes state, and the Inspector's words. ImageIO and
+        // no engine state, so `swift test` reaches it (docs/STILLS_AND_AUDIO_ONLY_PLAN.md, B0 result).
+        .target(
+            name: "StillImageInfo",
+            path: "Sources/StillImageInfo",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "StillImageInfoTests",
+            dependencies: ["StillImageInfo"],
+            path: "Tests/StillImageInfoTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The licence's Keychain activation record and the migration that takes `license.email` and
         // `license.machineId` out of the preferences plist (docs/PRIVACY_AUDIT.md, stage P1). Foundation
         // only. The tests run the migration against a SCRATCH Keychain service and a SCRATCH defaults
@@ -682,7 +701,7 @@ let package = Package(
             dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
-                           "AudioFileInfo"],
+                           "AudioFileInfo", "StillImageInfo"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

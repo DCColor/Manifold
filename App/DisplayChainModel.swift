@@ -369,6 +369,7 @@ final class DisplayChainModel: ObservableObject {
             print("[CHAIN] Headroom: \(next.headroom)" + (screen.map { " on \"\($0.localizedName)\"" } ?? ""))
         }
         if deck.engine?.mediaKind == .audioOnly { next.soleLine = "Audio-only file" }
+        if deck.engine?.mediaKind == .still { next.soleLine = StillImageSurface.colorLine }
         if next != chain { chain = next }
     }
 

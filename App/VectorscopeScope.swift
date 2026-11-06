@@ -76,6 +76,8 @@ final class VectorscopeScopeModel: ObservableObject {
     /// They are INDEPENDENT (e.g. P3 source: primaries P3, matrix 709-class).
     @Published var sourceMatrixCode: Int?
     @Published var sourcePrimariesCode: Int?
+    /// A still's caveat for the header, or nil. Written only by `ScopeColorFeed`.
+    @Published var headerNote: String?
 
     // Square chroma-plane buffer. Tracks the rendered square side, clamped — a
     // bigger slot gives a crisper plot. (Light touch: the vectorscope is usually
@@ -458,7 +460,7 @@ struct VectorscopeScopeView: View {
                     // graticule reference. Was hardcoded "709"; now it reads the real matrix, so a
                     // 2020 source no longer mislabels as 709 while CIE/inspector say 2020.
                     ScopeSlotHeader(name: "VECTORSCOPE",
-                                    suffix: " · \(ycbcrMatrixLabel(model.sourceMatrixCode)) · gr \(graticuleLabel) · box \(boxAmplitude.headerTag)",
+                                    suffix: " · \(ycbcrMatrixLabel(model.sourceMatrixCode)) · gr \(graticuleLabel) · box \(boxAmplitude.headerTag)\(model.headerNote.map { " · \($0)" } ?? "")",
                                     selection: slotSelection)
                     vectorscopeOptions
                     Spacer(minLength: 4)

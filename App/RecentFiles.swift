@@ -63,7 +63,7 @@ final class RecentFiles: ObservableObject {
     ///
     /// Called from `ContentView`'s `currentURL` observer, which fires on the one assignment in
     /// `loadAsset`'s PHASE 2 — past the point of no return, where the file has already been vetted.
-    /// Phase 1 refuses stills, R3D and anything with neither a readable video track nor an audio track,
+    /// Phase 1 refuses unreadable images, R3D and anything with neither a readable video track nor an audio track,
     /// and it refuses them WITHOUT touching `currentURL`, precisely so a refused file cannot overwrite the
     /// one on screen. Recording here inherits that: a file the app declined to play never reaches
     /// this call. Noting at the open panel would have listed every refusal.

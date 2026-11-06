@@ -225,6 +225,10 @@ targets:
       # target so `swift test` reaches the chunk walk. Used by ManifoldCore, and by App/AudioOnlyCard.swift for the words.
       - package: ManifoldCore
         product: AudioFileInfo
+      # A still's vet, decode and Inspector words (docs/STILLS_AND_AUDIO_ONLY_PLAN.md, B0 result) — a leaf target so
+      # `swift test` can run it on real files. Used by ManifoldCore's load path, and by the Inspector for its rows.
+      - package: ManifoldCore
+        product: StillImageInfo
       # The licence's Keychain activation record and the move of the email and machine id out of the
       # preferences plist (stage P1) — a leaf target so `swift test` can run the migration against a
       # scratch Keychain service. Used by App/LicenseManager.swift only.
@@ -390,7 +394,6 @@ targets:
           # what plays is what AVFoundation exposes an audio track for, and FrameEngine's phase-1 vet decides.
           # The five types below it are the ones Settings ▸ Files offers (`DefaultHandlerStatus.fileHandlers`): named for
           # the reason MXF is, since a direct claim ranks above one inherited through `public.audio`.
-          # An Image entry joins with stage B2 (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.1).
           - CFBundleTypeName: Audio
             LSItemContentTypes:
               - public.audio
@@ -399,6 +402,13 @@ targets:
               - public.mp3
               - com.apple.m4a-audio
               - public.aac-audio
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+          # Stills, viewer and Alternate for the same reason. What opens is what ImageIO reads, which FrameEngine's phase-1
+          # vet asks at runtime, so this claim is `public.image` and not a list (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.1).
+          - CFBundleTypeName: Image
+            LSItemContentTypes:
+              - public.image
             CFBundleTypeRole: Viewer
             LSHandlerRank: Alternate
           # ⚠️ THE ONE `Owner`, AND THE COMMENT ABOVE DOES NOT ARGUE AGAINST IT. That rule is about other people's

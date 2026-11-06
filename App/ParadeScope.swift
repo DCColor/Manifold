@@ -30,6 +30,8 @@ final class ParadeScopeModel: ObservableObject {
     /// renderer's source codes; the graticule is the
     /// only consumer (the R|G|B TRACE is unaffected). Shared axis with the waveform. nil/2 → SDR.
     @Published var sourceTransferCode: Int?
+    /// A still's caveat for the header, or nil. Written only by `ScopeColorFeed`.
+    @Published var headerNote: String?
 
     // Each channel column is columnWidth px; the full image is 3 columns wide.
     // columnWidth tracks the per-channel slot width (slot/3), clamped.
@@ -247,7 +249,8 @@ struct ParadeScopeView: View {
                 HStack(spacing: 4) {
                     ScopeSlotHeader(name: "PARADE",
                                     suffix: valueScopeHeaderSuffix(lead: "RGB", active: activeScale,
-                                                                   sdrScale: scopeScale, forced: verticalScale != .auto),
+                                                                   sdrScale: scopeScale, forced: verticalScale != .auto,
+                                                                   note: model.headerNote),
                                     selection: slotSelection)
                     ScopeValueAxisGear(line1On: $line1On, line1Position: $line1Position,
                                        line2On: $line2On, line2Position: $line2Position,
