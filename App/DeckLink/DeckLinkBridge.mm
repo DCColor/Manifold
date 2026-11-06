@@ -137,6 +137,7 @@
     double _trimSeconds;
     DeckLinkAudioSourceTimeBlock _sourceTime;
     DeckLinkAudioSilentBlock _isSilent;
+    DeckLinkAudioSilentBlock _isDestinationSilent;
     DeckLinkAudioReadBlock _read;
 }
 - (instancetype)initWithSampleRate:(double)sampleRate
@@ -145,6 +146,7 @@
                        trimSeconds:(double)trimSeconds
                         sourceTime:(DeckLinkAudioSourceTimeBlock)sourceTime
                           isSilent:(DeckLinkAudioSilentBlock)isSilent
+               isDestinationSilent:(DeckLinkAudioSilentBlock)isDestinationSilent
                               read:(DeckLinkAudioReadBlock)read {
     if ((self = [super init])) {
         _sampleRate = sampleRate;
@@ -153,6 +155,7 @@
         _trimSeconds = trimSeconds;
         _sourceTime = [sourceTime copy];
         _isSilent = [isSilent copy];
+        _isDestinationSilent = [isDestinationSilent copy];
         _read = [read copy];
     }
     return self;
@@ -163,6 +166,7 @@
 - (double)trimSeconds { return _trimSeconds; }
 - (DeckLinkAudioSourceTimeBlock)sourceTime { return _sourceTime; }
 - (DeckLinkAudioSilentBlock)isSilent { return _isSilent; }
+- (DeckLinkAudioSilentBlock)isDestinationSilent { return _isDestinationSilent; }
 - (DeckLinkAudioReadBlock)read { return _read; }
 @end
 
@@ -174,7 +178,8 @@ struct AudioSource {
     uint32_t dlChannels = 0;          // SDK-legal padded count the card is enabled with (2/8/16/32/64)
     double   trimSeconds = 0.0;       // residual-latency knob (see DeckLinkAudioConfig.trimSeconds)
     std::function<double(void)> sourceTime;                                  // pts of the frame in staging
-    std::function<bool(void)> isSilent;                                      // mute / pause / shuttle gate
+    std::function<bool(void)> isSilent;                                      // mute / pause / shuttle gate, or destination
+    std::function<bool(void)> isDestinationSilent;                           // the log's label: destination is Computer
     std::function<int32_t(double, int32_t, int32_t *)> read;                 // ring read (D4b-1)
 };
 
@@ -542,7 +547,9 @@ public:
         if (silent) {
             m_cursorAnchored = false;   // re-anchor to the video on the next unmuted callback
             m_errEma = 0.0;
-            logAudioBranch("SILENCE · transport gate (isCardAudioSilent: muted or shuttleRate != 1)",
+            const bool toComputer = m_audio.isDestinationSilent && m_audio.isDestinationSilent();
+            logAudioBranch(toComputer ? "SILENCE · audio destination is Computer"
+                                      : "SILENCE · transport gate (isCardAudioSilent: muted or shuttleRate != 1)",
                            silent, -1, want);
             return scheduleSilence(want) ? S_OK : E_FAIL;
         }
@@ -1663,9 +1670,11 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         src.trimSeconds = audioConfig.trimSeconds;
         DeckLinkAudioSourceTimeBlock timeBlock = [audioConfig.sourceTime copy];
         DeckLinkAudioSilentBlock silentBlock = [audioConfig.isSilent copy];
+        DeckLinkAudioSilentBlock destinationBlock = [audioConfig.isDestinationSilent copy];
         DeckLinkAudioReadBlock readBlock = [audioConfig.read copy];
         src.sourceTime = [timeBlock]() -> double { return timeBlock(); };
         src.isSilent   = [silentBlock]() -> bool { return silentBlock() ? true : false; };
+        src.isDestinationSilent = [destinationBlock]() -> bool { return destinationBlock() ? true : false; };
         src.read       = [readBlock](double t, int32_t n, int32_t *dst) -> int32_t { return readBlock(t, n, dst); };
         step = player->enableAudio(src);
         if (!step.ok()) {
@@ -1802,7 +1811,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
             const unsigned long long pcm     = (unsigned long long)_player->audioPcmFramesScheduled();
             const unsigned long long silence = (unsigned long long)_player->audioSilenceFramesScheduled();
             fprintf(stdout, "DeckLinkAudio: stopped — scheduled=%lldf TOTAL = real=%lluf (PCM read from "
-                            "the ring) + silence=%lluf (transport gate / no anchor / underrun / tail pad) "
+                            "the ring) + silence=%lluf (transport gate / destination / no anchor / underrun / tail pad) "
                             "· underruns=%llu underrunEvents=%llu shortReads=%llu shortSchedules=%llu resyncs=%llu\n",
                     (long long)_player->audioFramesScheduled(), pcm, silence,
                     (unsigned long long)_player->audioUnderrunCount(),

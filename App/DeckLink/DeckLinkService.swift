@@ -1183,6 +1183,7 @@ final class DeckLinkService: ObservableObject {
                 if !self.sdiIsAudioDestination() { return true }
                 return self.isCardAudioSilentProvider?() ?? true
             },
+            isDestinationSilent: { [weak self] in self?.sdiIsAudioDestination() == false },
             read: { startTime, frameCount, dst in
                 Int32(tap.read(framesStartingAt: startTime, frameCount: Int(frameCount), into: dst))
             })

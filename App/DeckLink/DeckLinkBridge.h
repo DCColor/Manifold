@@ -126,6 +126,9 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 @property (nonatomic, readonly) double trimSeconds;
 @property (nonatomic, copy, readonly) DeckLinkAudioSourceTimeBlock sourceTime;
 @property (nonatomic, copy, readonly) DeckLinkAudioSilentBlock isSilent;
+/// True when the silence comes from the audio destination being Computer, not from the transport. Asked only for
+/// the log, so a run with audio routed to the Mac does not read as a transport gate that stuck.
+@property (nonatomic, copy, readonly) DeckLinkAudioSilentBlock isDestinationSilent;
 @property (nonatomic, copy, readonly) DeckLinkAudioReadBlock read;
 
 - (instancetype)initWithSampleRate:(double)sampleRate
@@ -134,6 +137,7 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
                       trimSeconds:(double)trimSeconds
                         sourceTime:(DeckLinkAudioSourceTimeBlock)sourceTime
                           isSilent:(DeckLinkAudioSilentBlock)isSilent
+               isDestinationSilent:(DeckLinkAudioSilentBlock)isDestinationSilent
                               read:(DeckLinkAudioReadBlock)read;
 @end
 
