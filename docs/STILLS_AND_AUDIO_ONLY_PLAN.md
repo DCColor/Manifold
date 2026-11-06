@@ -76,6 +76,14 @@ scan cover it, on synthesized boxes). An HLG still, an Apple gain-map HEIC, a 10
 **The card's silence log** now says `SILENCE · audio destination is Computer` when that is the reason (`isDestinationSilent`, asked for the label
 only), measured playing and paused, and still `transport gate` when paused on SDI.
 
+## Post-release checks, 0.9.2 build 24 (2026-11-05)
+
+Robbie, attended, on the signed Developer ID build installed in `/Applications`.
+
+- **Default app: PASSED.** Settings ▸ Files ▸ WAV, "Use Manifold" accepted, and double-clicking a WAV opened it in Manifold 0.9.2. While a local
+  build and `/Applications` both exist, Launch Services opened the `/Applications` copy (expected; same bundle ID).
+- **Update dialog and guide: PASSED.** The update dialog showed 0.9.2 build 24 with the chosen first six notes. Help ▸ Sync and Color Guide shows 0.9.2.
+
 ## B0 result (2026-11-05)
 
 Standalone spike on macOS 26.7.1, LG in HDR mode (EDR 4.48, potential 8.97), each image beside Preview at the same size. Fixtures in

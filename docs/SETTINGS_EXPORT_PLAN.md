@@ -515,7 +515,14 @@ The Air, signed build (A6):
 Result, step 11, 2026-11-05 (Robbie, attended): passed. Streams exported with a password on one Mac, imported on the other, and connected
 to a real stream with no URL, passphrase or Keychain prompt. This also gives the real connection the sandbox pass couldn't (step 6).
 
-**Step 12 is pending on the 0.9.2 release build:** it runs after `release-mac.sh`, and is not a code item. Step 13 has no result recorded.
+Result, step 12, 2026-11-05 (Robbie, attended; 0.9.2 build 24, signed Developer ID build installed in `/Applications`): import PASSED. Importing an
+encrypted streams file asked only for the file's password, with no Keychain prompt.
+
+**Observation, same build:** on the Mac Studio, the development Mac, Export asked for Keychain access once per saved stream: 7 prompts for 7
+streams. Likely cause, not verified: those items were last written by unsigned local Profile builds, so their access lists don't include the
+Developer ID signature. **Open check:** an export on a Mac that has only run signed builds (the Air) should not prompt.
+
+Step 13 has no result recorded.
 
 **A5 result, 2026-11-04** (Profile, `.build-cc`, one windowed launch, sandbox `a5`, fixtures only, no keystrokes; real double-clicks and
 drags from a Finder window by synthesized pointer events):
@@ -554,6 +561,6 @@ Effort is in working sessions, and is a guess, not a measurement.
 | A3 Encrypted file | Header, KDF, seal and open, password sheets, tests | 1 | **Built, sandbox pass passed** |
 | A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | **Built, sandbox pass passed; connected to a real stream in the Studio-to-Air round trip, 2026-11-05** |
 | A5 Identity | UTI, double-click, drop, PRIVACY_AUDIT | 0.5 | **Built, sandbox pass passed. Cold-launch double-click passed by Robbie, 2026-11-04. Pending: a live stream under a preview** |
-| A6 Attended | Sandbox pass, Air pass | 0.5 | **Sandbox pass passed; iteration count frozen, no Air measurement needed (§2.5). Studio-to-Air round trip passed, 2026-11-05 (step 11). Pending: the signed-build check on the 0.9.2 release build (step 12), and no result recorded for step 13** |
+| A6 Attended | Sandbox pass, Air pass | 0.5 | **Sandbox pass passed; iteration count frozen, no Air measurement needed (§2.5). Studio-to-Air round trip passed, 2026-11-05 (step 11). Signed-build import passed on 0.9.2 build 24 (step 12). Open: export with no prompt on a Mac that has only run signed builds; no result recorded for step 13** |
 
 Sources for the iteration figure: [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
