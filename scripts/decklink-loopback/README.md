@@ -14,7 +14,12 @@ bundle. None of them activates a profile. **One configuration write exists:** `c
 | `cfghold.cpp` | Holds `bmdDeckLinkConfigVideoOutputIdleOperation` at black or last frame for N seconds, so it stays in force across other processes' output stops and starts. Reads and logs the prior value, never writes preferences, restores and releases on exit or signal. While a capture runs, pass-through (`pcln`) feeds the card's own HDMI input back out during a stop, so the idle setting is not what the input sees then |
 | `fieldtool.cpp` | Interlaced I2. `marks`: the picture number each field carries in the I2 marker band (`scripts/interlaced/generate-i2.sh`), per frame of a raw v210 file. `cmp`: two v210 frames field by field (top and bottom against both), per channel. No SDK calls |
 | `v210cmp.cpp` | Byte compare of two v210 frames, per channel: identical count, max \|Δ\|, Δ histogram, received low bits, and how many components each 10 → 8-bit rule explains |
+| `cardclock.sh`, `cardclock-plan*.sh`, `cardclock-summary.py`, `cardclock-fixtures.sh` | Card-clock runs (`docs/CARD_CLOCK_FINDINGS.md`): every clock against the host, per output session. Needs the `-DMANIFOLD_CARDCLOCK` build |
+| `devclock.swift` | A Core Audio device's sample clock against the host, from an IOProc that writes nothing. `swiftc -O devclock.swift -o ../../build/decklink-loopback/devclock` |
 | `ancout.cpp` | Positive control: black 1080p25 frames carrying two VANC test packets (0x51 / 0x01 and 0x61 / 0x01). **On the 8K Pro loop its packets never arrived, while the driver's own ST 2108-1 packets did**, so it is not a working control (§6.11) |
+
+**`capture` is not a passive observer.** Opening device 0's input on the loop moves its output clock, up to about ±125 ppm, until it closes
+(`docs/CARD_CLOCK_FINDINGS.md` §5). Its frame identity is right, but measure rates with the input closed.
 
 What `capture` records for each received frame:
 - the detected mode and format flags;

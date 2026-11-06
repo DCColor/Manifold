@@ -546,6 +546,9 @@ does nothing. That was a driver fault, not an app fault. **Not run:** an SDI own
 
 ### 7.9 2026-11-02, unattended: the wire, the 60 Hz-main baseline, and the two window fixes
 
+**Correction (2026-11-06, `CARD_CLOCK_FINDINGS.md`).** The per-session card rates in this section were caused by `capture`: opening the card's input on the loop moves the
+card's output clock, up to about ±125 ppm. With the input closed, the card holds −11.67 ppm. The wire counts below are correct as counted; the rates are not what the card does in use.
+
 Setup by Robbie: device 0's SDI output looped into its own SDI input (the Omniscope feed unplugged); the ASUS (59.936 Hz) is the MAIN
 display, the LG (120 Hz) secondary. A first attempt was stopped by the guard (the installed app was running); Robbie quit it and
 the runs below were made after that. Every launch: `manifold-proc.sh guard` → launch by absolute path, held by PID → quit by PID →

@@ -18,6 +18,10 @@ held back until after release, and the numbered defect entries follow.
 **Decided (Robbie, 2026-10-07; corrected 2026-10-08).** Nothing moves to 1.1. In this order:
 
 1. **The technical work.**
+   - **TOP PRIORITY (decided, Robbie, 2026-11-05): the one-frame SDI slips during file playback move from 1.1 into 1.0**
+     (*SDI from a file slips one frame whenever the card's clock and the file clock drift a frame apart*, below). A reference
+     player must not repeat or skip frames, and "the clocks drift" is not an acceptable explanation. Step 1, measure only:
+     `CARD_CLOCK_FINDINGS.md`.
    - The SRT audio break-up fix, with the buffer review (*SRT audio breaks up when the sender packs
      ≥ ~170 ms of AAC into each PES*, below; `COLOR_MANAGEMENT_FINDINGS.md` §6.10, Stage 0b).
      **Buffer policy decided 2026-10-08** (§6.10, *Buffer policy — the review and its decisions*):
@@ -1165,7 +1169,13 @@ and back in — see *What "done" means* below.
 - **What that leaves.** The list is still one key. If it is erased, a user with no exported file has no recovery and the Keychain items
   are still stranded, and an exported file holds only the streams saved when it was made.
 
-**Pending, not a code item:** the signed-build no-prompt check runs on the 0.9.2 release build, after `release-mac.sh` (§8, step 12).
+**Signed build, 0.9.2 build 24 (Robbie, 2026-11-05, Developer ID build installed in `/Applications`; §8, step 12):**
+
+- **Import PASSED.** Importing an encrypted streams file asked only for the file's password, with no Keychain prompt.
+- **Observation.** On the Mac Studio, the development Mac, Export asked for Keychain access once per saved stream: 7 prompts for 7 streams.
+  Likely cause, not verified: those items were last written by unsigned local Profile builds, so their access lists don't include the
+  Developer ID signature.
+- **Open check.** An export on a Mac that has only run signed builds (the Air) should not prompt.
 
 The sections below are as written on 2026-09-21. What they say about the key and the Keychain still holds; their "no export" and
 "no import" lines do not.
@@ -1519,6 +1529,16 @@ to send Export Diagnostics for a sync problem.
   exactly that, so it changes if the redactor changes.
 
 ---
+
+## ☐ PRE-SHIP: remove the card-clock measurement hooks
+
+Added 2026-11-05 for `CARD_CLOCK_FINDINGS.md`. Measurement only; none changes behaviour unless its variable is set.
+
+- `[CARDCLOCK]` and `[CARDCLOCK-REF]`, `App/DeckLink/DeckLinkBridge.mm` (`#if DEBUG`, `MANIFOLD_CARDCLOCK_LOG=1`): the helpers after the includes,
+  the block at the top of `ScheduledFrameCompleted`, and the `cardClockAdopt` and `cardClockLogReference` calls in the file output start.
+- `MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID`, `FrameEngine.init`. Behind `#if MANIFOLD_CARDCLOCK`, not DEBUG: DEBUG never reaches ManifoldCore in
+  Profile, and `MANIFOLD_TELEMETRY` is defined in Release too. The condition exists only on the measurement build's `xcodebuild` command
+  line (`OTHER_SWIFT_FLAGS`), so a normal Profile or Release build compiles it out.
 
 ## ☐ PRE-SHIP: review the `[WINDOWSIZER-DEINIT]` probe
 
@@ -3743,6 +3763,16 @@ decided):** a second drawable in flight on displays above 60 Hz (the pool of thr
 recent frame at the vsync rather than per frame. Window only; SDI must stay as measured.
 
 ## ☐ RECORDED 2026-11-02 — PRE-EXISTING, ALL BUILDS — SDI from a file slips one frame whenever the card's clock and the file clock drift a frame apart
+
+**Moved into 1.0 as the top priority (decided, Robbie, 2026-11-05).** A reference player must not repeat or skip frames, and "the
+clocks drift" is not an acceptable explanation. This replaces the "1.1" and "Not a 0.9.1 item" wording below, which is kept as
+written on 2026-11-02. Step 1, measure only, no fix: `CARD_CLOCK_FINDINGS.md`.
+
+**Measured 2026-11-06 (`CARD_CLOCK_FINDINGS.md`), and this corrects the text below.** The slips are real: the card, left alone, runs at a steady −11.67 ppm against the
+host; a file with sound follows the Mac's audio device (about +5.9 ppm here), even with destination SDI and that device muted. That is one skip every 948 s at 59.94
+(measured 947 s). **The −64 to +121 ppm spread and the 164 s spacing below were caused by the measurement:** `capture` opening the card's input on the loop moves the card's
+output clock, up to about ±125 ppm, and it returns to −11.7 when `capture` closes. Reference is not the cause (never locked), and the card's rate does not change with the
+session. The hypothesis below held: the file clock does follow the audio device. Open: how `capture` does this, and one launch in 32 whose file clock sat on the host.
 
 On the loop, `DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9: in 17 file runs on HEAD and on the window-fix build, every wire repeat or skip
 that remained was a lone one-frame slip with no pacer deadline missed. Each run's count matches the drift between the file clock
@@ -15836,10 +15866,17 @@ else; this entry exists so the next reader does not have to ask.
 - **Color control:** the greyed control named the renderer's default colorimetry for a file with no picture. It now reads "Audio".
 - **Verified:** by AX on the fixtures. **Not yet through a real session.**
 
-## Settings ▸ Files audio rows: the accept path has not been run (2026-11-04)
+## ☐ Settings ▸ Files audio rows: the accept path has run for WAV only (2026-11-04, narrowed 2026-11-05)
+
+**Status:** OPEN.
 
 The five audio rows extend `DefaultHandlerStatus.fileHandlers`. Each was pressed and answered Keep in the macOS consent dialog: each
 dialog names the right extensions (.wav/.wave, .aiff/.aif, .mp3/.mpga, .m4a, .aac/.adts), each row then reads "Kept …", and the handlers
-and the Launch Services plist stayed byte-identical. **Not run:** answering Use “Manifold”, which is the user's to answer. `.bwf` resolves
-to the WAV type by `UTType(filenameExtension:)`, but the dialog does not list it, so whether a claim moves `.bwf`-named files is UNKNOWN.
+and the Launch Services plist stayed byte-identical.
+
+**WAV: passed, 2026-11-05.** On the signed 0.9.2 build 24, Use “Manifold” was accepted and double-clicking a WAV opened it in Manifold.
+
+**Still not run:** answering Use “Manifold” for AIFF, MP3, M4A and AAC, which is the user's to answer. `.bwf` resolves to the WAV type by
+`UTType(filenameExtension:)`, but the dialog does not list it, so whether `.bwf`-named files follow the WAV claim is UNKNOWN.
+
 Expected but not measured: undoing a claim leaves an explicit Launch Services entry where the system default had none.
