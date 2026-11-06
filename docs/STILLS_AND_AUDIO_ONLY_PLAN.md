@@ -8,7 +8,7 @@ means run here as small standalone probes in the session scratchpad, on this Mac
 ## Build status (2026-11-04)
 
 **Built and run:** B0, B1, B2, B3 and B4 (2026-11-05 for B0, B2 and B3's still half). **Still to do for 0.9.2:** the attended pass: the
-§6 tables by eye and on the SDI monitor, the user guide, and the privacy line for EXIF (§4.3).
+§6 tables by eye and on the SDI monitor. The privacy line for EXIF (§4.3) is in `docs/PRIVACY_AUDIT.md` §3.
 
 **What changed from the plan while building:**
 
@@ -142,7 +142,7 @@ brighter than Preview. **B2 uses route C.**
 
 - **Version:** 0.9.2 takes B0–B4. B5 moves to 0.9.3 with its setting, its clock and its 48 kHz conversion.
 - **No Mac runs macOS 15.** Every finding here is as seen on macOS 26. The deployment target stays 15.0, and API availability comes
-  from the SDK headers, so behavior on 15 itself is unverified, and stated as such in the user guide.
+  from the SDK headers, so behavior on 15 itself is unverified.
 - **D3:** convert on the reader, in 0.9.3. **D4:** video files at 44.1 kHz keep today's refusal. **D5:** the tray does not open
   itself. **D6:** black on output for a still. **D7:** DPX out for v1. **D8:** sample rate is added to the SDI card, so it is the
   same card plus the running time. **D9:** all ImageIO formats. **D10:** Edit in Flip hidden for stills and audio-only.
@@ -312,7 +312,7 @@ WebP, GIF, BMP, TGA, PSD, OpenEXR, Radiance HDR, SGI, ICNS, ICO, DDS, PBM family
 CR3, NEF, ARW, RAF, RW2, ORF and others).
 
 **The list is as seen on macOS 26. No Mac here runs 15.** The design does not depend on it, since §3.1 asks at runtime, so an
-older system simply opens fewer formats. The user guide says formats are whatever the Mac's macOS can open.
+older system simply opens fewer formats.
 
 v1 opens whatever ImageIO reads. First frame only for GIF, multi-page TIFF and HEIC sequences. EXR is shown as macOS shows
 it, which is not a grading view, and the readout line already says so.
@@ -502,7 +502,7 @@ Effort is in working sessions, and is a guess, not a measurement.
 | B2 Stills | 0.9.2 | Display, phase 1 and commit, readout, Inspector, transport line | 1.5 |
 | B3 Held picture | 0.9.2 | `heldPicture`, black on output for stills and audio-only, menu rows | 0.5 |
 | B4 Audio in the window | 0.9.2 | Engine branch, card, gates, BWF | 1.5 |
-| Attended pass | 0.9.2 | Stills and audio tables above, user guide, privacy line | 0.5 |
+| Attended pass | 0.9.2 | Stills and audio tables above, privacy line | 0.5 |
 | B5 Audio on SDI | **0.9.3** | Card to v210, clock, setting, 48 kHz, attended SDI table | 2 |
 
 About 5.5 sessions for 0.9.2. B5 carries the most risk, because the clock change is by reading only.

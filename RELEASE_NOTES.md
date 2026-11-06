@@ -7,15 +7,23 @@ changelog page. Format notes are at the bottom.
 
 ## 0.9.2
 
-- Manifold now opens still images, shown as macOS shows them, HDR included, for every format your Mac can read. Scopes read the file's own values. Color controls don't apply to a still, and SDI and HDMI send black while one is open.
-- Manifold now opens audio-only files: WAV, AIFF, Broadcast WAV, MP3, M4A and audio-only movies. Play, seek, loop and meter them. The Inspector shows a BWF file's timecode.
+The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the
+rest behind "Show more".
+
+- Export Settings and Import Settings, in Settings ▸ General, move your keyboard shortcuts and saved streams to another Mac. Streams are exported only in an encrypted file, with a password of at least 12 characters. The password can't be recovered.
+- Importing streams only adds: a stream with the same name and URL is skipped, and the same name with a different URL or passphrase is added as "(copy)". Undo Import on the summary takes an import back. The automatic backup and Restore from Backup cover shortcuts only, so keep your exported file.
+- Manifold now opens still images, shown as macOS shows them: every SDR format your Mac can read, plus HDR AVIF and Ultra HDR (gain-map) JPEG. Color controls don't apply to a still. DPX stills aren't supported.
+- Manifold now opens audio-only files: WAV, AIFF, Broadcast WAV, MP3, M4A, AAC and audio-only movies. Play, seek, loop and meter them.
+- While a still or an audio-only file is open, SDI and HDMI keep their mode and send black with silent audio.
+- Audio-only files play on the Mac even when the audio destination is SDI. Sending them to SDI comes in 0.9.3.
+- Scopes on a still read the file's stored values. A gain-map file is scoped from its SDR base image, and the scope header says so.
+- Audio files show their channel layout by name, such as 5.1 or 7.1, when macOS can read one from the file. This applies to the Inspector for video files too.
+- The Inspector shows a Broadcast WAV file's timecode or time reference, and its origination date.
 - Settings ▸ Files can now make Manifold the default app for WAV, AIFF, MP3, M4A and AAC, one type at a time. Nothing changes until you choose.
-- Settings ▸ DeckLink Output ▸ Audio at launch chooses where sound goes when Manifold starts. The toolbar picker now changes it for the session only, and works with output off.
-- While an audio-only file is open, SDI and HDMI keep their mode and send black, and its sound plays on the Mac. Sending audio-only files to SDI comes in 0.9.3.
-- Audio files show their layout by name, such as 5.1 or 7.1, when the file states one. This applies to the Inspector for video files too.
-- Opening a file over one that is playing no longer leaves the transport stuck, with Pause showing and nothing moving.
-- Double-click a Manifold settings file, or drop one on a player window, to preview its import. Nothing changes until you click Import.
-- Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too.
+- Settings ▸ DeckLink Output ▸ Audio at launch chooses where sound goes when Manifold starts. The toolbar picker now changes it for the session only, and can be set with output off.
+- Double-click a .manifoldsettings file, or drop one on a player window, to preview its import in Manifold. Nothing changes until you click Import.
+- Deleting a saved stream now asks first, because it removes the stream's saved URL and passphrase from this Mac for good. Undo Import asks too when it would remove streams.
+- With autoplay off, opening a file over one that is playing no longer leaves the transport stuck, with Pause showing and nothing moving.
 - PQ in As macOS Shows It stays correct when you move a window to another display. No mode switch needed.
 - System Services shortcuts, such as ⇧⌘L for Search With Google, keep their keys inside Manifold.
 - The transform readout says "white and black" instead of "Lb/Lw".

@@ -1,8 +1,8 @@
 # Export/Import Settings (shortcuts + streams) — PLAN
 
 Status: revised 2026-11-03 after Robbie's decisions. **A1 and A2 (shortcuts end to end) are built and passed their attended
-check. A3 and A4 (the encrypted file and streams) are built and passed the attended sandbox pass, on fake URLs. The stream
-design (§2.4–§4.2) is settled, R1–R6 below.** First version at `884cce3`, and line
+check. A3 and A4 (the encrypted file and streams) are built and passed the attended sandbox pass, on fake URLs, and the Studio-to-Air
+round trip with a real stream, 2026-11-05 (§8). The stream design (§2.4–§4.2) is settled, R1–R6 below.** First version at `884cce3`, and line
 references are to that commit unless they name new code. **By reading** means established from the code and not run.
 **Measured** means run on this Mac (M4 Max, macOS 26.7.1). **UNKNOWN** means not established. Companion:
 `docs/STILLS_AND_AUDIO_ONLY_PLAN.md`.
@@ -414,7 +414,7 @@ Rules for streams:
 
 - **Secrets leave the Keychain only inside an encrypted file,** and only when the user exports with a password they chose.
 - **The file is only as strong as its password.** It can be attacked offline, without limit, wherever it ends up. That is the reason
-  for the minimum length, the iteration count and the warning. The user guide says to treat the file like the keys it holds.
+  for the minimum length, the iteration count and the warning.
 - **Readable without the password:** app version, export date, section names, counts, KDF parameters, salt. No name, host or URL.
 - **Manifold never sends the file anywhere,** and never stores the password.
 - **The automatic backup never holds a secret,** so nothing with stream data is written without the user choosing a place for it.
@@ -498,8 +498,9 @@ payload and a changed header gave the one message; cut JSON was refused before t
 Into an empty sandbox: 4 added, a repeat said Already here (4), all four dial URLs matched by hash, and no stream prompt appeared. The
 real `streamBookmarks`, the 8 real stream items and the licence key names were unchanged by hash and name.
 
-**Limit:** with fake URLs, step 6's real connection against local OBS SRT and MediaMTX has not run. A connect to a fake host read its item
-with no prompt and failed at DNS, as expected. Still to run, with Robbie's say on which URLs.
+**Limit:** with fake URLs, step 6's real connection did not run in this pass. A connect to a fake host read its item with no prompt and
+failed at DNS, as expected. The Studio-to-Air round trip connected to a real stream, 2026-11-05 (below). No run against local OBS SRT and
+MediaMTX by name is recorded.
 
 Found and fixed in the pass: the password fields' hints read as labels and Export gave no reason for being greyed. Both fields now have a
 title above them and a line says what Export is waiting for. The Export and Import caption now names streams.
@@ -510,6 +511,11 @@ The Air, signed build (A6):
 11. Export on the Studio, import on the Air, and the reverse. Streams connect with nothing asked.
 12. Confirm a signed build reads its own items without a prompt.
 13. `.code` nudge binding and the Fn warning on the Air's keyboard. Licence unaffected on both, by presence only.
+
+Result, step 11, 2026-11-05 (Robbie, attended): passed. Streams exported with a password on one Mac, imported on the other, and connected
+to a real stream with no URL, passphrase or Keychain prompt. This also gives the real connection the sandbox pass couldn't (step 6).
+
+**Step 12 is pending on the 0.9.2 release build:** it runs after `release-mac.sh`, and is not a code item. Step 13 has no result recorded.
 
 **A5 result, 2026-11-04** (Profile, `.build-cc`, one windowed launch, sandbox `a5`, fixtures only, no keystrokes; real double-clicks and
 drags from a Finder window by synthesized pointer events):
@@ -546,8 +552,8 @@ Effort is in working sessions, and is a guess, not a measurement.
 | A1 Shortcuts core | `SettingsTransfer`, file format, set-level judge, backups, tests | 1 | **Done** |
 | A2 Shortcuts UI | Settings section, export sheet, import preview, Undo, Restore | 1 | **Done, attended pass passed** |
 | A3 Encrypted file | Header, KDF, seal and open, password sheets, tests | 1 | **Built, sandbox pass passed** |
-| A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | **Built, sandbox pass passed; a real connection is still to run (step 6)** |
-| A5 Identity | UTI, double-click, drop, PRIVACY_AUDIT, user guide | 0.5 | **Built, sandbox pass passed. Cold-launch double-click passed by Robbie, 2026-11-04. Pending: a live stream under a preview, and the user guide** |
-| A6 Attended | Sandbox pass, Air pass | 0.5 | **Sandbox pass passed; iteration count frozen, no Air measurement needed (§2.5). Pending: a real connection (step 6) and the Air pass (steps 11-13)** |
+| A4 Streams | Export entry and Keychain pass, left-out sheet, add-only plan, preview, apply, Undo | 1.5 | **Built, sandbox pass passed; connected to a real stream in the Studio-to-Air round trip, 2026-11-05** |
+| A5 Identity | UTI, double-click, drop, PRIVACY_AUDIT | 0.5 | **Built, sandbox pass passed. Cold-launch double-click passed by Robbie, 2026-11-04. Pending: a live stream under a preview** |
+| A6 Attended | Sandbox pass, Air pass | 0.5 | **Sandbox pass passed; iteration count frozen, no Air measurement needed (§2.5). Studio-to-Air round trip passed, 2026-11-05 (step 11). Pending: the signed-build check on the 0.9.2 release build (step 12), and no result recorded for step 13** |
 
 Sources for the iteration figure: [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).

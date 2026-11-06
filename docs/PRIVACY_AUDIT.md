@@ -9,7 +9,7 @@ This is the input to the privacy policy. **The policy may describe only behaviou
 shipped.** Each finding below is marked:
 - **P1** — changed in stage P1;
 - **P2** — changed in stage P2;
-- **0.9.2** — Export/Import Settings, which ships in 0.9.2: describe it once 0.9.2 is out;
+- **0.9.2** — Export/Import Settings and stills, shipped in 0.9.2;
 - **later** — a decided later stage;
 - **open** — no decision yet;
 - no mark — unchanged and fine to describe as is.
@@ -231,7 +231,14 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 - **Reads:**
   - media is fully decoded for playback (AVFoundation, libav);
   - MXF, timecode and `stsd` are parsed from headers only;
-  - embedded creator, author and software metadata is read into memory only.
+  - embedded creator, author and software metadata is read into memory only;
+  - **a still's metadata (0.9.2)** is read into memory only, by ImageIO, when the still opens (`StillImageReader.swift`). Manifold uses
+    its pixel size, orientation, colour profile name, bit depth and HDR details, and one date: EXIF `DateTimeOriginal`, else TIFF
+    `DateTime`, shown as the Inspector's Capture Date. ImageIO's answer can also hold GPS, camera serial and owner tags; nothing reads,
+    shows or logs them. Nothing from a still's metadata is stored: it lasts while the still is open, and only the file's path joins
+    Recent Files, as for any file. The one log line (`[STILL]`, `FrameEngine.swift`) holds the file name, format, dimensions, HDR type and
+    headroom, and no EXIF value. Export Diagnostics reads no still metadata: it carries that captured line, with the file name removed
+    unless the user includes file names.
 - **Nothing is ever written to a media file or a sidecar.** FFmpeg is built with no muxers and the
   `file` protocol only.
 - **"Edit in Flip"** (`ContentView.swift:3146-3181`) calls
@@ -369,10 +376,10 @@ installed copies do until they update.
 > your Mac. Saved stream addresses, stream keys and stream passwords, and your license, are kept in
 > the macOS Keychain; Manifold's preferences file keeps only each saved stream's name and server name
 > [true once P2 ships]. Manifold's own network responses are not cached to disk.
-> [True once 0.9.2 ships:] If you export saved streams, their addresses and passwords are written to a
+> [Shipped in 0.9.2:] If you export saved streams, their addresses and passwords are written to a
 > file encrypted with a password you choose. Anyone with that file and that password can read them.
-> Manifold can't recover the password. Before an import, Manifold keeps a backup of your keyboard
-> shortcuts on your Mac; it never holds a stream address or password. Exports and backups are never
+> Manifold can't recover the password. When an import changes your shortcuts, Manifold keeps a backup
+> of them first, on your Mac; it never holds a stream address or password. Exports and backups are never
 > sent anywhere, and are not part of a diagnostics report.
 > Diagnostics reports are created only when you choose Export Diagnostics, saved where you choose,
 > and never sent automatically. Network addresses, folder paths, machine names and display serial
@@ -382,7 +389,7 @@ installed copies do until they update.
 > **Removing your data.** Delete the app. Then remove
 > `~/Library/Preferences/com.graviton.manifold.plist`, `~/Library/Caches/com.graviton.manifold`,
 > `~/Library/HTTPStorages/com.graviton.manifold`, `~/Library/Application Support/com.graviton.manifold`
-> [once 0.9.2 ships], and the Keychain items named `tools.graviton.manifold`. Settings files you exported
+> [shipped in 0.9.2], and the Keychain items named `tools.graviton.manifold`. Settings files you exported
 > stay where you saved them. To free a license seat, contact support.
 
 ## Open questions

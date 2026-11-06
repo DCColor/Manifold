@@ -1134,13 +1134,41 @@ The decision this entry asks for is unchanged. It is now one switch, listed unde
 
 ---
 
-## ☐ PRE-SHIP: stream bookmarks have no durability story — no backup, no export, one key
+## ☐ PRE-SHIP: stream bookmarks: no automatic backup of streams
 
-**Status:** OPEN, required before public launch. **NOT a blocker** — nothing ships broken, and the
-app does not lose the list on its own. **Raised:** 2026-09-21, after the `streamBookmarks` defaults
+**Status:** OPEN, narrowed 2026-11-05. Export/Import Settings (0.9.2) gets saved streams out and back in, on this Mac and another. The one
+open part is the automatic backup of streams, which *What "done" means* lists as separate and not required for launch. **NOT a blocker** —
+nothing ships broken, and the app does not lose the list on its own. **Raised:** 2026-09-21, after the `streamBookmarks` defaults
 key was erased during LIVECLOCK verification and there was no way back: no snapshots, no Time
 Machine, no store-side backup. **Done means:** a user can get their saved streams out of the app
 and back in — see *What "done" means* below.
+
+**Covered by Export/Import Settings (0.9.2, `docs/SETTINGS_EXPORT_PLAN.md`):**
+
+- **Export and import.** Streams go to a file and come back from it. A file with streams is always encrypted with a password the user
+  chooses, at least 12 characters (§2.4, §2.5).
+- **What round-trips.** Name, URL, A/V offset, colour override and passphrase. The type and the address are worked out again from the URL,
+  and import mints a new `id` (§1.2, §2.4). *What "done" means* expected passphrases to be named and re-entered. Decision 1 of 2026-11-03
+  replaced that: they travel inside the encrypted file, and import asks for nothing beyond the file's password.
+- **Merge or replace.** Stream import never replaces, so there is no replace to confirm. It is add-only, and the preview lists Added,
+  Renamed, Already here and Not imported before anything is written (§4.2). Undo Import removes only what that import added, while the
+  summary is open (§4.4).
+- **Verified:** unit tests, and the attended sandbox pass on the Mac Studio with fake URLs (§8, steps 6-9).
+- **Another Mac, and a real connection.** The Studio-to-Air round trip passed attended, 2026-11-05 (Robbie): streams exported with a
+  password on one Mac, imported on the other, and connected to a real stream with no URL, passphrase or Keychain prompt (§8).
+
+**Not covered, so this stays open:**
+
+- **Automatic backup of streams.** The automatic backup and Restore from Backup cover shortcuts only, and the backup never holds a
+  secret (decision 7, §4.4, §7). So the second half of *What "done" means*, separate and not required for launch, is not met: no
+  automatic copy of `streamBookmarks`, and no restore that doesn't depend on the user having exported first.
+- **What that leaves.** The list is still one key. If it is erased, a user with no exported file has no recovery and the Keychain items
+  are still stranded, and an exported file holds only the streams saved when it was made.
+
+**Pending, not a code item:** the signed-build no-prompt check runs on the 0.9.2 release build, after `release-mac.sh` (§8, step 12).
+
+The sections below are as written on 2026-09-21. What they say about the key and the Keychain still holds; their "no export" and
+"no import" lines do not.
 
 ### What exists, and what does not
 
@@ -3874,7 +3902,7 @@ keeper also skips everything under `NSApp.servicesMenu`, so it can never clear a
 cleared. **The bug itself did not show in that launch:** the Services menu held 9 items, none with a key and no Search With Google, so the fixed
 path was not exercised in the app. The original line came from one launch, so watch for `'Search With Google' had Loop Playback's key` not returning.
 
-## ☐ 0.9.2 INVESTIGATION 2026-11-03 — `AttributeGraph: cycle detected` in the log, with the chain readout open
+## ☐ 0.9.3 INVESTIGATION 2026-11-03 — `AttributeGraph: cycle detected` in the log, with the chain readout open
 
 **What was seen.** The AX launch that verified the This display checkbox (Profile, `.build-cc`, HEAD with that fix) logged 86
 `=== AttributeGraph: cycle detected through attribute … ===` lines. The first came straight after a mode change (`[EDR] display transform →
