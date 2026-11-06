@@ -7,8 +7,10 @@ changelog page. Format notes are at the bottom.
 
 ## 0.9.2
 
+- Manifold now opens still images, shown as macOS shows them, HDR included, for every format your Mac can read. Scopes read the file's own values. Color controls don't apply to a still, and SDI and HDMI send black while one is open.
 - Manifold now opens audio-only files: WAV, AIFF, Broadcast WAV, MP3, M4A and audio-only movies. Play, seek, loop and meter them. The Inspector shows a BWF file's timecode.
 - Settings ▸ Files can now make Manifold the default app for WAV, AIFF, MP3, M4A and AAC, one type at a time. Nothing changes until you choose.
+- Settings ▸ DeckLink Output ▸ Audio at launch chooses where sound goes when Manifold starts. The toolbar picker now changes it for the session only, and works with output off.
 - While an audio-only file is open, SDI and HDMI keep their mode and send black, and its sound plays on the Mac. Sending audio-only files to SDI comes in 0.9.3.
 - Audio files show their layout by name, such as 5.1 or 7.1, when the file states one. This applies to the Inspector for video files too.
 - Opening a file over one that is playing no longer leaves the transport stuck, with Pause showing and nothing moving.

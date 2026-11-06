@@ -1,16 +1,14 @@
-# Stills and audio-only files — PLAN ONLY
+# Stills and audio-only files
 
-Status: plan, 2026-11-03, at `884cce3` (release 0.9.1, build 23), decisions recorded the same day. **0.9.2 = B0–B4. B5 (audio on
+Status: built through B4, see *Build status*. Written as a plan, 2026-11-03, at `884cce3` (release 0.9.1, build 23), decisions recorded the same day. **0.9.2 = B0–B4. B5 (audio on
 SDI) = 0.9.3.** No Manifold build was made, launched or committed for this plan. Line references are to that commit. **By reading** means established from the code and not run. **Measured**
 means run here as small standalone probes in the session scratchpad, on this Mac: macOS 26.7.1 (25G241), SDK 27.2.
 **UNKNOWN** means not established. Companion: `docs/SETTINGS_EXPORT_PLAN.md`.
 
 ## Build status (2026-11-04)
 
-**Built and run:** B1 (audio parts and the shared `mediaKind`), B4, and the held picture for audio-only (B3's audio half). **Still to
-build:** B0, B2 and the still half of B3. Stills keep their refusal, which now goes through `mediaKind` in `loadAsset`: B2 replaces
-that one block, adds `.image` to the open panel and an Image entry to `project.yml`, and calls `setHeldBlack` with the still sentence
-from `updateHeldPicture`.
+**Built and run:** B0, B1, B2, B3 and B4 (2026-11-05 for B0, B2 and B3's still half). **Still to do for 0.9.2:** the attended pass: the
+§6 tables by eye and on the SDI monitor, the user guide, and the privacy line for EXIF (§4.3).
 
 **What changed from the plan while building:**
 
@@ -34,6 +32,111 @@ and a moving 48 kHz clip restores scopes, meters and real PCM on SDI.
 
 **By reading only, not run:** the key gates (frame step, reverse-as-pause, timecode entry, frame readout): AX sends no keystrokes. A live
 source committing over a hold. The card at the 720 × 569 minimum. A file rewritten on disk while open (`reinspect`). Desktop sound, by ear.
+
+**B2 and B3's still half, what changed from the plan:**
+
+- **The decode is in phase 1**, not after the commit, in the new leaf target `StillImageInfo`. A file with a good header and bad data is refused
+  with the current file left alone. A JPEG cut short still opens, showing what macOS can decode.
+- **`metadata` stays nil for a still.** `stillInfo` and `stillPicture` carry it, so nothing reaches the output's colour or mode. The file name
+  overlay reads `stillInfo`.
+- **Raster sizes stay on for a still** (§3.3) through a new `rasterControlsEnabled`. `colorControlsEnabled` is off, as for audio-only.
+- **An extra Headroom row, "Mastering peak N nits (from file)"**, for a file with `mdcv` and no `clli`: there "macOS assumes 1,000 nits" would be
+  false (B0 result). HLG with no `clli` says "Peak not stated", because what macOS assumes for HLG was not measured. A file reporting another
+  number the scan cannot see says "Peak not stated" too.
+- **The bar for a still** keeps Open, guides, Inspector, Refresh, scopes, DeckLink, Streaming, Color (face "Still", greyed), the display transform
+  (greyed, its tooltip the still sentence) and the pin, on one row or two.
+
+**Measured 2026-11-05 (AX, logs, SDI loopback `capture`, `.build-cc` Profile build):** nine of the 12 fixtures were opened in the app, one or more of each kind, with the
+right format, size, HDR type and headroom row. Unit tests read six on real files. `IMG_0026` reads 4284 × 5712 (rotated). Refusals: DPX by name and with its banner, a truncated PNG, random bytes named
+`.jpg`. A PNG named `.jpg` opens as a PNG. View ▸ 25% and 50% size the window ("50% — 2016×1512"). The chain readout shows the still sentence.
+Colour menu items are off. The window's bar has no play, scrubber, mute or audio track. Opened over a playing video: the transport goes, meters
+read no audio track.
+
+On the wire, in one window, output 1080p24: PQ video reads Rec. 2020, HDR, ANC on every frame. The still reads Rec. 709, dynamic range 0, no ANC,
+one hash across 78 frames, every sample Y 64, Cb/Cr 512, mode unchanged. Back on the video, Rec. 2020, HDR and ANC return, and the scope header
+reads Rec. 2020. Video → still → audio-only → still → video each swap the DeckLink menu row, and no re-establish was logged.
+
+**Scopes on a still, measured 2026-11-05 (`MANIFOLD_SCOPE_PROBE=1`, the bins the kernels wrote; DEBUG builds):** a generated 8-bit sRGB grey ramp reads bins 0
+to 1023, and code 63, 127, 191, 255 land at 253, 509, 766, 1023 on the waveform, each the code × 1023 ÷ 255. The PQ AVIF's parade tops at bin 991, its
+peak code, 7,429 nits, tagged CICP 9-16-9. The Ultra HDR JPEG tags 12-13-1 from its ICC colorants and `para` curve, and every header reads "SDR base image
+(gain map not applied)", as does `IMG_0026`, upright. Unit tests hold every ramp code at 16 bits, a Display P3 file unmoved, and all 8 orientations
+against ImageIO. In one window, ramp, gain map, video, rotated gain map and PQ each replace the trace and header, the ramp returning its exact bins and
+the video its own trace, Rec. 2020 and no note. Output on under the PQ still, 2160p23.98: Rec. 709, dynamic range 0, no ANC, one hash across 78 frames,
+menu row shown, scope still reading 991.
+
+Not run for scopes: a LUT loaded with a still open, Adobe RGB and untagged headers in the app (unit tests only), a CMYK file, a still over 8192
+pixels. The scope headers on this Mac read "HLG (%·nits)*" because the vertical scale is forced to HLG in the scope's own setting; on Auto, a PQ still
+takes the PQ ruler by reading.
+
+**By reading only, not run:** the keys on a still (Space, J/K/L, arrows: `positionControlsEnabled`; Export Frame and Loop: `canPerform` beeps). A
+refused file with a file already in that window: `manifold-proc open` puts it in a new window. A drop. A file rewritten on disk (`reinspectStill`).
+A LUT returning with the next video. The bar at the 720 × 569 minimum and a portrait still there. A `clli` row in the app (unit tests and the
+scan cover it, on synthesized boxes). An HLG still, an Apple gain-map HEIC, a 100 MP file: no fixture.
+
+**The card's silence log** now says `SILENCE · audio destination is Computer` when that is the reason (`isDestinationSilent`, asked for the label
+only), measured playing and paused, and still `transport gate` when paused on SDI.
+
+## B0 result (2026-11-05)
+
+Standalone spike on macOS 26.7.1, LG in HDR mode (EDR 4.48, potential 8.97), each image beside Preview at the same size. Fixtures in
+`$HOME/Code/Manifold/fixtures/stills/`, one subfolder per type. **Measured** unless stated.
+
+**Verdict (Robbie, by eye, a sanity check and not a reference judgment):** route C matches Preview side by side on the LG. Route B is
+brighter than Preview. **B2 uses route C.**
+
+| Route | Decode | `NSImageView` range | Result |
+|---|---|---|---|
+| A | `NSImage(contentsOf:)` | `.high` | Loses HDR on an EXIF-rotated file: `IMG_0026` (orientation 6) comes back 8-bit, headroom 1.0. The unrotated `IMG_0014` keeps 10-bit, 4.15 |
+| B | `CGImageSourceCreateThumbnailAtIndex` with `kCGImageSourceDecodeToHDR`, `…WithTransform`, `…FromImageAlways`, max size = the larger side | `.high` | Keeps HDR and rotates. Brighter than Preview |
+| **C** | As B | **`.constrainedHigh`** | **Matches Preview. Chosen** |
+
+`NSImageView.imageDynamicRange` read `standard` on all three while HDR was visibly on, so it cannot be used to log what resolved.
+
+**Decisions for B2 (Robbie, 2026-11-05):**
+
+- Inspector headroom rows state their source: gain map **"HDR capacity N nits (from file)"**; PQ with `clli` **"MaxCLL N nits (from
+  file)"**; PQ without **"Peak not stated; macOS assumes 1,000 nits"**.
+- The gain-map type is labelled from the file (Adobe XMP or ISO 21496-1), not from ImageIO's ISO key alone.
+- Read the file type **before** properties.
+- The skin "banding" on the JPEGR looks like skin texture. The gain-map offset question goes to GradeShare, not Manifold.
+
+**What the headroom numbers are.** macOS's scale: extended linear 1.0 = 203 nits for PQ (100 nits lands at 0.4925, 10,000 at 49.26).
+
+| File | Number | Source | Peak at 203 nits |
+|---|---|---|---|
+| JPEGR | 19.70 | `hdrgm:HDRCapacityMax="4.30045"`, as 2^x; the `Headroom` property and `CIImage.contentHeadroom` report it | 4,000 nits |
+| JPEGR | 35.54 | `hdrgm:GainMapMax="5.15148"`, as 2^x | 7,215 nits |
+| JPEGR | 8.00 | `CGImage.contentHeadroom` after `kCGImageSourceDecodeToHDR` | 1,624 stated; pixels reach 12.06 = 2,449 nits |
+| AVIF | 4.93 | `kCGDefaultHDRImageContentHeadroom` = 1000/203. A default, not file data | 1,000 nits |
+| AVIF | ~35.09 | `CGImage.calculatedContentHeadroom`; DecodeToHDR returns the same when the file has no `clli` | 7,123 nits |
+| AVIF | 36.60 | Scan of decoded pixels (max RGB; max luminance 35.44) | 7,429 nits |
+
+- **ImageIO decodes a gain map for a target headroom of 2³.** Patching `HDRCapacityMax` in scratch copies: 2.5 gives 5.66 and peak 35.6; 3.0
+  gives 8.00 and 35.6; 3.2 gives 8.00 and 28.5; 4.30045 gives 8.00 and 12.06; 5.15148 gives 8.00 and 7.98. Each peak fits weight 3 ÷ capacity.
+  No public ImageIO option changes it (`kCGComputeHDRStats` and `kCGImageSourceGenerateImageSpecificLumaScaling` change nothing). Core
+  Image is not limited: `.expandToHDR` reports 19.70 and renders to 38.89.
+- **A gain map states no nits.** It is relative to SDR white, so the Inspector's N is capacity × 203, macOS's scale. At full weight the JPEG's
+  top percentiles match the AVIF's (5.38 / 12.39 / 33.68 against 5.35 / 12.45 / 33.84), so JPEG 1.0 lines up with the AVIF's 203 nits.
+- **The fixture AVIFs carry no `mdcv` or `clli`**, only `colr nclx 9/16/9`, full range. macOS reads them when present: on scratch copies `clli`
+  4000 states 19.70 and DecodeToHDR agrees; `clli` 1000 states 4.93; `mdcv` 4000 alone states 19.70 while DecodeToHDR stays 35.09. That is
+  why the Inspector also has a mastering-peak row: with `mdcv` alone, "macOS assumes 1,000 nits" would be false.
+- **The JPEGR is Adobe `hdrgm` XMP with no ISO 21496-1 segment**, yet ImageIO answers its ISO auxiliary key. The iPhone JPEGs carry the ISO
+  URN and Apple's aux URN.
+- **`CGImageSourceGetType` flips** from `public.jpeg` to `public.heic` on the JPEGR files once properties have been read. Cause UNKNOWN. Their
+  JFIF APP0 sits after APP1 and APP2, not straight after SOI, which may or may not be related.
+- **DecodeToHDR changes shadows as well as highlights** on the JPEGR: median 0.0045 plain, 0.0056 at weight 0.698, 0.0062 at full weight.
+
+**Fixtures against their folder names.** The `HEIC` files have no gain map: 8-bit sRGB, SDR, so no Apple HEIC gain map has been tried yet. The
+`SDR JPEG` files are not SDR: both carry ISO and Apple gain maps. The real SDR files are `SDR PNG` and `SDR TIFF`.
+
+**For GradeShare, not Manifold:**
+
+1. `GainMapMax` (5.15) exceeds `HDRCapacityMax` (4.30), so the peak overshoots a display's headroom: 6.03× at the LG's 4.48. With capacity at
+   5.15148 the decoded peak is 7.98, which fits the stated 8.00.
+2. Peak pixels reach 7,429 nits against an implied 4,000 ceiling, about 0.01% above 6,870. Whether the grade goes there is UNKNOWN.
+3. The AVIF writes no `clli`.
+4. `GainMapMin` is -14.3 with offsets of 1e-07: 0.076 stops per code on an 8-bit map, against 0.025 in the 1080 file (`GainMapMin` -1.28).
+5. JFIF APP0 is not straight after SOI.
 
 ## Decisions (Robbie, 2026-11-03)
 
@@ -88,19 +191,19 @@ files never reach Recent (`RecentFiles.swift:62-69`).
 
 **One rule: Manifold's renderer never touches a still.** No Metal, no shader, no LUT, no display mode.
 
-**Use `NSImageView` with `preferredImageDynamicRange = .high`**, in an `NSViewRepresentable` placed in the same `ZStack` as
+**Use `NSImageView` with `preferredImageDynamicRange = .constrainedHigh` (route C, B0 result)**, in an `NSViewRepresentable` placed in the same `ZStack` as
 `MetalSurfaceView` (`ContentView.swift:1197-1204`). It inherits the aspect fit (`:1206`), the measured picture rect
 (`:1210`) and the guide overlay (`:1218`). `imageScaling = .scaleProportionallyUpOrDown`, `animates = false`.
 
 | API | Available | Use |
 |---|---|---|
-| `NSImageView.preferredImageDynamicRange` | macOS 14.0 (`NSImageView.h:74`) | **Yes.** Must be set: the default is constrained, not high (`:70-71`) |
-| `NSImageView.imageDynamicRange` | macOS 14.0 (`:77`) | Yes, read-only, for logging what resolved |
+| `NSImageView.preferredImageDynamicRange` | macOS 14.0 (`NSImageView.h:74`) | **Yes**, at `.constrainedHigh`, stated rather than left to the default (`:70-71`) |
+| `NSImageView.imageDynamicRange` | macOS 14.0 (`:77`) | **No.** Read `standard` with HDR on (B0) |
 | SwiftUI `.allowedDynamicRange` | In SDK | No. Gives no readback, and the region is already representables |
 | `CGImageGetContentHeadroom` (Swift `contentHeadroom`) | macOS 15.0 (`CGImage.h:270-271`) | Yes, for the HDR row |
 | `kCGImageAuxiliaryDataTypeISOGainMap` | macOS 15.0 | Yes, detection only |
 | `kCGImageAuxiliaryDataTypeHDRGainMap` | macOS 11.0 | Yes, detection only |
-| `kCGImageSourceDecodeRequest`, `…DecodeToHDR` | macOS 14.0 (`CGImageSource.h:589-592`) | Fallback if `NSImage` proves not to apply gain maps |
+| `kCGImageSourceDecodeRequest`, `…DecodeToHDR` | macOS 14.0 (`CGImageSource.h:589-592`) | **Yes**, the decode for every still (B0) |
 | `CALayer.preferredDynamicRange`, `contentsHeadroom` | **macOS 26 only** (`CALayer.h:469-481`) | **No.** Below our target |
 | `CGImageCalculateContentHeadroom` | **macOS 26 only** (`CGImage.h:276-278`) | **No** |
 | `wantsExtendedDynamicRangeContent` | Deprecated at 26 (`CALayer.h:455-456`) | No custom layer, so not needed |
@@ -111,12 +214,9 @@ files never reach Recent (`RecentFiles.swift:62-69`).
 **Not established:**
 
 - how Preview itself renders, so "match Preview" is judged by eye on the LG;
-- whether `NSImage` + `NSImageView` applies an ISO gain map, an Apple gain map or an Ultra HDR JPEG as Preview does;
-- my attempt to make a gain-map fixture failed: the encode request wrote a plain PQ HEIC with no gain map, so a real
-  iPhone HEIC and a real Ultra HDR JPEG are needed.
+- an Apple gain-map HEIC: the fixture HEICs have no gain map (B0 result). The Apple and ISO gain maps were seen in iPhone JPEGs only.
 
-Stage B0 settles this on macOS 26 in a tiny test window before any app work. If `NSImage` is not enough, decode with
-`kCGImageSourceDecodeToHDR` and give the view that image.
+B0 settled the route on macOS 26: see the B0 result at the top.
 
 ## 3. Behavior with a still open
 
@@ -150,9 +250,7 @@ Autoplay does not apply. A file change is picked up by `SourceFileWatcher` as fo
 - **A loaded LUT stays loaded** and applies again with the next video. Nothing clears it. The LUT is simply not drawn.
 - **Readout:** the chain readout shows one line, **"Still image: shown as macOS shows it"**, in place of the chain. It reads
   `hasSource` today (`DisplayChainModel.swift:209`).
-- **Scopes off:** `hasSource` is true for a still because `currentURL` is set (`WindowDeck.swift:484-487`). So
-  `ScopeColorFeed.swift:115` must use a new "has a picture for the renderer" test, or the headers would describe nothing.
-  No scope sampling runs. The tray stays closable. Headers read "no source", the existing wording (L3).
+- **Scopes on, showing the file (Robbie, 2026-11-05):** see §3.5.
 
 ### 3.3 Window, narrow layouts, transport
 
@@ -166,6 +264,24 @@ Autoplay does not apply. A file change is picked up by `SourceFileWatcher` as fo
   arrows do nothing.
 - **Narrow windows:** with fewer controls `adaptiveButtonRows` (`ContentView.swift:2971`) has less to fit. Check at the
   720 × 569 minimum and with a tall portrait still (`docs/NARROW_WINDOW_LAYOUT_PLAN.md` §1.1).
+
+### 3.5 Scopes
+
+**Decision (Robbie, 2026-11-05), replacing "scopes off":** principle as for video: scopes show the file, not the display. The window stays route C,
+untouched by this.
+
+- **Pixels.** The still is decoded once from disk with no colour conversion, and fed to the scopes as a single frame: ImageIO's plain decode, so no
+  gain map and the stored encoding and profile, drawn at 16 bits into a context in the image's own colour space, EXIF orientation applied without
+  filtering. `MetalVideoRenderer` holds it as an `rgba16Unorm` texture, and the four `computeXGPU` calls read that in place of the offscreen ring.
+- **Tags, from the file.** The file's CICP first (`colr nclx`, PNG `cICP`), so PQ and HLG AVIF/HEIF by their CICP; then the profile, by name or from its
+  ICC colorants and curve. A profile with no CICP code (Adobe RGB) and an untagged file resolve as Rec. 709 and say so on every header:
+  "Adobe RGB (1998): no CICP code, read as Rec. 709", "Untagged: read as Rec. 709".
+- **Gain-map files.** The SDR base image as stored, with the header "SDR base image (gain map not applied)".
+- **The codes are not source or picture codes.** Those set the layer's colourspace and EDR behind the `NSImageView`, and a loaded LUT would restate them
+  as its output. So the renderer keeps `stillScopeColor` beside the frame, the scope maths read it, and `ScopeColorFeed` stays the only writer of the
+  scope models. Source and picture codes stay nil, the layer and the SDI tag are unchanged, and the chain readout keeps its one line.
+- **Limits.** Above 8192 pixels on the longer side, every Nth pixel, never filtered, so the values stay the file's. CMYK and Lab have no RGB values, so
+  no frame: the tray blanks and reads "no source". Alpha is not read; a transparent pixel reads as black.
 
 ### 3.4 SDI/HDMI: not sent in v1
 
@@ -222,7 +338,8 @@ From `CGImageSourceCopyPropertiesAtIndex`, in a new `stillInfo` branch of `Inspe
 | Dimensions | Pixel size, plus "(rotated)" when orientation swaps them |
 | Color Profile | `kCGImagePropertyProfileName` (measured working), else "Untagged" |
 | Bit Depth | `kCGImagePropertyDepth` (measured working) |
-| HDR Type | ISO gain map, Apple gain map, PQ, HLG, or SDR. Gain maps by auxiliary data, PQ/HLG by `CGColorSpaceUsesITUR_2100TF` plus the color space name. Headroom shown when non-zero |
+| HDR Type | Gain map (ISO 21496-1, Adobe XMP, Apple, as the file's own bytes say), PQ, HLG, or SDR. PQ/HLG by `CGColorSpaceIsPQBased` / `…IsHLGBased` |
+| Headroom | The stated source, per the B0 decisions. Nothing for SDR |
 | Capture Date | EXIF `DateTimeOriginal`, else TIFF `DateTime`, else absent. Never the file date |
 | File | The existing Size and date rows (`:208-215`) |
 

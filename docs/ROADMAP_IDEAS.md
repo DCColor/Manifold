@@ -145,6 +145,17 @@ Open questions:
 Depends on: unsure
 Size guess: medium
 
+## Scopes for a gain-map still's HDR rendition
+Status: idea (2026-11-05)
+Version: after 0.9.2
+
+Stills scope the SDR base image today, with the header "SDR base image (gain map not applied)".
+
+Idea: a scope-header toggle, "SDR base / HDR (file capacity)". The HDR version is decoded with Core Image `.expandToHDR`, not ImageIO's
+DecodeToHDR, which decodes for a target headroom of 8 (docs/STILLS_AND_AUDIO_ONLY_PLAN.md, B0 result), and read on the nits scale with 1.0 = 203 nits.
+
+Size guess: Small
+
 ## Load DCPs and IMFs for viewing
 Status: idea (2026-10-06)
 Version: 1.5?
