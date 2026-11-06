@@ -8,7 +8,9 @@
   the card's output clock, to a different value each time, up to about ±125 ppm. When it closes, the card returns to −11.7.
 - **The file clock follows the audio device,** even with destination SDI, where that device is muted and nobody hears it.
 
-Step 1 of the card-clock investigation: **measure only**. No fix and no design here. The bug is `BUGS.md`, *SDI from a file slips
+**Step 2, the plan (2026-11-06): §10.** Nothing in it is built.
+
+Sections 1–9 are step 1 of the card-clock investigation: **measure only**. No fix and no design there. The bug is `BUGS.md`, *SDI from a file slips
 one frame whenever the card's clock and the file clock drift a frame apart*, moved into 1.0 as the top priority (Robbie,
 2026-11-05). Earlier work: `DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9 (the method and the first numbers) and §4.5 (the card-clock
 direction).
@@ -254,3 +256,217 @@ different card or Mac the figures will differ. The direction here is a skip, as 
 - **The built-in at +1.9 ppm** in the 69 s smoke run against +4.8 to +5.3 later. One short run; not explained.
 - **Rate across days, cold starts, other modes, other cards.** One night, 1080p59.94 and 1080p23.976 only, card at 61–65 °C.
 - **Why `capture` overruns `--seconds`** (300 → about 345, 1800 → 2069). Harmless here, not investigated.
+
+## 10. The plan: the card as master clock during file playback
+
+Step 2, written 2026-11-06. **Plan only: nothing here is built.** Line numbers are this working tree (HEAD `b2b765b` plus the uncommitted measurement hooks).
+
+Decided (Robbie, 2026-11-06): while DeckLink output runs during file playback, the card is the master clock. Destination SDI: the muted Mac renderer stops timing the picture.
+Destination Computer: option A, the Mac audio follows the card, resampled. No constants tuned to this card or Mac; the rate is measured continuously; a step within about 2 s and a genlocked
+card must work the same way. Output off: file playback unchanged.
+
+**The plan in brief.**
+
+- **Picture.** While output runs, the audio renderer leaves the engine's `synchronizer`, which then runs on the host clock with nothing else attached. Once a second that synchronizer is
+  written onto the card's line with `setRate(_:time:atHostTime:)`, using a card completion stamp as the host time. Every reader of the file clock stays as it is. I call this state **card lock**.
+- **Mac audio.** The audio renderer moves to a second synchronizer that runs at rate 1 on its device, and the live resampler bends the audio to the picture clock, as it does for a stream.
+- **SDI audio.** Still original samples from the tap. It needs one fix of its own, because today it is not sample-continuous (§10.3).
+- **Output off:** none of this exists. The second synchronizer is not created and the pump closures are today's.
+
+### 10.1 Driving the file clock from the card
+
+**What AVFoundation allows.** The header settles the first two rows; the rest come from two standalone probes run today (the real `AVSampleBufferRenderSynchronizer`,
+`AVSampleBufferAudioRenderer` and a display layer's video renderer; renderer muted, video renderer unfed, Scarlett the default device, no Manifold, no card). Sources in
+`~/Code/_scratch/manifold-cardclock-probe/`, kept until Stage 1 is built.
+
+| Question | Answer |
+|---|---|
+| Can the synchronizer be given a custom clock or timebase? | **No.** `timebase` is read-only (`AVSampleBufferRenderSynchronizer.h`). `AVSampleBufferDisplayLayer.controlTimebase` is settable, but the audio renderer has no equivalent |
+| Which clock does it use with no audio renderer? | The host clock (header) |
+| Can the audio renderer leave a running synchronizer? | **Yes**, completion after 48 ms. Clock +6.41 → −0.01 ppm. **The clock loses 47.8 ms** at the removal |
+| Can it come back? | **Yes**, the clock returns to the device (+6.2 ppm). The clock loses 64.6 ms |
+| Can a second synchronizer hold it? | **Yes.** At the same time: audio's +6.24 ppm, picture's −0.00 ppm. Writes to the picture's do not reach it (+6.01 ppm) |
+| Does a renderer on no synchronizer consume? | **No.** 0 buffers taken in 50 s, so the pump stalls |
+| Bare `synchronizer.rate = r`, no audio attached | **Loses time:** 80–145 µs per write |
+| `setRate(r, time:atHostTime:)`, host time ahead by L | **The clock stops for about L on every write:** 18 ms at a 20 ms lead, 5.05 ms at 5 ms. Not what the header describes |
+| Same, host time now | On the line, median 0.2 µs, one excursion of −513 µs in 20 writes |
+| **Same, host time 5 ms or 50 ms in the past** | **On the line:** median 0.2 µs, all within ±65 µs including sampling jitter, no stop |
+| `setRate(r, time:)` | About 170 µs behind the line, no stop |
+| Both synchronizers paused and resumed at one host time | Their relation held to about 10 µs |
+
+`rate` is a `Float`, so its step is 0.06 ppm below 1.0 and 0.12 ppm above. The position written every second makes that irrelevant.
+
+**The options.**
+
+| Option | What it costs | Verdict |
+|---|---|---|
+| A. Steer the rate with the audio renderer attached | Every write mutes for 50–60 ms (`LIVECLOCK_AUDIO_MIRROR_FINDINGS.md` §11.11), so it cannot serve destination Computer. On SDI the mute is inaudible, but the device stays under the picture, which the decision rules out | No |
+| **B. Audio renderer off; steer the picture's synchronizer, now on the host clock** | Costs a second synchronizer, and the 48/65 ms clock loss when the renderer moves (§10.2). Writes are free: no renderer to mute. All readers unchanged: `renderer.clock`, `isPausedNow`, the end-of-file observer, decode pacing, the pull | **Recommended** |
+| C. A card clock object in place of `renderer.clock`, as `LiveClock` does, with the synchronizer left on the device | The synchronizer still paces decode through the video renderer's readiness (`FileFrameSource.swift:114`, `LibavFrameSource.swift:476`) and still drives end of file. The picture and the decode pace would part by 1 ms a minute with no bound. Two sources of truth in 20 file-side rate sites | No |
+| D. A timebase steered from completions, handed to the synchronizer | Not available: read-only | No |
+| E. Address frames by slot (`SDI_OUTPUT_TIMING.md` §3, stages 1–3) | Fixes the wire but still needs a clock for decode, audio and the window. Large: split render, second cursor, up to twice the GPU work at 4K | Stays 1.1; compatible with B |
+
+**How B works.**
+
+- **Reading.** `ScheduledFrameCompleted` (`DeckLinkBridge.mm:729`) publishes one sample per frame: the slot count `n` and `GetFrameCompletionReferenceTimestamp`, a host-axis stamp. This is reading (b) of §6: a
+  stamped pair with no read jitter, 0.03 ppm from the hardware clock on all 48 sessions. Card time is `n` × the mode's frame duration, as an exact rational.
+- **Latch.** At the first sample after the clock starts at 1×, `φ = clock − card time`, held constant. Any transport move ends the run and the next run re-latches. So the loop needs no pts and no knowledge of the file.
+- **Write, once a second.** Rate from a least-squares fit over the last 2 s of samples; then `setRate(rate, time: cardTime(n) + φ, atHostTime: stamp(n))`, with `n` the newest sample at least 5 ms old.
+  The host time is always in the past, which is the one form the probe found exact.
+- **No constants from this card.** The 2 s window and the 1 s tick come from the stated step requirement. Nothing holds a ppm value. A genlocked card is the same code: it reports a different line.
+- **The pull does not change.** `deckLinkPullSlotLocked` (`MetalVideoRenderer.swift:5521`) reads the clock. With the clock on the card, `target` advances one card frame per slot, so it can no longer cross a frame's due
+  time. The 2 ms hysteresis only ever sees wobble.
+
+**Replay on saved data.** This law run over all 48 sessions' stamps (1 Hz, so a coarser fit than the real one), capture's rate steps included, rate rounded to `Float`: error at the next tick median 4.4 µs, p99 45 µs,
+**max 169 µs**, against 2 ms of hysteresis and an 8.34 ms frame at 119.88. This is arithmetic on real stamps, not a run of the code.
+
+### 10.2 Mac audio under option A
+
+**Does the live resampler fit? Most of it, unchanged.**
+
+| Piece | Fits? |
+|---|---|
+| `PolyphaseResampler` | **Yes, as is.** Ratio changes are free by construction; 1.84 % of a core at 16 channels |
+| `LiveAudioResampleStage` | **Yes, as is**, one per audio arm. Same contract: CMSampleBuffer in, contiguous output axis out, `inputTime(atOutputTime:)` for the content heard now |
+| `LiveAudioResampleController` | **Yes, as is**, `.adopted` gains. Pure function, so its state outlives an arm |
+| `LiveAudioResampleSteering` (1747 lines) | **No.** Its bulk serves things a file does not have: first-anchor gates, Sender Reports, splices for LiveClock's position moves, the starvation hold, user offset. A file's position moves already rebuild the arm. A small new class in the same module reads the pair and calls the controller. Its pure core is what is reused |
+| `LiveAudioSink` | **No.** It pushes; file pumps are pulled. The stage goes in the pump's `enqueue` closure instead |
+
+**Where it sits.** After the tap, before the renderer, as in live: the AVFoundation pump's `enqueue:` closure (`FrameEngine.swift:4362-4366`) and libav's `onAudioFrame` (`FrameEngine.swift:2718`). `TapLookaheadPump` already ingests at decode time and enqueues
+separately, so the tap sees original samples on the content axis with no change. The closure is chosen when the arm is built, so output off runs today's closures and no shared path gains a branch. `AUDIO_RESAMPLER_DESIGN.md` §1.3 ("a file cannot reach it") and
+the "Mac audio device ↔ DeckLink card: nothing" row of §4.2 are superseded for this one case and get amended at Stage 2.
+
+**How it is steered.** As live (§2.1): `e = stage.inputTime(atOutputTime: audioSynchronizer.currentTime()) − synchronizer.currentTime()`, a paired read, discarded if the pair takes over 200 µs. `ρ` from the controller, per input buffer. The target is
+the picture clock, so the audio inherits the card through it and has no second measurement of the card.
+
+**The one difference from live is the delay.** An unmuted file renderer sits 1.2–1.6 s ahead of the playhead (§19.12), against 0.25 s live, so a change of `ρ` is heard later. Simulated with the adopted law, 1.6 s of delay, one update per 171 ms buffer, even or in the
+muted renderer's bursts: start-up drift nulled to under 0.2 ms; a 115 ppm step peaks at 1.0 ms and is back within 0.2 ms in 69 s; a 250 ppm step peaks at 2.2 ms. That is a simulation, and those steps come only from `capture`. At the true +17.6 ppm the ratio is 0.03 cents.
+
+**The audio synchronizer.** Rate 1 on the device clock, on the resampler's output axis, created at card lock and released after it. In steady play nothing writes to it, so nothing mutes. Both destinations use this path while card lock is on, and the renderer
+stays muted for SDI as today. So a destination flip stays a mute flip, with no move and no rate write (§4.5 measured that a muted renderer keeps advancing).
+
+Today's 20 file-side `synchronizer.rate` / `setRate` sites go through one transport setter, which also moves the audio synchronizer while card lock is on. `delaysRateChangeUntilHasSufficientMediaData` is set false on the audio synchronizer, or the two could start apart.
+
+| Event | Picture clock | Audio synchronizer | Stage and controller |
+|---|---|---|---|
+| Play | Starts as today; lock latches at the first sample | Starts at the same host time, future-dated, which is harmless from a stop. One position write in the first second, inside the start mute today already has | Run |
+| Pause | Rate 0, no lock writes | Rate 0 at the same host time | Held, queue kept |
+| Seek, frame step, scrub release, loop wrap | `beginReading` as today, lock re-latches | Re-anchored for the new arm | Stage retired with the arm (`teardownAudioReading`, `FrameEngine.swift:4264`); `coarseEvent`: filter reset, **integrator held**, so no re-acquisition |
+| Scrub drag | As today, no lock writes | Rate 0 | Held |
+| Shuttle ≠ 1× | Rate as today, no lock writes | Same rate; muted as today | `ρ` held, loop paused |
+| Reverse jog | Rate 0, as today | Rate 0 | Held |
+| Track switch | Untouched, as today | One position write: the new stage's axis starts on content time | New stage, integrator held |
+| Output start | Renderer moves off. **Clock loses about 48 ms** if playing | Created, renderer added, audio rebuilt by the track-switch route | Built |
+| Output stop | Renderer moves back. **Clock loses about 65 ms** if playing; back on the device | Released | Destroyed |
+| Audio device change | Unaffected | Clock changes under it | `outputConfigurationDidChange` rebuilds the arm; the loop absorbs the new rate |
+
+The output start and stop losses are a one-off hold in the window of 3–4 frames at 59.94. At a start the wire has no programme yet; at a stop it has ended. Paused, nothing shows. No correction is written, because jumping forward would be a skip.
+
+### 10.3 SDI audio
+
+**What stays.** The tap keeps source samples on the source axis; nothing resampled reaches the card (`AUDIO_RESAMPLER_DESIGN.md` §4.2 still holds). The card callback (`RenderAudioSamples`, `DeckLinkBridge.mm:575`) tops up its buffer by the card's own consumption, and audio and video are
+scheduled on one stream clock from one `StartScheduledPlayback`. So picture and sound leave on the same oscillator: at 59.94, exactly 800.8 samples per frame.
+
+**That holds only if the read cursor advances one sample per sample scheduled. Today it does not, and this is a new finding.** The anchor loop (`DeckLinkBridge.mm:633-660`) steers the cursor toward the staged frame's pts with skips and repeats of up to 2 samples per callback, about 50 times a second. The comment
+says a settled loop applies nothing, but its dead band is 104 µs and the pts staircase leaves about ±1 ms in the smoothed error, so it never settles. From the saved logs, once-a-second reads after the first 20 s:
+
+| Run | Reads | Correction not zero | Smoothed error after 100 s |
+|---|---|---|---|
+| `p7`, 59.94, 1900 s | 1860 | 84 % (±1 or ±2 samples) | sd 1.0 ms |
+| `q1-5994-sdi` | 665 | 87 % | |
+| `q1-2398-sdi` | 664 | 85 % | |
+
+The clocks need 0.84 samples a second; the loop moves tens. **Also at Play:** `p7` reads −84 ms 4 s after Play and takes 44 s to come inside 1 ms, crawling at the loop's 2 ms/s. Five card frames of queue at 59.94 is 83 ms, so the likely cause is that `ideal` subtracts a video depth full of the paused frame
+(an inference). Whether either reaches a listener is UNKNOWN: both are the bridge's own numbers, and no tool here reads audio off the wire.
+
+**The change, under card lock only.** The anchor reads a continuous source time for the slot, not the quantised staged pts: the pull's `target`, which has no staircase once the clock is on the card. The cursor is set once per run, after the first timed pull, and then advances only by samples
+scheduled, with no correction. The loop stays as a monitor: if the smoothed error passes half a source frame it snaps, logged and counted, as a resync does today. Live sources and every state outside card lock keep today's loop.
+
+Result: at 1× the card plays the file's samples in order, with none skipped or repeated, on the clock that plays the frames.
+
+### 10.4 Edge cases
+
+| Case | What happens |
+|---|---|
+| **No audio track** | Same picture path, the renderer moved the same way. No arm, nothing resampled; SDI carries silence as today. Removes today's 11.7 ppm, one slip per 24 minutes at 59.94 |
+| **Output started or stopped mid-playback** | §10.2. The clock holds once, the wire is not on air at that moment, the audio is rebuilt |
+| **Window on another display, or moved** | No effect: the pacer ticks the owner and no display is read (§7.9 runs). Other windows keep their own engines and clocks, unlocked |
+| **Ownership passes to another window** | Outgoing engine unlocks, incoming locks, from `DeckRegistry.attachDeviceHooks`, the hook that already moves `deckLinkOwnsAudio` |
+| **High frame rates** | The tick and window are in seconds, not frames, so 1080p100 and 119.88 need nothing extra. Samples are thinned by time. Budget 169 µs against an 8.34 ms frame. 2160p100/119.88 stays its own bug (every frame late): **not fixed here**. 2160p59.94 cannot be counted by `capture`; pulls can |
+| **File rate ≠ output rate** | The clock runs in card seconds at 1×, so sound and duration stay true and the rate difference shows as cadence, not drift: exact and predictable. 25p on 59.94 repeats in a fixed pattern; 23.976 on a 24.000 mode repeats one frame every 1000 slots (41.7 s). Follow source only gets here for rates with no mode, and `rateWarning` already says so. Slip counters must subtract this cadence. Conforming the file to the mode is not proposed |
+| **Genlocked card** | Same code. Reference locking mid-play may step the line: a stamp more than half a card frame off the fit is a position step, so `φ` re-latches and it is logged. It may cost one frame, once, in the moment the card itself re-times. Measured: **no**, no reference here |
+| **`capture` or anything else steps the rate** | Covered: 169 µs in the replay |
+| **Stamps stop (driver stall, late frames)** | No sample for 0.5 s: hold the last rate, write nothing, log. Output failure unlocks through `isOutputting` |
+| **A stamp that is not credible** | Skipped; it costs a held rate, never a step (the controller's rule) |
+| **The `q3-l1` host-clock launch** | The picture no longer depends on it. The audio synchronizer logs its slope against the host so a repeat is visible; the loop would absorb it |
+| **Stills, audio-only, live sources** | No card lock. Audio-only stays silent on the card until B5, which could use this clock |
+
+### 10.5 Predictions and test plan
+
+Written 2026-11-06 before anything is built. **Rate and slips are measured with `capture` closed:** `[CADENCE]` pulls, as §6 established. `capture` runs only where a row says so, as a stress test. Every run uses `cardclock.sh` (`NOCAP=1`), guard before and after, launch by absolute path, quit by PID, with Robbie told first.
+Needs one new fixture pair of about 3700 s and 7300 s.
+
+| # | Stage | Run | Today | Prediction |
+|---|---|---|---|---|
+| T1 | 1a | 59.94, no audio track, 3700 s | 2.6 slips | **0 repeats, 0 skips.** File − card within 0.05 ppm over the run |
+| T2 | 1b | 59.94, sound, destination SDI, 3700 s | 3.9 | **0 / 0.** File − card within 0.05 ppm, while the Scarlett reads about +5.9 unchanged |
+| T3 | 1b | 23.976, sound, destination SDI, 7300 s | 3.1 | **0 / 0** |
+| T4 | 1b | `capture` on and off in one session, as P6, and four 300 s sessions | 1–3 per 300 s | **0 / 0 on the wire**, through the steps. Worst position error under 0.2 ms |
+| T5 | 1b | Pause, seek, step, loop, JKL, scrub with output on | | Each resumes with 0 slips beyond the transport's own frame moves; lock re-latches, logged. Decode continues under 1 Hz writes (the probes' video renderer was unfed); end of file lands as today |
+| T6 | 1b | Tap over a T2-length run | Lead ≥ 232 ms | Lead stays within 20 ms of today's. Underruns 0 |
+| T7 | 1c | SDI audio, T2 and T3 runs | 84–87 % of reads corrected | **`corr=+0f` in every read after lock.** Anchor within half a source frame in the first second. Resyncs 0, underruns 0 |
+| T8 | 2 | 59.94, destination Computer, Scarlett, 3700 s | 3.9 | **0 / 0.** `ρ − 1` settles at card − device, about −17.6 ppm, within 0.5. `|e|` under 0.2 ms after 2 minutes. Zero rate writes on the audio synchronizer between Play and Pause |
+| T9 | 2 | Same, renderer named to the built-in | | Same, with `ρ` at that device's own difference |
+| T10 | 2 | `capture` on and off, Computer | | 0 / 0 on the wire. `e` peak under 1.5 ms (simulated 1.0) |
+| T11 | 2 | SDI ↔ Computer flip while playing, 10 times | | 0 / 0, no rate write, no renderer move |
+| T12 | 2 | **Attended.** Audio Hijack + OBS recorder, 30 min, Computer: A/V at start against end, and a dropout scan | | No slope between start and end. No dropouts in steady play. Also gives the Mac-to-wire offset, today UNKNOWN |
+| T13 | 2 | Window on the LG, the ASUS, and moved; 1080p100 and 119.88; 2160p59.94 by pulls | | 0 / 0 |
+| T14 | 2 | 23.976 file on a manual 24.000 mode, 600 s | | One repeat every 1000 slots, evenly spaced, no others |
+| T15 | every | **Output off:** §3's table on a file with sound | | File = device within 0.02 ppm. No `[CARDLOCK]` line; no audio synchronizer created. `swift test` passes; export set byte-identical |
+| T16 | every | **Live control:** output on with local SRT or NDI | | No card lock. Behaviour unchanged, so CLAUDE.md's non-Cloudflare rule is met |
+
+Genlock has no row: it needs a reference signal. It stays UNKNOWN until one is connected, with T2 and T7 as the run to repeat.
+
+**Attended check: how `capture` moves the clock.** Robbie's only job is the cable. Each state is one output session, `PHASES=30`, 30 s closed / 30 s `capture` open / 30 s closed, four times, reading card (c), file playing:
+
+1. **Loop in** (control). Predicted: as P6, about −11.7, a different value per open, back to −11.7.
+2. **Loop out, input with no signal.** Predicted: **no step**, −11.7 throughout. My guess at the mechanism: the output follows the input's signal, and on the loop that signal is the output itself, so it settles anywhere. That is a guess.
+3. **Loop out, a signal from something else, if one is to hand.** Predicted: the card moves toward that signal's rate, the same value on every open.
+
+If 2 holds, only a loop triggers it, and a customer with an unrelated input in use is probably safe. If 2 fails, any open input moves the output clock, which is worth a line in the manual. Card lock handles either.
+
+### 10.6 Hooks and telemetry
+
+| Hook, today | Fate |
+|---|---|
+| Completion stamp read, `[CARDCLOCK]` block in `ScheduledFrameCompleted` | The read becomes **permanent, ungated code**: it is the input to card lock. The 1 Hz log line is **removed** |
+| `cardClockLogReference("start")` | **Permanent**, one ungated line at each output start, plus one when the locked state changes. Genlock needs this evidence |
+| `cardClockLogReference("minute")` | **Removed** |
+| `CardClockProbe`, `gCardClock`, `cardClockAdopt`, `cardClockHostNow`, `kCardClockLog` | **Removed.** The player owns its output; no global is needed |
+| `MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID`, `#if MANIFOLD_CARDCLOCK`, the `-DMANIFOLD_CARDCLOCK` build | **Kept until T9 passes, then removed**, with its line in `cardclock.sh` |
+| `[CADENCE]` (existing, DEBUG, env) | Stays: it is the test instrument |
+| `scripts/decklink-loopback/cardclock*`, `devclock.swift` | Stay in the repo, not shipped. The probes join them at Stage 1 so a macOS update can be re-checked |
+
+**New permanent telemetry.** `[CARDLOCK]` on each lock, unlock and re-latch, ungated, like `[PACER]`. A 10 s line, card rate, position error, audio `ρ` and `e`, under `MANIFOLD_TELEMETRY`. And a **slip counter** in the output-stopped summary: pulls whose frame was not the next one due, net of cadence. A reference player should be able to say how many it made.
+
+**Gating.** Card lock is shipped behaviour, so none of it may sit behind `DEBUG` in the bridge or behind `MANIFOLD_CARDCLOCK`. `ManifoldCore` never sees `DEBUG` in Profile, and `MANIFOLD_TELEMETRY` is on in Release too.
+
+**Release compile check.** Run today on the tree with the hooks: `xcodebuild … -configuration Release -derivedDataPath ./.build-cc CODE_SIGNING_ALLOWED=NO build`, **succeeded**. `strings -a` on that binary: `[CARDCLOCK` 0, `MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID` 0, `[CADENCE]` 0, `[PACER]` 8 (the control). At the end of each stage, the same compile and the same check, with
+`[CARDLOCK]` required present. At the end of Stage 3 `MANIFOLD_CARDCLOCK` must be gone from the tree. No Release build has ever been run for this path; every build cut to date is Profile, so a compile plus `strings` is the honest limit of this check.
+
+### 10.7 Stages
+
+Each stage ends with its T rows, T15, T16 and the Release check, and is committed on its own.
+
+| Stage | What | Result |
+|---|---|---|
+| **1a. Picture on the card** | `CardClock` target in ManifoldCore: fit, latch and write as pure functions, with tests replaying saved stamps and a synthetic step. Bridge publishes the sample. Lock engages for a file with **no audio track** only. No audio code is touched | Removes the slip for files with no sound. Proves the writes against the real decode path |
+| **1b. Destination SDI** | The audio synchronizer; the renderer moves at lock, unchanged and unresampled; pump, tap and mute as today. While muted, the audio synchronizer is re-anchored to the picture when they part by 20 ms, a bound from the tap's 250 ms look-ahead. That keeps the tap's lead bounded, about every 19 minutes here, and inaudibly, because it is muted | **Removes the SDI-destination slip, on its own.** Destination Computer stays as today, slips included. A destination flip on air drops or takes lock, with its 48/65 ms hold, until Stage 2 |
+| **1c. SDI audio** | §10.3 | SDI audio sample-continuous, and the Play crawl gone |
+| **2. Option A** | Stage and small steering class in the pump closures; the transport setter; lock for both destinations; 1b's re-anchor retired; flip back to a mute flip. Amend `AUDIO_RESAMPLER_DESIGN.md` §1.3 and §4.2 | Slips gone in both destinations. Sound and picture locked on the Mac |
+| **3. Finish** | Remove hooks per §10.6, soak, close the `BUGS.md` entry, retire the pre-ship item. The 1.1 card-clock entry shrinks to what §10.1 option E still offers | Ready for 1.0 |
+
+**For Robbie to decide:** §10.3's two findings, how the Mac audio aligns under Computer, and the holds at output start and stop. They are listed in the report for this step.
+
+**Unknown going in.** Whether the decode path is untroubled by 1 Hz writes (T5). Whether a move of the audio renderer behaves the same with real queued audio and picture (the probes used silence and no frames). The Mac-to-wire offset in destination Computer: by reading the code about 100 ms at 59.94 and 230 ms at 23.976, five card frames plus the pull
+margin, never measured at a device. Genlock. Whether §10.3's corrections or the Play crawl are audible or even present on the wire.
