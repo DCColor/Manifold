@@ -466,7 +466,73 @@ Each stage ends with its T rows, T15, T16 and the Release check, and is committe
 | **2. Option A** | Stage and small steering class in the pump closures; the transport setter; lock for both destinations; 1b's re-anchor retired; flip back to a mute flip. Amend `AUDIO_RESAMPLER_DESIGN.md` §1.3 and §4.2 | Slips gone in both destinations. Sound and picture locked on the Mac |
 | **3. Finish** | Remove hooks per §10.6, soak, close the `BUGS.md` entry, retire the pre-ship item. The 1.1 card-clock entry shrinks to what §10.1 option E still offers | Ready for 1.0 |
 
-**For Robbie to decide:** §10.3's two findings, how the Mac audio aligns under Computer, and the holds at output start and stop. They are listed in the report for this step.
+**Decided (Robbie, 2026-11-06).**
+
+1. **1c is in 1.0 scope.** `BUGS.md`, *SDI audio is not sample-continuous, and takes about 44 s to settle after Play*. The figures in §10.3 are the bridge's own and have not been seen on the wire. So 1c starts by measuring the wire: SDI
+   audio on the loop with a click fixture, counting discontinuities and the A/V offset from Play through the first 60 s.
+2. **Destination Computer, output on: Mac sound lines up with the SDI picture, not the window.** This changes §10.2, where the target is the picture clock: Stage 2's target carries the wire's offset from it. That offset (by code reading about 100 ms at 59.94, 230 ms at 23.976) is a **known item to
+   measure, not yet acted on**.
+3. **The one-off hold at output start and stop while playing is accepted.**
+4. **1b and Stage 2 ship together in one release.** Stages are built and verified separately. So the interim state in 1b's row, with Computer still slipping and a flip on air holding, never reaches a user.
+5. **Genlock is not tested for 1.0:** no reference signal is available. Free-running is the expected case for Manifold's users. The design must not assume free-running: a locked card is still the master. The release notes say a genlocked card is untested. Re-test if a tester with house sync reports a problem.
 
 **Unknown going in.** Whether the decode path is untroubled by 1 Hz writes (T5). Whether a move of the audio renderer behaves the same with real queued audio and picture (the probes used silence and no frames). The Mac-to-wire offset in destination Computer: by reading the code about 100 ms at 59.94 and 230 ms at 23.976, five card frames plus the pull
 margin, never measured at a device. Genlock. Whether §10.3's corrections or the Play crawl are audible or even present on the wire.
+
+### 10.8 Stage 1a: predictions, written 2026-11-06 before any code
+
+Scope: files with no audio track. Picture on the card's clock; no audio code touched. Probed first: with an audio renderer attached and never fed, which is what this case has, past-host writes stay on the line (median 0.2 µs, −129 to +47 µs over 30 writes), so the renderer stays where it is.
+No renderer moves, so the accepted hold at output start and stop does not arise in 1a.
+
+Verified with `capture` closed, by `[CADENCE]` pulls. New fixtures of 2450 s. A 2400 s run today would slip 1.7 times at 59.94 and 0.7 times at 23.976 (11.7 ppm, card against host), so **the 23.976 runs are weak evidence on their own**: two of them have about a 25 % chance of showing nothing even with no fix. The clock readings below carry that weight.
+
+| # | Run | Prediction |
+|---|---|---|
+| A1 | 59.94, no audio, 2450 s, twice | **0 repeats, 0 skips in pulls.** File reads about −11.7 ppm against the host; file − card (b) within 0.05 ppm |
+| A2 | 23.976, no audio, 2450 s, twice | The same |
+| A3 | All of A1, A2 | `[CARDLOCK]` position error median under 20 µs, worst under 200 µs (replay: 169 µs). Card late 0, dropped at most the frame-4 case before Play. No `[FRAMEQ]` evictions |
+| A4 | Output started and stopped mid-playback, three times in one play | Output off: file 0.00 ppm. Locks within 3 s of output start. **No clock step over 1 ms at lock or unlock.** Back to 0.00 ppm after each stop. 0 slips while on, beyond what output start itself gives before the lock (the pull's first frames) |
+| A5 | Pause, Play, seek, frame step, loop wrap, JKL with output on | Lock suspends and re-latches; **a paused clock stays paused**: no write ever restarts it. 0 slips in each steady stretch |
+| A6 | **Output off,** file with sound, then no audio, 300 s each | Sound: file = Scarlett within 0.02 ppm. No audio: 0.00 ppm. No `[CARDLOCK]` line in either |
+| A7 | **Output on, file with sound,** 300 s | Not locked, no `[CARDLOCK]` line: file = Scarlett within 0.02 ppm, as today |
+| A8 | Live control: output on, local SRT | Not locked, no `[CARDLOCK]` line |
+| A9 | `swift test`, Release compile, `strings` | Pass. `[CARDLOCK]` present in Release, `[CARDCLOCK` absent |
+
+**Added stress, not a substitute for A1 and A2:** one `capture`-open run per rate, 300 s, where the card sits tens of ppm off and today slips 1–3 times. Predicted 0 on the wire. This is the strong test at 23.976.
+
+### 10.9 Stage 1a: results, 2026-11-06
+
+Built and verified, not committed. The lock did what §10.8 predicted on every point that matters: **0 skips and no slip in six 40-minute runs, and the file clock on the card to 0.00 ppm.** Three predictions missed as written, listed below; none of them is the lock failing. Profile builds, guarded before and after every run, `capture` closed unless stated, 1001-based fixtures.
+
+**Conditions.** Robbie was on a browser video call during part of the run. coreaudiod's log shows one client with 40 start/stop events from 17:21:51 to 18:25:17, the likely match by timing; the process has gone, so which process it was is UNKNOWN. It overlaps the last 26 minutes of `a1-5994-r2` and nearly all of `a2-2398-r2`. Both runs were kept as a load check, and `a1-5994-r3` and `a2-2398-r3` were added on a quiet machine: no recording client but the harness's own `devclock`, no device restart. So there are two runs per rate outside the call.
+
+| Run | Conditions | File, ppm vs host | Card (b) | File − card | Lock error median / worst, µs | Pulls counted | Repeats | Skips | Late / dropped | FRAMEQ |
+|---|---|---|---|---|---|---|---|---|---|---|
+| a1-5994-r1 | quiet | −11.67 | −11.67 | 0.00 | 2.9 / 73.9 | 143919 | 2, at Play | 0 | 0 / 0 | 0 |
+| a1-5994-r3 | quiet | −11.90 | −11.90 | 0.00 | 4.1 / 74.2 | 143919 | 2, at Play | 0 | 0 / 0 | 0 |
+| a1-5994-r2 | last 26 min in call | −11.97 | −11.97 | 0.00 | 2.9 / 83.9 | 143919 | 2, at Play | 0 | 0 / 0 | 0 |
+| a2-2398-r1 | quiet; Scarlett restart, below | −11.53 | −11.53 | 0.00 | 3.4 / 66.6 | 57567 | 1, at Play | 0 | 0 / 0 | 0 |
+| a2-2398-r3 | quiet | −11.55 | −11.55 | 0.00 | 3.1 / 93.2 | 57567 | 1, at Play | 0 | 0 / 0 | 0 |
+| a2-2398-r2 | in call | −11.83 | −11.83 | 0.00 | 2.7 / 64.0 | 57567 | 1, at Play | 0 | 0 / 0 | 0 |
+
+Each of those runs is one unbroken 2401 s stretch of the clock, with 0 steps over 1 ms. At 11.7 ppm the unlocked file drifts 28 ms from the card in 2400 s, 1.7 frames at 59.94 and 0.67 at 23.976; the lock held it within 93 µs. That position error, not the slip count, is what carries the 23.976 result, as §10.8 said it would have to.
+
+| # | Predicted | Result | |
+|---|---|---|---|
+| A1, A2 | 0 repeats, 0 skips; file about −11.7; file − card within 0.05 | Skips 0. File − card 0.00. File −11.53 to −11.97. Repeats 2 per run at 59.94, 1 at 23.976 | **Repeats missed as written.** All are the first pulls after Play, at clock about 0.03 s, nearly 2 s before the lock latches. The same 2 appear with no lock at all (`a7-on-sound`), so they are not the lock's. 0 repeats after the lock in any run |
+| A3 | Error median under 20 µs, worst under 200 µs; late 0; no evictions | Median 2.7–4.1 µs, worst 93.2 µs, late 0, dropped 0, FRAMEQ 0 | Held |
+| A4 | Output off 0.00; locks within 3 s; no step over 1 ms; back to 0.00 after each stop; 0 slips beyond output start | Off: −0.005, −0.007, −0.023, −0.001 ppm. Locked: −11.79, −11.87, −11.80. Lock about 2.3 s after output start. 0 steps over 1 ms. 3 repeats, the first pulls of each new output before the lock; 0 skips. Worst error 16.2 µs | Held, with **one prediction wrong:** stopping output pauses every deck (`[ARBITER] exclusive device released`, existing behaviour), so the clock does not carry on at 0.00 after a stop. It reads 0.00 once Play is pressed again |
+| A5 | Lock suspends and re-latches; paused clock stays paused; 0 slips in steady stretches | All re-latches correct; paused clock stayed paused; error median 1.9 µs, worst 15.7 µs. 8 repeats in 7723 pulls, all the end-of-file hold at the loop wrap, which is existing behaviour; 0 otherwise | Held |
+| A6 | Sound: file = Scarlett within 0.02. No audio: 0.00. No `[CARDLOCK]` | No audio −0.001. Sound, three runs: +0.041, −0.009, −0.023. 0 `[CARDLOCK]` lines and 0 clock steps in all four | **Sound missed 0.02 in two of three runs.** Mixed sign, mean +0.003, no sign of an offset. The fit's noise on 1 Hz readings is 0.006–0.021 ppm, so 0.02 was tighter than this measurement resolves. The first run predates the call |
+| A7 | Not locked; file = Scarlett within 0.02 | File +5.69, Scarlett +5.68, card −11.91, 0 `[CARDLOCK]` lines | Held |
+| A8 | Live, not locked | 0 `[CARDLOCK]` lines; 2405 pulls, 0 repeats, 0 skips | Held |
+| A9 | Tests pass; `[CARDLOCK]` in Release, `[CARDCLOCK` absent | `swift test` 0 failures. Release compiled. `strings`: `[CARDLOCK]` 4, `[CARDCLOCK` 0, `MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID` 0, `[TRANSPORT]` 0, `[CADENCE]` 0 | Held |
+| Stress | `capture` open, 0 on the wire | 59.94: card −101.00, file −101.01, 19407 wire frames, 0 repeats, 0 skips. 23.976: card −84.55, file −84.55, 7992 wire frames, 0 repeats, 0 skips | Held, but at 23.976 weaker than §10.8 claimed: 84.55 ppm over 333 s is 0.68 of a frame, not 1–3 slips |
+
+**A1's −11.7.** It held over 40 minutes. Short runs read differently because the host wanders: the 60 s smoke run read −14.5, and card − device stayed about 17.5 there. The figure is the host's, not the lock's.
+
+**The Scarlett restart in `a2-2398-r1`.** Its summary shows device −15530.98 ppm. That is not a clock reading: the device's sample counter restarted at 16:29:53, with coreaudiod stopping IO after 6445568 frames as another recording client ran for 18 s (16:29:54–16:30:12; which client is UNKNOWN). It is not the call. The file has no audio, and its clock ran straight through.
+
+**The call as a load check.** Worst lock error in the runs it touched was 83.9 and 64.0 µs, against 93.2 µs on a quiet machine. No load effect shows in the lock. This is one call, not a load test.
+
+**What this means for 1b.** The arbiter's pause means the hold §10 accepted at output stop should not arise: the clock is already pausing. The hold at output start remains. §10.8's slip counter (§10.6) was not part of 1a and is not built. The export set was not byte-checked; render code was not touched.

@@ -696,9 +696,25 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // The card as master clock during file playback (docs/CARD_CLOCK_FINDINGS.md §10): pure steering logic. ManifoldCore uses it.
+        .target(
+            name: "CardClock",
+            path: "Sources/CardClock",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "CardClockTests",
+            dependencies: ["CardClock"],
+            path: "Tests/CardClockTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         .target(
             name: "ManifoldCore",
-            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "SyncCalibration",
+            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "CardClock", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
                            "AudioFileInfo", "StillImageInfo"],

@@ -21,7 +21,9 @@ held back until after release, and the numbered defect entries follow.
    - **TOP PRIORITY (decided, Robbie, 2026-11-05): the one-frame SDI slips during file playback move from 1.1 into 1.0**
      (*SDI from a file slips one frame whenever the card's clock and the file clock drift a frame apart*, below). A reference
      player must not repeat or skip frames, and "the clocks drift" is not an acceptable explanation. Step 1, measure only:
-     `CARD_CLOCK_FINDINGS.md`.
+     `CARD_CLOCK_FINDINGS.md`. Plan and decisions (2026-11-06): its §10. 1b and Stage 2 ship together in one release. **The release notes must say a
+     genlocked card is untested** (no reference signal available; re-test if a tester with house sync reports a problem).
+   - **Stage 1c of the same plan, decided into 1.0 (Robbie, 2026-11-06):** *SDI audio is not sample-continuous, and takes about 44 s to settle after Play*, below.
    - The SRT audio break-up fix, with the buffer review (*SRT audio breaks up when the sender packs
      ≥ ~170 ms of AAC into each PES*, below; `COLOR_MANAGEMENT_FINDINGS.md` §6.10, Stage 0b).
      **Buffer policy decided 2026-10-08** (§6.10, *Buffer policy — the review and its decisions*):
@@ -1539,6 +1541,10 @@ Added 2026-11-05 for `CARD_CLOCK_FINDINGS.md`. Measurement only; none changes be
 - `MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID`, `FrameEngine.init`. Behind `#if MANIFOLD_CARDCLOCK`, not DEBUG: DEBUG never reaches ManifoldCore in
   Profile, and `MANIFOLD_TELEMETRY` is defined in Release too. The condition exists only on the measurement build's `xcodebuild` command
   line (`OTHER_SWIFT_FLAGS`), so a normal Profile or Release build compiles it out.
+- `[CARDCLOCK-FILE]`, `App/MetalVideoRenderer.swift`, `notePlaybackStats` (`#if DEBUG`, `MANIFOLD_CARDCLOCK_LOG=1` with `MANIFOLD_PLAYBACK_STATS=1`): the file clock against the host with output off. Added 2026-11-06 for Stage 1a.
+- `DebugTransportHook`, `App/DebugStepHook.swift`, and its call in `ContentView` (`#if DEBUG`, `MANIFOLD_DEBUG_TRANSPORT`): scripted play, pause, seek, step, shuttle and loop, which are key-only. Added 2026-11-06 for Stage 1a.
+
+What stays and what goes at Stage 3: `CARD_CLOCK_FINDINGS.md` §10.6. The completion read is now shipped code (the `cardFrame` block in the bridge); the `[CARDCLOCK]` log around it is still a hook.
 
 ## ☐ PRE-SHIP: review the `[WINDOWSIZER-DEINIT]` probe
 
@@ -3761,6 +3767,20 @@ these runs. **Cause, by inference:** the in-flight limit: a present's handler ar
 120 Hz display the gate is often still closed at the next frame. Held back counts: 26–1578 "in flight" per 10 s. **Direction (not
 decided):** a second drawable in flight on displays above 60 Hz (the pool of three still leaves one free), or present from the most
 recent frame at the vsync rather than per frame. Window only; SDI must stay as measured.
+
+## ☐ RECORDED 2026-11-06 — PRE-EXISTING — SDI audio is not sample-continuous, and takes about 44 s to settle after Play
+
+**In 1.0 scope (decided, Robbie, 2026-11-06), as Stage 1c of `CARD_CLOCK_FINDINGS.md` §10.** Details: its §10.3.
+
+⚠️ **Every figure here is the bridge's own, from its `DeckLinkAudio:` log line. None has been seen on the wire.** Whether either effect reaches SDI, or can be heard, is UNKNOWN: no tool here reads audio off the wire yet.
+
+- **Continuity.** The anchor loop (`DeckLinkBridge.mm`, `RenderAudioSamples`) moves the read cursor by up to 2 samples per callback, about 50 times a second. In once-a-second reads after the first 20 s, the correction was not zero in 84 % of `p7` (1900 s, 59.94), 87 % of
+  `q1-5994-sdi` and 85 % of `q1-2398-sdi`. The clocks need 0.84 samples a second. The comment says a settled loop applies nothing, but its dead band is 104 µs and the staged pts's staircase leaves about ±1 ms in the smoothed error.
+- **After Play.** `p7` reads −84 ms 4 s after Play and takes 44 s to come inside 1 ms, at the loop's 2 ms/s. Five card frames of queue at 59.94 is 83 ms, so the likely cause is that `ideal` subtracts a video depth still full of the paused frame. That is an inference.
+
+**First step:** measure the wire. SDI audio on the loop with a click fixture, counting discontinuities and the A/V offset from Play through the first 60 s. **Direction:** under card lock, anchor once from a continuous source time, then let the cursor advance only by samples scheduled (§10.3).
+
+**Known item, to measure, not yet acted on (decided 2026-11-06).** With destination Computer and output on, Mac sound is to line up with the SDI picture, not the window. The window-to-SDI offset, by code reading about 100 ms at 59.94 and 230 ms at 23.976, has never been measured at a device.
 
 ## ☐ RECORDED 2026-11-02 — PRE-EXISTING, ALL BUILDS — SDI from a file slips one frame whenever the card's clock and the file clock drift a frame apart
 

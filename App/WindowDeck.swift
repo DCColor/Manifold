@@ -1511,6 +1511,9 @@ final class DeckRegistry {
         DeckLinkService.shared.audioTap = nil
         DeckLinkService.shared.isCardAudioSilentProvider = nil
         DeckLinkService.shared.systemAudioRouting = nil
+        DeckLinkService.shared.cardFrameSink = nil
+        DeckLinkService.shared.cardOutputChanged = nil
+        deck.engine?.cardOutputEnded()
         deck.engine?.audioTap.onFormatChange = nil
         // The outgoing engine must stop steering HLS's output — otherwise a background deck's
         // mute would keep reaching a stream the host deck now owns.
@@ -1563,6 +1566,13 @@ final class DeckRegistry {
         // start/stop/destination change — which, if output is already running, is never.
         engine.setDeckLinkOwnsAudio(DeckLinkService.shared.ownsSystemAudio)
         NDIService.shared.setDeckLinkOwnsAudio(DeckLinkService.shared.ownsSystemAudio)
+        // The card as master clock (docs/CARD_CLOCK_FINDINGS.md §10): the owning engine gets the card's frames, and is told
+        // of an output already running, for the same reason as the line above.
+        DeckLinkService.shared.cardFrameSink = { [weak engine] slot, host in engine?.noteCardFrame(slot: slot, host: host) }
+        DeckLinkService.shared.cardOutputChanged = { [weak engine] frameSeconds in
+            if let frameSeconds { engine?.cardOutputBegan(frameSeconds: frameSeconds) } else { engine?.cardOutputEnded() }
+        }
+        if let frameSeconds = DeckLinkService.shared.activeFrameSeconds { engine.cardOutputBegan(frameSeconds: frameSeconds) }
         // The card must be ENABLED with a fixed rate/channel count before playback starts, so a
         // file whose audio format differs re-establishes the output (this is also what lets you
         // enable output BEFORE loading a file and still get audio).

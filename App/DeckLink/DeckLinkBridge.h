@@ -95,6 +95,11 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// frame is ready. This is the anchor the audio stream is keyed to: serving audio at the source time
 /// the VIDEO carries makes A/V alignment structural rather than a wall-clock guess. Called on the SDK
 /// audio-callback thread (~50 Hz) — must be a cheap lock-guarded read.
+/// A frame the card completed: its slot (frames completed, late or dropped so far) and when it completed, in host seconds
+/// (`GetFrameCompletionReferenceTimestamp`). Runs on the SDK callback thread, once per frame: it must be cheap. The card as master
+/// clock reads this (docs/CARD_CLOCK_FINDINGS.md §10.1).
+typedef void (^DeckLinkCardFrameBlock)(int64_t slot, double completedHostSeconds);
+
 typedef double (^DeckLinkAudioSourceTimeBlock)(void);
 
 /// YES → the SDI audio stream must carry SILENCE this callback (user mute, pause, or an off-speed
@@ -191,6 +196,11 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 
 /// Disable the output opened by -startTestFrameOutputOnDevice0 and release its held frame + output.
 - (void)stopTestOutput;
+
+/// Set before a start; the started output keeps it until it stops.
+@property (nonatomic, copy, nullable) DeckLinkCardFrameBlock cardFrame;
+/// The running output's frame duration in seconds, exactly as the mode states it (1001/60000 at 59.94). 0 when stopped.
+@property (nonatomic, readonly) double activeFrameSeconds;
 
 /// D3 "scheduled playback": start CONTINUOUS free-running output on device 0 at 2160p23.98 /
 /// v210 10-bit YUV, driven by the frame-completion callback against the card's hardware clock. Frames

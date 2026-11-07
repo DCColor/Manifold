@@ -80,7 +80,25 @@ final class DeckLinkService: ObservableObject {
 
     // Observable UI state (mutated on main).
     @Published private(set) var isOutputting = false {   // reflects the ACTUAL scheduled-playback state
-        didSet { if isOutputting != oldValue { updateOutputActivity() } }
+        didSet {
+            guard isOutputting != oldValue else { return }
+            updateOutputActivity()
+            if !isOutputting { activeFrameSeconds = nil; cardOutputChanged?(nil) }
+        }
+    }
+
+    // MARK: The card's line, for the file clock (docs/CARD_CLOCK_FINDINGS.md §10.1)
+
+    /// The running output's frame duration in seconds. Nil while none runs. Main.
+    private(set) var activeFrameSeconds: Double?
+    /// The owning engine, told each start (with the frame duration) and the end (nil). Main. Set with the other providers.
+    var cardOutputChanged: ((Double?) -> Void)?
+    /// The owning engine's sample ring. Read on the SDK callback thread, hence the lock; set on main when ownership moves.
+    private let cardFrameLock = NSLock()
+    private var cardFrameSinkLocked: ((Int64, Double) -> Void)?
+    var cardFrameSink: ((Int64, Double) -> Void)? {
+        get { cardFrameLock.lock(); defer { cardFrameLock.unlock() }; return cardFrameSinkLocked }
+        set { cardFrameLock.lock(); cardFrameSinkLocked = newValue; cardFrameLock.unlock() }
     }
     /// SDI_OUTPUT_TIMING.md §3, Stage 0 (Robbie, 2026-10-26): while output runs, neither the displays nor the Mac may
     /// idle-sleep and App Nap may not throttle Manifold, because every SDI frame is still made by a window render. ONE
@@ -1068,6 +1086,7 @@ final class DeckLinkService: ObservableObject {
         // re-establish or a mode change reads it again here, never a value saved at an earlier start.
         let startSignal = self.heldSignal ?? self.renderer?.deckLinkStartSignal() ?? .sdr709
         print("DeckLink: output start — signal until the first picture: \(startSignal.logLine)")
+        self.bridge.cardFrame = { [weak self] slot, host in self?.cardFrameSink?(slot, host) }
         let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
                                                         initialSignal: Self.bridgeSignal(startSignal),
                                                         outputWidth: mode.width, outputHeight: mode.height,
@@ -1080,6 +1099,12 @@ final class DeckLinkService: ObservableObject {
             // Reflect the mode actually established (honors any bridge-side support fallback).
             if let active = result.activeModeName {
                 DispatchQueue.main.async { self.modeLabel = active }
+            }
+            let frameSeconds = self.bridge.activeFrameSeconds
+            DispatchQueue.main.async {
+                guard self.isOutputting else { return }   // a stop already overtook this start
+                self.activeFrameSeconds = frameSeconds
+                self.cardOutputChanged?(frameSeconds)
             }
         } else {
             self.renderer?.stopDeckLinkOutput()

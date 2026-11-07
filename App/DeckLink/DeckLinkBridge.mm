@@ -16,6 +16,63 @@
 #include <chrono>
 #include <unistd.h>
 
+#if DEBUG
+#include <mach/mach_time.h>
+// [CARDCLOCK] (MANIFOLD_CARDCLOCK_LOG=1; DEBUG; pre-ship removal, docs/BUGS.md; docs/CARD_CLOCK_FINDINGS.md). Measurement only, reads
+// nothing but status. Once a second from the completion callback: the completed-frame count, the host time, the frame's completion
+// timestamp (the SDK: locked to the system clock) and the output's hardware reference clock (the SDK: locked to the rate the hardware
+// outputs frames). [CARDCLOCK-REF] at output start and once a minute: reference, clock adjustment and temperature.
+namespace {
+struct CardClockProbe {
+    IDeckLinkStatus *status = nullptr; IDeckLinkStatistics *stats = nullptr;
+    IDeckLinkProfileAttributes *attrs = nullptr; IDeckLinkConfiguration *config = nullptr;
+};
+CardClockProbe gCardClock;   // held for the process: a measurement build, env-gated
+const bool kCardClockLog = getenv("MANIFOLD_CARDCLOCK_LOG") != nullptr;
+double cardClockHostNow() {
+    static mach_timebase_info_data_t tb = [] { mach_timebase_info_data_t t; mach_timebase_info(&t); return t; }();
+    return (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
+}
+void cardClockAdopt(IDeckLink *device) {
+    if (!kCardClockLog || gCardClock.status) return;
+    device->QueryInterface(IID_IDeckLinkStatus, (void **)&gCardClock.status);
+    device->QueryInterface(IID_IDeckLinkStatistics, (void **)&gCardClock.stats);
+    device->QueryInterface(IID_IDeckLinkProfileAttributes, (void **)&gCardClock.attrs);
+    device->QueryInterface(IID_IDeckLinkConfiguration, (void **)&gCardClock.config);
+}
+void cardClockLogReference(const char *when, IDeckLinkOutput *output) {
+    if (!kCardClockLog) return;
+    BMDReferenceStatus ref = 0; const HRESULT refHr = output->GetReferenceStatus(&ref);
+    bool hasRef = false, canAdjust = false, refLocked = false, inLocked = false;
+    int64_t refMode = 0, refFlags = 0, adjust = 0, refOut = 0, temp = 0;
+    HRESULT hasHr = E_FAIL, canHr = E_FAIL, lockHr = E_FAIL, modeHr = E_FAIL, flagsHr = E_FAIL, inHr = E_FAIL, adjHr = E_FAIL, outHr = E_FAIL, tempHr = E_FAIL;
+    if (gCardClock.attrs) {
+        hasHr = gCardClock.attrs->GetFlag(BMDDeckLinkHasReferenceInput, &hasRef);
+        canHr = gCardClock.attrs->GetFlag(BMDDeckLinkSupportsClockTimingAdjustment, &canAdjust);
+    }
+    if (gCardClock.status) {
+        lockHr = gCardClock.status->GetFlag(bmdDeckLinkStatusReferenceSignalLocked, &refLocked);
+        modeHr = gCardClock.status->GetInt(bmdDeckLinkStatusReferenceSignalMode, &refMode);
+        flagsHr = gCardClock.status->GetInt(bmdDeckLinkStatusReferenceSignalFlags, &refFlags);
+        inHr = gCardClock.status->GetFlag(bmdDeckLinkStatusVideoInputSignalLocked, &inLocked);
+    }
+    if (gCardClock.config) {
+        adjHr = gCardClock.config->GetInt(bmdDeckLinkConfigClockTimingAdjustment, &adjust);
+        outHr = gCardClock.config->GetInt(bmdDeckLinkConfigReferenceOutputMode, &refOut);
+    }
+    if (gCardClock.stats) tempHr = gCardClock.stats->GetInt(bmdDeckLinkStatisticDeviceTemperature, &temp);
+    fprintf(stdout, "[CARDCLOCK-REF] %s host %.6f refStatus 0x%x (hr 0x%08X) hasRefInput %d (hr 0x%08X) refLocked %d (hr 0x%08X) "
+                    "refMode 0x%llx (hr 0x%08X) refFlags 0x%llx (hr 0x%08X) inputLocked %d (hr 0x%08X) "
+                    "supportsClockAdjust %d (hr 0x%08X) clockAdjust %lld (hr 0x%08X) refOutputMode 0x%llx (hr 0x%08X) temp %lld (hr 0x%08X)\n",
+            when, cardClockHostNow(), (unsigned)ref, (unsigned)refHr, (int)hasRef, (unsigned)hasHr, (int)refLocked, (unsigned)lockHr,
+            (unsigned long long)refMode, (unsigned)modeHr, (unsigned long long)refFlags, (unsigned)flagsHr, (int)inLocked, (unsigned)inHr,
+            (int)canAdjust, (unsigned)canHr, (long long)adjust, (unsigned)adjHr, (unsigned long long)refOut, (unsigned)outHr,
+            (long long)temp, (unsigned)tempHr);
+    fflush(stdout);
+}
+}
+#endif
+
 #pragma mark - Value object
 
 @implementation DeckLinkDeviceInfo {
@@ -467,6 +524,7 @@ public:
     }
 
     // Stats (read after stop for the run summary).
+    void setCardFrame(DeckLinkCardFrameBlock block) { m_cardFrame = block; }   // before the start, so no callback races it
     int64_t  framesScheduled() const { return m_nextIndex.load(); }
     uint64_t completedCount()  const { return m_completed.load(); }
     uint64_t lateCount()       const { return m_late.load(); }
@@ -670,6 +728,13 @@ public:
 
     // --- IDeckLinkVideoOutputCallback (runs on the SDK's dedicated callback thread) ---
     HRESULT ScheduledFrameCompleted(IDeckLinkVideoFrame *completedFrame, BMDOutputFrameCompletionResult result) override {
+        // The card's line, for the file clock (docs/CARD_CLOCK_FINDINGS.md §10.1). Only a frame that completed has a stamp that
+        // says when its slot passed; a late or dropped frame still counts as a slot, so the line stays true across it.
+        if (m_cardFrame && result == bmdOutputFrameCompleted) {
+            BMDTimeValue stamp = 0;
+            if (m_output->GetFrameCompletionReferenceTimestamp(completedFrame, 1000000000, &stamp) == S_OK)
+                m_cardFrame((int64_t)(m_completed.load() + m_late.load() + m_dropped.load()), (double)stamp / 1e9);
+        }
 #if DEBUG
         // [CADENCE] the first completions against the card's clock: which result, the stream time now, and the
         // frame's own completion timestamp, so a frame-#0 drop at start can be placed (docs/BUGS.md).
@@ -681,6 +746,23 @@ public:
                     (int)result, (long long)streamTime, (long long)doneTime, (long long)m_timeScale,
                     (long long)m_frameDuration);
             fflush(stdout);
+        }
+#endif
+#if DEBUG
+        if (kCardClockLog && result != bmdOutputFrameFlushed) {
+            const uint64_t n = m_completed.load() + m_late.load() + m_dropped.load();
+            const uint64_t perSecond = (uint64_t)std::llround((double)m_timeScale / (double)m_frameDuration);
+            if (perSecond && n % perSecond == 0) {
+                BMDTimeValue done = 0, hw = 0, inFrame = 0, ticks = 0;
+                const double before = cardClockHostNow();
+                m_output->GetHardwareReferenceClock(1000000000, &hw, &inFrame, &ticks);
+                const double after = cardClockHostNow();
+                m_output->GetFrameCompletionReferenceTimestamp(completedFrame, 1000000000, &done);
+                fprintf(stdout, "[CARDCLOCK] n %llu result %d host %.9f hostAfter %.9f done %lld hw %lld inFrame %lld ticks %lld\n",
+                        (unsigned long long)n, (int)result, before, after, (long long)done, (long long)hw, (long long)inFrame, (long long)ticks);
+                fflush(stdout);
+                if (n % (perSecond * 60) == 0) cardClockLogReference("minute", m_output);
+            }
         }
 #endif
         // Tally + immediately surface any non-Completed result (the "is scheduling keeping up?" signal).
@@ -991,6 +1073,7 @@ private:
     BMDTimeValue m_frameDuration;
     BMDTimeScale m_timeScale;
     FrameFillFn m_fill;
+    DeckLinkCardFrameBlock m_cardFrame = nil;
     std::vector<IDeckLinkMutableVideoFrame *> m_pool;
     std::atomic<bool> m_running;
     std::atomic<int64_t> m_nextIndex;
@@ -1561,6 +1644,9 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     HRESULT hr = target->QueryInterface(IID_IDeckLinkOutput, (void **)&output);
     CFStringRef nameRef = NULL; target->GetDisplayName(&nameRef);
     NSString *name = NSStringTakeDeckLink(nameRef);
+#if DEBUG
+    cardClockAdopt(target);
+#endif
     target->Release();
     if (hr != S_OK || output == NULL) {
         [log addObject:[NSString stringWithFormat:@"device: index %ld has no IDeckLinkOutput (QueryInterface hr=0x%08X) — aborting",
@@ -1607,6 +1693,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     // its own (colour S7, D5). The resolved `wantMode` drives EnableVideoOutput + DoesSupportVideoMode.
     DeckLinkScheduledPlayer *player =
         new DeckLinkScheduledPlayer(output, wantMode, width, height, rowBytes, frameDuration, timeScale, fill, initialSignal);
+    player->setCardFrame(self.cardFrame);
     output->Release();
     [log addObject:[NSString stringWithFormat:@"tag: until the first picture — colorspace %@ · EOTF %d%@",
                     (initialSignal.rec2020 ? @"Rec. 2020" : @"Rec. 709"), (int)initialSignal.eotf,
@@ -1734,10 +1821,14 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         player->stop(); player->Release();
         return [[DeckLinkOutputResult alloc] initFailureWithLog:log call:@(step.call) hresult:step.hr];
     }
+#if DEBUG
+    cardClockLogReference("start", output);
+#endif
     [log addObject:[NSString stringWithFormat:@"start: StartScheduledPlayback(0, %lld, 1.0) OK — free-running at %@%@",
                     (long long)timeScale, modeName, player->audioEnabled() ? @" (video + SDI audio)" : @" (video only)"]];
 
     _player = player;   // held; callback keeps the pipeline full until -stopScheduledPlayback
+    _activeFrameSeconds = (double)frameDuration / (double)timeScale;
     return [[DeckLinkOutputResult alloc] initWithSuccess:YES log:log activeModeName:modeName];
 }
 
@@ -1790,6 +1881,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 }
 
 - (void)stopScheduledPlaybackEndingOnBlack:(BOOL)endOnBlack {
+    _activeFrameSeconds = 0;
     if (_player != NULL) {
         const bool hadAudio = _player->audioEnabled();
         _player->stop(endOnBlack);   // StopScheduledPlayback → unset both callbacks → Disable audio → [final black] → Disable video → free pool/output

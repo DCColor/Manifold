@@ -937,6 +937,7 @@ struct ContentView: View {
             scopeColorFeed.refresh()
             #if DEBUG
             DebugStepHook.run(engine: engine, renderer: metalRenderer)   // measurement only, env-gated
+            DebugTransportHook.run(engine: engine)                       // measurement only, env-gated
             #endif
         }
         // The watch's OTHER re-baseline — the one that covers re-opening the file this deck already

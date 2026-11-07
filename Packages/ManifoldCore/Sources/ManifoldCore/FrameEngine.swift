@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 import StillImageInfo
 // The ASRC stage at the live-audio seam — `LiveAudioSink` is its only caller.
 import LiveAudioResample
+import CardClock
 import SyncCalibration
 import FileAudioLookahead
 import ColorimetryModel   // SourceChroma — the chain readout's Chroma line (Stage 3b S2)
@@ -626,6 +627,16 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public var onScrubFrame: ((CVPixelBuffer, Double) -> Void)?
 
     public init() {
+        #if MANIFOLD_CARDCLOCK
+        // Card-clock measurement (pre-ship removal, docs/BUGS.md; docs/CARD_CLOCK_FINDINGS.md): a named output device for this
+        // run, so the built-in output can be measured without changing the system default. Neither DEBUG (never reaches this
+        // package in Profile) nor MANIFOLD_TELEMETRY (defined in Release too): the condition is set only on the measurement
+        // build's xcodebuild command line, so every other build compiles this out.
+        if let uid = ProcessInfo.processInfo.environment["MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID"] {
+            audioRenderer.audioOutputDeviceUniqueID = uid
+            print("[CARDCLOCK] audio renderer device read-back: \(audioRenderer.audioOutputDeviceUniqueID ?? "nil")")
+        }
+        #endif
         synchronizer.addRenderer(audioRenderer)
         // Every rate change, from whichever of the many `rate` / `setRate` sites made it: the app's display
         // renderer stops its link while paused, and Play must restart it even when no new frame is enqueued
@@ -671,6 +682,98 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// thread-safety for this call, so it is nonisolated despite @MainActor.
     public nonisolated func currentSyncTime() -> CMTime {
         synchronizer.currentTime()
+    }
+
+    // MARK: - The card as master clock (docs/CARD_CLOCK_FINDINGS.md §10)
+
+    // Stage 1a: a file with NO AUDIO TRACK only. While output runs, once a second, the synchronizer is written onto the card's line,
+    // so the pull (`deckLinkPullSlotLocked`) sees a clock that advances one card frame per slot and a frame can no longer slip. Every
+    // reader of the clock is unchanged. With a track, or with output off, none of this acts: no timer exists with output off.
+    //
+    // MAIN ACTOR, AND THAT IS WHAT MAKES A WRITE SAFE. Every transport write is on main too, so a tick cannot land between a pause
+    // and its rate 0 and start the clock again.
+    nonisolated private let cardSamples = CardClockSampleRing()
+    private var cardSteering: CardClockSteering?
+    private var cardTimer: DispatchSourceTimer?
+    /// The rate on the synchronizer is the card's, not the transport's: leaving card lock must put 1.0 back.
+    private var cardSteered = false
+    private var cardWait: CardClockSteering.Wait?
+    private var cardStats = (ticks: 0, worst: 0.0)
+
+    /// SDK callback thread, once per frame.
+    public nonisolated func noteCardFrame(slot: Int64, host: Double) { cardSamples.append(slot: slot, host: host) }
+
+    /// Each output start, a mode change's included: its slots start again from 0.
+    public func cardOutputBegan(frameSeconds: Double) {
+        releaseCardClock(reason: "output restarted")
+        cardSamples.reset()
+        cardSteering = CardClockSteering(frameSeconds: frameSeconds)
+        guard cardTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(20))
+        timer.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.cardClockTick() } }
+        timer.resume()
+        cardTimer = timer
+    }
+
+    public func cardOutputEnded() {
+        cardTimer?.cancel(); cardTimer = nil
+        releaseCardClock(reason: "output stopped")
+        cardSteering = nil
+        cardSamples.reset()
+    }
+
+    private func cardClockTick() {
+        guard var steering = cardSteering else { return }
+        guard hasMedia, mediaKind == .video, audioPresence == .absent else {
+            releaseCardClock(reason: "not a file without sound")
+            return
+        }
+        let running = isPlaying && shuttleRate == 1 && abs(synchronizer.rate - 1) < 0.01
+        let t0 = CACurrentMediaTime()
+        let clock = CMTimeGetSeconds(synchronizer.currentTime())
+        let t1 = CACurrentMediaTime()
+        let decision = steering.tick(samples: cardSamples.snapshot(), clock: clock, clockHost: (t0 + t1) / 2, running: running)
+        cardSteering = steering
+        switch decision {
+        case .idle:
+            cardWait = nil
+        case .wait(let why):
+            // `settling` is the tick before every latch: not worth a line.
+            if why != cardWait, why != .settling { print("[CARDLOCK] holding: \(why.rawValue)") }
+            cardWait = why
+        case .write(let w):
+            cardWait = nil
+            synchronizer.setRate(Float(w.rate), time: CMTime(seconds: w.time, preferredTimescale: 1_000_000_000),
+                                 atHostTime: CMTime(seconds: w.host, preferredTimescale: 1_000_000_000))
+            cardSteered = true
+            if let latched = w.latched {
+                print(String(format: "[CARDLOCK] latched (%@) at clock %.6f · card %+.2f ppm against the host", latched.rawValue, w.time, (w.rate - 1) * 1e6))
+            }
+            #if DEBUG || MANIFOLD_TELEMETRY
+            cardStats.ticks += 1
+            cardStats.worst = max(cardStats.worst, abs(w.error))
+            if cardStats.ticks == 10 {
+                print(String(format: "[CARDLOCK] card %+.2f ppm · error %+.1f µs now, %.1f µs worst in 10 s", (w.rate - 1) * 1e6, w.error * 1e6, cardStats.worst * 1e6))
+                cardStats = (0, 0)
+            }
+            #endif
+        }
+    }
+
+    /// Leave the card's line. The clock keeps its place: 1.0 from a host time in the past is the write that does not stop it.
+    private func releaseCardClock(reason: String) {
+        guard cardSteered else { return }
+        cardSteered = false
+        if synchronizer.rate != 0, abs(synchronizer.rate - 1) < 0.01 {
+            let rate = Double(synchronizer.rate)
+            let host = CACurrentMediaTime()
+            let clock = CMTimeGetSeconds(synchronizer.currentTime())
+            let past = host - 0.005
+            synchronizer.setRate(1, time: CMTime(seconds: clock - 0.005 * rate, preferredTimescale: 1_000_000_000),
+                                 atHostTime: CMTime(seconds: past, preferredTimescale: 1_000_000_000))
+        }
+        print("[CARDLOCK] released: \(reason)")
     }
 
     /// True when transport is paused (synchronizer rate 0). Readable from any thread

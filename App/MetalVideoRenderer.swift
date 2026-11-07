@@ -1601,6 +1601,10 @@ final class MetalVideoRenderer {
         if t - playbackStats.since >= 1 {
             print(String(format: "[PLAYBACK-STATS] t=%.3f presented=%d dropped=%d late=%d pts=%.3f",
                          now, playbackStats.presented, playbackStats.dropped, playbackStats.late, pts))
+            // Card-clock measurement (pre-ship removal, docs/BUGS.md): the file clock against the host with output off, where [CADENCE] has no rows.
+            if ProcessInfo.processInfo.environment["MANIFOLD_CARDCLOCK_LOG"] == "1", let c = clock?() {
+                print(String(format: "[CARDCLOCK-FILE] host %.6f clock %.6f", CACurrentMediaTime(), c))
+            }
             playbackStats = (0, 0, 0, t)
         }
     }
