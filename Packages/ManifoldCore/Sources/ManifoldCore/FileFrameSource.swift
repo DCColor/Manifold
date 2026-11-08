@@ -48,6 +48,11 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
     /// decoding a frame the queue would have to evict. Set by the owner before `start()`; nil pumps as before.
     public var sinkGate: VideoSinkGate?
 
+    #if MANIFOLD_CARDCLOCK
+    /// The freeze watch (`PumpWatch`, pre-ship removal). Set by the owner before `start()`.
+    public var pumpWatch: PumpWatch?
+    #endif
+
     private let output: AVAssetReaderTrackOutput
     private let reader: AVAssetReader
     private let pacingRenderer: AVSampleBufferVideoRenderer
@@ -106,20 +111,45 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
         let current = isCurrent
         let gate = sinkGate
         let queue = pumpQueue
+        #if MANIFOLD_CARDCLOCK
+        let watch = pumpWatch
+        watch?.armed()
+        #endif
         // A local function rather than the closure inline, so a parked pump can be resumed with the same body.
         func pump() {
+            #if MANIFOLD_CARDCLOCK
+            watch?.callback()
+            #endif
             // Superseded by a newer session: do NOT stop the renderer — the new
             // session already re-armed it; just bow out.
-            guard current() else { return }
+            guard current() else {
+                #if MANIFOLD_CARDCLOCK
+                watch?.exit(.superseded)
+                #endif
+                return
+            }
             while renderer.isReadyForMoreMediaData {
-                guard current() else { return }
+                guard current() else {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.superseded)
+                    #endif
+                    return
+                }
                 // The window's queue is full: park rather than decode a frame it would evict. Resumed when the queue
                 // takes a frame (`VideoSinkGate`). Before the decode, so nothing is read that cannot be queued.
                 if let gate, !gate.hasRoom {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.parked)
+                    gate.park { watch?.resumed(); queue.async { pump() } }
+                    #else
                     gate.park { queue.async { pump() } }
+                    #endif
                     return
                 }
                 guard rdr.status == .reading, let next = out.copyNextSampleBuffer() else {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.endOfStream, detail: "AVF reader status \(rdr.status.rawValue), error \(rdr.error.map { String(describing: $0) } ?? "none")")
+                    #endif
                     // Genuine end-of-stream for the CURRENT session: stop requesting
                     // so the renderer doesn't spin on an exhausted reader.
                     renderer.stopRequestingMediaData(); return
@@ -128,9 +158,21 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
                 // can retire this session and flush the renderer inside it. Emitting then would put the
                 // retired reader's frame — one decoded AHEAD of the old position, so usually later than the
                 // new target — into the new session's queue (docs/BUGS.md, the paused-step overshoot).
-                guard current() else { return }
+                guard current() else {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.superseded)
+                    #endif
+                    return
+                }
                 emit?(next)
+                #if MANIFOLD_CARDCLOCK
+                watch?.emitted(pts: CMSampleBufferGetPresentationTimeStamp(next).seconds)
+                #endif
             }
+            #if MANIFOLD_CARDCLOCK
+            if renderer.status == .failed { watch?.noteFailed { String(describing: renderer.error) } }
+            watch?.exit(.notReady)
+            #endif
         }
         renderer.requestMediaDataWhenReady(on: pumpQueue) { pump() }
     }

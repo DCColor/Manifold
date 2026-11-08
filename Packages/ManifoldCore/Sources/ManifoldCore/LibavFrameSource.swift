@@ -100,6 +100,11 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// The display queue's backpressure, as `FileFrameSource.sinkGate`. Set by the owner before `arm`.
     public var sinkGate: VideoSinkGate?
 
+    #if MANIFOLD_CARDCLOCK
+    /// The freeze watch (`PumpWatch`, pre-ship removal). Set by the owner before `arm`.
+    public var pumpWatch: PumpWatch?
+    #endif
+
     private let url: URL
     /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries: the file's
     /// resolved format (`FileChromaProbe`), `x422` for HQX, `x444` for 4:4:4 (Stage 3b S2).
@@ -466,25 +471,57 @@ public final class LibavFrameSource: @unchecked Sendable {
         let current = isCurrent
         let gate = sinkGate
         let queue = pumpQueue
+        #if MANIFOLD_CARDCLOCK
+        let watch = pumpWatch
+        watch?.armed()
+        #endif
         // Seek runs on pumpQueue BEFORE the first pump pull (serial queue ordering).
         pumpQueue.async { [weak self] in self?.seekOnPump(toSeconds: time) }
         // A local function so a parked pump can be resumed with the same body (`FileFrameSource.start`).
         func pump(_ source: LibavFrameSource?) {
+            #if MANIFOLD_CARDCLOCK
+            watch?.callback()
+            #endif
             // Superseded / deallocated: bow out WITHOUT stopping the shared renderer
             // (the new session already re-armed it) — the Stage 1 race fix.
-            guard let source, current() else { return }
+            guard let source, current() else {
+                #if MANIFOLD_CARDCLOCK
+                watch?.exit(source == nil ? .released : .superseded)
+                #endif
+                return
+            }
             while renderer.isReadyForMoreMediaData {
-                guard current() else { return }
+                guard current() else {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.superseded)
+                    #endif
+                    return
+                }
                 // The window's queue is full: park, don't decode (`VideoSinkGate`).
                 if let gate, !gate.hasRoom {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.parked)
+                    gate.park { [weak source] in watch?.resumed(); queue.async { pump(source) } }
+                    #else
                     gate.park { [weak source] in queue.async { pump(source) } }
+                    #endif
                     return
                 }
                 guard let sb = source.nextFrame() else {
+                    #if MANIFOLD_CARDCLOCK
+                    watch?.exit(.endOfStream, detail: "libav nextFrame returned nil")
+                    #endif
                     renderer.stopRequestingMediaData(); return   // genuine end-of-stream
                 }
                 emit?(sb)
+                #if MANIFOLD_CARDCLOCK
+                watch?.emitted(pts: CMSampleBufferGetPresentationTimeStamp(sb).seconds)
+                #endif
             }
+            #if MANIFOLD_CARDCLOCK
+            if renderer.status == .failed { watch?.noteFailed { String(describing: renderer.error) } }
+            watch?.exit(.notReady)
+            #endif
         }
         renderer.requestMediaDataWhenReady(on: pumpQueue) { [weak self] in pump(self) }
     }

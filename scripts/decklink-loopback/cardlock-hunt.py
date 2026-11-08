@@ -6,7 +6,8 @@
 #   cardlock-hunt.py replay <log>                         the detector alone over an existing log
 # On detection, before anything else: sample, a spindump (only if spindump-watch.sh is running as root), the last 60 s of logs, and whether the window is frozen, saved in
 # build/cardclock/hunt/<label>-<n>/. Then quit by PID, guard, relaunch, carry on until the deadline. A guard trip, or a build that will not quit, stops everything.
-# `touch build/cardclock/hunt/STOP` ends a case cleanly.
+# `touch build/cardclock/hunt/STOP` ends a case cleanly. HUNT_STOP_FIRST=1 ends it at the first detection.
+# MANIFOLD_CARDLOCK_STEER_HZ (measurement build) and MANIFOLD_PUMPWATCH_SELFTEST pass through to the build; the rate is kept in <label>.json (§10.14).
 import datetime, json, os, random, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
 OUT = f"{REPO}/build/cardclock/hunt"; PROC = f"{REPO}/scripts/manifold-proc.sh"; AXT = f"{REPO}/build/linkpace/linkpace-ax"
@@ -137,7 +138,8 @@ def launch_once(label, n, gate, steps, deadline, state):
 
 def hunt(mode, gate, label, deadline):
     rng = random.Random(); seed = rng.randrange(1 << 30); rng.seed(seed)
-    state = dict(plays=0, ran=0.0, fz=0, events=[], seed=seed, gate=gate, mode=mode, began=datetime.datetime.now().isoformat(timespec="seconds")); n = 0
+    state = dict(plays=0, ran=0.0, fz=0, events=[], seed=seed, gate=gate, mode=mode, steer_hz=os.environ.get("MANIFOLD_CARDLOCK_STEER_HZ", "1"),
+                 began=datetime.datetime.now().isoformat(timespec="seconds")); n = 0
     while time.time() < deadline and not os.path.exists(f"{OUT}/STOP"):
         n += 1
         if mode == "cycle":
@@ -147,6 +149,7 @@ def hunt(mode, gate, label, deadline):
         r = launch_once(label, n, gate, steps, deadline, state)
         json.dump(dict(state, launches=n, ended=datetime.datetime.now().isoformat(timespec="seconds")), open(f"{OUT}/{label}.json", "w"), indent=1)
         if r in ("no-launch", "no-output"): say(f"stopping {label}: {r}"); break
+        if r == "detected" and os.environ.get("HUNT_STOP_FIRST") == "1": say(f"stopping {label}: first detection (HUNT_STOP_FIRST)"); break
     say(f"{label} DONE: {state['ran'] / 3600:.2f} h, Plays {state['plays']}, detections {state['fz']}")
 
 if __name__ == "__main__":

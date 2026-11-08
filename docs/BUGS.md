@@ -1542,6 +1542,11 @@ Added 2026-11-05 for `CARD_CLOCK_FINDINGS.md`. Measurement only; none changes be
   Profile, and `MANIFOLD_TELEMETRY` is defined in Release too. The condition exists only on the measurement build's `xcodebuild` command
   line (`OTHER_SWIFT_FLAGS`), so a normal Profile or Release build compiles it out.
 - `[CARDCLOCK-FILE]`, `App/MetalVideoRenderer.swift`, `notePlaybackStats` (`#if DEBUG`, `MANIFOLD_CARDCLOCK_LOG=1` with `MANIFOLD_PLAYBACK_STATS=1`): the file clock against the host with output off. Added 2026-11-06 for Stage 1a.
+- The freeze watch, added 2026-11-07 for `CARD_CLOCK_FINDINGS.md` §10.14, all behind `#if MANIFOLD_CARDCLOCK`: `PumpWatch.swift` (the whole file);
+  its `pumpWatch` field and calls in the two video pumps (`FileFrameSource.start`, `LibavFrameSource.arm`); in `FrameEngine`, the `pumpWatch`
+  instance and its two `source.pumpWatch =` lines, `startPumpWatch()` in `init`, `observePacingRenderer` in `attach(renderer:)`, the
+  "freeze watch" MARK section (`[PUMPWATCH]` and `MANIFOLD_PUMPWATCH_SELFTEST`), and `MANIFOLD_CARDLOCK_STEER_HZ` with `cardWrites`/`cardLastWriteHost`.
+  When removing it, `cardSteerHz` goes back to a fixed 1 Hz timer.
 - `DebugTransportHook`, `App/DebugStepHook.swift`, and its call in `ContentView` (`#if DEBUG`, `MANIFOLD_DEBUG_TRANSPORT`): scripted play, pause, seek, step, shuttle, loop and `dest sdi|computer`, the transport moves being key-only. Added 2026-11-06 for Stage 1a; `dest` for Stage 1b.
 
 What stays and what goes at Stage 3: `CARD_CLOCK_FINDINGS.md` §10.6. The completion read is now shipped code (the `cardFrame` block in the bridge); the `[CARDCLOCK]` log around it is still a hook.
@@ -3788,12 +3793,18 @@ recent frame at the vsync rather than per frame. Window only; SDI must stay as m
 - **The stack:** no thread is blocked. `pump.video`, `AVSampleBufferVideoRenderer videoQueue` and the Metal queue are absent, where a healthy sample has them busy.
 - **Three branches, none logged:** the pacing renderer stops calling back (its `status` and `error` are never read on the pump's path), the gate parks the pump for good (unlikely), or the pump takes its end-of-stream branch mid-file.
 - **The difference between the gates:** gate on, the steering's 1 Hz rate writes take the picture timebase through rate 0. That is a correlation, not a shown cause.
-- **Next:** instrument those three branches, and run about 10.5 h gate-off to settle whether it is pre-existing.
+- **Instrumented, 2026-11-07 (§10.14):** each branch now logs (`[PUMPWATCH]`, measurement build), and a picture stuck 2 s logs the pacing renderer's state and the time since the last steering write. Checked against a forced branch 1.
+- **Re-anchor stress, 2026-11-08 (§10.14):** steering raised to 10 Hz, then 20 Hz, gate on, 0.97 h each: **0 freezes** at both, with CoreMedia taking the video queue through rate 0 on every write (34,783 and 69,604 times). A per-write trigger at the 1 Hz rate would have given about 2.1; none happens 12% of the time. The trip through rate 0 is not shown to be the trigger.
+- **Next:** about 10.5 h gate-off, with the freeze watch in the build, to settle whether it is pre-existing. Not started.
 - **Not the Jump stall:** that stops the audio pump with the picture running.
 
 ## ☐ OPEN 2026-11-07 — PRE-EXISTING, IN 0.9.2 — a change of the system default output silences SDI audio until the session ends
 
-`CARD_CLOCK_FINDINGS.md` §10.13. **Not 1b's:** tested with Robbie on `d7a4e93` and on 1b, and both do it. A file with sound, destination SDI. Jump Desktop switches the default output on connect, and SDI audio goes silent 0.65 s (`d7a4e93`) or 2.7 s (1b) later and stays silent. Disconnecting does not bring it back: 337 s after the restore, both were still silent, for 423 s and 488 s in all. The window and the SDI picture play on with no repeat, skip, late or drop. A restore can stop a running pump too (`s-ph1-s4`).
+**In 1.0 scope (decided, Robbie, 2026-11-07), queued behind the card-lock picture freeze above.**
+
+`CARD_CLOCK_FINDINGS.md` §10.13. **Not 1b's:** tested with Robbie on `d7a4e93` and on 1b, and both do it. A file with sound, destination SDI. Jump Desktop switches the default output on connect, and SDI audio goes silent 0.65 s (`d7a4e93`) or 2.7 s (1b) later and stays silent. **SDI audio did NOT recover after Jump disconnected:** 337 s after the restore, both were still silent, for 423 s (`d7a4e93`) and 488 s (1b) in all, each to the end of its session.
+
+⚠️ **Superseded: "it recovers in 27–95 s".** The first reading of the overnight 1b logs (`CARD_CLOCK_FINDINGS.md` §10.12, Fault 2) took three silences of 27, 95 and about 28 s as stall lengths, i.e. as the time to recovery. They were not: each silence ran to the end of its session, so it measured the time left in the session, not a stall that ended. Re-read from the underrun counts they are 26.4, 90.0 and 22.2 s. Why the first figures were 0.6–5.8 s longer is UNKNOWN: how they were taken was not recorded. What came back was the next session, under 1b, where a session's end moves the renderer. The attended runs, which watched 337 s past the restore, are the measurement. The window and the SDI picture play on with no repeat, skip, late or drop. A restore can stop a running pump too (`s-ph1-s4`).
 
 The pump stops. The renderer reads ready, its callback does not fire, and the audio clock stays right. Under 1b a renderer move restarts it, and the next session of the launch was clean. On `d7a4e93` there is no renderer move, and what restarts it is UNKNOWN: Pause and Play were not tried, and the run ended by quitting. Any default-output change should do the same, though only Jump's were seen, and the Mac's own output was not measured. Candidate fix, not built: re-arm the request on the 1 Hz tick when the renderer is ready and the tap is not filling.
 

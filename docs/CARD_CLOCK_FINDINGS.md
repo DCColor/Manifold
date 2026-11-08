@@ -663,7 +663,7 @@ UNKNOWN: whether the pump is blocked or the renderer stopped asking; whether it 
 - **T2 and T3 at full length** are deferred until the freeze is understood.
 - **Genlock:** as §10.4 and §10.5 record.
 
-**Jump, attended, with Robbie connecting and disconnecting.** A file with sound, destination SDI, 59.94, capture closed, Scarlett the default output. `j-today` is `d7a4e93` from a `git archive` export (`build/linkpace-src/d7a4e93`), `j-1b` the working tree. `defout.swift` logged the default output on the host clock, and Jump's own log agrees to the second.
+**Jump, attended, with Robbie connecting and disconnecting.** A file with sound, destination SDI, 59.94, capture closed, Scarlett the default output. `j-today` is `d7a4e93` from a `git archive` export (`build/linkpace-src/d7a4e93`) (deleted 2026-11-08: gate off now reproduces `d7a4e93`, §10.13 "The gate"), `j-1b` the working tree. `defout.swift` logged the default output on the host clock, and Jump's own log agrees to the second.
 
 | | `j-today` | `j-1b` |
 |---|---|---|
@@ -767,3 +767,29 @@ A freeze is not a permanent version of the Jump stall. The freeze stack does not
 **To confirm:**
 - **(i) Gate-off hours.** About 10.5 h of gate-off cycling, three times the 1b mean interval, gives a 95% chance of at least one freeze if gate off freezes at 1b's rate.
 - **(ii) Instrumentation, so the next freeze names its branch.** Log when the pump parks and resumes, when it takes the end-of-stream branch, and, once pts has been stuck 2 s, the pacing renderer's `isReadyForMoreMediaData`, `status`, `error` and `requiresFlushToResumeDecoding`.
+
+### 10.14 Freeze: instrumentation and the re-anchor stress, 2026-11-07/08
+
+Measure only, no fix (Robbie, 2026-11-07). Guarded Profile measurement builds (`-DMANIFOLD_CARDCLOCK`), launched by absolute path, quit by PID, no keystrokes. Nothing committed at the time of the runs.
+
+**Instrumentation (ii above), built.** `PumpWatch.swift`, the two video pumps (`FileFrameSource.start`, `LibavFrameSource.arm`) and `FrameEngine`'s freeze watch, all behind `#if MANIFOLD_CARDCLOCK`. DEBUG never reaches ManifoldCore in Profile (`project.yml`, the `configs:` note), so that flag is the package's measurement-only switch. On the pre-ship removal list (`BUGS.md`).
+- **Logged as it happens:** the end-of-stream branch, with the reader's status and error (branch 3). A park on a full window queue that lasts 1 s or more (branch 2). The pacing renderer reading `.failed` at a pump exit, and its `didFailToDecode` and `requiresFlushToResumeDecodingDidChange` notifications (branch 1).
+- **Counted:** the two exits meant to be quiet, a superseded session and a released libav source, so a freeze that takes one is not missed.
+- **Once the picture has been stuck 2 s** (no frame out of the pump, or the newest frame 2 s behind the clock), and again at 10 s: `[PUMPWATCH] PICTURE STUCK`, with the branch it names, the pacing renderer's status, error, `isReadyForMoreMediaData`, `requiresFlushToResumeDecoding`, and its timebase's rate and time; the synchronizer's rate; the audio clock; the pump's callback count, last callback, last exit, parks; the reader; and the time since the last steering write.
+- **Checked against a known answer:** `MANIFOLD_PUMPWATCH_SELFTEST=20` stops the renderer's request 20 s into play. The report came at 2.00 s and 10.01 s and named branch 1, "stopped calling back (ready, no callback for 2.000 s)", with status 1, no error, ready true, timebase rate 0.999989 (`hunt/selftest-1/`, `hunt/selftest-L1.log`). The hunt detected the same freeze from the pulls at 2.2 s. The steering was at 10 Hz: 219 writes in the 22 s.
+- **The normal Profile build** (no flag) compiles and holds none of the strings.
+
+**The stress (step 3).** `MANIFOLD_CARDLOCK_STEER_HZ` (measurement build; 1–60, default 1) sets the steering timer, leeway scaled with it. The steering itself is cadence-free (`CardClockSteering.tick`), so nothing else changed. `cardlock-hunt.py cycle on`, `HUNT_STOP_FIRST=1`: gate on, `cc-5994-2450s.mov` (sound), destination SDI, 59.94, capture closed, Plays of 120 s from random points, freeze from the pulls, as §10.13.
+
+| Rate | Hours run | Plays | Rate-0 dips of the video queue | Freezes | `[PUMPWATCH]` | Lock |
+|---|---|---|---|---|---|---|
+| 10 Hz (`hz10`) | 0.97 (3477 s) | 29 | 34,783, 10 a second (median) | **0** | 0 lines | 29 latches, error worst 136.6 µs in a 10 s window, 0 evictions, SDI audio on PCM throughout |
+| 20 Hz (`hz20`) | 0.97 (3480 s) | 29 | 69,604, 20 a second (median) | **0** | 0 lines | 29 latches, error worst 125.0 µs, 0 evictions, SDI audio on PCM throughout |
+| 1 Hz, for comparison (§10.13 (a)) | 2.90 | 88 | about 10,400 | 1 | — | |
+
+- **The suspect was really driven.** The dips are CoreMedia's own "Effective Timebase Rate of videoqueue changed to: 0.000" lines for each build's PID, from `/usr/bin/log show` (`hunt/tb-28175.log.gz`, `tb-61684.log.gz`; a 74 s 20 Hz check, `tb-95691.log.gz`, the same). Each write is still one trip through rate 0 at 20 Hz: CoreMedia does not merge them.
+- **Against the hypothesis that each trip through 0 is a trigger:** the 1 Hz freezes give about one per 49,800 dips (four freezes in about 49,800 s). That predicts 0.70 freezes at 10 Hz and 1.40 at 20 Hz, 2.1 together. None came. If the hypothesis held, that would happen 12% of the time (Poisson). Against "one per 3.5 h of running", whatever the rate, 1.93 h expects 0.55, and none happens 58% of the time.
+- **So by the brief's rule: not much faster than one per 3.5 h.** No freeze at 10 or 20 Hz in an hour each. The trip through rate 0 is not shown to be the trigger, and a strong per-write trigger is unlikely (12%). A weak or rate-independent dependence on the writes is not ruled out. No exit was taken, so no steering change is proposed.
+- **Next, per the brief, not started:** the 10.5 h of gate-off cycling (i above), now with the freeze watch in the build, so a freeze on either gate names its branch.
+
+⚠️ **A measuring note.** In zsh, `log` is a shell builtin, so `log show …` typed in a zsh command fails ("too many arguments"), and with stderr discarded it reads as "no lines". Use `/usr/bin/log`. `cardlock-hunt.py` runs it from Python, which finds `/usr/bin/log`, so its captures were never affected.

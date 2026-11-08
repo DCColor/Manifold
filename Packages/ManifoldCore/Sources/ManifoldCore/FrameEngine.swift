@@ -321,6 +321,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The window renderer's backpressure on this engine's file decode pumps (`VideoSinkGate`). The owner wires its
     /// renderer's queue to it; every file source this engine creates parks on it.
     public let videoSinkGate = VideoSinkGate()
+    #if MANIFOLD_CARDCLOCK
+    /// The freeze watch (`PumpWatch`, pre-ship removal): both video pumps report into it, `pumpWatchTick` reads it.
+    public let pumpWatch = PumpWatch()
+    #endif
     private var videoRenderer: AVSampleBufferVideoRenderer?
     // `nonisolated(unsafe)` for the same reason as `synchronizer`: the reference never changes, and
     // the one off-main reader is `liveAudioRendererState()` on the NDI audio pump (diagnostics only).
@@ -638,6 +642,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             audioRenderer.audioOutputDeviceUniqueID = uid
             print("[CARDCLOCK] audio renderer device read-back: \(audioRenderer.audioOutputDeviceUniqueID ?? "nil")")
         }
+        if ProcessInfo.processInfo.environment["MANIFOLD_CARDCLOCK_LOG"] == "1" { startPumpWatch() }
         #endif
         synchronizer.addRenderer(audioRenderer)
         // Every rate change, from whichever of the many `rate` / `setRate` sites made it: the app's display
@@ -677,6 +682,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         self.videoRenderer = renderer
         synchronizer.addRenderer(renderer)
+        #if MANIFOLD_CARDCLOCK
+        observePacingRenderer(renderer)
+        #endif
     }
 
     /// The synchronizer's current playback time, readable from any thread
@@ -714,6 +722,19 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// A renderer move is in flight. `removeRenderer` finishes later, and adding to a second synchronizer before it has is an exception.
     private var cardAudioMoving = false
 
+    /// How often the steering writes the clock. 1 Hz everywhere but the measurement build, where `MANIFOLD_CARDLOCK_STEER_HZ` (1–60) can
+    /// raise it to stress the write for the freeze (docs/CARD_CLOCK_FINDINGS.md §10.14; pre-ship removal of the variable).
+    #if MANIFOLD_CARDCLOCK
+    private static let cardSteerHz: Double = {
+        let v = Double(ProcessInfo.processInfo.environment["MANIFOLD_CARDLOCK_STEER_HZ"] ?? "") ?? 1
+        return v >= 1 && v <= 60 ? v.rounded() : 1
+    }()
+    private var cardWrites = 0
+    private var cardLastWriteHost = 0.0
+    #else
+    private static let cardSteerHz = 1.0
+    #endif
+
     /// SDK callback thread, once per frame.
     public nonisolated func noteCardFrame(slot: Int64, host: Double) { cardSamples.append(slot: slot, host: host) }
 
@@ -725,7 +746,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         updateCardAudioRoute()
         guard cardTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(20))
+        let hz = Self.cardSteerHz
+        #if MANIFOLD_CARDCLOCK
+        print(String(format: "[CARDLOCK] steering writes at %.0f Hz (MANIFOLD_CARDLOCK_STEER_HZ)", hz))
+        #endif
+        timer.schedule(deadline: .now() + 1, repeating: 1 / hz, leeway: .microseconds(Int(20_000 / hz)))
         timer.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.cardClockTick() } }
         timer.resume()
         cardTimer = timer
@@ -884,6 +909,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             synchronizer.setRate(Float(w.rate), time: CMTime(seconds: w.time, preferredTimescale: 1_000_000_000),
                                  atHostTime: CMTime(seconds: w.host, preferredTimescale: 1_000_000_000))
             cardSteered = true
+            #if MANIFOLD_CARDCLOCK
+            cardWrites += 1; cardLastWriteHost = CACurrentMediaTime()
+            #endif
             if let latched = w.latched {
                 print(String(format: "[CARDLOCK] latched (%@) at clock %.6f · card %+.2f ppm against the host", latched.rawValue, w.time, (w.rate - 1) * 1e6))
             }
@@ -892,7 +920,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             cardStats.ticks += 1
             cardStats.worst = max(cardStats.worst, abs(w.error))
             cardStats.audioWorst = max(cardStats.audioWorst, abs(audioPart ?? 0))
-            if cardStats.ticks == 10 {
+            if cardStats.ticks == Int(10 * Self.cardSteerHz) {
                 let audio = audioPart.map { String(format: " · audio %+.2f ms now, %.2f ms worst", $0 * 1e3, cardStats.audioWorst * 1e3) } ?? ""
                 print(String(format: "[CARDLOCK] card %+.2f ppm · error %+.1f µs now, %.1f µs worst in 10 s", (w.rate - 1) * 1e6, w.error * 1e6, cardStats.worst * 1e6) + audio)
                 cardStats = (0, 0, 0)
@@ -915,6 +943,116 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         print("[CARDLOCK] released: \(reason)")
     }
+
+    // MARK: - The freeze watch (measurement build only; pre-ship removal)
+
+    #if MANIFOLD_CARDCLOCK
+    // docs/CARD_CLOCK_FINDINGS.md §10.13–§10.14. Every 0.25 s on main: once a playing file's picture has been stuck 2 s (no frame out of the
+    // pump, or the newest frame 2 s behind the clock), log the pacing renderer's state, the pump's last exit and the time since the last
+    // steering write, and name the branch. Again at 10 s. Reads only; changes nothing.
+    private var pumpWatchTimer: DispatchSourceTimer?
+    private var pumpWatchRunningSince: Double?
+    private var pumpStuckSince: Double?
+    private var pumpStuckReports = 0
+    private var pumpWatchObservers: [NSObjectProtocol] = []
+    private var pumpWatchSelfTested = false
+
+    private func startPumpWatch() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 1, repeating: 0.25, leeway: .milliseconds(10))
+        timer.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.pumpWatchTick() } }
+        timer.resume()
+        pumpWatchTimer = timer
+    }
+
+    private func observePacingRenderer(_ renderer: AVSampleBufferVideoRenderer) {
+        for o in pumpWatchObservers { NotificationCenter.default.removeObserver(o) }
+        pumpWatchObservers = [
+            NotificationCenter.default.addObserver(forName: AVSampleBufferVideoRenderer.didFailToDecodeNotification, object: renderer, queue: nil) { n in
+                let e = n.userInfo?[AVSampleBufferVideoRenderer.didFailToDecodeNotificationErrorKey]
+                print("[PUMPWATCH] pacing renderer failed to decode: \(e.map { String(describing: $0) } ?? "no error given")")
+            },
+            NotificationCenter.default.addObserver(forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification, object: renderer, queue: nil) { [weak renderer] _ in
+                print("[PUMPWATCH] pacing renderer requiresFlushToResumeDecoding changed to \(renderer?.requiresFlushToResumeDecoding ?? false)")
+            },
+        ]
+    }
+
+    private func pumpWatchTick() {
+        let now = CACurrentMediaTime()
+        let running = isPlaying && synchronizer.rate != 0 && hasMedia && mediaKind == .video
+        guard running else { pumpWatchRunningSince = nil; pumpStuckSince = nil; pumpStuckReports = 0; return }
+        let since = pumpWatchRunningSince ?? now
+        pumpWatchRunningSince = since
+        // MANIFOLD_PUMPWATCH_SELFTEST=<s>: once per launch, <s> s into a run, stop the pacing renderer's request, so the report can be
+        // checked against a branch whose answer is known (1, stopped calling back).
+        if !pumpWatchSelfTested, let t = Double(ProcessInfo.processInfo.environment["MANIFOLD_PUMPWATCH_SELFTEST"] ?? ""), now - since >= t {
+            pumpWatchSelfTested = true
+            videoRenderer?.stopRequestingMediaData()
+            print(String(format: "[PUMPWATCH] SELFTEST: stopped the pacing renderer's request %.2f s into the run", now - since))
+        }
+        let w = pumpWatch.snapshot()
+        let clock = CMTimeGetSeconds(synchronizer.currentTime())
+        let quiet = now - max(w.lastEmitHost, since)
+        let behind = now - since >= 2 && w.lastEmitPTS.isFinite ? clock - w.lastEmitPTS : 0
+        guard quiet >= 2 || behind >= 2 else {
+            if let stuck = pumpStuckSince, pumpStuckReports > 0 {
+                print(String(format: "[PUMPWATCH] picture moving again after %.2f s: emitted pts %.6f, clock %.6f", now - stuck, w.lastEmitPTS, clock))
+            }
+            pumpStuckSince = nil; pumpStuckReports = 0; return
+        }
+        let stuck = pumpStuckSince ?? (now - max(quiet, behind))
+        pumpStuckSince = stuck
+        let due: Double = pumpStuckReports == 0 ? 2 : 10
+        guard pumpStuckReports < 2, now - stuck >= due else { return }
+        pumpStuckReports += 1
+        print(pumpWatchReport(now: now, stuckFor: now - stuck, quiet: quiet, clock: clock, w: w))
+    }
+
+    private func pumpWatchReport(now: Double, stuckFor: Double, quiet: Double, clock: Double, w: PumpWatch.Snapshot) -> String {
+        func ago(_ h: Double) -> String { h > 0 ? String(format: "%.3f s ago", now - h) : "never" }
+        let r = videoRenderer
+        let ready = r?.isReadyForMoreMediaData ?? false
+        let failed = r?.status == .failed || r?.error != nil
+        let branch: String
+        if w.lastExit == .endOfStream {
+            branch = "3, END-OF-STREAM EXIT mid-file"
+        } else if let parked = w.parkedSince {
+            branch = String(format: "2, PARKED on a full window queue %.3f s and not woken (gate has room now: %@)", now - parked, videoSinkGate.hasRoom ? "yes" : "no")
+        } else if failed {
+            branch = "1, PACING RENDERER FAILED"
+        } else if ready, now - w.lastCallbackHost > 0.5 {
+            branch = String(format: "1, PACING RENDERER STOPPED CALLING BACK (ready, no callback for %.3f s)", now - w.lastCallbackHost)
+        } else if !ready, now - w.lastCallbackHost > 0.5 {
+            branch = "1, PACING RENDERER NOT READY and not draining (no callback, not ready)"
+        } else if let e = w.lastExit, e == .superseded || e == .released {
+            branch = "none of the three: last exit was the quiet \(e.rawValue)"
+        } else {
+            branch = "none of the three: the pump is still being called"
+        }
+        var parts: [String] = []
+        parts.append(String(format: "[PUMPWATCH] PICTURE STUCK %.2f s: no frame out of the pump for %.3f s, last emitted pts %.6f, clock %.6f", stuckFor, quiet, w.lastEmitPTS, clock))
+        parts.append("branch \(branch)")
+        if let r {
+            let tb = r.timebase
+            parts.append(String(format: "pacing renderer: status %d, error %@, isReadyForMoreMediaData %@, requiresFlushToResumeDecoding %@, timebase rate %.6f time %.6f",
+                                r.status.rawValue, r.error.map { String(describing: $0) } ?? "none", ready ? "true" : "false",
+                                r.requiresFlushToResumeDecoding ? "true" : "false", CMTimebaseGetRate(tb), CMTimebaseGetTime(tb).seconds))
+        } else {
+            parts.append("pacing renderer: none attached")
+        }
+        parts.append(String(format: "synchronizer rate %.6f", synchronizer.rate))
+        if let own = audioSynchronizer { parts.append(String(format: "audio clock rate %.6f time %.6f", own.rate, CMTimeGetSeconds(own.currentTime()))) }
+        parts.append(String(format: "pump: arms %d, callbacks %d (last %@), emitted %d, last exit %@ %@, parks %d, resumes %d, ends of stream %d, quiet exits %d",
+                            w.arms, w.callbacks, ago(w.lastCallbackHost), w.emitted, w.lastExit?.rawValue ?? "none", ago(w.lastExitHost),
+                            w.parks, w.resumes, w.endsOfStream, w.superseded))
+        if useLibav { parts.append("reader: libav") } else if let rd = reader {
+            parts.append("reader: AVF status \(rd.status.rawValue), error \(rd.error.map { String(describing: $0) } ?? "none")")
+        }
+        parts.append(String(format: "steering: %.0f Hz, last write %@ (%d writes), steered %@", Self.cardSteerHz, ago(cardLastWriteHost), cardWrites, cardSteered ? "yes" : "no"))
+        return parts.joined(separator: " · ")
+    }
+    #endif
 
     /// True when transport is paused (synchronizer rate 0). Readable from any thread
     /// (the CVDisplayLink render loop), same thread-safety rationale as currentSyncTime().
@@ -2808,6 +2946,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
             source.sinkGate = videoSinkGate
+            #if MANIFOLD_CARDCLOCK
+            source.pumpWatch = pumpWatch
+            #endif
             do {
                 // open() enables auto-threaded decode so the 4K 10-bit source cost
                 // doesn't contend with the render pipeline (locks 23.976fps).
@@ -4757,6 +4898,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             print("FrameEngine: cannot add video output"); return
         }
         source.sinkGate = videoSinkGate
+        #if MANIFOLD_CARDCLOCK
+        source.pumpWatch = pumpWatch
+        #endif
 
         // ── THE VIDEO READER CARRIES VIDEO ONLY ───────────────────────────────────────────────
         // Audio lives on its own reader (see `audioReader`), so there is nothing here that could
