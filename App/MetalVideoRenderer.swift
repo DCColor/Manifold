@@ -611,6 +611,13 @@ final class MetalVideoRenderer {
     /// Called, outside `queueLock`, whenever frames leave the queue (a tick's selection, the paused relaxed render, a
     /// flush): resumes a file's pump parked on a full queue. Wired to the engine's `VideoSinkGate`.
     var onQueueRoom: (() -> Void)?
+    #if MANIFOLD_CARDCLOCK
+    /// ⚠️ PRE-SHIP REMOVAL, with `PumpWatch`: the queue's depth and bound for the freeze watch's gate line (docs/CARD_CLOCK_FINDINGS.md §10.14).
+    func queueDepthForWatch() -> (count: Int, max: Int) {
+        queueLock.lock(); defer { queueLock.unlock() }
+        return (frameQueue.count, maxQueued)
+    }
+    #endif
     // A file's evictions (the backstop below): counted under `queueLock`, logged at most once a second from `enqueue`.
     private var fileEvictionsPending = 0
     private var fileEvictionsLastLog: CFTimeInterval = 0

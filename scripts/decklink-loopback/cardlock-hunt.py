@@ -6,7 +6,8 @@
 #   cardlock-hunt.py replay <log>                         the detector alone over an existing log
 # On detection, before anything else: sample, a spindump (only if spindump-watch.sh is running as root), the last 60 s of logs, and whether the window is frozen, saved in
 # build/cardclock/hunt/<label>-<n>/. Then quit by PID, guard, relaunch, carry on until the deadline. A guard trip, or a build that will not quit, stops everything.
-# `touch build/cardclock/hunt/STOP` ends a case cleanly. HUNT_STOP_FIRST=1 ends it at the first detection.
+# `touch build/cardclock/hunt/STOP` ends a case cleanly. HUNT_STOP_FIRST=1 ends it at the first picture freeze (or a stopped log), exit 3; an
+# audio-only silence (the Jump stall, §10.12 Fault 2) is captured and the hunt carries on. HUNT_CYCLE sets the Play length (default 120 s).
 # MANIFOLD_CARDLOCK_STEER_HZ (measurement build) and MANIFOLD_PUMPWATCH_SELFTEST pass through to the build; the rate is kept in <label>.json (§10.14).
 import datetime, json, os, random, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
@@ -16,7 +17,7 @@ FIXTURE = f"{REPO}/build/cardclock/cc-5994-2450s.mov"; TITLE = os.path.basename(
 SCARLETT = "AppleUSBAudioEngine:Focusrite:Scarlett 18i20 USB:00011706:1,2"
 STILL = 2.0   # seconds without a new picture, or without PCM
 GRACE = 2.0   # after Play, for the picture and the sound to start
-CYCLE = 120
+CYCLE = int(os.environ.get("HUNT_CYCLE", "120"))   # seconds of each Play; HUNT_CYCLE=60 for the interleaved hunt (§10.14)
 
 class Detector:
     """Reads the log a line at a time. `check()` names what it sees: 'freeze', 'audio' or None."""
@@ -129,7 +130,7 @@ def launch_once(label, n, gate, steps, deadline, state):
             kind = seen or "log-stopped"; say(f"DETECTED {kind}: pts {d.pts}, Play {d.plays}, {d.host - d.play:.1f} s after Play")
             state["fz"] += 1; rec = capture(pid, kind, d, label, state["fz"], log, defout); rec["launch"] = n; state["events"].append(rec)
             say(f"captured {label}-{state['fz']}: window_frozen {rec['window_frozen']}, last new picture {rec['seconds_since_play']} s after Play")
-            state["plays"] += d.plays; state["ran"] += d.ran; quit_build(); return "detected"
+            state["plays"] += d.plays; state["ran"] += d.ran; quit_build(); return "detected-audio" if kind == "audio" else "detected"
         if d.done or time.time() >= deadline or os.path.exists(f"{OUT}/STOP"):
             menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(3); menu(pid, "File", "Close All"); time.sleep(1.5)
             state["plays"] += d.plays; state["ran"] += d.ran; quit_build(); say(f"{label} launch {n} ended: Plays {d.plays}, ran {d.ran:.0f} s"); return "ended"
@@ -138,7 +139,7 @@ def launch_once(label, n, gate, steps, deadline, state):
 
 def hunt(mode, gate, label, deadline):
     rng = random.Random(); seed = rng.randrange(1 << 30); rng.seed(seed)
-    state = dict(plays=0, ran=0.0, fz=0, events=[], seed=seed, gate=gate, mode=mode, steer_hz=os.environ.get("MANIFOLD_CARDLOCK_STEER_HZ", "1"),
+    state = dict(plays=0, ran=0.0, fz=0, events=[], seed=seed, gate=gate, mode=mode, steer_hz=os.environ.get("MANIFOLD_CARDLOCK_STEER_HZ", "1"), cycle=CYCLE,
                  began=datetime.datetime.now().isoformat(timespec="seconds")); n = 0
     while time.time() < deadline and not os.path.exists(f"{OUT}/STOP"):
         n += 1
@@ -148,8 +149,9 @@ def hunt(mode, gate, label, deadline):
         else: steps = "wait 25;loop;play"
         r = launch_once(label, n, gate, steps, deadline, state)
         json.dump(dict(state, launches=n, ended=datetime.datetime.now().isoformat(timespec="seconds")), open(f"{OUT}/{label}.json", "w"), indent=1)
-        if r in ("no-launch", "no-output"): say(f"stopping {label}: {r}"); break
-        if r == "detected" and os.environ.get("HUNT_STOP_FIRST") == "1": say(f"stopping {label}: first detection (HUNT_STOP_FIRST)"); break
+        if r in ("no-launch", "no-output"): say(f"stopping {label}: {r}"); sys.exit(4)
+        if r == "detected" and os.environ.get("HUNT_STOP_FIRST") == "1":
+            say(f"stopping {label}: first freeze (HUNT_STOP_FIRST)"); say(f"{label} DONE: {state['ran'] / 3600:.2f} h, Plays {state['plays']}, detections {state['fz']}"); sys.exit(3)
     say(f"{label} DONE: {state['ran'] / 3600:.2f} h, Plays {state['plays']}, detections {state['fz']}")
 
 if __name__ == "__main__":

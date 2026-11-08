@@ -19,6 +19,9 @@
 //
 
 import Foundation
+#if MANIFOLD_CARDCLOCK
+import QuartzCore
+#endif
 
 public final class VideoSinkGate: @unchecked Sendable {
     private let lock = NSLock()
@@ -26,6 +29,29 @@ public final class VideoSinkGate: @unchecked Sendable {
     private var parkedResume: (() -> Void)?
 
     public init() {}
+
+    #if MANIFOLD_CARDCLOCK
+    // ⚠️ PRE-SHIP REMOVAL, with `PumpWatch` (docs/CARD_CLOCK_FINDINGS.md §10.14): the gate's own state for the freeze watch's report, so a
+    // freeze that waits here for frame-queue space and is never woken says so. Counted under the gate's lock; nothing here changes the gate.
+    public struct WatchState: Sendable {
+        public var waiting = false
+        public var waitingSince = 0.0
+        public var parks = 0
+        public var lastParkHost = 0.0
+        public var recheckResumes = 0
+        public var signals = 0
+        public var lastSignalHost = 0.0
+        public var signalResumes = 0
+        public var lastResumeHost = 0.0
+    }
+    private var watch = WatchState()
+    /// The window queue's depth and bound, for the report. Wired by the owner in the measurement build only.
+    public var depthProvider: (() -> (count: Int, max: Int)?)?
+    public func watchState() -> WatchState {
+        lock.lock(); defer { lock.unlock() }
+        var w = watch; w.waiting = parkedResume != nil; return w
+    }
+    #endif
 
     /// The renderer's answer to "may another frame be queued?". nil (no renderer wired) always has room.
     public func setHasRoom(_ provider: (() -> Bool)?) {
@@ -40,13 +66,27 @@ public final class VideoSinkGate: @unchecked Sendable {
     /// Pump side, on the pump queue: the queue is full, so stop decoding until `roomAvailable`. Re-checks after parking,
     /// so room freed between the caller's check and the park is not missed (that would park the pump for good).
     public func park(resume: @escaping () -> Void) {
-        lock.lock(); parkedResume = resume; lock.unlock()
-        if hasRoom { roomAvailable() }
+        lock.lock(); parkedResume = resume
+        #if MANIFOLD_CARDCLOCK
+        let now = CACurrentMediaTime(); watch.parks += 1; watch.lastParkHost = now; watch.waitingSince = now
+        #endif
+        lock.unlock()
+        if hasRoom {
+            #if MANIFOLD_CARDCLOCK
+            lock.lock(); watch.recheckResumes += 1; lock.unlock()
+            #endif
+            roomAvailable()
+        }
     }
 
     /// Renderer side, any thread: the queue lost a frame. Resumes a parked pump once; a no-op when none is parked.
     public func roomAvailable() {
-        lock.lock(); let resume = parkedResume; parkedResume = nil; lock.unlock()
+        lock.lock(); let resume = parkedResume; parkedResume = nil
+        #if MANIFOLD_CARDCLOCK
+        let now = CACurrentMediaTime(); watch.signals += 1; watch.lastSignalHost = now
+        if resume != nil { watch.signalResumes += 1; watch.lastResumeHost = now }
+        #endif
+        lock.unlock()
         resume?()
     }
 }

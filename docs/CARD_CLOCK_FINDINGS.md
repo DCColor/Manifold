@@ -793,3 +793,39 @@ Measure only, no fix (Robbie, 2026-11-07). Guarded Profile measurement builds (`
 - **Next, per the brief, not started:** the 10.5 h of gate-off cycling (i above), now with the freeze watch in the build, so a freeze on either gate names its branch.
 
 ⚠️ **A measuring note.** In zsh, `log` is a shell builtin, so `log show …` typed in a zsh command fails ("too many arguments"), and with stderr discarded it reads as "no lines". Use `/usr/bin/log`. `cardlock-hunt.py` runs it from Python, which finds `/usr/bin/log`, so its captures were never affected.
+
+**A candidate to check at any freeze: the 0.9.1 decode backpressure (`VideoSinkGate`)** (Robbie, 2026-11-08). The pump parks waiting for window-queue space and is never woken, perhaps because a wake-up is lost when a queue is flushed at Play. Checked two ways.
+- **In the code, before the hunt.** `park` checks for room again after it parks (`VideoSinkGate.swift`), so room freed between the pump's check and the park is not missed. Every path that takes a file's frames out of the window queue signals the gate: the flush (`App/MetalVideoRenderer.swift:3168`), a tick that takes a frame (`:3678`) and the paused relaxed render (`:3783`). The two that do not signal are the live hold floor (`:3621`, never a file) and the overflow trim inside `enqueue` (`:3124`, `:3129`), which runs only from the pump's own call. 1b never flushes the video queues. The flush at Play comes from the seek before it (`FrameEngine.swift:2952`), with the gate on or off. No lost wake-up was found.
+- **In the build.** The freeze watch's 2 s and 10 s reports now carry the gate's state: waiters, the window queue's depth and bound, has room, parks (and the re-check resumes among them), signals with the time of the last, and resumes by signal. Branch 2 is now named `VIDEOSINKGATE`. 1b's renderer moves and `rereadSoundAfterMove` (whether it read again or was skipped) now log with host times. All behind `#if MANIFOLD_CARDCLOCK`. Checked against the self-test (`hunt/il-selftest-1/`, `il-selftest-L1.log`): reports at 2.01 s and 10.01 s naming branch 1, gate waiters 0, depth 0/12, 1212 signals, 0 parks in 20 s of 59.94 play.
+- **At the freeze below: not the gate.** Waiters 0, depth 0/12, has room yes. The last park was 1043.6 s before the report, which is 0.3 s after the launch's first Play. The last signal was 2.05 s before it, at 2 s; at 10 s, 10.05 s.
+
+**The interleaved hunt, 2026-11-08 06:03–06:21: the first block, gate OFF, froze.** `cardlock-interleave.sh off 14:00 il`: one-hour `cardlock-hunt.py` blocks alternating the gate, starting OFF because OFF had the fewer hours. Plays of 60 s (`HUNT_CYCLE=60`, shortened from 120 s because three of the four freezes came 17–47 s after a Play), from random points in `cc-5994-2450s.mov`. Sound on, destination SDI, 59.94, capture closed, steering timer at 1 Hz. The rule was to stop at the first freeze on either side, so no gate-on block ran.
+
+| Block | Gate | Hours | Plays | Freezes |
+|---|---|---|---|---|
+| `il-off1` | Off | 0.28 (994 s) | 17 | **1**: Play 17, 31.9 s after Play (`hunt/il-off1-1/`) |
+
+**What it took: branch 1, the pacing renderer not ready and never draining.** Both reports, 2.18 s and 10.18 s, read the same:
+- **The pacing renderer:** status 1, error none, `isReadyForMoreMediaData` **false**, `requiresFlushToResumeDecoding` false, timebase rate 1.000000 and running (1696.27, then 1704.27).
+- **Its own queues were empty while it said not ready:** CoreMedia logs its video queue at "sbuf queue contains 0 frames … LWM: 1.000 HWM: 2.000" (06:21:04.205, 06:21:10.206) and its image queue at "iq unconsumed: 0" (06:21:04.363). Before the stop the queue held 1 frame and the image queue 5–6, every 6 s.
+- **The pump:** last exit "renderer not ready (waiting for its callback)", 2.183 s before the report. No callback since. 18 arms, 69,369 callbacks, 59,561 frames emitted, 0 ends of stream, 0 quiet exits. The reader: AVF status 1, no error.
+- **The last frame out:** pts 1694.209183, about 0.13 s ahead of the clock (the renderer's normal lead). So the pump stopped because the renderer said not ready with a normal lead, and the renderer then played out what it held and never asked again.
+- **The steering:** "last write never (0 writes), steered no". With the gate off and sound, `cardLockApplies` is false, so nothing writes the synchronizer.
+- **1b at that Play:** nothing. The log has 0 `1b move` and 0 `1b re-read` lines, and its only `[CARDLOCK]` line is the steering-rate banner.
+- **The stack (`sample`):** as `a-1`. No `com.graviton.manifold.pump.video` thread, no `AVSampleBufferVideoRenderer videoQueue`, no `videomediaconverter.inbound`, no `com.Metal.CommandQueueDispatch`. The CoreMedia video threads wait on their condition variables. Nothing is blocked.
+- **The rest:** the window froze (`window_frozen` true). The audio tap read on, the bridge logged six `RESYNC`s back to 1694.30 s, and the default output stayed on the Scarlett (`il-off1-L1.defout`). No error from AVFoundation, the reader or the renderer. Play 17 itself was a normal start: CoreMedia's image queue flushed 7 frames at the Play, as at every Play.
+
+**So the freeze is not 1b's.** Today's path, with no steering write, no renderer move and no 1b re-read, freezes the same way: the same pts-stuck-while-the-clock-runs signature as all four earlier freezes, and the same stack as `a-1`. This overturns §10.13's reading ("by the brief's rule, the freeze is 1b's"). That reading rested on 1 freeze against 0, a split that equal rates give 37% of the time. The steering write's trip through rate 0, the stress suspect, is ruled out as a cause, since this freeze had no writes at all. `a-1` never named its branch, so whether `a-1` was also "not ready and not draining" is UNKNOWN; its renderer read the same way in §10.12 (`isReadyForMoreMediaData` false, queue empty, status 1). Whether shipped 0.9.2 freezes is UNKNOWN: gate off matches `d7a4e93` (§10.13 "The gate"), not a 0.9.2 build.
+
+**Totals, every sound-locked hunt and log, at 59.94 unless the source says not:**
+
+| | Running | Plays | Freezes | One per |
+|---|---|---|---|---|
+| Gate on / 1b: §10.13's logs (39,375 s, 127 Plays, 3), hunt (a) (2.90 h, 88, 1), `hz10` (0.97 h, 29, 0), `hz20` (0.97 h, 29, 0) | 15.77 h | 273 | 4 | 3.9 h, 68 Plays |
+| Gate off / today's path: hunt (b) (2.92 h, 88, 0), `g-off` (600 s, 1 Play), `il-off1` (0.28 h, 17, 1) | 3.36 h | 106 | 1 | 3.4 h, 106 Plays |
+
+If the two run at the same rate, 3.36 h of 19.13 h would hold at least one of the five freezes 62% of the time. The data cannot tell the rates apart.
+
+**An aside, not the freeze: parks before the first Play.** The pump parked 9836 times and was woken by a signal once. All of the parks came before the launch's first Play was 0.3 s old, and none in the 17 Plays after. Each park overwrites the gate's single slot, so this reads as the renderer calling back repeatedly while the paused window queue is full, but how long it lasted and what it costs is UNKNOWN (PumpWatch logs only parks of 1 s or more, and none was).
+
+**Next, not started (measure only):** the branch is now named. What is still UNKNOWN is why AVSampleBufferVideoRenderer reads not ready with empty queues and never calls back. In the logs that freeze is not tied to the gate, steering, a renderer move, a decoder error, an output change or Jump.

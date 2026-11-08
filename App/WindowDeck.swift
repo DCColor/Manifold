@@ -1141,6 +1141,9 @@ final class DeckRegistry {
         let sinkGate = engine.videoSinkGate
         sinkGate.setHasRoom { [weak renderer] in renderer?.queueHasRoom() ?? true }
         renderer.onQueueRoom = { sinkGate.roomAvailable() }
+        #if MANIFOLD_CARDCLOCK
+        sinkGate.depthProvider = { [weak renderer] in renderer?.queueDepthForWatch() }   // ⚠️ pre-ship removal, with `PumpWatch`
+        #endif
         // Play, pause, shuttle: a paused renderer has stopped its display link, and Play may need no new frame.
         engine.onClockRateChange = { [weak renderer] in renderer?.wakeDisplayLink() }
         // THE SOURCE'S COLOUR TAGS, ON THE LOAD PATH RATHER THAN BEHIND THE INSPECTION TASK.

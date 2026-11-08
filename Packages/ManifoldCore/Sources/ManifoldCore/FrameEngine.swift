@@ -789,6 +789,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     private func moveAudioToOwnClock() {
         cardAudioMoving = true
+        #if MANIFOLD_CARDCLOCK
+        print(String(format: "[PUMPWATCH] 1b move to own clock begins at host %.6f, picture clock %.6f rate %.0f", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate))
+        #endif
         let own = AVSampleBufferRenderSynchronizer()
         own.delaysRateChangeUntilHasSufficientMediaData = false   // a delayed start would part it from the picture before it began
         let began = CACurrentMediaTime()
@@ -813,6 +816,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func moveAudioToPictureClock() {
         guard let own = audioSynchronizer else { return }
         cardAudioMoving = true
+        #if MANIFOLD_CARDCLOCK
+        print(String(format: "[PUMPWATCH] 1b move to picture clock begins at host %.6f, picture clock %.6f rate %.0f", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate))
+        #endif
         let began = CACurrentMediaTime()
         own.removeRenderer(audioRenderer, at: .invalid) { [weak self] _ in
             DispatchQueue.main.async {
@@ -834,6 +840,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// SDI was silent for up to 0.9 s after Play (§10.12). So a move with the clock stopped reads the sound again from the clock,
     /// as a track switch does. Running moves are left alone: re-reading there would drop the tap under SDI's cursor.
     private func rereadSoundAfterMove() {
+        #if MANIFOLD_CARDCLOCK
+        let acts = !cardAudioMoving && synchronizer.rate == 0 && hasMedia && hasAudioToRoute
+        print(String(format: "[PUMPWATCH] 1b re-read after move %@ at host %.6f, picture clock %.6f rate %.0f, moving %@",
+                     acts ? "READS AGAIN" : "skipped", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate, cardAudioMoving ? "yes" : "no"))
+        #endif
         guard !cardAudioMoving, synchronizer.rate == 0, hasMedia, hasAudioToRoute else { return }
         let clock = synchronizer.currentTime()
         if useLibav {
@@ -1018,7 +1029,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if w.lastExit == .endOfStream {
             branch = "3, END-OF-STREAM EXIT mid-file"
         } else if let parked = w.parkedSince {
-            branch = String(format: "2, PARKED on a full window queue %.3f s and not woken (gate has room now: %@)", now - parked, videoSinkGate.hasRoom ? "yes" : "no")
+            branch = String(format: "2, VIDEOSINKGATE: PARKED waiting for frame-queue space %.3f s and not woken (gate has room now: %@)", now - parked, videoSinkGate.hasRoom ? "yes" : "no")
         } else if failed {
             branch = "1, PACING RENDERER FAILED"
         } else if ready, now - w.lastCallbackHost > 0.5 {
@@ -1046,6 +1057,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         parts.append(String(format: "pump: arms %d, callbacks %d (last %@), emitted %d, last exit %@ %@, parks %d, resumes %d, ends of stream %d, quiet exits %d",
                             w.arms, w.callbacks, ago(w.lastCallbackHost), w.emitted, w.lastExit?.rawValue ?? "none", ago(w.lastExitHost),
                             w.parks, w.resumes, w.endsOfStream, w.superseded))
+        let g = videoSinkGate.watchState()
+        let depth = videoSinkGate.depthProvider?().map { "\($0.count)/\($0.max)" } ?? "unknown"
+        parts.append(String(format: "gate (VideoSinkGate): waiters %d%@, queue depth %@, has room %@, parks %d (last %@, %d re-check resumes), signals %d (last %@), resumes by signal %d (last %@)",
+                            g.waiting ? 1 : 0, g.waiting ? String(format: " (waiting %.3f s)", now - g.waitingSince) : "", depth, videoSinkGate.hasRoom ? "yes" : "no",
+                            g.parks, ago(g.lastParkHost), g.recheckResumes, g.signals, ago(g.lastSignalHost), g.signalResumes, ago(g.lastResumeHost)))
         if useLibav { parts.append("reader: libav") } else if let rd = reader {
             parts.append("reader: AVF status \(rd.status.rawValue), error \(rd.error.map { String(describing: $0) } ?? "none")")
         }
