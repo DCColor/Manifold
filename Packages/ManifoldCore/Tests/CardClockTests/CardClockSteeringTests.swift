@@ -149,4 +149,20 @@ final class CardClockSteeringTests: XCTestCase {
         XCTAssertEqual(s.count, 1024); XCTAssertEqual(s.first?.slot, 3000 - 1024); XCTAssertEqual(s.last?.slot, 2999)
         r.reset(); XCTAssertTrue(r.snapshot().isEmpty)
     }
+
+    func testStage1bIsOffUnlessTheSwitchIsExactlyOne() {
+        XCTAssertFalse(CardClockAudio.stage1bEnabled(environment: [:]))
+        XCTAssertFalse(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": "0"]))
+        XCTAssertFalse(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": ""]))
+        XCTAssertTrue(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": "1"]))
+    }
+
+    func testAudioClockIsAnchoredOnlyPastTheBoundInEitherDirection() {
+        XCTAssertFalse(CardClockAudio.needsAnchor(part: 0))
+        XCTAssertFalse(CardClockAudio.needsAnchor(part: 0.0199))
+        XCTAssertFalse(CardClockAudio.needsAnchor(part: -0.0199))
+        XCTAssertTrue(CardClockAudio.needsAnchor(part: 0.0201))
+        XCTAssertTrue(CardClockAudio.needsAnchor(part: -0.0201))
+        XCTAssertFalse(CardClockAudio.needsAnchor(part: .nan), "an unreadable clock is not a reason to write one")
+    }
 }

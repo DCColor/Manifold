@@ -137,3 +137,4 @@ docs/mxf-fixtures/op1a/
 
 # Licence test harnesses and test keys (Graviton adoption rule 4). Output can contain keys.
 .harness/
+__pycache__/

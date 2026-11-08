@@ -4,6 +4,7 @@
 #   cardlock.sh outputoff <fixture> <label> <seconds>                       output never started
 #   cardlock.sh transport <fixture> <label> <steps>                         output on, then MANIFOLD_DEBUG_TRANSPORT=<steps>
 #   cardlock.sh live - <label> <seconds>                                    output on with a local SRT stream: no card lock
+#   cardlock.sh playwire <fixture> <label> <steps> <capture seconds>        output on, capture opened BEFORE Play, then the steps: the wire across each Play
 # guard && launch by absolute path, held by PID → quit by PID → guard. AX clicks on named items only; no keystrokes, no screenshots.
 set -u
 HERE=${0:A:h}; REPO=${HERE:h:h}; OUT=$REPO/build/cardclock; PROC=$REPO/scripts/manifold-proc.sh
@@ -13,8 +14,9 @@ SCARLETT='AppleUSBAudioEngine:Focusrite:Scarlett 18i20 USB:00011706:1,2'
 nap() { perl -e "select(undef,undef,undef,$1)"; }
 MODE=$1; F=${2:A}; LABEL=$3; T=${F:t}; LOG=$OUT/$LABEL.log; DLOG=$OUT/$LABEL.dev; PID=; DP=
 [[ ( -f $F || $MODE == live ) && -x $DEVCLK && -x $AXT ]] || { echo "missing fixture or tool"; exit 1; }
-SRTPID=
+SRTPID=; CP=
 cleanup() {
+  [[ -n $CP ]] && kill $CP 2>/dev/null
   [[ -n $SRTPID ]] && kill $SRTPID 2>/dev/null
   [[ -n $DP ]] && kill $DP 2>/dev/null
   [[ -n $PID ]] && $PROC check $PID 2>/dev/null && $PROC quit $PID
@@ -26,7 +28,7 @@ $PROC guard || { echo "GUARD: the installed app is running — stopping, nothing
 : > $LOG
 $DEVCLK "$SCARLETT" 100000 $DLOG & DP=$!
 export MANIFOLD_CARDCLOCK_LOG=1 MANIFOLD_DECKLINK_CADENCE_LOG=1 MANIFOLD_PLAYBACK_STATS=1
-[[ $MODE == transport ]] && export MANIFOLD_DEBUG_TRANSPORT=$4
+[[ $MODE == transport || $MODE == playwire ]] && export MANIFOLD_DEBUG_TRANSPORT=$4
 if [[ $MODE == live ]]; then
   ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc2=s=1920x1080:r=60000/1001" -f lavfi -i "sine=f=1000:r=48000" \
     -c:v h264_videotoolbox -b:v 12M -g 60 -c:a aac -f mpegts "srt://127.0.0.1:9000?mode=listener" > $OUT/$LABEL.srt 2>&1 &
@@ -61,6 +63,12 @@ transport)
   toggle on
   while ! grep -q '^\[TRANSPORT\] done' $LOG; do nap 1; $PROC check $PID || fail "the build exited"; done
   nap 2; toggle off; nap 2.5 ;;
+playwire)
+  # capture moves the card's clock (§5), which does not matter here: this reads picture order, not rate. The steps start with a wait long enough for this to open.
+  toggle on; nap 2
+  $REPO/build/decklink-loopback/capture --device 0 --seconds $5 --label $LABEL --marks $OUT/$LABEL.marks > $OUT/$LABEL.cap 2>&1 & CP=$!
+  while ! grep -q '^\[TRANSPORT\] done' $LOG; do nap 1; $PROC check $PID || fail "the build exited"; done
+  wait $CP; CP=; nap 1; toggle off; nap 2.5 ;;
 *) fail "bad mode" ;;
 esac
 nap 1.5
@@ -70,3 +78,4 @@ kill $DP 2>/dev/null; wait $DP 2>/dev/null; DP=
 [[ -n $SRTPID ]] && kill $SRTPID 2>/dev/null; SRTPID=
 $PROC guard || { echo "GUARD tripped after $LABEL"; exit 2; }
 python3 -I $HERE/cardlock-summary.py $OUT $LABEL
+if [[ $MODE == playwire ]]; then python3 -I $HERE/cardlock-playwire.py $OUT $LABEL; fi

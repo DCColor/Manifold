@@ -8,7 +8,7 @@
   the card's output clock, to a different value each time, up to about ±125 ppm. When it closes, the card returns to −11.7.
 - **The file clock follows the audio device,** even with destination SDI, where that device is muted and nobody hears it.
 
-**Step 2, the plan (2026-11-06): §10.** Nothing in it is built.
+**Step 2, the plan (2026-11-06): §10.** Stage 1a is built (§10.9); 1b is §10.11.
 
 Sections 1–9 are step 1 of the card-clock investigation: **measure only**. No fix and no design there. The bug is `BUGS.md`, *SDI from a file slips
 one frame whenever the card's clock and the file clock drift a frame apart*, moved into 1.0 as the top priority (Robbie,
@@ -100,7 +100,7 @@ default output stays the Scarlett; the driver refuses the run unless the app log
 **Check of the method on saved logs, before any run.** §7.9's `fix-asus` reproduced from its log: card −101.2 ppm, file 0.0 (§7.9: +101.4).
 
 **Runs.** 2026-11-05 22:48 to 2026-11-06 02:55, 34 launches, 48 output sessions, all guarded, no guard tripped, `/Applications/Manifold.app` not
-run. Logs and per-session JSON: `build/cardclock/` (gitignored). The installed app was running at the first guard check, so nothing launched
+run. Logs and per-session JSON were in `build/cardclock/` (gitignored), deleted 2026-11-06 once §10.10 had read them; the numbers here are what remains. The installed app was running at the first guard check, so nothing launched
 until Robbie had quit it. One stop: Q2's `capture` overran past the file's end, so there was no Pause button. Its data was complete and the driver now
 allows for it. `.build-cc` still holds the measurement build.
 
@@ -422,7 +422,7 @@ Needs one new fixture pair of about 3700 s and 7300 s.
 | T12 | 2 | **Attended.** Audio Hijack + OBS recorder, 30 min, Computer: A/V at start against end, and a dropout scan | | No slope between start and end. No dropouts in steady play. Also gives the Mac-to-wire offset, today UNKNOWN |
 | T13 | 2 | Window on the LG, the ASUS, and moved; 1080p100 and 119.88; 2160p59.94 by pulls | | 0 / 0 |
 | T14 | 2 | 23.976 file on a manual 24.000 mode, 600 s | | One repeat every 1000 slots, evenly spaced, no others |
-| T15 | every | **Output off:** §3's table on a file with sound | | File = device within 0.02 ppm. No `[CARDLOCK]` line; no audio synchronizer created. `swift test` passes; export set byte-identical |
+| T15 | every | **Output off:** §3's table on a file with sound, **measured over 20 minutes or more** | | File = device within 0.02 ppm over that span (decided, Robbie, 2026-11-06: the tolerance stays and the run grows, because over 300 s the fit's own noise is 0.006–0.021 ppm, §10.9 A6). No `[CARDLOCK]` line; no audio synchronizer created. `swift test` passes; export set byte-identical |
 | T16 | every | **Live control:** output on with local SRT or NDI | | No card lock. Behaviour unchanged, so CLAUDE.md's non-Cloudflare rule is met |
 
 Genlock has no row: it needs a reference signal. It stays UNKNOWN until one is connected, with T2 and T7 as the run to repeat.
@@ -536,3 +536,234 @@ Each of those runs is one unbroken 2401 s stretch of the clock, with 0 steps ove
 **The call as a load check.** Worst lock error in the runs it touched was 83.9 and 64.0 µs, against 93.2 µs on a quiet machine. No load effect shows in the lock. This is one call, not a load test.
 
 **What this means for 1b.** The arbiter's pause means the hold §10 accepted at output stop should not arise: the clock is already pausing. The hold at output start remains. §10.8's slip counter (§10.6) was not part of 1a and is not built. The export set was not byte-checked; render code was not touched.
+
+### 10.10 Repeats at Play: classification, 2026-11-06
+
+**Answer: both kinds exist, and which you get depends on whether the audio renderer is on the clock.** With no audio track they are all start latency. With sound and an unlocked clock, a Play from a mid-file pause usually skips, and often repeats after motion has begun. That is new, and it is not 1a's "1–2 repeats at Play", which are the first kind: `BUGS.md`, *Play from a pause on a file with sound skips a frame, and can repeat one after motion begins*.
+
+**Method.** No saved run could answer this on the wire: `capture` opened 1 s after Play in every one, so the first mark is picture 59. So four new runs (`cardlock.sh playwire`, `cardlock-playwire.py`, committed 1a build at `d7a4e93`, destination SDI): `capture` open before the first Play, then 16 Pause/Play pairs mid-file and 4 seeks to 0 with a Play, 21 Plays each. `capture` moves the card's rate (§5), which does not matter for picture order. Then the pulls in all saved logs, 64 Plays over 45 runs.
+
+Wire, picture numbers read by `capture`:
+
+| Run | Clock | Plays from 0: clean | Mid-file: clean | Mid-file: +2, no repeat | Mid-file: +1, then repeat | Mid-file: +2, then repeat |
+|---|---|---|---|---|---|---|
+| 59.94, no audio | locked | 5 of 5 | **16 of 16** | 0 | 0 | 0 |
+| 23.976, no audio | locked | 5 of 5 | **16 of 16** | 0 | 0 | 0 |
+| 59.94, sound | unlocked | 5 of 5 | 3 of 16 | 6 | 0 | **7** |
+| 23.976, sound | unlocked | 5 of 5 | 9 of 16 | 1 | 4 | **2** |
+
+The frame sequences, around the first new picture:
+
+| Case | Sequence on the wire |
+|---|---|
+| Clean: start latency, every no-audio Play | `0, 0, 0, 1, 2, 3, 4` · `240, 240, 240, 241, 242, 243` |
+| Sound, skip | `235, 235, 235, 237, 238, 239` |
+| Sound, skip then repeat | `477, 477, 477, 479, 479, 480, 481` |
+| Sound, 23.976, repeat | `95, 95, 95, 96, 96, 97, 98` |
+
+- **Start latency, all no-audio Plays and every Play from 0.** The paused picture stays on the wire, then motion starts at +1 with no later repeat. The pulls show how long it stayed after the clock started: 0–2 pulls. These are 1a's repeats: in §10.9's runs, `0, 0, 0, 0, 1, 2, 3` with the clock already moving for the last two zeros. On the wire they cannot be told from the pause before them, so nothing there is a defect.
+- **Skip, and repeat after motion, on a mid-file Play with sound.** 20 of 32 Plays were not clean. In 16 the first new picture jumps one frame, and in 13 a picture repeats straight after the first move.
+- **The cause, as far as measured.** At the first running pull the clock has already risen 1.47–2.82 frames at 59.94 with sound, 0.64–1.44 at 23.976, against 0.03–0.98 with no audio. So the clock gets ahead of the pull at the start and the pull catches up in one step: that is the skip. If it overshot, the next pull has nothing new: that is the repeat. Why the clock rises that much with the renderer attached is UNKNOWN. Picture 0 escapes because the paused clock and picture agree there; that is an inference.
+- **Saved pulls agree.** 62 of 64 Plays are the hold alone. The other two: `p6` is this fault (`13503, 13506, 13506, 13507`, a two-frame skip), and `q1-5994-noaudio`'s is a drift slip 8.3 s after Play, on that run's 175.5 s spacing, not a Play event. Mid-file skips with no repeat also show in the saved pulls (`3721, 3723`, `r-nocap`), and 1a's counters did not count them, because they ignored the step into motion.
+
+The apparent repeats near 177 (59.94) and 71 (23.976) in `cardlock-playwire.py`'s output on the Plays from 0 are the script's own next `pause;seek 0`: the hold before a seek is under its 0.5 s rule, so it is read as motion. They are not counted above.
+
+### 10.11 Stage 1b: predictions, written 2026-11-06 before any code
+
+Scope: a file with sound, destination SDI, output on. Destination Computer stays as it is today, slips included. Files with no audio keep 1a's path, with the renderer left where it is. Verified with `capture` closed by `[CADENCE]` pulls, except where a row says otherwise. Plain Profile builds, guarded before and after every run, launched by absolute path, quit by PID. No commit.
+
+**Length.** B1 and B2 are 2400 s on the 2450 s fixtures with sound, as Robbie's brief for 1b sets, not T2's 3700 s and T3's 7300 s. Unlocked, 17.6 ppm over 2400 s is 42 ms: 2.5 slips at 59.94 and 1.0 at 23.976. So as in 1a, a clean slip count at 23.976 is weak evidence on its own, and the position error carries it.
+
+**What the design expects of the audio synchronizer.** It runs on the device, so against a card at −11.7 and a device at +5.9 it gains on the picture at 17.6 ppm: 20 ms in 1136 s. While it is ahead the tap's lead grows, so nothing is at risk on this Mac. Behind, the lead shrinks one for one, which is what the 20 ms bound is for. On a Mac where the device runs slow against the card, that direction is the real one.
+
+| # | Run | Prediction |
+|---|---|---|
+| B1 | 59.94, sound, destination SDI, 2400 s, twice | **0 skips, and no repeat after motion begins.** File reads about −11.7 ppm against the host; file − card (b) within 0.05 ppm, while the Scarlett reads about +5.9, unchanged. The Play hold stays as §10.10 classifies it |
+| B2 | 23.976, the same, twice | The same |
+| B3 | All of B1, B2 | `[CARDLOCK]` error median under 20 µs, worst under 200 µs. One unbroken stretch of the clock, 0 steps over 1 ms. Card late 0, dropped at most the frame-4 case. No `[FRAMEQ]` evictions |
+| B4 | Audio synchronizer in B1, B2 | **2 re-anchors in each 2400 s run** (1136 s apart), each from about +20 ms, with the audio ahead, and each leaving the picture clock untouched. 0 `synchronizer` writes from it. Parted by under 20 ms within 2 s of Play |
+| B5 | Tap in B1, B2 (T6) | Tap lead over the card's cursor at least today's minimum less 20 ms; if the audio sits ahead as predicted it only grows. `underruns` 0. `short` and `resyncs` no worse than `a7-on-sound`'s rate |
+| B6 | **Scarlett IO restart.** A second process opens the Scarlett's input for 20 s partway through a run, 59.94 and 23.976, sound, destination SDI, 600 s each, `capture` closed | `devclock` logs a sample-time discontinuity at the helper's start, and perhaps at its end. **File clock: 0 steps over 1 ms, one unbroken line. Lock error worst under 200 µs through it. 0 repeats, 0 skips, late 0, dropped 0.** The audio synchronizer may stall: my guess is under 100 ms. If it parts by over 20 ms it is re-anchored once. `underruns` 0, on the guess that a stall stays inside the 232 ms lead; a longer stall would break this one, and it would show as silence on SDI, not as a picture fault |
+| B6c | Control: the same restart on the 1a build, file with sound, 300 s | **The picture is not protected:** the file clock is on the device, so it moves with the restart: a step or a stall in it over 1 ms. This is what makes B6 mean something. If it shows nothing, the helper did not reproduce the event and B6 proves nothing |
+| B6w | The restart with `capture` open, 59.94, 300 s | 0 repeats, 0 skips on the wire, which is the direct reading of "nothing on the card" |
+| B7 | Output started and stopped while playing, three times, file with sound | Locks within 3 s of output start. **One hold of about 48 ms at each start while playing** (accepted, §10.7). At a stop, none: the arbiter has already paused the deck (§10.9). After each stop the renderer is back: file = Scarlett again once Play is pressed. 0 slips after the lock |
+| B8 | Output started with the deck paused, then Play | The renderer moves with the clock stopped, and the paused clock does not change |
+| B9 | Pause, Play, seek, frame step, loop wrap, JKL, sound (T5) | Lock suspends and re-latches; a paused clock stays paused; the audio synchronizer follows every move and is under 20 ms from the picture within 2 s of each return to 1×. 0 slips in each steady stretch. End of file lands as today. Decode carries on through the 1 Hz writes |
+| B10 | `capture` on and off in one session, and one 300 s session per rate, sound (T4) | 0 / 0 on the wire. Lock error under 200 µs. Re-anchors become frequent, about one every 200 s at 100 ppm, and the picture does not notice them |
+| B11 | Destination flipped SDI → Computer → SDI while playing, five times | Interim behaviour, §10.7: each flip to Computer releases the lock and puts the renderer back (hold about 65 ms); each flip to SDI moves it off (about 48 ms) and locks within 3 s. No crash, no stuck mute, and the sound is on the right output after each flip |
+| B12 | A file decoded by libav, with sound, destination SDI, 300 s | The same as B1. This is the other audio pump |
+| B13 | **Destination Computer, output on, sound, 1250 s** | Not locked, 0 `[CARDLOCK]` lines, no audio synchronizer. File = Scarlett within 0.02 ppm, over 20 minutes as T15 now says |
+| B14 | **Output off (T15),** sound, 1250 s; then no audio, 300 s | Sound: file = Scarlett within 0.02 ppm over the 20 minutes. No audio: 0.00. 0 `[CARDLOCK]` lines, no audio synchronizer |
+| B15 | 1a's case, no audio, destination SDI, 300 s | Locked as 1a, and no renderer move |
+| B16 | Live control (T16): output on, local SRT | Not locked, 0 `[CARDLOCK]` lines |
+| B17 | `swift test`, Release compile, `strings` | Pass. `[CARDLOCK]` in Release, `[CARDCLOCK` absent |
+| B18 | **Added after §10.10, before any 1b run.** The `playwire` run on a file with sound, destination SDI, under 1b, both rates | With the renderer off the clock it behaves as no audio does: **16 of 16 mid-file Plays clean at each rate**, on the wire. If it holds, §10.10's fault is gone for destination SDI and stays for Computer until Stage 2 |
+
+**Unknown going in**, from §10.7, now to be answered: whether a renderer with real queued audio survives the move, or loses its queue. It is muted, so a lost queue costs nothing audible on the Mac, but the pump must keep running or the tap dries up. And what `AVSampleBufferRenderSynchronizer` does when its device restarts under it: nothing here has measured that.
+
+### 10.12 Stage 1b: results, 2026-11-07
+
+**Not ready to ship: the picture can freeze (below).** With that set aside, the design did what §10.11 said. The card rate holds the picture, destination SDI runs without a slip, and the Scarlett no longer matters to it.
+
+Lengths: B1 and B2 ran 2400 s, as the brief set. T2's 3700 s and T3's 7300 s were not run. Capture closed unless a row says otherwise. Every run below used a Profile build carrying temporary `[PUMPWATCH]` diagnostics, since removed. The rows B1–B18 were run before the parked re-read fix; the re-test section says which were run again after it.
+
+| # | Result | Against prediction |
+|---|---|---|
+| B1 | File −11.24, −11.05 ppm; file − card ≤ 0.001; Scarlett +6.96 to +7.40. r1: 0 repeats, 0 skips. **r2 froze at pts 1998.78** | **Missed**, on r2. Clock numbers held |
+| B2 | File −10.93, −10.92. 0 repeats, 0 skips, both runs | Held. Weak at 23.976, as §10.11 says |
+| B3 | Error median 3.1–4.8 µs, worst 84.3–119.7 µs. Late 0, dropped 0, 0 evictions, 0 running steps. One step of −15 to −31 ms per run, at Play itself | Held. The step at Play is also in unlocked and no-audio runs, so it is not 1b's |
+| B4 | 2 re-anchors from +20.0 ms, 1090–1105 s apart, as predicted, plus **one at Play, −70 to −81 ms, 2–6 s after Play** | Partly missed: the Play one was not predicted. Device start-up; the picture does not notice |
+| B5 | Lead over the cursor: floor well above today's. Underruns 0 at 59.94. At 23.976, 3–5 in one event at Play (about 78 ms, srcT ≈ −0.03) | Missed as written at 23.976, but today's q1-2398 had 9, so not worse. Median lead rose from 0.72–0.90 s to about 1.7 s. Cause UNKNOWN (see re-test) |
+| B6 | 600 s at each rate. Restart logged (−218.6 s, −21.06 s off the device's sample time). 0 running steps, error worst 109–110 µs, 0 repeats, 0 skips, late and dropped 0, no extra re-anchor, audio part unbroken | Held |
+| B6c | 1a file clock unbroken through the restart: +6.336, +6.273, +6.279 ppm before, during, after | **Missed.** Today's timebase absorbs the restart too, so B6 passing is not 1b's doing. It shows 1b did no harm, not that it protects |
+| B6w | Wire 20689 frames, 0 repeats, 0 skips | Held |
+| B7 | Holds −44 to −55 ms, moves 48–55 ms out, 46–71 ms back, locks in about 2 s | Held |
+| B8 | Moves at rate 0, paused clock unchanged | Held |
+| B9 | Re-latches correctly. Error median 1.8 µs, worst 52.8 µs. 5148 pulls, 7 repeats, all at the loop-wrap hold, which 1a also has (8). Dropped 1, one step of +9.23 ms at the return from shuttle | Held, bar the dropped frame and the step. Neither came back in the re-test |
+| B10 | 0 / 0 on the wire. Fewer re-anchors than predicted: sessions were too short to reach 20 ms at 100 ppm | Held, with that note. The phases sessions also showed the start silence below |
+| B11 | 5 flips each way release and re-lock. 0 pull repeats, 0 skips | Held. Mac audio right after a flip not measured (decision below) |
+| B12 | 12 of 13 libav runs clean. **`b12-libav` froze at pts 47.01** | **Missed** |
+| B13 | File +7.460, Scarlett +7.461, 0 `[CARDLOCK]`. 2 skips, as expected unlocked | Held |
+| B14 | Sound: +7.626 against +7.624. No audio: −0.000. 0 `[CARDLOCK]` | Held |
+| B15 | Locked as 1a, no renderer move | Held |
+| B16 | 0 `[CARDLOCK]`. 2 repeats, 2 skips, live and unlocked | Held |
+| B17 | Tests 0 failures. Release: `CARDLOCK]` 7, `[CARDCLOCK` 0, `[TRANSPORT]` 0, `[CADENCE]` 0. Run again on the final tree, diagnostics out | Held |
+| B18 | 42 of 42 Plays clean on the wire, both rates | Held. The Play skip in `BUGS.md` is gone for destination SDI |
+
+**§10.11's open question, answered: the renderer loses its queue at a move.** The pump keeps running, and refills from where it had reached.
+
+**Fault 1, fixed: 0.2–0.9 s of SDI silence after Play, mid-file.** A regression in 1b. Outside the Jump stalls below, 6 of 10 sessions had it on 1b, against 0 of 12 on the 1a control (`c1a-ph1..3`, same script). Each move costs the renderer its queue, so the pump's position walks on about a second, and the tap keeps 4.0 s (`AudioTapBuffer.swift:108`). One session, parked at 191.37: tap at 193.49, then 194.45 at the move back, then 195.50 at the move out, and on. That pushed the frames at the cursor out of the ring, and SDI read nothing until the cursor reached the oldest frame left. A first session from 0 has only one move and never showed it. **Fix:** `rereadSoundAfterMove`, a move that ends with the clock stopped reads the sound again from the clock. Moves while running are unchanged.
+
+**Re-test after the fix** (`f-` runs): 11 of 12 phases sessions at 59.94 have 0 underruns and the tap parked about 1.9 s ahead; the twelfth froze. 3 of 3 libav phases sessions clean. 23.976 phases sessions: 4–5 underruns at each Play, one event of 78–100 ms, as B5. Mid-file Play 0 underruns. `f-transport`: error worst 12.7 µs, 0 steps, dropped 0, 7 repeats at the same loop wrap. `f-flip`: 4466 pulls, 0 repeats, 0 skips, error worst 24.8 µs. Median lead stays about 1.7 s, so parked moves are not what raised it; that cause is UNKNOWN. It leaves 2 s of margin in the ring.
+
+**Soak after the fix:** `s-fz4..8`, five runs of 2400 s at 59.94 with sound, capture closed. File −10.82 to −10.98, file − card 0.00, Scarlett +7.87 to +8.04. 0 pull repeats, 0 skips, late 0, dropped 0, underruns 0, resyncs 0. No freeze.
+
+**Fault 2, open: a change of the system default output stalls the audio pump.** Jump Desktop switches the default output on connect and restores it on disconnect. Its log has four such events overnight, and the three that fell inside runs each cost SDI audio to the end of that session: 26 s, 90 s and 22 s (first written here as 27, 95 and about 28 s, and read as stall lengths; §10.13 corrects both). During the stall the renderer reads ready, its callback does not fire, and the audio clock stays right. Only a renderer move restarts it. **Today's path does the same: §10.13.**
+
+**Fault 3, open and blocking: the picture freezes.** Three times in about 37,000 s of sound-locked running:
+
+| Run | Path | Last picture | When | Then |
+|---|---|---|---|---|
+| `b12-libav` | libav | pts 47.01 | 47 s after Play | 256 s of SDI silence, 5 resyncs |
+| `b1-5994-r2` | AVFoundation | pts 1998.78 | 1999 s after Play | 405 s of silence, 24108 pull repeats |
+| `f-ph1` s4 | AVFoundation, capture open, with the fix | pts 330.05 | 43 s after Play, fourth session of the launch | to the end of the session, 3154 pull repeats, 4 resyncs |
+
+The clock keeps running and stays on the card's line, so **every clock figure looks fine through a freeze**: check pulls and the SDI stop line. It does not recover. CoreMedia shows the video queue fed normally, then nothing, and the queue drains. The renderer then reads `isReadyForMoreMediaData` false with the queue empty, status 1, gate not parked. The libav pump's end line never printed. No error in any of the three system logs, no Jump event near them, and no shared phase against the 1 Hz write (the last frame came about 150 ms after one write, about 710 ms after another).
+
+UNKNOWN: whether the pump is blocked or the renderer stopped asking; whether it needs the 1 Hz writes; whether it needs sound. 1a's 9600 s with no audio saw none, but at this rate that is no evidence: about a one in three chance of none anyway. Unlocked sound runs are too short to say either. None came in the eight watched 2400 s runs (`s-fz1..8`), so no stack sample exists. Unanswered licence Keychain prompts sat on screen through the night, freezes and clean runs alike, and the system logs around the freezes have no SecurityAgent line, so nothing ties them together. Measurement also disturbed one run: a `sample` of the build cost 26 frames (late 6, dropped 20) at 06:30:49 in `s-fz1`, so sampling is kept for a freeze already under way.
+
+### 10.13 After the 1b report: Jump, the gate, and decisions, 2026-11-07
+
+**Decisions (Robbie, 2026-11-07).**
+
+- **Stage 1b is off by default.** All of it sits behind `MANIFOLD_CARDLOCK_1B=1`, read once at launch, until the freeze is understood.
+- **The re-anchor of −70 to −81 ms after Play is not accepted.** B4's "the picture does not notice" stands as a measurement, not as an acceptance. It is filed under 1c, in the same family as the −84 ms post-Play settle (`BUGS.md`, *SDI audio is not sample-continuous*).
+- **The doubled tap lead** (median 0.72–0.90 s up to about 1.7 s, B5): noted. Investigated only if the freeze stacks point at the audio pump.
+- **Mac audio after a flip to Computer** is deferred to Stage 2.
+- **T2 and T3 at full length** are deferred until the freeze is understood.
+- **Genlock:** as §10.4 and §10.5 record.
+
+**Jump, attended, with Robbie connecting and disconnecting.** A file with sound, destination SDI, 59.94, capture closed, Scarlett the default output. `j-today` is `d7a4e93` from a `git archive` export (`build/linkpace-src/d7a4e93`), `j-1b` the working tree. `defout.swift` logged the default output on the host clock, and Jump's own log agrees to the second.
+
+| | `j-today` | `j-1b` |
+|---|---|---|
+| Connect, default output to Jump Desktop Audio | SDI silent 0.65 s later | SDI silent 2.7 s later |
+| Last tap line (the pump's position) | pts 44.27 | pts 41.28 |
+| Disconnect, default output back | 79 s after connect. No recovery | 138 s after connect. No recovery |
+| Watched after the restore | 337 s, silent throughout | 337 s, silent throughout |
+| Silence, from the underrun count | 423 s, one event, to the end of the session | 488 s, one event, to the end of the session |
+| Window | Kept playing: 60 presented a second, dropped 0, late 0 | The same |
+| SDI picture | Pulls: 0 repeats, 0 skips. Late 0, dropped 0 | The same |
+
+**So Fault 2 is not 1b's. It is in today's path, and so in 0.9.2.** The switch stops the audio pump on both. The picture does not notice on either. Neither comes back by itself: the disconnect restarts nothing, and nothing else tried here did, though Pause and Play were not tried. 1b goes silent later because its tap holds more ahead of the cursor.
+
+**The overnight figures, corrected.** All three silences ran to the end of their session, so they measured the time left, not a stall: `b10-phases-s3` 26.4 s, `s-ph1-s1` 90.0 s, `s-ph1-s4` 22.2 s. The next session of the launch was clean in the two that had one, under 1b, where a session's end moves the renderer. `s-ph1-s4` began at the restore (01:13:13), so a restore can stop a running pump too. In the attended runs the pump had already stopped at the connect, so they say nothing about that direction.
+
+**The gate.** `CardClockAudio.stage1b` is read once. It is checked in `cardLockApplies`, so with it off that is never true with sound: the renderer never moves, `audioSynchronizer` stays nil, and the re-read, the anchor and the second rate write cannot run. It is checked again in `cardClockTick`, to keep 1a's release reason and leave the steering alone.
+
+| | Gate off, `g-off` | `d7a4e93`, `g-ref` |
+|---|---|---|
+| 600 s pulls | 36327 | 36324 |
+| Pull repeats, skips | 0, **1** | 0, 0 |
+| File, Scarlett | +7.55, +7.55 ppm | +7.73, +7.73 ppm |
+| Card (b) | −11.04 ppm | −10.88 ppm |
+| `[CARDLOCK]` lines, renderer moves, re-anchors | 0, 0, 0 | 0, 0, 0 |
+| SDI real, silence, underruns | 601.1 s, 5.1 s, 0 | 601.1 s, 5.1 s, 0 |
+| Late, dropped | 0, 0 | 0, 0 |
+
+Both run at 18.6 ppm of drift, which is 0.67 of a frame in 600 s, so 0 or 1 slip is what an unlocked 10 minutes gives. The one skip fits that; a single pair of runs cannot show the rates equal. `g-off-noaudio`, 90 s: 1a's lock still latches, 11 `[CARDLOCK]` lines, no renderer move, dropped 1 (the frame-4 case). Tests 0 failures. Release: `CARDLOCK]` 7, `[CARDCLOCK` 0, `[TRANSPORT]` 0, `[CADENCE]` 0, as B17, and `MANIFOLD_CARDLOCK_1B` 1.
+
+**The three freezes, from the logs.** All three are 1b: the gate did not yet exist, and all had the renderer moved and the card lock on.
+
+| Run | Since the last Play | Capture | Decode path | Build |
+|---|---|---|---|---|
+| `b12-libav` | 47.1 s, first Play of the launch | Closed | libav | Before the re-read fix |
+| `b1-5994-r2` | 1998.9 s, first Play of the launch | Closed | AVFoundation | Before the re-read fix |
+| `f-ph1` s4 | 43.2 s, fourth Play of the launch | **Open**, 12.1 s after it opened | AVFoundation | With the fix |
+
+127 Plays in the 49 logs of sound-locked running. Counting running pulls gives 39,375 s, against §10.12's "about 37,000". **Two of the three came with capture closed, so capture is not needed for a freeze.**
+
+**The freeze hunt, 2026-11-07 15:10–21:10.** `cardlock-hunt.py` (scripts README) runs Plays of 120 s each, from random points in `cc-5994-2450s.mov`: sound on, destination SDI, 59.94, capture closed. A freeze is detected from the pulls (frame number unchanged for 2 s). On detection it captures `sample <pid> 10`, the last 60 s of logs and whether the window picture is frozen, then quits by PID, runs the guard and relaunches. No spindump: it needs root, and the optional root watcher was not running. Captures are in `build/cardclock/hunt/`.
+
+| Case | Gate | Hours | Plays | Freezes |
+|---|---|---|---|---|
+| (a) | On (`MANIFOLD_CARDLOCK_1B=1`) | 2.90 | 88 | **1**: Play 70, 17.7 s after Play, 8301 s into the launch (`hunt/a-1/`) |
+| (b) | Off | 2.92 | 88 | 0 |
+| (c) | — | not run: the plan ran it only if (a) and (b) were both clean | | |
+
+Gate on, the launch that froze logged 966 `[CARDLOCK]` lines and 70 re-anchors. Gate off logged 0 and 0, with SDI audio flowing (10,383 PCM branch lines). Jump was never connected during the hunt: the default output stayed on the Scarlett throughout (`hunt/*.defout`).
+
+**What the freeze is (`a-1`).** The video side stops while everything else runs on.
+- **The pulls:** from host 249032.846 they return pts 1978.693383 indefinitely, while the picture clock in the same lines runs on (1979.9 → 1996.9 over the next 17 s).
+- **The window:** last presents that frame and then presents nothing (`window_frozen` true).
+- **The audio tap:** keeps reading at 1:1 (pts 1979.8 → 1998.8, `held≈192000f` steady).
+- **SDI audio:** the bridge follows the picture, logs five `RESYNC`s snapping its cursor back to 1978.79 s, then underruns. SDI audio goes silent as a consequence of the stopped picture, not on its own.
+- **The pacing renderer:** the system log shows its image queue empty at 17:32:44.285 ("iq unconsumed: 0"). It took 48 frames in that second instead of 60, so frames stopped arriving at about host 249032.75.
+- **The video reader:** its decoder (VMC `R/UD.t1`), which logs 361 frames every 6 s, logs nothing after 17:32:42.584.
+- **Errors:** none from AVFoundation, the reader or the renderer, before or after.
+- **What the app was doing:** no transport command, rate write or re-anchor at that moment. The nearest steering writes are at host 249031.942 and 249032.943, 0.2 s either side.
+
+**The stack.** Compared with `hunt/forced-1/`, a healthy gate-ON Play sampled the same way:
+- **No thread is blocked.** Main sits in its run loop. CoreMedia's video threads (`videomediaconverter` ×3, `videomentor` ×2) wait on their condition variables, as they do in the healthy sample. The audio pump ran in 4 of the 10 s samples.
+- **What is missing:**
+  - `com.graviton.manifold.pump.video`: 34 samples healthy, **0** frozen.
+  - `AVSampleBufferVideoRenderer videoQueue`: 3 healthy, 0 frozen.
+  - `com.apple.coremedia.videoqueue.notification`: 4 healthy, 0 frozen.
+  - `videomediaconverter.inbound`: 6 healthy, 0 frozen.
+  - `com.Metal.CommandQueueDispatch`: 759 healthy, 0 frozen.
+- **So it is a pump that is never called, not a deadlock.** The video pump (`FileFrameSource.start`, `FileFrameSource.swift:110-136`; the libav one at `LibavFrameSource.swift:472-488` has the same shape) runs only from the pacing renderer's `requestMediaDataWhenReady` block, or from a `VideoSinkGate` resume. It has three ways to go quiet, none of which logs:
+  1. **The pacing renderer stops calling back.** Nothing on the pump's path reads its `status`, its `error` or `requiresFlushToResumeDecoding`. The engine enqueues to it directly (`FrameEngine.swift:2935`, `:4812`). The app's one `status` check, `SampleBufferSurfaceView.swift:45`, is in the view's own `enqueue`, which the pump does not use.
+  2. **The pump parks on the gate and is never resumed.** Unlikely: `park` re-checks for room after parking (`VideoSinkGate.swift`). The window queue must have been empty, since it presented nothing as the clock ran past, so the gate had room.
+  3. **The pump takes its end-of-stream branch** (`rdr.status != .reading` or a nil frame) and calls `stopRequestingMediaData`. Mid-file, with no reader error logged.
+
+  The stack cannot tell these apart, because all three leave the same idle threads.
+
+**All four freezes have the same signature.** Tonight's plus the three from the logs: pts stuck while the clock runs on.
+
+| Run | Stuck | Clock ran on | Audio tap |
+|---|---|---|---|
+| `b12-libav` | 255.9 s at pts 47.014 | 254.0 s | (libav, no AVF tap line) |
+| `b1-5994-r2` | 404.2 s at 1998.780 | 402.2 s | 2001.8 → 2403.8, running |
+| `f-ph1` | 54.4 s at 330.046 | 52.7 s | 332.7 → 383.7, running |
+| `hunt/a-1` | to detection at pts 1978.693 | yes | 1979.8 → 1998.8, running |
+
+One freeze on libav rules out the AVAssetReader as the cause. What the two decode paths share is the pacing renderer's ready callback, the gate, and the synchronizer the card steering writes.
+
+**Against the Jump stall (step 1).** No stack was taken during a Jump stall, so the stack comparison was NOT done. From the logs the two are opposites:
+- **Jump:** the audio pump stops (tap pts frozen at 44.27 and 41.28) while the picture plays on at 60 fps with pulls normal.
+- **Freeze:** the video pump stops while the audio tap reads on.
+
+A freeze is not a permanent version of the Jump stall. The freeze stack does not point at the audio pump, so the tap-lead doubling stays uninvestigated, as decided above.
+
+**The reading.** By the brief's rule, (a) froze and (b) did not, so the freeze is 1b's. The evidence is thin, though:
+- **Counts:** one freeze in (a) against none in (b). If the two had the same rate, 0 in (b) would happen 37% of the time (Poisson, mean 1).
+- **The four freezes together:** all four came with the renderer moved and the lock on. That is about 49,800 s of 1b running, one freeze per 3.5 h.
+- **Without 1b:** 2.92 h of gate-off running here, plus §10.13's two 10-minute gate runs, all clean.
+- **The only mechanism difference in the data:**
+  - Gate on, the steering writes `setRate(1, time:, atHostTime:)` to the picture's synchronizer once a second. CoreMedia carries out each write by setting the timebase to rate 0 and then back to 1. The system log shows the video queue's "Effective Timebase Rate … changed to: 0.000" then "1.000" every second (`hunt/a-1/system-process.log`).
+  - Gate off, there are no such writes.
+  - This freeze began 0.2 s away from a write, so the timing does not tie it to one, and the link is a correlation, not a shown cause.
+
+**To confirm:**
+- **(i) Gate-off hours.** About 10.5 h of gate-off cycling, three times the 1b mean interval, gives a 95% chance of at least one freeze if gate off freezes at 1b's rate.
+- **(ii) Instrumentation, so the next freeze names its branch.** Log when the pump parks and resumes, when it takes the end-of-stream branch, and, once pts has been stuck 2 s, the pacing renderer's `isReadyForMoreMediaData`, `status`, `error` and `requiresFlushToResumeDecoding`.

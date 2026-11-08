@@ -376,7 +376,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// audio track output could be added. Meters key their empty state off it — showing silent
     /// bars for a file that has audio, or "NO AUDIO" for one whose audio simply has not started,
     /// are both lies a colourist would act on.
-    @Published public private(set) var audioPresence: AudioPresence = .unknown
+    @Published public private(set) var audioPresence: AudioPresence = .unknown {
+        didSet { updateCardAudioRoute() }
+    }
 
     private var asset: AVURLAsset?
     private var videoTrack: AVAssetTrack?
@@ -686,9 +688,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     // MARK: - The card as master clock (docs/CARD_CLOCK_FINDINGS.md §10)
 
-    // Stage 1a: a file with NO AUDIO TRACK only. While output runs, once a second, the synchronizer is written onto the card's line,
-    // so the pull (`deckLinkPullSlotLocked`) sees a clock that advances one card frame per slot and a frame can no longer slip. Every
-    // reader of the clock is unchanged. With a track, or with output off, none of this acts: no timer exists with output off.
+    // A file with no audio track (Stage 1a), or a file with sound while the card owns it, destination SDI (Stage 1b, off unless
+    // `CardClockAudio.stage1b`: with it off, sound is exactly as at Stage 1a). While output runs,
+    // once a second, the synchronizer is written onto the card's line, so the pull (`deckLinkPullSlotLocked`) sees a clock that advances
+    // one card frame per slot and a frame can no longer slip. Every reader of the clock is unchanged. With output off none of this acts:
+    // no timer exists, and no second synchronizer.
+    //
+    // ── WITH SOUND THE AUDIO RENDERER LEAVES THIS SYNCHRONIZER (§10.2) ─────────────────────────
+    // Attached, it times the clock from the Mac's device, and every rate write mutes it for 50–60 ms. So it moves to `audioSynchronizer`,
+    // which runs at 1× on the device and takes every transport move (`setTransportRate`, `parkTransport`), and the picture's
+    // synchronizer is left on the host clock for the card to steer. The renderer keeps pacing the pump and the tap exactly as before.
+    // It cannot be on no synchronizer: it would stop taking buffers, the pump would stall and the tap would run dry.
     //
     // MAIN ACTOR, AND THAT IS WHAT MAKES A WRITE SAFE. Every transport write is on main too, so a tick cannot land between a pause
     // and its rate 0 and start the clock again.
@@ -698,7 +708,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The rate on the synchronizer is the card's, not the transport's: leaving card lock must put 1.0 back.
     private var cardSteered = false
     private var cardWait: CardClockSteering.Wait?
-    private var cardStats = (ticks: 0, worst: 0.0)
+    private var cardStats = (ticks: 0, worst: 0.0, audioWorst: 0.0)
+    /// The sound's own clock while the renderer is off the picture's. Nil with output off, always.
+    private var audioSynchronizer: AVSampleBufferRenderSynchronizer?
+    /// A renderer move is in flight. `removeRenderer` finishes later, and adding to a second synchronizer before it has is an exception.
+    private var cardAudioMoving = false
 
     /// SDK callback thread, once per frame.
     public nonisolated func noteCardFrame(slot: Int64, host: Double) { cardSamples.append(slot: slot, host: host) }
@@ -708,6 +722,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         releaseCardClock(reason: "output restarted")
         cardSamples.reset()
         cardSteering = CardClockSteering(frameSeconds: frameSeconds)
+        updateCardAudioRoute()
         guard cardTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(20))
@@ -721,14 +736,136 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         releaseCardClock(reason: "output stopped")
         cardSteering = nil
         cardSamples.reset()
+        updateCardAudioRoute()
+    }
+
+    /// There is sound to feed, whether or not it can be decoded. `.unknown` is neither: a load has not said yet.
+    private var hasAudioToRoute: Bool {
+        switch audioPresence {
+        case .present, .unreadable: return true
+        default: return false
+        }
+    }
+
+    /// The card may steer this source: a file with nothing to hear, or, with Stage 1b switched on, one whose sound the card owns. A file
+    /// sounding on the Mac stays on the Mac's device until Stage 2, and a live source (`hasMedia` false) has its own clock.
+    /// THE ONE PLACE THE SWITCH IS READ FOR THE SOUND: off, this is never true with sound, so `updateCardAudioRoute` never moves the
+    /// renderer, `audioSynchronizer` stays nil, and everything hung off them (the re-read, the anchor, the second rate write) cannot run.
+    private var cardLockApplies: Bool {
+        hasMedia && mediaKind == .video && (audioPresence == .absent || (CardClockAudio.stage1b && deckLinkOwnsAudio && hasAudioToRoute))
+    }
+
+    /// Bring the renderer to where the state says it belongs. Safe from anywhere on main, as often as liked: it only acts on a difference.
+    private func updateCardAudioRoute() {
+        guard !cardAudioMoving else { return }   // the move's end calls this again
+        let wanted = cardSteering != nil && cardLockApplies && hasAudioToRoute
+        if wanted, audioSynchronizer == nil { moveAudioToOwnClock() } else if !wanted, audioSynchronizer != nil { moveAudioToPictureClock() }
+    }
+
+    private func moveAudioToOwnClock() {
+        cardAudioMoving = true
+        let own = AVSampleBufferRenderSynchronizer()
+        own.delaysRateChangeUntilHasSufficientMediaData = false   // a delayed start would part it from the picture before it began
+        let began = CACurrentMediaTime()
+        synchronizer.removeRenderer(audioRenderer, at: .invalid) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    own.addRenderer(self.audioRenderer)
+                    // Moves made during the removal reached only the picture's clock, so this reads them from it.
+                    own.setRate(self.synchronizer.rate, time: self.synchronizer.currentTime())
+                    self.audioSynchronizer = own
+                    self.cardAudioMoving = false
+                    print(String(format: "[CARDLOCK] audio renderer on its own clock after %.1f ms, picture clock %.6f at rate %.0f",
+                                 (CACurrentMediaTime() - began) * 1e3, CMTimeGetSeconds(self.synchronizer.currentTime()), self.synchronizer.rate))
+                    self.updateCardAudioRoute()
+                    self.rereadSoundAfterMove()
+                }
+            }
+        }
+    }
+
+    private func moveAudioToPictureClock() {
+        guard let own = audioSynchronizer else { return }
+        cardAudioMoving = true
+        let began = CACurrentMediaTime()
+        own.removeRenderer(audioRenderer, at: .invalid) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.audioSynchronizer = nil
+                    self.synchronizer.addRenderer(self.audioRenderer)
+                    self.cardAudioMoving = false
+                    print(String(format: "[CARDLOCK] audio renderer back on the picture clock after %.1f ms", (CACurrentMediaTime() - began) * 1e3))
+                    self.updateCardAudioRoute()
+                    self.rereadSoundAfterMove()
+                }
+            }
+        }
+    }
+
+    /// A renderer taken off a synchronizer gives up what it held, and the pump refills it from where it had got to, so each move
+    /// puts the tap about a second further on. The tap keeps 4 s: parked, two moves pushed the frames at the clock out of it, and
+    /// SDI was silent for up to 0.9 s after Play (§10.12). So a move with the clock stopped reads the sound again from the clock,
+    /// as a track switch does. Running moves are left alone: re-reading there would drop the tap under SDI's cursor.
+    private func rereadSoundAfterMove() {
+        guard !cardAudioMoving, synchronizer.rate == 0, hasMedia, hasAudioToRoute else { return }
+        let clock = synchronizer.currentTime()
+        if useLibav {
+            guard let source = libavAudioSource else { return }
+            teardownAudioReading()
+            let audioSession = audioSessionToken
+            let audioToken = audioSession.next()
+            source.arm(fromSeconds: clock.seconds, isCurrent: { audioSession.isCurrent(audioToken) })
+        } else {
+            Task { await beginAudioReading(from: clock) }
+        }
+    }
+
+    /// Every file transport rate, so the sound's own clock takes the same move. Live sources write `synchronizer` directly: the renderer is never moved for them.
+    private func setTransportRate(_ rate: Float) {
+        synchronizer.rate = rate
+        audioSynchronizer?.rate = rate
+    }
+
+    /// Stop the transport at `time`, as `setTransportRate` does for a rate.
+    private func parkTransport(at time: CMTime) {
+        synchronizer.setRate(0, time: time)
+        audioSynchronizer?.setRate(0, time: time)
+    }
+
+    /// Stage 1b: nobody hears this clock, it only paces the pump and with it the tap. Put back on the picture when it has parted too far.
+    /// Returns how far apart it was. Picture untouched: this writes only the sound's clock, and only while muted (§10.7).
+    private func holdCardAudioNearPicture() -> Double? {
+        guard let own = audioSynchronizer, audioRenderer.isMuted else { return nil }
+        let t0 = CACurrentMediaTime()
+        let audio = CMTimeGetSeconds(own.currentTime())
+        let picture = CMTimeGetSeconds(synchronizer.currentTime())
+        let t1 = CACurrentMediaTime()
+        guard t1 - t0 < CardClockAudio.pairedReadLimit else { return nil }   // a read that long says nothing about the pair
+        let part = audio - picture
+        if CardClockAudio.needsAnchor(part: part) {
+            let past = 0.005   // a host time in the past is the write that lands on the line (§10.1)
+            own.setRate(1, time: CMTime(seconds: picture - past * Double(synchronizer.rate), preferredTimescale: 1_000_000_000),
+                        atHostTime: CMTime(seconds: t0 - past, preferredTimescale: 1_000_000_000))
+            print(String(format: "[CARDLOCK] audio clock re-anchored: it was %+.2f ms from the picture at clock %.3f", part * 1e3, picture))
+        }
+        return part
     }
 
     private func cardClockTick() {
         guard var steering = cardSteering else { return }
-        guard hasMedia, mediaKind == .video, audioPresence == .absent else {
-            releaseCardClock(reason: "not a file without sound")
+        updateCardAudioRoute()
+        guard cardLockApplies else {
+            releaseCardClock(reason: CardClockAudio.stage1b ? "not a source the card steers" : "not a file without sound")
+            if CardClockAudio.stage1b {
+                _ = steering.tick(samples: [], clock: 0, clockHost: 0, running: false)   // whatever comes next latches afresh
+                cardSteering = steering
+            }
             return
         }
+        // Writes wait for the renderer to be off this clock: with it attached each one would mute it, and the clock would be its device's.
+        guard !hasAudioToRoute || (audioSynchronizer != nil && !cardAudioMoving) else { return }
         let running = isPlaying && shuttleRate == 1 && abs(synchronizer.rate - 1) < 0.01
         let t0 = CACurrentMediaTime()
         let clock = CMTimeGetSeconds(synchronizer.currentTime())
@@ -750,12 +887,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             if let latched = w.latched {
                 print(String(format: "[CARDLOCK] latched (%@) at clock %.6f · card %+.2f ppm against the host", latched.rawValue, w.time, (w.rate - 1) * 1e6))
             }
+            let audioPart = holdCardAudioNearPicture()
             #if DEBUG || MANIFOLD_TELEMETRY
             cardStats.ticks += 1
             cardStats.worst = max(cardStats.worst, abs(w.error))
+            cardStats.audioWorst = max(cardStats.audioWorst, abs(audioPart ?? 0))
             if cardStats.ticks == 10 {
-                print(String(format: "[CARDLOCK] card %+.2f ppm · error %+.1f µs now, %.1f µs worst in 10 s", (w.rate - 1) * 1e6, w.error * 1e6, cardStats.worst * 1e6))
-                cardStats = (0, 0)
+                let audio = audioPart.map { String(format: " · audio %+.2f ms now, %.2f ms worst", $0 * 1e3, cardStats.audioWorst * 1e3) } ?? ""
+                print(String(format: "[CARDLOCK] card %+.2f ppm · error %+.1f µs now, %.1f µs worst in 10 s", (w.rate - 1) * 1e6, w.error * 1e6, cardStats.worst * 1e6) + audio)
+                cardStats = (0, 0, 0)
             }
             #endif
         }
@@ -1018,6 +1158,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         //
         // An audio-only file: always silence, until B5 gives the card a clock (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.3).
         setCardAudioSilent(isMuted || mediaKind == .audioOnly || (hasMedia && shuttleRate != 1))
+        updateCardAudioRoute()   // every input to who owns the sound comes through here
     }
 
     /// D4b-2: thread-safe mirror of the SDI audio gate, readable from the DeckLink audio-callback
@@ -1065,13 +1206,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         shuttleRate = clamped
         applyAudioMute()
         if clamped > 0 {
-            synchronizer.rate = clamped
+            setTransportRate(clamped)
             isPlaying = true
         } else if clamped == 0 {
-            synchronizer.rate = 0
+            setTransportRate(0)
             isPlaying = false
         } else {
-            synchronizer.rate = 0      // synchronizer can't drive the backward pump
+            setTransportRate(0)      // synchronizer can't drive the backward pump
             isPlaying = true
             startReverseJog()
         }
@@ -1300,7 +1441,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         stopReverseJog()
         shuttleRate = 0
         applyAudioMute()
-        synchronizer.rate = 0
+        setTransportRate(0)
         currentSource?.stop()           // retire the video pump (FrameSource seam)
         currentSource = nil
         libavSource?.stop()             // retire the libav sources (DNxHR path)
@@ -2131,7 +2272,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // THE PREVIOUS VIDEO SOURCE ENDS HERE, because no `beginReading` video branch will retire it. Bumped first, so its
         // pump sees it is no longer current and cannot land a frame after the wipe. The libav sources went at the commit.
         _ = sessionToken.next()
-        synchronizer.rate = 0
+        setTransportRate(0)
         currentSource?.stop()
         currentSource = nil
         videoSinkGate.roomAvailable()   // a pump parked on a full queue goes now, as in `stop()`
@@ -2173,7 +2314,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         audioTracks = []
         selectedAudioTrackIndex = 0
         audioPresence = .absent
-        synchronizer.setRate(0, time: .zero)
+        parkTransport(at: .zero)
         displaySize = CGSize(width: still.picture.width, height: still.picture.height)
         hasMedia = true
         print("[STILL] \(still.info.fileName): \(still.info.format) \(still.info.dimensions) · \(still.info.hdr.typeRow)"
@@ -2200,10 +2341,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// and step all come through `beginReading`, so they follow.
     private func beginAudioOnlyReading(from time: Double, resumePlaying: Bool, exactStart: CMTime?) async {
         let token = sessionToken.next()
-        synchronizer.rate = 0
+        setTransportRate(0)
         teardownAudioReading()
         let start = exactStart ?? CMTime(seconds: time, preferredTimescale: 600)
-        synchronizer.setRate(0, time: start)
+        parkTransport(at: start)
         // The clock observer publishes `currentTime` while it moves; a paused seek has to say so itself.
         currentTime = CMTimeGetSeconds(start)
         await beginAudioReading(from: start)
@@ -2306,7 +2447,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                         // resumePlaying: true re-establishes 1x play; beginReading resets currentTime.
                         Task { await self.beginReading(from: 0, resumePlaying: true) }
                     } else if self.isPlaying {
-                        self.synchronizer.rate = 0
+                        self.setTransportRate(0)
                         self.isPlaying = false
                         self.shuttleRate = 0
                         self.applyAudioMute()
@@ -2646,7 +2787,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         guard let url = currentURL, let videoRenderer else { return }
 
         let token = sessionToken.next()
-        synchronizer.rate = 0
+        setTransportRate(0)
         currentSource?.stop(); currentSource = nil      // retire any AVFoundation pump
         // ⚠️ AND THE AVFOUNDATION AUDIO READER, WHICH IS A SEPARATE SESSION SINCE THE DECOUPLING.
         // This branch RETURNS before `beginReading`'s own teardown, so without this an AVF audio
@@ -2883,7 +3024,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let start: CMTime = frameGrid.map { $0.time(ofFrame: $0.frame(atSeconds: time)) }
             ?? CMTime(seconds: time, preferredTimescale: 600)
         let startSeconds = frameGrid == nil ? time : start.seconds
-        synchronizer.setRate(0, time: start)
+        parkTransport(at: start)
         libavSource?.arm(fromSeconds: startSeconds, isCurrent: { session.isCurrent(token) })
         libavAudioSource?.arm(fromSeconds: startSeconds, isCurrent: { audioSession.isCurrent(audioToken) })
         if resumePlaying { play() }
@@ -4567,7 +4708,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // Retire any prior pump session.
         let token = sessionToken.next()
 
-        synchronizer.rate = 0
+        setTransportRate(0)
         currentSource?.stop()           // retire the prior session's video pump
         currentSource = nil
 
@@ -4638,7 +4779,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let activeSource = source
 
         self.reader = reader
-        synchronizer.setRate(0, time: start)
+        parkTransport(at: start)
 
         // Route the FrameSource's frames to the SAME two consumers as before:
         // the reference AVSampleBufferVideoRenderer (display + sync clock) and the

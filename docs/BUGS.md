@@ -1542,7 +1542,7 @@ Added 2026-11-05 for `CARD_CLOCK_FINDINGS.md`. Measurement only; none changes be
   Profile, and `MANIFOLD_TELEMETRY` is defined in Release too. The condition exists only on the measurement build's `xcodebuild` command
   line (`OTHER_SWIFT_FLAGS`), so a normal Profile or Release build compiles it out.
 - `[CARDCLOCK-FILE]`, `App/MetalVideoRenderer.swift`, `notePlaybackStats` (`#if DEBUG`, `MANIFOLD_CARDCLOCK_LOG=1` with `MANIFOLD_PLAYBACK_STATS=1`): the file clock against the host with output off. Added 2026-11-06 for Stage 1a.
-- `DebugTransportHook`, `App/DebugStepHook.swift`, and its call in `ContentView` (`#if DEBUG`, `MANIFOLD_DEBUG_TRANSPORT`): scripted play, pause, seek, step, shuttle and loop, which are key-only. Added 2026-11-06 for Stage 1a.
+- `DebugTransportHook`, `App/DebugStepHook.swift`, and its call in `ContentView` (`#if DEBUG`, `MANIFOLD_DEBUG_TRANSPORT`): scripted play, pause, seek, step, shuttle, loop and `dest sdi|computer`, the transport moves being key-only. Added 2026-11-06 for Stage 1a; `dest` for Stage 1b.
 
 What stays and what goes at Stage 3: `CARD_CLOCK_FINDINGS.md` §10.6. The completion read is now shipped code (the `cardFrame` block in the bridge); the `[CARDCLOCK]` log around it is still a hook.
 
@@ -3768,9 +3768,44 @@ these runs. **Cause, by inference:** the in-flight limit: a present's handler ar
 decided):** a second drawable in flight on displays above 60 Hz (the pool of three still leaves one free), or present from the most
 recent frame at the vsync rather than per frame. Window only; SDI must stay as measured.
 
+## ☐ RECORDED 2026-11-06 — PRE-EXISTING — Play from a pause on a file with sound skips a frame, and can repeat one after motion begins
+
+**Measured only; nothing fixed.** `CARD_CLOCK_FINDINGS.md` §10.10. Seen on the wire by `capture`, at `d7a4e93`, destination SDI, clock unlocked.
+
+- **What goes out.** Pause mid-file, then Play. At 59.94, 13 of 16 Plays were not clean: `235, 235, 237, 238` (one picture skipped, 6 Plays) or `477, 477, 479, 479, 480` (skipped, then repeated after motion began, 7 Plays). At 23.976, 7 of 16: `95, 95, 96, 96, 97` (4), `964, 964, 966, 966, 967` (2), `867, 867, 869, 870` (1).
+- **Not affected:** a file with no audio track (32 of 32 clean, with card lock on); any Play from picture 0 (20 of 20).
+- **Why, as far as measured.** With sound the clock has risen 1.47–2.82 frames by the first running pull at 59.94 and 0.64–1.44 at 23.976; with no audio, 0.03–0.98. The pull catches up in one step, then may have nothing new for the next slot. Why the renderer does this to the clock is UNKNOWN.
+- **Not the same as** the 1–2 repeats of `CARD_CLOCK_FINDINGS.md` §10.9, which are the paused picture held at start, on every path, and are no defect.
+- **Unknown:** whether the window shows it too; destination Computer was not run, though the clock path is the same.
+
+**Stage 1b, destination SDI: gone.** 42 of 42 Plays clean on the wire at both rates (`CARD_CLOCK_FINDINGS.md` §10.12, B18). Destination Computer stays until Stage 2 at the earliest.
+
+## ☐ OPEN 2026-11-07 — Stage 1b — the picture can freeze with card lock on and the clock still running
+
+**Blocks 1b, which is off by default behind `MANIFOLD_CARDLOCK_1B=1` until this is understood.** `CARD_CLOCK_FINDINGS.md` §10.12, Fault 3, and §10.13. Three times in about 37,000 s of sound-locked running, on both decode paths, at 43 s, 47 s and 1999 s after Play. The picture stops, the clock runs on, SDI audio goes silent, and it does not recover. Clock figures stay good, so a run has to be checked by pulls and the SDI stop line. Not Jump Desktop. **Hunt, 2026-11-07 (§10.13):**
+- **Counts:** gate on, 1 freeze in 2.90 h and 88 Plays (`build/cardclock/hunt/a-1/`). Gate off, 0 in 2.92 h and 88 Plays. All four freezes seen so far came under 1b; how strong that is is set out in §10.13.
+- **What stops:** the VIDEO pump stops being called. The pulls repeat one pts while the clock runs on, and the window presents nothing. The audio tap keeps reading, and SDI audio goes silent only because the bridge follows the stopped picture.
+- **The stack:** no thread is blocked. `pump.video`, `AVSampleBufferVideoRenderer videoQueue` and the Metal queue are absent, where a healthy sample has them busy.
+- **Three branches, none logged:** the pacing renderer stops calling back (its `status` and `error` are never read on the pump's path), the gate parks the pump for good (unlikely), or the pump takes its end-of-stream branch mid-file.
+- **The difference between the gates:** gate on, the steering's 1 Hz rate writes take the picture timebase through rate 0. That is a correlation, not a shown cause.
+- **Next:** instrument those three branches, and run about 10.5 h gate-off to settle whether it is pre-existing.
+- **Not the Jump stall:** that stops the audio pump with the picture running.
+
+## ☐ OPEN 2026-11-07 — PRE-EXISTING, IN 0.9.2 — a change of the system default output silences SDI audio until the session ends
+
+`CARD_CLOCK_FINDINGS.md` §10.13. **Not 1b's:** tested with Robbie on `d7a4e93` and on 1b, and both do it. A file with sound, destination SDI. Jump Desktop switches the default output on connect, and SDI audio goes silent 0.65 s (`d7a4e93`) or 2.7 s (1b) later and stays silent. Disconnecting does not bring it back: 337 s after the restore, both were still silent, for 423 s and 488 s in all. The window and the SDI picture play on with no repeat, skip, late or drop. A restore can stop a running pump too (`s-ph1-s4`).
+
+The pump stops. The renderer reads ready, its callback does not fire, and the audio clock stays right. Under 1b a renderer move restarts it, and the next session of the launch was clean. On `d7a4e93` there is no renderer move, and what restarts it is UNKNOWN: Pause and Play were not tried, and the run ended by quitting. Any default-output change should do the same, though only Jump's were seen, and the Mac's own output was not measured. Candidate fix, not built: re-arm the request on the 1 Hz tick when the renderer is ready and the tap is not filling.
+
+## ✅ FIXED 2026-11-07 — Stage 1b — SDI silent for up to 0.9 s after Play, mid-file
+
+**Never committed.** `CARD_CLOCK_FINDINGS.md` §10.12, Fault 1. A renderer move loses the renderer's queue, the pump refills from further on, and two moves pushed the frames at the cursor out of the tap's 4 s ring. `rereadSoundAfterMove` reads the sound again from the clock when a move ends parked. 1b before: 6 of 10 sessions. After: 0 of 14 that ran through (one further session froze, entry above).
+
 ## ☐ RECORDED 2026-11-06 — PRE-EXISTING — SDI audio is not sample-continuous, and takes about 44 s to settle after Play
 
 **In 1.0 scope (decided, Robbie, 2026-11-06), as Stage 1c of `CARD_CLOCK_FINDINGS.md` §10.** Details: its §10.3.
+
+**Also under 1c (Robbie, 2026-11-07):** Stage 1b's audio-clock re-anchor of −70 to −81 ms, 2–6 s after Play, is not accepted. It is the same family as the −84 ms post-Play settle below (`CARD_CLOCK_FINDINGS.md` §10.12 B4, §10.13).
 
 ⚠️ **Every figure here is the bridge's own, from its `DeckLinkAudio:` log line. None has been seen on the wire.** Whether either effect reaches SDI, or can be heard, is UNKNOWN: no tool here reads audio off the wire yet.
 
