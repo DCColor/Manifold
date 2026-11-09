@@ -10,6 +10,9 @@ changelog page. Format notes are at the bottom.
 The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the
 rest behind "Show more".
 
+- The picture could freeze during long playback, in the window and on SDI, and SDI audio went silent, until Manifold was restarted. Manifold now detects this and recovers in under half a second. You see the picture hold for about a third of a second, then jump ahead about 20 frames to catch up. SDI audio plays straight through, with no gap or jump.
+- Files without sound no longer repeat or skip a frame on SDI during long playback. SDI output now follows the card's own clock for these files. Files with sound are next.
+- Help ▸ Export Diagnostics… now includes a Picture Recovery section.
 - Export Settings and Import Settings, in Settings ▸ General, move your keyboard shortcuts and saved streams to another Mac. Streams are exported only in an encrypted file, with a password of at least 12 characters. The password can't be recovered.
 - Importing streams only adds: a stream with the same name and URL is skipped, and the same name with a different URL or passphrase is added as "(copy)". Undo Import on the summary takes an import back. The automatic backup and Restore from Backup cover shortcuts only, so keep your exported file.
 - Manifold now opens still images, shown as macOS shows them: every SDR format your Mac can read, plus HDR AVIF and Ultra HDR (gain-map) JPEG. Color controls don't apply to a still. DPX stills aren't supported.

@@ -9,7 +9,10 @@
 // SIGINT / SIGTERM) sets the prior value back and releases the configuration object. It never calls
 // WriteConfigurationToPreferences, so per the SDK (2.5.15) the change cannot outlive the process. Run the probe after.
 //   build/decklink-loopback/capture --device 0 --seconds 6 [--input hdmi] [--ref f.v210] [--dumpdir d --dumpmax 8] [--label x]
-//       [--marks out.txt [--band x0 width]]
+//       [--marks out.txt [--band x0 width]] [--audio out.raw]
+// --audio (picture recovery, docs/CARD_CLOCK_FINDINGS.md §10.16): also enables the input's audio, 48 kHz 32-bit, channels 1–2,
+// writes the samples as received (interleaved little-endian int32) and adds " a<sample frames>" to each marks line, so every
+// received picture carries the audio that arrived with it.
 // --marks (interlaced I2): for every received frame, the picture number each field carries in the I2 marker band
 // (scripts/interlaced/generate-i2.sh; the same reader as fieldtool marks), one line per frame: rx index, stream time,
 // top, bottom ("?" when a field's band does not read), and the input's field dominance.
@@ -48,9 +51,10 @@ static std::string flagsStr(int64_t f) {
     return s.empty() ? "none" : s;
 }
 
-struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input, marks; int dumpmax = 0;
+struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input, marks, audio; int dumpmax = 0;
               long bandX = 0, bandW = -1; } A;
 static FILE *marksFile = nullptr;
+static FILE *audioFile = nullptr;
 static std::string dominanceNow = "?";
 // The I2 marker reader (fieldtool.cpp, `fieldMark`): rows 10..55 of one parity must all read the same number with the
 // check pattern 1 0 1 0 in blocks 16–19, else -1.
@@ -120,9 +124,14 @@ public:
         fflush(stdout); return S_OK;
     }
 
-    HRESULT VideoInputFrameArrived(IDeckLinkVideoInputFrame *fr, IDeckLinkAudioInputPacket *) override {
-        if (!fr) return S_OK;
+    HRESULT VideoInputFrameArrived(IDeckLinkVideoInputFrame *fr, IDeckLinkAudioInputPacket *ap) override {
         std::lock_guard<std::mutex> g(mu);
+        long aframes = -1;   // -1: no audio packet with this callback
+        if (audioFile && ap) {
+            void *ab = nullptr; aframes = ap->GetSampleFrameCount();
+            if (aframes > 0 && ap->GetBytes(&ab) == S_OK && ab) fwrite(ab, 8, (size_t)aframes, audioFile);
+        }
+        if (!fr) { if (marksFile && audioFile) fprintf(marksFile, "audio-only a%ld\n", aframes); return S_OK; }
         long i = n++;
         BMDTimeValue t = 0, d = 0; fr->GetStreamTime(&t, &d, 240000);
         if (lastT >= 0 && d > 0 && t - lastT > d + d / 2) dropped += (long)llround((double)(t - lastT) / d) - 1;
@@ -215,8 +224,9 @@ public:
             if (marksFile && w >= 20 && h >= 56) {
                 const long bw = A.bandW > 0 ? A.bandW : w;
                 const long tm = fieldMark((const uint8_t *)bytes, rb, 0, A.bandX, bw), bm = fieldMark((const uint8_t *)bytes, rb, 1, A.bandX, bw);
-                fprintf(marksFile, "%ld %.5f %s %s %s%s\n", i, (double)t / 240000, tm < 0 ? "?" : std::to_string(tm).c_str(),
-                        bm < 0 ? "?" : std::to_string(bm).c_str(), dominanceNow.c_str(), (ff & bmdFrameHasNoInputSource) ? " NOINPUT" : "");
+                fprintf(marksFile, "%ld %.5f %s %s %s%s%s\n", i, (double)t / 240000, tm < 0 ? "?" : std::to_string(tm).c_str(),
+                        bm < 0 ? "?" : std::to_string(bm).c_str(), dominanceNow.c_str(), (ff & bmdFrameHasNoInputSource) ? " NOINPUT" : "",
+                        audioFile ? (" a" + std::to_string(aframes)).c_str() : "");
             }
             if (full != lastPic && dumps < A.dumpmax && !A.dumpdir.empty()) {
                 char p[1024]; snprintf(p, sizeof p, "%s/%s-rx%05ld.v210", A.dumpdir.c_str(), A.label.c_str(), i);
@@ -256,10 +266,11 @@ int main(int argc, char **argv) {
         if (a == "--device") A.device = std::stoi(nx()); else if (a == "--seconds") A.seconds = std::stod(nx());
         else if (a == "--ref") A.ref = nx(); else if (a == "--dumpdir") A.dumpdir = nx(); else if (a == "--dumpmax") A.dumpmax = std::stoi(nx());
         else if (a == "--label") A.label = nx(); else if (a == "--input") A.input = nx();
-        else if (a == "--marks") A.marks = nx();
+        else if (a == "--marks") A.marks = nx(); else if (a == "--audio") A.audio = nx();
         else if (a == "--band") { A.bandX = std::stol(nx()); A.bandW = std::stol(nx()); }
     }
     if (!A.marks.empty() && !(marksFile = fopen(A.marks.c_str(), "w"))) { printf("cannot write marks\n"); return 2; }
+    if (!A.audio.empty() && !(audioFile = fopen(A.audio.c_str(), "wb"))) { printf("cannot write audio\n"); return 2; }
     IDeckLinkIterator *it = CreateDeckLinkIteratorInstance(); if (!it) { printf("no driver\n"); return 2; }
     IDeckLink *dl = nullptr; for (int k = 0; k <= A.device; k++) { if (dl) dl->Release(); if (it->Next(&dl) != S_OK) { printf("no device %d\n", A.device); return 2; } }
     Cap c;
@@ -306,10 +317,16 @@ int main(int argc, char **argv) {
     HRESULT hr = c.in->EnableVideoInput((BMDDisplayMode)mode, bmdFormat10BitYUV, bmdVideoInputEnableFormatDetection);
     printf("[%s] EnableVideoInput(%s, v210, format detection) → 0x%08X\n", A.label.c_str(), fcc(mode).c_str(), (unsigned)hr);
     if (hr != S_OK) { restore(); return 3; }
+    if (audioFile) {
+        HRESULT ar = c.in->EnableAudioInput(bmdAudioSampleRate48kHz, bmdAudioSampleType32bitInteger, 2);
+        printf("[%s] EnableAudioInput(48 kHz, 32-bit, 2 ch) → 0x%08X\n", A.label.c_str(), (unsigned)ar);
+        if (ar != S_OK) { restore(); return 3; }
+    }
     c.in->StartStreams();
     for (double waited = 0; waited < A.seconds && !stopRequested; waited += 0.05) usleep(50000);
     if (stopRequested) printf("[%s] stopped early by signal\n", A.label.c_str());
     c.in->StopStreams(); c.in->SetCallback(nullptr); c.in->DisableVideoInput();
+    if (audioFile) c.in->DisableAudioInput();
     std::lock_guard<std::mutex> g(c.mu);
     printf("[%s] SUMMARY frames=%ld dropped(input, by stream-time gaps)=%ld noInputSource=%ld · ref identical=%ld different=%ld sizeMismatch=%ld · "
            "frames with ANC packets=%ld · ST 2108-1 packets=%ld · raw VANC lines returned on %ld frames, refused on %ld; frames with a raw-VANC ANC header=%ld · dumps=%ld\n",
@@ -317,6 +334,7 @@ int main(int argc, char **argv) {
            c.rawAncFrames, c.dumps);
     restore();
     if (marksFile) fclose(marksFile);
+    if (audioFile) fclose(audioFile);
     c.in->Release(); if (c.st) c.st->Release(); dl->Release(); it->Release();
     return 0;
 }

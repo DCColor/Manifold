@@ -113,6 +113,13 @@ the pins, but reproducing them takes real time.
 - [ ] Review the bundled guide's content for this release: `docs/guides/manifold-0.9-sync-and-color-guide.md`
       (Help ▸ Sync and Color Guide; every build converts it). Its date line is not filled in by the app: the
       version is (`{{VERSION}}`). The build log's "Guide shot list" names the screenshots still to take
+- [ ] A long soak of the release candidate (Play cycles, overnight or at least 3 hours, counting freezes,
+      recoveries and slips) (Robbie, 2026-11-09)
+      - **0.9.2 build 25:** met by the 2026-11-08/09 overnight run (`docs/CARD_CLOCK_FINDINGS.md` §10.15: 13.2 h
+        with the watchdog on, 0 freezes, 2 recoveries, both on the first re-arm) and Stage 1a's 6 × 40 min runs
+        (§10.9: 0 skips, file clock on the card to 0.00 ppm) (Robbie, 2026-11-09). These ran on measurement
+        builds (`-DMANIFOLD_CARDCLOCK`), not on the build 25 binary. 5.75 h of the 13.2 h had Stage 1b on
+        (`MANIFOLD_CARDLOCK_1B=1`), which build 25 ships off. With the gate off as shipped: 7.46 h, 1 recovery.
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
