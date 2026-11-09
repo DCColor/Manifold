@@ -53,6 +53,9 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
     public var pumpWatch: PumpWatch?
     #endif
 
+    /// The pacing renderer's watchdog (`PacingRendererWatchdog.swift`): arms and callbacks. Set by the owner before `start()`.
+    public var activity: RendererActivity?
+
     private let output: AVAssetReaderTrackOutput
     private let reader: AVAssetReader
     private let pacingRenderer: AVSampleBufferVideoRenderer
@@ -97,7 +100,8 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
     /// Begin pumping decoded frames out through `onVideoFrame`. Must be called after
     /// the owner has called `reader.startReading()`. The loop drains while the
     /// pacing renderer wants data and the reader is still delivering — identical to
-    /// the old inline pump.
+    /// the old inline pump. The renderer watchdog calls it again, after `stop()` and a flush, to re-arm a stalled
+    /// renderer on the same session (`FrameEngine.recoverPacingRenderer`): the reader carries on where it was.
     ///
     /// The block captures only locals (renderer, output, reader, the emit closure,
     /// the currency check) — never `self`. So this source may be deallocated the
@@ -111,12 +115,15 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
         let current = isCurrent
         let gate = sinkGate
         let queue = pumpQueue
+        let activity = self.activity
+        activity?.armed()
         #if MANIFOLD_CARDCLOCK
         let watch = pumpWatch
         watch?.armed()
         #endif
         // A local function rather than the closure inline, so a parked pump can be resumed with the same body.
         func pump() {
+            activity?.callback()
             #if MANIFOLD_CARDCLOCK
             watch?.callback()
             #endif
@@ -152,6 +159,7 @@ public final class FileFrameSource: FrameSource, @unchecked Sendable {
                     #endif
                     // Genuine end-of-stream for the CURRENT session: stop requesting
                     // so the renderer doesn't spin on an exhausted reader.
+                    activity?.ended()
                     renderer.stopRequestingMediaData(); return
                 }
                 // Re-checked AFTER the decode: `copyNextSampleBuffer` takes milliseconds, and a step or seek

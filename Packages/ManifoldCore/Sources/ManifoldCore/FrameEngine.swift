@@ -321,6 +321,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The window renderer's backpressure on this engine's file decode pumps (`VideoSinkGate`). The owner wires its
     /// renderer's queue to it; every file source this engine creates parks on it.
     public let videoSinkGate = VideoSinkGate()
+
+    /// The picture-freeze watchdog's record of the pacing renderer's arms, callbacks and enqueues (`PacingRendererWatchdog.swift`).
+    /// Both decode pumps and both emit closures write it; `rendererWatchdogTick` reads it.
+    let rendererActivity = RendererActivity()
+    /// 20 Hz on main; reads only while a file plays. Created here so `deinit` can cancel it.
+    private let rendererWatchdogTimer = DispatchSource.makeTimerSource(queue: .main)
     #if MANIFOLD_CARDCLOCK
     /// The freeze watch (`PumpWatch`, pre-ship removal): both video pumps report into it, `pumpWatchTick` reads it.
     public let pumpWatch = PumpWatch()
@@ -645,6 +651,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         if ProcessInfo.processInfo.environment["MANIFOLD_CARDCLOCK_LOG"] == "1" { startPumpWatch() }
         #endif
         synchronizer.addRenderer(audioRenderer)
+        startRendererWatchdog()
         // Every rate change, from whichever of the many `rate` / `setRate` sites made it: the app's display
         // renderer stops its link while paused, and Play must restart it even when no new frame is enqueued
         // (the queue may already hold the frames Play needs). Weak: the observer must not keep the engine.
@@ -654,6 +661,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     deinit {
+        rendererWatchdogTimer.cancel()
         if let rateObserver { NotificationCenter.default.removeObserver(rateObserver) }
     }
 
@@ -1069,6 +1077,168 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return parts.joined(separator: " · ")
     }
     #endif
+
+    // MARK: - The picture-freeze watchdog (docs/BUGS.md, top 1.0 entry; PacingRendererWatchdog.swift)
+
+    private enum RendererStall {
+        case idle
+        /// Not ready with nothing of ours pending, since `since`. `wouldRecover`: the measurement switch held a recovery back.
+        case stalled(since: Double, wouldRecover: Bool)
+        /// Re-armed at `armHost`, waiting for a frame; `attempts` re-arms so far; `rebuilt`: the session was rebuilt.
+        case recovering(began: Double, armHost: Double, attempts: Int, rebuilt: Bool)
+        /// Out of attempts for this episode: wait for the state to clear, or for transport to stop.
+        case gaveUp
+    }
+    private var rendererStall = RendererStall.idle
+    #if MANIFOLD_CARDCLOCK
+    // MANIFOLD_RENDERER_SELFTEST=recover:<s> | nearmiss:<s> (measurement build): once per launch, <s> s into a run, stop the
+    // renderer's request and read it as not ready until a re-arm, so the watchdog can be checked against a known answer.
+    // `nearmiss` re-arms by itself 0.3 s later. The renderer itself is not stalled: only the watchdog's reading of it is forced.
+    private var watchdogPlayingSince: Double?
+    private var watchdogSelftestDone = false
+    private var watchdogForceNotReady = false
+    #endif
+    private static let nearMissAfter = 0.1     // the state lasting longer than this, then clearing by itself, is a near-miss
+    private static let recoverAfter = 0.5      // no pump callback for this long while in the state: recover
+    private static let rearmWait = 1.0         // a re-arm that brings no frame out within this is tried again
+    private static let rearmAttempts = 3       // then the session is rebuilt at the clock, once
+
+    /// Measurement build only: `MANIFOLD_RENDERER_RECOVER=0` detects and logs but never recovers, for the before-rate.
+    private static let recoveryEnabled: Bool = {
+        #if MANIFOLD_CARDCLOCK
+        return ProcessInfo.processInfo.environment["MANIFOLD_RENDERER_RECOVER"] != "0"
+        #else
+        return true
+        #endif
+    }()
+
+    private func startRendererWatchdog() {
+        rendererWatchdogTimer.schedule(deadline: .now() + 1, repeating: 0.05, leeway: .milliseconds(10))
+        rendererWatchdogTimer.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.rendererWatchdogTick() } }
+        rendererWatchdogTimer.resume()
+    }
+
+    private func rendererWatchdogTick() {
+        let now = CACurrentMediaTime()
+        guard isPlaying, synchronizer.rate > 0, hasMedia, mediaKind == .video, let r = videoRenderer,
+              currentSource != nil || libavSource != nil else {
+            if case .idle = rendererStall {} else { rendererStall = .idle }   // paused or gone: not this fault's to judge
+            #if MANIFOLD_CARDCLOCK
+            watchdogPlayingSince = nil
+            #endif
+            return
+        }
+        var ready = r.isReadyForMoreMediaData
+        #if MANIFOLD_CARDCLOCK
+        let playingSince = watchdogPlayingSince ?? now
+        watchdogPlayingSince = playingSince
+        if !watchdogSelftestDone, let spec = ProcessInfo.processInfo.environment["MANIFOLD_RENDERER_SELFTEST"] {
+            let parts = spec.split(separator: ":")
+            if parts.count == 2, let at = Double(parts[1]), now - playingSince >= at {
+                watchdogSelftestDone = true
+                watchdogForceNotReady = true
+                r.stopRequestingMediaData()
+                print(String(format: "[RENDERER-SELFTEST] %@: stopped the request and forced not-ready %.2f s into the run", String(parts[0]), now - playingSince))
+                if parts[0] == "nearmiss" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                        MainActor.assumeIsolated {
+                            guard let self, self.watchdogForceNotReady else { return }
+                            self.watchdogForceNotReady = false
+                            if self.useLibav { self.libavSource?.rearm() } else { try? self.currentSource?.start() }
+                            print("[RENDERER-SELFTEST] nearmiss: re-armed by itself after 0.3 s")
+                        }
+                    }
+                }
+            }
+        }
+        if watchdogForceNotReady { ready = false }
+        #endif
+        let a = rendererActivity.snapshot()
+        let tb = CMTimebaseGetTime(r.timebase).seconds
+        let frame = a.frameDuration > 0 ? a.frameDuration : 1.0 / 60
+        // Nothing of ours pending: the renderer's clock is a frame past the last frame we gave it, so all of it is due.
+        // Healthy play keeps 0.1–0.2 s ahead, and a renderer with nothing ahead is ready, so this pair never holds there.
+        let nothingPending = a.enqueuedSinceArm == 0 ? now - a.armedHost > 0.25 : tb > a.lastEnqueuedPTS + frame
+        let inState = !a.ended && !ready && nothingPending
+
+        switch rendererStall {
+        case .idle:
+            if inState { rendererStall = .stalled(since: now, wouldRecover: false) }
+        case let .stalled(since, wouldRecover):
+            if !inState {
+                rendererStall = .idle
+                let lasted = now - since
+                guard lasted > Self.nearMissAfter else { return }
+                RendererRecoveryStats.noteNearMiss()
+                print(String(format: "[RENDERER-NEARMISS] pacing renderer not ready with nothing pending for %.0f ms, cleared by itself%@: ready %@, last callback %.0f ms ago, last frame in pts %.6f, renderer clock %.6f, %@",
+                             lasted * 1e3, wouldRecover ? " (past the recovery point; recovery off)" : "",
+                             r.isReadyForMoreMediaData ? "true" : "false", (now - a.lastCallbackHost) * 1e3, a.lastEnqueuedPTS, tb, useLibav ? "libav" : "AVFoundation"))
+                return
+            }
+            guard now - a.lastCallbackHost >= Self.recoverAfter, now - since >= Self.nearMissAfter else { return }
+            guard Self.recoveryEnabled else {
+                if !wouldRecover {
+                    rendererStall = .stalled(since: since, wouldRecover: true)
+                    print("[RENDERER-RECOVER] DISABLED (measurement, MANIFOLD_RENDERER_RECOVER=0): would recover now · " + rendererStallState(r, a, tb: tb, now: now, since: since))
+                }
+                return
+            }
+            recoverPacingRenderer(r, a, tb: tb, now: now, began: since, attempt: 1)
+        case let .recovering(began, armHost, attempts, rebuilt):
+            let after = rendererActivity.snapshot()
+            if after.enqueuedSinceArm > 0 {   // `armed()` zeroed it at the re-arm (or the rebuild's new session)
+                rendererStall = .idle
+                print(String(format: "[RENDERER-RECOVER] picture moving again: first frame in %.0f ms after the %@, %.3f s after the stall began; now newest frame in pts %.6f, renderer clock %.6f",
+                             (after.lastEnqueueHost - armHost) * 1e3, rebuilt ? "rebuild" : "re-arm", now - began, after.lastEnqueuedPTS, tb))
+                return
+            }
+            guard now - armHost >= Self.rearmWait else { return }
+            if rebuilt {
+                rendererStall = .gaveUp
+                print("[RENDERER-RECOVER] GAVE UP: no frame after \(attempts) re-arms and a rebuild · " + rendererStallState(r, a, tb: tb, now: now, since: began))
+            } else if attempts < Self.rearmAttempts {
+                recoverPacingRenderer(r, a, tb: tb, now: now, began: began, attempt: attempts + 1)
+            } else {
+                let clock = CMTimeGetSeconds(synchronizer.currentTime())
+                RendererRecoveryStats.noteRebuild()
+                print(String(format: "[RENDERER-RECOVER] REBUILD: %d re-arms brought no frame; reading again from the clock %.6f · ", attempts, clock)
+                      + rendererStallState(r, a, tb: tb, now: now, since: began))
+                rendererStall = .recovering(began: began, armHost: now, attempts: attempts, rebuilt: true)
+                Task { await beginReading(from: clock, resumePlaying: true) }
+            }
+        case .gaveUp:
+            if !inState { rendererStall = .idle }
+        }
+    }
+
+    /// Flush the stalled renderer and re-arm its request on the SAME session: no seek, the reader carries on where it was,
+    /// and the sound is not touched. Its frames are then a little late, and the renderer and the window drop them to catch up.
+    private func recoverPacingRenderer(_ r: AVSampleBufferVideoRenderer, _ a: RendererActivity.Snapshot, tb: Double, now: Double, began: Double, attempt: Int) {
+        let line = String(format: "[RENDERER-RECOVER] attempt %d: flushing and re-arming the pacing renderer · ", attempt)
+            + rendererStallState(r, a, tb: tb, now: now, since: began)
+        RendererRecoveryStats.noteRecovery(line)
+        print(line)
+        #if MANIFOLD_CARDCLOCK
+        watchdogForceNotReady = false
+        #endif
+        if useLibav, let src = libavSource {
+            r.stopRequestingMediaData()
+            r.flush()
+            src.rearm()
+        } else if let src = currentSource {
+            src.stop()
+            r.flush()
+            try? src.start()
+        }
+        rendererStall = .recovering(began: began, armHost: CACurrentMediaTime(), attempts: attempt, rebuilt: false)
+    }
+
+    private func rendererStallState(_ r: AVSampleBufferVideoRenderer, _ a: RendererActivity.Snapshot, tb: Double, now: Double, since: Double) -> String {
+        String(format: "in the state %.3f s, no pump callback for %.3f s, last frame in %.3f s ago at pts %.6f (%d since the arm), renderer status %d, error %@, ready %@, requiresFlushToResumeDecoding %@, timebase rate %.6f time %.6f, synchronizer rate %.3f, %@",
+               now - since, now - a.lastCallbackHost, a.lastEnqueueHost > 0 ? now - a.lastEnqueueHost : -1, a.lastEnqueuedPTS, a.enqueuedSinceArm,
+               r.status.rawValue, r.error.map { String(describing: $0) } ?? "none", r.isReadyForMoreMediaData ? "true" : "false",
+               r.requiresFlushToResumeDecoding ? "true" : "false", CMTimebaseGetRate(r.timebase), tb, synchronizer.rate, useLibav ? "libav" : "AVFoundation")
+    }
 
     /// True when transport is paused (synchronizer rate 0). Readable from any thread
     /// (the CVDisplayLink render loop), same thread-safety rationale as currentSyncTime().
@@ -2962,6 +3132,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                                           pacingRenderer: videoRenderer,
                                           pumpQueue: videoPumpQueue)
             source.sinkGate = videoSinkGate
+            source.activity = rendererActivity
             #if MANIFOLD_CARDCLOCK
             source.pumpWatch = pumpWatch
             #endif
@@ -3088,8 +3259,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             // Metal tap, both fed off the source's onVideoFrame.
             let vRenderer = videoRenderer
             let frameTap = onVideoFrame
+            let activity = rendererActivity
             source.onVideoFrame = { sb in
                 vRenderer.enqueue(sb)
+                activity.enqueued(pts: CMSampleBufferGetPresentationTimeStamp(sb).seconds)
                 frameTap?(sb)
             }
             libavSource = source
@@ -4914,6 +5087,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             print("FrameEngine: cannot add video output"); return
         }
         source.sinkGate = videoSinkGate
+        source.activity = rendererActivity
         #if MANIFOLD_CARDCLOCK
         source.pumpWatch = pumpWatch
         #endif
@@ -4958,6 +5132,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // An 8-bit source's frames are flagged for the shader's exact ×4 (`SourceBitDepth`): the
         // file's SPS said so, once per load. Every frame, so a frame always carries its own answer.
         let eightBit = fileChroma.eightBitSource
+        let activity = rendererActivity
         activeSource.onVideoFrame = { [weak self] sb in
             if let pb = CMSampleBufferGetImageBuffer(sb) { SourceBitDepth.mark(pb, eightBit: eightBit) }
             if firstFrame {
@@ -4970,6 +5145,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 }
             }
             vRenderer.enqueue(sb)
+            activity.enqueued(pts: CMSampleBufferGetPresentationTimeStamp(sb).seconds)
             frameTap?(sb)
         }
         self.currentSource = activeSource

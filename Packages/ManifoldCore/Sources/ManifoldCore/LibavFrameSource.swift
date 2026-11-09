@@ -105,6 +105,11 @@ public final class LibavFrameSource: @unchecked Sendable {
     public var pumpWatch: PumpWatch?
     #endif
 
+    /// The pacing renderer's watchdog (`PacingRendererWatchdog.swift`): arms and callbacks. Set by the owner before `arm`.
+    public var activity: RendererActivity?
+    /// The current session's currency check, kept so the watchdog can re-arm without a seek (`rearm`).
+    private var armedIsCurrent: (@Sendable () -> Bool)?
+
     private let url: URL
     /// Decoded CVPixelBuffer format — the SAME parameter `FileFrameSource` carries: the file's
     /// resolved format (`FileChromaProbe`), `x422` for HQX, `x444` for 4:4:4 (Stage 3b S2).
@@ -466,19 +471,34 @@ public final class LibavFrameSource: @unchecked Sendable {
     /// by `isCurrent` (the engine's session token) so rapid seek/stop churn is safe.
     /// Must be called after the engine has stopped the renderer's prior arm.
     public func arm(fromSeconds time: Double, isCurrent: @escaping @Sendable () -> Bool) {
+        // Seek runs on pumpQueue BEFORE the first pump pull (serial queue ordering).
+        pumpQueue.async { [weak self] in self?.seekOnPump(toSeconds: time) }
+        armedIsCurrent = isCurrent
+        armRequest(isCurrent: isCurrent)
+    }
+
+    /// Re-arm the current session's request WITHOUT a seek: the decoder carries on where it was. For the renderer watchdog,
+    /// after it has stopped and flushed a stalled renderer (`FrameEngine.recoverPacingRenderer`). No-op before the first arm.
+    public func rearm() {
+        guard let isCurrent = armedIsCurrent else { return }
+        armRequest(isCurrent: isCurrent)
+    }
+
+    private func armRequest(isCurrent: @escaping @Sendable () -> Bool) {
         let renderer = pacingRenderer
         let emit = onVideoFrame
         let current = isCurrent
         let gate = sinkGate
         let queue = pumpQueue
+        let activity = self.activity
+        activity?.armed()
         #if MANIFOLD_CARDCLOCK
         let watch = pumpWatch
         watch?.armed()
         #endif
-        // Seek runs on pumpQueue BEFORE the first pump pull (serial queue ordering).
-        pumpQueue.async { [weak self] in self?.seekOnPump(toSeconds: time) }
         // A local function so a parked pump can be resumed with the same body (`FileFrameSource.start`).
         func pump(_ source: LibavFrameSource?) {
+            activity?.callback()
             #if MANIFOLD_CARDCLOCK
             watch?.callback()
             #endif
@@ -511,6 +531,7 @@ public final class LibavFrameSource: @unchecked Sendable {
                     #if MANIFOLD_CARDCLOCK
                     watch?.exit(.endOfStream, detail: "libav nextFrame returned nil")
                     #endif
+                    activity?.ended()
                     renderer.stopRequestingMediaData(); return   // genuine end-of-stream
                 }
                 emit?(sb)

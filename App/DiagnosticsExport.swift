@@ -423,7 +423,7 @@ enum LogPartitioner {
         "SCAN", "SCRUB", "SCRUB-GEOM", "SETTLE",
         "SRT", "SRT-AU", "SRT-AUDIO", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
-        "PLAYBACK", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE",
+        "PLAYBACK", "RENDERER-NEARMISS", "RENDERER-RECOVER", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE",
         "V210", "WEBRTC", "WEBRTC-SMOKE",
         "WHEP", "WHEP-AUDIO", "WHEP-BRIDGE", "WHEP-DECODE", "WHEP-FLOW", "WHEP-RTP",
     ]
@@ -906,6 +906,12 @@ enum DiagnosticsReport {
               and should be read as one. Both arms need loss events; a clean link cannot answer it.
 
               """
+
+        section("PICTURE RECOVERY")
+        // The picture-freeze watchdog (docs/BUGS.md, top 1.0 entry): how often a playing file's pacing renderer stalled and was
+        // flushed and re-armed. Each recovery and near-miss also has its own line in the captured log below.
+        out += "Pacing renderer  : \(RendererRecoveryStats.summary)\n"
+        if let last = RendererRecoveryStats.lastRecovery { out += "Last recovery    : \(last)\n" }
 
         section("ACTIVE ERROR STATE")
         var errors: [String] = []

@@ -9,6 +9,9 @@
 # `touch build/cardclock/hunt/STOP` ends a case cleanly. HUNT_STOP_FIRST=1 ends it at the first picture freeze (or a stopped log), exit 3; an
 # audio-only silence (the Jump stall, §10.12 Fault 2) is captured and the hunt carries on. HUNT_CYCLE sets the Play length (default 120 s).
 # MANIFOLD_CARDLOCK_STEER_HZ (measurement build) and MANIFOLD_PUMPWATCH_SELFTEST pass through to the build; the rate is kept in <label>.json (§10.14).
+# The picture-freeze watchdog (§10.15): MANIFOLD_RENDERER_RECOVER=0 (measurement build) turns recovery off for a before-rate, and
+# MANIFOLD_RENDERER_SELFTEST passes through. Each launch's [RENDERER-NEARMISS] and [RENDERER-RECOVER] lines are counted into <label>.json.
+# HUNT_NO_OUTPUT=1: DeckLink output never started. With no pulls, a freeze is the freeze watch's "[PUMPWATCH] PICTURE STUCK" line.
 import datetime, json, os, random, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
 OUT = f"{REPO}/build/cardclock/hunt"; PROC = f"{REPO}/scripts/manifold-proc.sh"; AXT = f"{REPO}/build/linkpace/linkpace-ax"
@@ -17,11 +20,12 @@ FIXTURE = f"{REPO}/build/cardclock/cc-5994-2450s.mov"; TITLE = os.path.basename(
 SCARLETT = "AppleUSBAudioEngine:Focusrite:Scarlett 18i20 USB:00011706:1,2"
 STILL = 2.0   # seconds without a new picture, or without PCM
 GRACE = 2.0   # after Play, for the picture and the sound to start
+NO_OUTPUT = os.environ.get("HUNT_NO_OUTPUT") == "1"
 CYCLE = int(os.environ.get("HUNT_CYCLE", "120"))   # seconds of each Play; HUNT_CYCLE=60 for the interleaved hunt (§10.14)
 
 class Detector:
     """Reads the log a line at a time. `check()` names what it sees: 'freeze', 'audio' or None."""
-    def __init__(s): s.playing = False; s.play = 0.0; s.plays = 0; s.pts = None; s.moved = 0.0; s.pcm = 0.0; s.host = 0.0; s.ran = 0.0; s.done = False; s.since = None
+    def __init__(s): s.playing = False; s.play = 0.0; s.plays = 0; s.pts = None; s.moved = 0.0; s.pcm = 0.0; s.host = 0.0; s.ran = 0.0; s.done = False; s.since = None; s.stuck = False; s.thost = None; s.played = 0.0
     def line(s, l):
         if l.startswith("[CADENCE] #"):
             f = l.split()
@@ -32,10 +36,18 @@ class Detector:
             if f[5] != "nan" and f[5] != s.pts: s.pts = f[5]; s.moved = h
         elif l.startswith("DeckLinkAudio: branch #"):
             if "→ PCM" in l: s.pcm = s.host
-        elif l.startswith("[TRANSPORT] play") or l.startswith("[DRV] BEGIN"): s.playing = True; s.play = s.host; s.plays += 1
-        elif l.startswith("[TRANSPORT] pause") or l.startswith("[DRV] END"): s.playing = False
+        elif l.startswith("[TRANSPORT] play") or l.startswith("[DRV] BEGIN"):
+            s.playing = True; s.play = s.host; s.plays += 1; s.stuck = False
+            m = re.search(r" host (\S+)", l); s.thost = float(m[1]) if m else None
+        elif l.startswith("[TRANSPORT] pause") or l.startswith("[DRV] END"):
+            s.playing = False
+            m = re.search(r" host (\S+)", l)
+            if m and s.thost is not None: s.played += float(m[1]) - s.thost
+            s.thost = None
+        elif l.startswith("[PUMPWATCH] PICTURE STUCK"): s.stuck = True
         elif l.startswith("[TRANSPORT] done"): s.done = True
     def check(s):
+        if s.playing and s.stuck and NO_OUTPUT: return "freeze"
         if not s.playing or not s.host: return None
         if s.host - max(s.moved, s.play + GRACE) >= STILL: return "freeze"
         if s.host - max(s.pcm, s.play + GRACE) >= STILL: return "audio"
@@ -112,9 +124,10 @@ def launch_once(label, n, gate, steps, deadline, state):
     deny_licence_prompt()
     sh(PROC, "open", str(pid), FIXTURE); time.sleep(3.5)
     sh(AXT, str(pid), "place", TITLE, "ASUS"); time.sleep(1.5)
-    menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(3)
-    if "CARDCLOCK-REF] start" not in open(log, errors="replace").read():
-        say("output did not start"); quit_build(); return "no-output"
+    if not NO_OUTPUT:
+        menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(3)
+        if "CARDCLOCK-REF] start" not in open(log, errors="replace").read():
+            say("output did not start"); quit_build(); return "no-output"
     d = Detector(); f = open(log, errors="replace"); buf = ""; grew = time.monotonic(); checked = time.monotonic(); seen = None
     while True:
         chunk = f.read()
@@ -125,21 +138,23 @@ def launch_once(label, n, gate, steps, deadline, state):
                 if seen is None: seen = d.check()
         if p.poll() is not None:
             say(f"pid {pid} EXITED by itself, code {p.returncode}"); state["events"].append(dict(kind="exit", code=p.returncode, label=label, launch=n)); stop_helpers(); state["plays"] += d.plays; state["ran"] += d.ran; return "exit"
-        stalled = time.monotonic() - grew > 5
+        stalled = time.monotonic() - grew > (60 if NO_OUTPUT else 5)   # without pulls the log is quiet while paused
         if seen or stalled:
             kind = seen or "log-stopped"; say(f"DETECTED {kind}: pts {d.pts}, Play {d.plays}, {d.host - d.play:.1f} s after Play")
             state["fz"] += 1; rec = capture(pid, kind, d, label, state["fz"], log, defout); rec["launch"] = n; state["events"].append(rec)
             say(f"captured {label}-{state['fz']}: window_frozen {rec['window_frozen']}, last new picture {rec['seconds_since_play']} s after Play")
             state["plays"] += d.plays; state["ran"] += d.ran; quit_build(); return "detected-audio" if kind == "audio" else "detected"
         if d.done or time.time() >= deadline or os.path.exists(f"{OUT}/STOP"):
-            menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(3); menu(pid, "File", "Close All"); time.sleep(1.5)
+            if not NO_OUTPUT: menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(3)
+            menu(pid, "File", "Close All"); time.sleep(1.5)
             state["plays"] += d.plays; state["ran"] += d.ran; quit_build(); say(f"{label} launch {n} ended: Plays {d.plays}, ran {d.ran:.0f} s"); return "ended"
         if time.monotonic() - checked > 15: checked = time.monotonic(); deny_licence_prompt()
         time.sleep(0.2)
 
 def hunt(mode, gate, label, deadline):
     rng = random.Random(); seed = rng.randrange(1 << 30); rng.seed(seed)
-    state = dict(plays=0, ran=0.0, fz=0, events=[], seed=seed, gate=gate, mode=mode, steer_hz=os.environ.get("MANIFOLD_CARDLOCK_STEER_HZ", "1"), cycle=CYCLE,
+    state = dict(plays=0, ran=0.0, fz=0, events=[], seed=seed, gate=gate, mode=mode, steer_hz=os.environ.get("MANIFOLD_CARDLOCK_STEER_HZ", "1"), cycle=CYCLE, no_output=NO_OUTPUT,
+                 recovery_enabled=os.environ.get("MANIFOLD_RENDERER_RECOVER", "1") != "0",
                  began=datetime.datetime.now().isoformat(timespec="seconds")); n = 0
     while time.time() < deadline and not os.path.exists(f"{OUT}/STOP"):
         n += 1
@@ -148,11 +163,17 @@ def hunt(mode, gate, label, deadline):
             steps = "wait 25;" + ";".join(f"seek {rng.uniform(0, 2300):.2f};wait 2;play;wait {CYCLE};pause;wait 1" for _ in range(k))
         else: steps = "wait 25;loop;play"
         r = launch_once(label, n, gate, steps, deadline, state)
+        try:
+            txt = open(f"{OUT}/{label}-L{n}.log", errors="replace").read()
+            state["nearmiss"] = state.get("nearmiss", 0) + txt.count("[RENDERER-NEARMISS]")
+            state["recover"] = state.get("recover", 0) + len(re.findall(r"\[RENDERER-RECOVER\] (attempt|DISABLED)", txt))
+            state["played"] = state.get("played", 0.0) + sum(float(b) - float(a) for a, b in zip(re.findall(r"\[TRANSPORT\] play host (\S+)", txt), re.findall(r"\[TRANSPORT\] pause host (\S+)", txt)))
+        except OSError: pass
         json.dump(dict(state, launches=n, ended=datetime.datetime.now().isoformat(timespec="seconds")), open(f"{OUT}/{label}.json", "w"), indent=1)
         if r in ("no-launch", "no-output"): say(f"stopping {label}: {r}"); sys.exit(4)
         if r == "detected" and os.environ.get("HUNT_STOP_FIRST") == "1":
-            say(f"stopping {label}: first freeze (HUNT_STOP_FIRST)"); say(f"{label} DONE: {state['ran'] / 3600:.2f} h, Plays {state['plays']}, detections {state['fz']}"); sys.exit(3)
-    say(f"{label} DONE: {state['ran'] / 3600:.2f} h, Plays {state['plays']}, detections {state['fz']}")
+            say(f"stopping {label}: first freeze (HUNT_STOP_FIRST)"); say(f"{label} DONE: {state['ran'] / 3600:.2f} h pulled, {state.get('played', 0) / 3600:.2f} h played, Plays {state['plays']}, detections {state['fz']}, near-misses {state.get('nearmiss', 0)}, recoveries {state.get('recover', 0)}"); sys.exit(3)
+    say(f"{label} DONE: {state['ran'] / 3600:.2f} h pulled, {state.get('played', 0) / 3600:.2f} h played, Plays {state['plays']}, detections {state['fz']}, near-misses {state.get('nearmiss', 0)}, recoveries {state.get('recover', 0)}")
 
 if __name__ == "__main__":
     a = sys.argv[1:]

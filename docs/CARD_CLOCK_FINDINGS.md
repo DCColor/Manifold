@@ -755,6 +755,8 @@ One freeze on libav rules out the AVAssetReader as the cause. What the two decod
 
 A freeze is not a permanent version of the Jump stall. The freeze stack does not point at the audio pump, so the tap-lead doubling stays uninvestigated, as decided above.
 
+⚠️ **Superseded 2026-11-08: the freeze is not 1b's.** The first gate-off block of the interleaved hunt froze (§10.14), with no steering write and no renderer move. It is now the top 1.0 bug (`BUGS.md`). The reading below is kept as written.
+
 **The reading.** By the brief's rule, (a) froze and (b) did not, so the freeze is 1b's. The evidence is thin, though:
 - **Counts:** one freeze in (a) against none in (b). If the two had the same rate, 0 in (b) would happen 37% of the time (Poisson, mean 1).
 - **The four freezes together:** all four came with the renderer moved and the lock on. That is about 49,800 s of 1b running, one freeze per 3.5 h.
@@ -829,3 +831,73 @@ If the two run at the same rate, 3.36 h of 19.13 h would hold at least one of th
 **An aside, not the freeze: parks before the first Play.** The pump parked 9836 times and was woken by a signal once. All of the parks came before the launch's first Play was 0.3 s old, and none in the 17 Plays after. Each park overwrites the gate's single slot, so this reads as the renderer calling back repeatedly while the paused window queue is full, but how long it lasted and what it costs is UNKNOWN (PumpWatch logs only parks of 1 s or more, and none was).
 
 **Next, not started (measure only):** the branch is now named. What is still UNKNOWN is why AVSampleBufferVideoRenderer reads not ready with empty queues and never calls back. In the logs that freeze is not tied to the gate, steering, a renderer move, a decoder error, an output change or Jump.
+
+**Decided (Robbie, 2026-11-08):** the freeze is pre-existing (gate off, `d7a4e93`; almost certainly in 0.9.2), and is now the top 1.0 bug, above the card-clock slips (`BUGS.md`). 1b is cleared of it.
+
+### 10.15 The picture freeze: reading for the cause, the watchdog, before and after, 2026-11-08
+
+**The reading: every call on the pacing renderer.** The pacing renderer is the `AVSampleBufferDisplayLayer`'s `sampleBufferRenderer` in each window (`App/ContentView.swift:1209-1212`), under the Metal surface, attached to the engine's synchronizer (`FrameEngine.attach(renderer:)`). The live routes' `renderer.flush()` calls (`App/Live/LiveDisplayRoute.swift:229`, `SyntheticLiveSource.swift:224`) are the Metal renderer's, not this one. What touches it:
+
+| Call | Where | Thread |
+|---|---|---|
+| `requestMediaDataWhenReady` | `FileFrameSource.start` (AVF), `LibavFrameSource.arm` (libav) | main (the block runs on `videoPumpQueue`) |
+| `stopRequestingMediaData` | `FileFrameSource.stop`; `beginLibavReading`; the pump's end-of-stream branch | main; the pump queue for end-of-stream |
+| `flush` | `beginReading` (every seek, step, loop, load), `beginLibavReading`, `stop()`, `retirePreviousPicture` | main |
+| `enqueue` | the session's `onVideoFrame` closure, from the pump | `videoPumpQueue` |
+| `isReadyForMoreMediaData` | the pump's `while` loop | `videoPumpQueue` |
+
+Play, pause and shuttle only set the synchronizer's rate (`setShuttleRate` → `setTransportRate`). Scrub runs its own producer and does not touch this renderer. Output start and stop touch only the card-clock state, and with sound and the gate off they change nothing here. Loop and step go through `beginReading`.
+
+**The order at a seek, then Play** (the hunt's `seek X; wait 2; play`): `seek(to:)` → `Task { beginReading }` on main: (1) the session token is bumped; (2) rate 0; (3) the old source's `stop()`, i.e. `stopRequestingMediaData`; (4) the audio teardown; (5) the old reader's cancel queued behind both pump queues; (6) `flush()` and the window's `onFlush`; (7) the new reader is built and started; (8) `parkTransport(at: start)`; (9) the new source's `start()`, i.e. `requestMediaDataWhenReady` on `videoPumpQueue`; (10) `await beginAudioReading`. The pump fills the renderer while paused. Two seconds later `play()` sets the rate to 1. Nothing else touches the renderer until the next seek.
+
+**The four things looked for:**
+- **A request not re-armed after a flush or a stop:** none. Every flush on a live session is followed by an arm in the same main-actor function (`beginReading`, `beginLibavReading`). `stop()` and `retirePreviousPicture` end the session on purpose.
+- **A re-arm racing a flush on another queue:** arm, stop and flush all run on main, in order. The one cross-queue race found: the old session's pump can pass its post-decode `guard current()` (`FileFrameSource.swift`, before `emit`) just before main bumps the token and flushes, and then enqueue one frame from the old position into the flushed renderer and the window queue. That frame's pts is from the old position. Seeking backwards it waits in the queue until the clock reaches it; seeking forwards it is late at once. Either way it is gone within the seek distance, the queues are not empty while it waits, and it happens at a seek, not 17–2000 s into play. **It cannot produce the freeze's state or its timing.** A real defect, recorded, not fixed here.
+- **A callback that returns early without re-arming:** the superseded exits (a newer session has armed) and the end-of-stream exit (stops on purpose) are correct. The gate's park returns while the renderer is ready and relies on the gate or on AVFoundation calling again. `il-off1` shows the second happens: 9,836 parks before the first Play, the renderer calling back each time. The freeze did not take this exit.
+- **Relying on `isReadyForMoreMediaData` without a callback:** the gate's resume runs the pump body, which tests readiness and, if not ready, returns to wait for the renderer's callback, which is still armed. Correct by AVFoundation's contract.
+
+**So no cause was found by reading.** In steady play the only actors on the renderer are our pump (enqueue, readiness) and AVFoundation/CoreMedia. At the freeze the pump's last exit was "not ready", which is the contract working, and the renderer then never called back while CoreMedia logged both its queues empty. That is the renderer's state, not something our ordering left behind. Why it gets there is UNKNOWN.
+
+**The watchdog (production code, every build).** `PacingRendererWatchdog.swift` (`RendererActivity`, `RendererRecoveryStats`) and `FrameEngine.rendererWatchdogTick`. Both pumps record their arms and callbacks, and both emit closures record each enqueue.
+- **Polling:** every 50 ms on main, only while a file plays.
+- **The state:** the renderer not ready, and nothing of ours pending in it, meaning its timebase is a frame past the last frame we enqueued (or nothing has been enqueued 0.25 s after an arm), and the pump has not ended. Healthy play keeps the renderer 0.1–0.2 s ahead, and a renderer with nothing ahead is ready, so the state should not occur there.
+- **Near-miss:** the state lasts over 100 ms and clears by itself. One `[RENDERER-NEARMISS]` line and a count.
+- **Recovery:** the state holds and no pump callback has come for 500 ms. One `[RENDERER-RECOVER]` line with the state, and a count. Then the renderer is flushed and its request re-armed on the same session: `FileFrameSource.stop`/`start` or `LibavFrameSource.rearm`, which re-arms without a seek. The reader carries on where it was, and the sound is not touched. If a re-arm brings no frame within 1 s it is tried again. After three, the session is rebuilt at the clock (`beginReading`), once, and then it gives up, so a renderer that will not drain cannot make it loop. Each step logs.
+- **Export Diagnostics:** a *PICTURE RECOVERY* section with the counts and the last recovery line. Both tags are in `LogPartitioner`.
+- **Measurement build only:** `MANIFOLD_RENDERER_RECOVER=0` detects but does not recover, for the before-rate. `MANIFOLD_RENDERER_SELFTEST=recover:<s>|nearmiss:<s>` stops the request and forces the watchdog to read not-ready, so it can be checked against a known answer.
+- **Builds:** Release without the flag compiles. It has the `RENDERER-RECOVER`/`NEARMISS` strings and none of `RENDERER-SELFTEST`, `MANIFOLD_RENDERER_RECOVER` or `PUMPWATCH`. `swift test`: all tests passed.
+
+**Self-tests (`build/cardclock/hunt/wd-st-*`):**
+
+| Test | Result |
+|---|---|
+| `recover:20`, output on | Recovery fired 0.510 s after the last callback (in the state 0.345 s). First frame 37 ms after the re-arm. Picture moving 0.400 s after the stall began |
+| `nearmiss:20`, output on | `[RENDERER-NEARMISS]` 196 ms, cleared by itself. No recovery |
+| `recover:20`, `MANIFOLD_RENDERER_RECOVER=0`, output off | One "DISABLED … would recover now" line at 0.515 s, no recovery. `[PUMPWATCH] PICTURE STUCK` at 2.05 s and 10.05 s, and the hunt's no-output mode detected it as a freeze |
+
+The self-test forces only the watchdog's reading of readiness. The renderer was never really in the freeze's state, so a real stall's recovery is first seen in the runs below.
+
+**Before and after** (`cardlock-hunt.py cycle`, 60 s Plays from random points, seeks between, `cc-5994-2450s.mov` with sound, destination SDI, 59.94, capture closed; 2026-11-08 13:47 → 2026-11-09 07:00; logs `build/cardclock/hunt/wd-*`). No separate fix exists, so "fix and watchdog off/on" is watchdog off/on (`MANIFOLD_RENDERER_RECOVER=0` / unset); near-miss logging on throughout.
+
+| Stage | Watchdog | Gate | DeckLink out | Played | Plays | Near-misses | Recoveries | Freezes |
+|---|---|---|---|---|---|---|---|---|
+| Before A (`wd-before-out`) | off | off | on | 1.88 h | 113 | 0 | — (0 would-recover) | 0 |
+| Before B (`wd-before-noout`) | off | off | **off** | 0.93 h | 57 | 0 | — (0 would-recover) | 0 |
+| After (`wd-after`) | on | off | on | 1.88 h | 113 | 0 | 0 | 0 |
+| Overnight, gate ON (`wd-night-on1…7`) | on | on | on | 5.75 h | 353 | 0 | 1, recovered | 0 |
+| Overnight, gate OFF (`wd-night-off1…6`) | on | off | on | 5.58 h | 342 | 0 | 1, recovered | 0 |
+
+Totals: watchdog off 2.81 h / 170 Plays, nothing seen. Watchdog on 13.21 h / 808 Plays: 2 recoveries, both first-attempt, 0 rebuilds, 0 gave-ups, 0 PICTURE STUCK, 0 freezes. 0 near-misses in 16.0 h.
+
+The two recoveries (the first real stalls the watchdog has met):
+
+| Block | Gate | When | State at recovery | Result |
+|---|---|---|---|---|
+| `wd-night-on2` | on | at Play: clock 866.71, 5 preroll frames enqueued since the arm, last callback 2.22 s before (during the paused preroll); the timebase ran past all 5 with no callback | not ready, status 1, error none, requiresFlush false, rate 1 | first frame 39 ms after the re-arm, picture moving 0.150 s after the stall began (≈0.2 s after Play) |
+| `wd-night-off4` | off | mid-play, ≈17.8 s in (1,069 frames since the arm), pts 1622.04 | the same, in state 0.346 s, no callback 0.524 s | first frame 47 ms after the re-arm, moving 0.394 s after the stall began; `[PLAYBACK-STATS]` shows 7 + 16 dropped over the two seconds around it |
+
+The reading:
+- Both are the freeze's state (§10.14, il-off1 and hunt/a-1): not ready with nothing of ours ahead of the timebase, no error, no flush requested. One at Play (as hunt/a-1), one mid-play (as il-off1). One with the gate on, one with it off: no gate dependence, consistent with "not 1b's".
+- Near-misses: 0 in 16 h. The state does not clear by itself; when the renderer reaches it, it stays. So the near-miss rate cannot be compared output on vs off: 0 in both (1.88 h and 0.93 h). Nor did a stall occur in either "before" stage (2.81 h, at a rate of about 1 per 6–7 h seen overnight, 0 was the likely outcome). Whether the card or chassis is involved is UNKNOWN from these runs.
+- Rate: 2 stalls in 13.2 watchdog-on hours (≈1 per 6.6 h, ≈1 per 400 Plays), every one recovered on the first re-arm. Without the watchdog each would have been a permanent freeze. The visible cost is a hitch of 0.2–0.5 s.
+- Disturbances, for reading the logs: Discord ran 18:01:06–18:04:45 on 2026-11-08 (one dropped frame at its launch) and a browser played audio about 18:10–18:18, both in `wd-after`; nothing reacted. No SDI audio underrun in any stage.

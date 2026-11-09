@@ -18,6 +18,9 @@ held back until after release, and the numbered defect entries follow.
 **Decided (Robbie, 2026-10-07; corrected 2026-10-08).** Nothing moves to 1.1. In this order:
 
 1. **The technical work.**
+   - **TOP 1.0 BUG (decided, Robbie, 2026-11-08), above the card-clock slips: the picture freeze during file playback**
+     (*A playing file's picture freezes for good while the clock and sound run on*, the first defect entry below). Pre-existing:
+     it froze with the 1b gate off, on the `d7a4e93` path, and is almost certainly in 0.9.2. 1b is cleared of it.
    - **TOP PRIORITY (decided, Robbie, 2026-11-05): the one-frame SDI slips during file playback move from 1.1 into 1.0**
      (*SDI from a file slips one frame whenever the card's clock and the file clock drift a frame apart*, below). A reference
      player must not repeat or skip frames, and "the clocks drift" is not an acceptable explanation. Step 1, measure only:
@@ -1547,6 +1550,10 @@ Added 2026-11-05 for `CARD_CLOCK_FINDINGS.md`. Measurement only; none changes be
   instance and its two `source.pumpWatch =` lines, `startPumpWatch()` in `init`, `observePacingRenderer` in `attach(renderer:)`, the
   "freeze watch" MARK section (`[PUMPWATCH]` and `MANIFOLD_PUMPWATCH_SELFTEST`), and `MANIFOLD_CARDLOCK_STEER_HZ` with `cardWrites`/`cardLastWriteHost`.
   When removing it, `cardSteerHz` goes back to a fixed 1 Hz timer.
+- Added 2026-11-08 to the freeze watch (§10.14–§10.15), also `#if MANIFOLD_CARDCLOCK`: `VideoSinkGate.WatchState`, `watchState()`, `depthProvider` and
+  the counting in `park`/`roomAvailable`; `MetalVideoRenderer.queueDepthForWatch` and its wiring in `WindowDeck`; the `[PUMPWATCH] 1b move` and
+  `1b re-read` lines in `FrameEngine`; and the watchdog's measurement switches, `MANIFOLD_RENDERER_RECOVER` and `MANIFOLD_RENDERER_SELFTEST`
+  (`watchdogPlayingSince`, `watchdogSelftestDone`, `watchdogForceNotReady`). **The watchdog itself is shipping code and stays.**
 - `DebugTransportHook`, `App/DebugStepHook.swift`, and its call in `ContentView` (`#if DEBUG`, `MANIFOLD_DEBUG_TRANSPORT`): scripted play, pause, seek, step, shuttle, loop and `dest sdi|computer`, the transport moves being key-only. Added 2026-11-06 for Stage 1a; `dest` for Stage 1b.
 
 What stays and what goes at Stage 3: `CARD_CLOCK_FINDINGS.md` §10.6. The completion read is now shipped code (the `cardFrame` block in the bridge); the `[CARDCLOCK]` log around it is still a hook.
@@ -2132,6 +2139,32 @@ items.
 - **Not before release:** this deinit is on the launch path that once left windows invisible.
 
 ---
+
+## ☐ OPEN 2026-11-08 — TOP 1.0 BUG — PRE-EXISTING (gate off, `d7a4e93`; almost certainly 0.9.2) — A playing file's picture freezes for good while the clock and sound run on
+
+**Decided (Robbie, 2026-11-08): the top 1.0 bug, above the card-clock slips. Not Stage 1b's: it froze with the gate off.** `CARD_CLOCK_FINDINGS.md` §10.12 (Fault 3), §10.13, §10.14, §10.15.
+
+**What happens.** Mid-file, at a random moment, the decode pump stops being called. The picture holds one frame in the window and on SDI. The clock runs on, the audio tap reads on, and SDI audio goes silent only because the bridge follows the stopped picture. It does not recover. No error from AVFoundation, the reader or the renderer. Every clock figure stays good, so a run has to be checked by pulls or presents.
+
+**The five freezes:**
+
+| Run | 1b gate | Decode path | Since Play | Exit taken |
+|---|---|---|---|---|
+| `b12-libav` | On (before the gate existed) | libav | 47.1 s | UNKNOWN (before the freeze watch) |
+| `b1-5994-r2` | On (before the gate existed) | AVFoundation | 1998.9 s | UNKNOWN (before the freeze watch) |
+| `f-ph1` s4 | On (before the gate existed), capture open | AVFoundation | 43.2 s | UNKNOWN (before the freeze watch) |
+| `hunt/a-1` | On | AVFoundation | 17.7 s | UNKNOWN: the stack shows the pump never called, nothing blocked; the branch was not yet logged |
+| `hunt/il-off1-1` | **Off** | AVFoundation | 31.9 s | **Branch 1: the pacing renderer not ready and never draining.** `isReadyForMoreMediaData` false, status 1, no error, timebase at rate 1, while CoreMedia logs its video queue at 0 frames and its image queue at 0 unconsumed. No callback after the pump's last not-ready exit. Not the gate (waiters 0, room yes). 0 steering writes, no 1b move |
+
+All five share the signature: pts stuck while the clock runs on, the window presenting nothing. Rate: gate on, 4 in 15.77 h and 273 Plays; gate off, 1 in 3.36 h and 106 Plays. The two cannot be told apart (§10.14).
+
+**Cause: none found by reading (§10.15).** Every call that flushes, arms or stops the pacing renderer was traced. None leaves it armed-but-stalled mid-play: in steady play nothing of ours touches it but the pump's own enqueue. One unrelated race was found (an old session's frame can land after a seek's flush), which cannot produce this state or this timing.
+
+**Fix: a watchdog, in production code (§10.15).** 20 Hz on main, while a file plays: renderer not ready, nothing of ours pending in it, no pump callback for 500 ms → flush it and re-arm its request on the same session, and log `[RENDERER-RECOVER]` with the state. If three re-arms bring no frame, rebuild the session at the clock, once. A state lasting over 100 ms that clears by itself logs `[RENDERER-NEARMISS]`. Counts in Export Diagnostics (*PICTURE RECOVERY*). Self-tested against a forced stall: recovered in 0.40 s, first frame 37 ms after the re-arm. Built, not committed. **Before/after (§10.15):** watchdog off 2.81 h / 170 Plays, nothing seen (0 near-misses, output on and off). Watchdog on 13.2 h / 808 Plays (gate on 5.75 h, off 7.46 h): 2 real stalls, one at Play (gate on), one 17.8 s into Play (gate off), both recovered on the first re-arm in 0.15 s and 0.39 s; 0 freezes, 0 rebuilds, 0 near-misses. The state never clears by itself. Root cause still open: the watchdog contains it, it does not prevent it.
+
+## ☐ OPEN 2026-11-08 — LOW — the video pump parks thousands of times while paused before the first Play
+
+Found by the gate's counters (`CARD_CLOCK_FINDINGS.md` §10.14): in `il-off1` the pump parked on a full window queue **9,836 times** and was woken by a signal once, all before the launch's first Play was 0.3 s old, and never in the 17 Plays after. Each park overwrites the gate's single slot, so this reads as the pacing renderer calling its request block over and over while it is ready and the paused window queue is full. **Cost UNKNOWN** (CPU, battery, how long it lasts). Not the freeze: none of it falls near a freeze. Low priority; measure before changing anything.
 
 ## ✅ FIXED 2026-10-31 (covered by the narrow/vertical fix) — PRE-EXISTING, ALL BUILDS — at 875–900 pt the control row is cut off at both edges
 
@@ -3785,9 +3818,11 @@ recent frame at the vsync rather than per frame. Window only; SDI must stay as m
 
 **Stage 1b, destination SDI: gone.** 42 of 42 Plays clean on the wire at both rates (`CARD_CLOCK_FINDINGS.md` §10.12, B18). Destination Computer stays until Stage 2 at the earliest.
 
-## ☐ OPEN 2026-11-07 — Stage 1b — the picture can freeze with card lock on and the clock still running
+## ➜ MOVED 2026-11-08 — NOT 1b's — the picture can freeze with card lock on and the clock still running
 
-**Blocks 1b, which is off by default behind `MANIFOLD_CARDLOCK_1B=1` until this is understood.** `CARD_CLOCK_FINDINGS.md` §10.12, Fault 3, and §10.13. Three times in about 37,000 s of sound-locked running, on both decode paths, at 43 s, 47 s and 1999 s after Play. The picture stops, the clock runs on, SDI audio goes silent, and it does not recover. Clock figures stay good, so a run has to be checked by pulls and the SDI stop line. Not Jump Desktop. **Hunt, 2026-11-07 (§10.13):**
+**Superseded (2026-11-08): the freeze is not 1b's.** It froze with the gate off, with no steering write and no renderer move (`hunt/il-off1-1`, `CARD_CLOCK_FINDINGS.md` §10.14). It is now the top 1.0 bug, *A playing file's picture freezes for good while the clock and sound run on*, above. The freeze no longer blocks 1b. 1b stays off by default behind `MANIFOLD_CARDLOCK_1B=1` until the rest of its plan is decided. The history below is kept as it was written.
+
+**(As written 2026-11-07.) Blocks 1b, which is off by default behind `MANIFOLD_CARDLOCK_1B=1` until this is understood.** `CARD_CLOCK_FINDINGS.md` §10.12, Fault 3, and §10.13. Three times in about 37,000 s of sound-locked running, on both decode paths, at 43 s, 47 s and 1999 s after Play. The picture stops, the clock runs on, SDI audio goes silent, and it does not recover. Clock figures stay good, so a run has to be checked by pulls and the SDI stop line. Not Jump Desktop. **Hunt, 2026-11-07 (§10.13):**
 - **Counts:** gate on, 1 freeze in 2.90 h and 88 Plays (`build/cardclock/hunt/a-1/`). Gate off, 0 in 2.92 h and 88 Plays. All four freezes seen so far came under 1b; how strong that is is set out in §10.13.
 - **What stops:** the VIDEO pump stops being called. The pulls repeat one pts while the clock runs on, and the window presents nothing. The audio tap keeps reading, and SDI audio goes silent only because the bridge follows the stopped picture.
 - **The stack:** no thread is blocked. `pump.video`, `AVSampleBufferVideoRenderer videoQueue` and the Metal queue are absent, where a healthy sample has them busy.
@@ -3795,7 +3830,7 @@ recent frame at the vsync rather than per frame. Window only; SDI must stay as m
 - **The difference between the gates:** gate on, the steering's 1 Hz rate writes take the picture timebase through rate 0. That is a correlation, not a shown cause.
 - **Instrumented, 2026-11-07 (§10.14):** each branch now logs (`[PUMPWATCH]`, measurement build), and a picture stuck 2 s logs the pacing renderer's state and the time since the last steering write. Checked against a forced branch 1.
 - **Re-anchor stress, 2026-11-08 (§10.14):** steering raised to 10 Hz, then 20 Hz, gate on, 0.97 h each: **0 freezes** at both, with CoreMedia taking the video queue through rate 0 on every write (34,783 and 69,604 times). A per-write trigger at the 1 Hz rate would have given about 2.1; none happens 12% of the time. The trip through rate 0 is not shown to be the trigger.
-- **Next:** about 10.5 h gate-off, with the freeze watch in the build, to settle whether it is pre-existing. Not started.
+- **Next:** about 10.5 h gate-off, with the freeze watch in the build, to settle whether it is pre-existing. **Done 2026-11-08: the first gate-off block froze after 0.28 h (§10.14). Pre-existing.**
 - **Not the Jump stall:** that stops the audio pump with the picture running.
 
 ## ☐ OPEN 2026-11-07 — PRE-EXISTING, IN 0.9.2 — a change of the system default output silences SDI audio until the session ends
