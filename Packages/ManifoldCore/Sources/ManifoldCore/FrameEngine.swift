@@ -648,7 +648,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             audioRenderer.audioOutputDeviceUniqueID = uid
             print("[CARDCLOCK] audio renderer device read-back: \(audioRenderer.audioOutputDeviceUniqueID ?? "nil")")
         }
-        if ProcessInfo.processInfo.environment["MANIFOLD_CARDCLOCK_LOG"] == "1" { startPumpWatch() }
+        if ProcessInfo.processInfo.environment["MANIFOLD_CARDCLOCK_LOG"] == "1" { startPumpWatch(); observeAudioRenderer() }
         #endif
         synchronizer.addRenderer(audioRenderer)
         startRendererWatchdog()
@@ -999,6 +999,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     private func pumpWatchTick() {
         let now = CACurrentMediaTime()
+        audioWatchTick(now)
         let running = isPlaying && synchronizer.rate != 0 && hasMedia && mediaKind == .video
         guard running else { pumpWatchRunningSince = nil; pumpStuckSince = nil; pumpStuckReports = 0; return }
         let since = pumpWatchRunningSince ?? now
@@ -1075,6 +1076,84 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         }
         parts.append(String(format: "steering: %.0f Hz, last write %@ (%d writes), steered %@", Self.cardSteerHz, ago(cardLastWriteHost), cardWrites, cardSteered ? "yes" : "no"))
         return parts.joined(separator: " · ")
+    }
+
+    // The audio watch (docs/CARD_CLOCK_FINDINGS.md §10.17; pre-ship removal). The AVFoundation audio pump's callbacks and enqueues, the
+    // audio renderer's own notifications, and, once a playing file's audio pump has had no callback for 2 s (and again at 10 s), the
+    // renderer's state: what the pump is waiting on when a default-output change stops it. Every 30 s of play, the callback count and the
+    // longest gap, so a stall can be told from the renderer's normal bursts. Reads only; changes nothing.
+    final class AudioWatch: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var arms = 0, callbacks = 0, enqueues = 0
+        private(set) var lastCallbackHost = 0.0, lastEnqueuePTS = Double.nan, lastOutcome = "none", maxGap = 0.0, windowCallbacks = 0
+        func armed() { lock.lock(); arms += 1; lastCallbackHost = CACurrentMediaTime(); lock.unlock() }
+        func callback(outcome: String) {
+            let now = CACurrentMediaTime(); lock.lock()
+            if lastCallbackHost > 0 { maxGap = max(maxGap, now - lastCallbackHost) }
+            callbacks += 1; windowCallbacks += 1; lastCallbackHost = now; lastOutcome = outcome; lock.unlock()
+        }
+        func enqueued(_ pts: Double) { lock.lock(); enqueues += 1; lastEnqueuePTS = pts; lock.unlock() }
+        func snapshot(resetWindow: Bool = false) -> (arms: Int, callbacks: Int, enqueues: Int, last: Double, pts: Double, outcome: String, maxGap: Double, window: Int) {
+            lock.lock(); defer { lock.unlock() }
+            let r = (arms, callbacks, enqueues, lastCallbackHost, lastEnqueuePTS, lastOutcome, maxGap, windowCallbacks)
+            if resetWindow { maxGap = 0; windowCallbacks = 0 }
+            return r
+        }
+    }
+    nonisolated let audioWatch = AudioWatch()
+    private var audioWatchObservers: [NSObjectProtocol] = []
+    private var audioStallSince: Double?
+    private var audioStallReports = 0
+    private var audioWatchWindowStart: Double?
+
+    private func observeAudioRenderer() {
+        let r = audioRenderer
+        audioWatchObservers = [
+            NotificationCenter.default.addObserver(forName: .AVSampleBufferAudioRendererWasFlushedAutomatically, object: r, queue: nil) { [weak self] n in
+                let t = (n.userInfo?[AVSampleBufferAudioRendererFlushTimeKey] as? NSValue)?.timeValue.seconds ?? .nan
+                print(String(format: "[AUDIOWATCH] audio renderer WAS FLUSHED AUTOMATICALLY at host %.6f, flush time %.6f · %@", CACurrentMediaTime(), t, self?.audioWatchState() ?? ""))
+            },
+            NotificationCenter.default.addObserver(forName: .AVSampleBufferAudioRendererOutputConfigurationDidChange, object: r, queue: nil) { [weak self] _ in
+                print(String(format: "[AUDIOWATCH] audio renderer OUTPUT CONFIGURATION CHANGED at host %.6f · %@", CACurrentMediaTime(), self?.audioWatchState() ?? ""))
+            },
+        ]
+    }
+
+    nonisolated private func audioWatchState() -> String {
+        let r = audioRenderer
+        let w = audioWatch.snapshot()
+        return String(format: "ready %@, status %d, error %@, hasSufficientMediaDataForReliablePlaybackStart %@, device %@, callbacks %d (last %.3f s ago, outcome %@), enqueues %d, last enqueued pts %.6f",
+                      r.isReadyForMoreMediaData ? "true" : "false", r.status.rawValue, r.error.map { String(describing: $0) } ?? "none",
+                      r.hasSufficientMediaDataForReliablePlaybackStart ? "true" : "false", r.audioOutputDeviceUniqueID ?? "system default",
+                      w.callbacks, CACurrentMediaTime() - w.last, w.outcome, w.enqueues, w.pts)
+    }
+
+    private func audioWatchTick(_ now: Double) {
+        let running = isPlaying && synchronizer.rate != 0 && hasMedia && audioReader != nil
+        guard running else { audioStallSince = nil; audioStallReports = 0; audioWatchWindowStart = nil; return }
+        let w = audioWatch.snapshot()
+        let clock = CMTimeGetSeconds(synchronizer.currentTime())
+        if let s = audioWatchWindowStart, now - s >= 30 {
+            let x = audioWatch.snapshot(resetWindow: true)
+            print(String(format: "[AUDIOWATCH] ok · %d callbacks in %.1f s, longest gap %.3f s, last enqueued pts %.6f, clock %.6f", x.window, now - s, x.maxGap, x.pts, clock))
+            audioWatchWindowStart = now
+        } else if audioWatchWindowStart == nil { audioWatchWindowStart = now; _ = audioWatch.snapshot(resetWindow: true) }
+        let quiet = now - w.last
+        guard quiet >= 2 else {
+            if let st = audioStallSince, audioStallReports > 0 {
+                print(String(format: "[AUDIOWATCH] audio pump called again after %.2f s · clock %.6f · %@", now - st, clock, audioWatchState()))
+            }
+            audioStallSince = nil; audioStallReports = 0; return
+        }
+        let st = audioStallSince ?? w.last
+        audioStallSince = st
+        let due: Double = audioStallReports == 0 ? 2 : 10
+        guard audioStallReports < 2, now - st >= due else { return }
+        audioStallReports += 1
+        var extra = ""
+        if let rd = audioReader { extra = " · audio reader status \(rd.status.rawValue), error \(rd.error.map { String(describing: $0) } ?? "none")" }
+        print(String(format: "[AUDIOWATCH] AUDIO PUMP QUIET %.2f s at host %.6f: clock %.6f, synchronizer rate %.6f, last enqueued pts %.6f (%.3f s ahead of the clock) · %@",
+                     now - st, now, clock, synchronizer.rate, w.pts, w.pts - clock, audioWatchState()) + extra)
     }
     #endif
 
@@ -4918,6 +4997,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // renderer has taken, so SDI never waits on the renderer's refill timer. One per arm —
         // this closure's — so a seek / switch drops it with the token. See `TapLookaheadPump`.
         let lookahead = TapLookaheadPump<CMSampleBuffer>(duration: TapLookahead.duration(of:))
+        #if MANIFOLD_CARDCLOCK
+        let aw = audioWatch; aw.armed()
+        let enqueueAudio: (CMSampleBuffer) -> Void = { aRenderer.enqueue($0); aw.enqueued(CMSampleBufferGetPresentationTimeStamp($0).seconds) }
+        #else
+        let enqueueAudio: (CMSampleBuffer) -> Void = { aRenderer.enqueue($0) }
+        #endif
         aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [weak self] in
             guard self != nil, session.isCurrent(token) else {
                 aRenderer.stopRequestingMediaData(); return
@@ -4927,7 +5012,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 isCurrent: { session.isCurrent(token) },
                 next: { newReader.status == .reading ? out.copyNextSampleBuffer() : nil },
                 ingest: { tap.ingest($0, path: .avFoundation) },   // D4b-1 tee — does not alter the buffer
-                enqueue: { aRenderer.enqueue($0) })
+                enqueue: enqueueAudio)
+            #if MANIFOLD_CARDCLOCK
+            aw.callback(outcome: "\(outcome)")
+            #endif
             if outcome != .waiting { aRenderer.stopRequestingMediaData() }
         }
 

@@ -901,3 +901,172 @@ The reading:
 - Near-misses: 0 in 16 h. The state does not clear by itself; when the renderer reaches it, it stays. So the near-miss rate cannot be compared output on vs off: 0 in both (1.88 h and 0.93 h). Nor did a stall occur in either "before" stage (2.81 h, at a rate of about 1 per 6–7 h seen overnight, 0 was the likely outcome). Whether the card or chassis is involved is UNKNOWN from these runs.
 - Rate: 2 stalls in 13.2 watchdog-on hours (≈1 per 6.6 h, ≈1 per 400 Plays), every one recovered on the first re-arm. Without the watchdog each would have been a permanent freeze. The visible cost is a hitch of 0.2–0.5 s.
 - Disturbances, for reading the logs: Discord ran 18:01:06–18:04:45 on 2026-11-08 (one dropped frame at its launch) and a browser played audio about 18:10–18:18, both in `wd-after`; nothing reacted. No SDI audio underrun in any stage.
+
+### 10.16 Stage 1c, measure only: SDI audio on the wire, 2026-11-10
+
+Overnight, unattended, measure only (Robbie, 2026-11-10). No fix, no shipped-code change, nothing committed. Guarded Profile measurement builds, launched by absolute path, held by PID, quit by PID, no keystrokes.
+
+**Results in brief (§10.16–§10.18).**
+- **SDI audio is not sample-continuous, on the wire.** Every anchor-loop correction reaches SDI one for one (310,846 of 310,847 matched to the sample): 43 skips or repeats of 1–2 samples a second, at 59.94 and 23.976, gate off and on. Nothing else breaks it in steady play.
+- **SDI sound is 2.5 frames late against its own picture**, steadily: −42.4 ms at 59.94, −104.6 ms at 23.976. New.
+- **After Play:** gate off, every Play from 0 jumps −106 to −146 ms on the wire 1.2–2.2 s in (the logged RESYNC); mid-file Plays and all gate-on Plays have no jump, and gate on slews in for up to 33 s instead.
+- **The default-output stall is any default-output change, not Jump** (5 of 5): the renderer is flushed automatically and never calls the pump again; a seek restarts it, Pause and Play do not.
+- **Renderer stalls:** 1 recovery in 1.57 h with output on, 0 in 1.57 h with it off. Too few to say whether the card matters.
+
+**Baseline going in.** The build-25 recovery runs of 2026-11-09 read SDI audio off the wire but were never written up here (`capture.cpp`'s pointer to §10.16 means them; their logs are in `~/Code/_scratch/manifold-recovery-audio/runs/`). Five runs at 59.94, gate off, about 40 s of play each, read again tonight with this section's analyser (`sdi-1`): 1683 discontinuities in 40 s of play, every one ±1 or ±2 samples (42 a second) except **one jump of −6490 samples (−135.2 ms) 1.44 s after the first sound**, which is the bridge's logged RESYNC (−135.0 ms). Offset at the first sound +93.4 ms (sound ahead of the picture), settled at about −42 ms by 5 s.
+
+**Method.**
+- **Fixtures** (`~/Code/_scratch/manifold-1c-wire/mkfixture.sh`): the linkpace marker band and the picture number on flat grey, ProRes 422 Proxy, 1920 s, at 59.94 and 23.976, 48 kHz 24-bit stereo carrying **seeded white noise** (−26 dBFS peak, the same in both channels). Any 2 samples of it are all but unique, so every received sample is located in the source.
+- **Runs** (`scripts/decklink-loopback/w1c-run.py`): destination SDI, output on, `capture --audio --marks` open from before Play to after Pause, so every received picture and sample is kept. `cont`: one Play from 0, 1800 s, Pause. `plays`: 20 cycles of seek 0, Play 60 s, Pause, Play 60 s from where it paused, Pause: 20 Plays from 0 and 20 mid-file. Gate off is `MANIFOLD_CARDLOCK_1B` unset (as build 25 ships); gate on is `=1`.
+- **Analysis** (`w1c-wire.py`): walks the capture sample by sample against the source. A **discontinuity** is any place where the next received sample is not the next source sample: a step of d samples (+ skipped, − repeated), or digital silence. **A/V offset** at a frame: the source position of that frame's first received sample minus the frame's picture × samples per picture, in ms; positive means the sound is ahead of its picture.
+- **The bridge's own log, one line per callback.** The once-a-second `DeckLinkAudio:` line shows one callback in about 50, which is what the 84–87 % figure (§10.3) samples. New measurement hook `[AUDIO-CORR]` (`DeckLinkBridge.mm`, `#ifdef DEBUG`, `MANIFOLD_AUDIO_CORR_LOG=1`; on the pre-ship list): every callback that schedules PCM logs the card stream position of its first sample, the samples taken, its correction and its kind (steering, anchor snap, resync). Each correction then has an exact place on the wire to be looked for.
+- **`capture` moves the card's output clock while its input is open (§5).** That is acceptable here: continuity and A/V offset are both read on the same wire, from the same received samples and pictures. It makes the card's rate, and so the gate-off slip count, a capture value, not a customer's.
+
+**Predictions, written 2026-11-10 00:50, before any run.**
+
+| # | Run | Prediction |
+|---|---|---|
+| W1 | `cont`, 1800 s, each of 59.94 and 23.976, gate off and on | **Every bridge correction reaches the wire, one for one:** a step of exactly its size at exactly its sample, in at least 99 % of nonzero corrections. No wire step without a correction at that sample. About 42 steps a second at both rates (the callback runs on the card's audio, not the frame rate): 70,000–80,000 per run, all ±1 or ±2 samples (21–42 µs each) |
+| W2 | The same | After the first 5 s: **0 jumps over 8 samples, 0 silences, 0 resyncs, 0 underruns** until Pause |
+| W3 | The same, gate off | Picture slips on the wire at the rate the card's capture-set rate gives against the file clock: 0 to about 14 per run at 59.94, 0 to about 6 at 23.976. **Each slip moves the A/V offset by one frame** (16.7 ms, 41.7 ms) at the slip, and the ±2 steps walk it back at about 2 ms/s: back within 1 ms in about 8 s at 59.94 and 20 s at 23.976, with no jump and no resync. Net of the small steps over the run equals the picture's own drift against the card, slips included, to within one frame of samples |
+| W4 | The same, gate on | **0 picture slips** (card lock, B10). Net of the small steps within ±100 samples of 0 |
+| W5 | Steady A/V offset, after 60 s | 59.94: median −42 ± 3 ms, both gates. 23.976: **about −104 ms** (−90 to −120), on the guess that the bridge's model misses by about 2.5 frames of video queue, not by a fixed time. If it is a fixed time, −42 |
+| W6 | `plays`, 59.94, 40 Plays per gate | **At least 36 of 40 Plays per gate show the resync as one jump on the wire** of −125 to −146 ms, 1.2–2.0 s after the first sound, each a logged RESYNC. A Play without one slews instead (smoothed error peaking under 100 ms), at the loop's 2 ms/s, for up to about 45 s (`p7`, §10.3) |
+| W7 | The same | First-sound offset +85 to +100 ms. After the jump −45 to −62 ms, then a walk to the final value: within ±1 ms of it by 15 s after the first sound. Final −40 to −46 ms |
+| W8 | The same | Audible-class events, per Play: the jump only. **Silence over 5 ms after the first sound: 0.** Jumps over 1 ms other than the resync: 0 |
+| W9 | Gate on against off | The same on the wire. 1b's audio-clock re-anchor (−70 to −81 ms, 2–6 s after Play, B4) does **not** reach SDI: the bridge anchors to the staged picture, not to the Mac renderer. Picture at Play: gate on, 40 of 40 clean (B18); gate off, mid-file Plays skip or repeat as §10.10 (about 13 of 20 not clean), Plays from 0 clean |
+| W10 | From 0 against mid-file | Same first-sound offset and same jump |
+
+**Runs.** 2026-11-10 00:47–04:20, 7 launches (a 45 s smoke run, then the six below), all guarded before and after, no guard tripped, `/Applications/Manifold.app` not run, Resolve not running, the default output the Scarlett throughout (`defout` logs). One measurement build for all of them: `-DMANIFOLD_CARDCLOCK`, `.build-cc`, the tree at `452f697` plus the `[AUDIO-CORR]` hook. Capture dropped nothing; every picture mark read, except one line cut short when `capture` was stopped.
+
+#### Continuity: 1800 s of play each (`c5994-off`, `c2398-off`, `c5994-on`, `c2398-on`)
+
+| Run | Wire steps in play | Per second | −2 / −1 / +1 / +2 | Bridge: nonzero corrections of its callbacks | Found on the wire at their sample and size | Wire steps with no correction | Jumps over 8 samples | Silence in play | Picture slips | Steady offset after 60 s, median (p1 / p99) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 59.94, gate off | 78,113 | 43.4 | 26,340 / 10,697 / 13,714 / 27,361 | 78,112 of 89,999 (86.8 %) | **78,112 (100 %)** | 0 | 1, the RESYNC at Play | 0 | 6 skips | −42.38 ms (−52.85 / −40.53) |
+| 23.976, gate off | 77,779 | 43.2 | 25,018 / 12,357 / 11,032 / 29,372 | 77,779 of 89,995 (86.4 %) | **77,779 (100 %)** | 0 | 0 | 0 | 4 skips | −104.65 ms (−136.83 / −103.31) |
+| 59.94, gate on | 77,790 | 43.2 | 27,704 / 10,843 / 14,132 / 25,111 | 77,790 of 89,999 (86.4 %) | **77,789**, and 1 one sample later at the same size | 0 | 0 | 0 | **0** | −42.35 ms (−43.68 / −40.57) |
+| 23.976, gate on | 77,166 | 42.9 | 26,254 / 12,665 / 11,561 / 26,686 | 77,166 of 89,995 (85.7 %) | **77,166 (100 %)** | 0 | 0 | 0 | **0** | −104.62 ms (−106.21 / −103.33) |
+
+- **Every correction the anchor loop makes reaches the wire, one for one: 310,846 of 310,847 at exactly the logged sample and size, the last one sample later.** No discontinuity on the wire came from anywhere else. So SDI audio is not sample-continuous: in steady play it skips or repeats 1 or 2 samples **43 times a second, about 78,000 times in 30 minutes, at both rates and both gates.** Each step is 21 or 42 µs of content. Whether that is audible is UNKNOWN: nobody listened, and in white noise it cannot be heard by construction. On a pure tone it is a phase step of up to 2 samples.
+- **The 84–87 % of §10.3 was a fair sample.** Counting every callback, 85.7–86.8 % carry a correction.
+- **Two corrections can sit 9–12 samples apart.** The bridge sometimes runs a callback of only 9–12 samples (5 in the four runs, e.g. `n=12` at stream 555784), and it applies its own ±2 to that one as well. Seen first as three unlocated places in `c2398-off`; the analyser now verifies on 6 samples there, and all three are logged corrections.
+- **In steady play: 0 jumps over 8 samples, 0 silences, 0 resyncs, 0 underruns, in all four.** The underruns in the bridge's own totals (9 in `c2398-off`, 4 in `c2398-on`, one event each) are all at Play, before the first sound: the cursor starts at source −0.03 s, where the ring has nothing, and the card is given 180 ms and 79 ms of silence. On the wire this only delays the first sound.
+- **Picture slips, gate off** (capture sets the card's rate, §5): 59.94, 6 skips 266.8 s apart (62.5 ppm card against file); 23.976, 4 skips 433.6 s apart (96 ppm). **Each slip moves the offset by a frame and the ordinary ±2 steps walk it back:** at 59.94 from −42 to −58 ms and back within 1 ms in 6.7–8.5 s; at 23.976 from −104 to −146 ms and back in 19.6 s. No jump, no resync. The net of the small steps after the first minute is +4797 samples at 59.94 (6 × 800.8 = 4805) and +8029 at 23.976 (4 × 2002 = 8008): the audio follows the picture's slips and nothing else.
+- **Gate on: no slip, and the net after the first minute is +66 and +2 samples.** The offset's whole p1–p99 range is 3.1 ms at 59.94 and 2.9 ms at 23.976; gate off it is 12–33 ms, because the slips are in it.
+- **The steady offset: the sound is late on SDI by 2.5 frames, at both rates.** −42.4 ms is 2.54 frames at 59.94; −104.6 ms is 2.51 frames at 23.976. The bridge aims `ideal = stagedPts + audioDepth − videoDepth` at 0 and misses by two and a half frames of video. **This is new: the SDI sound has never been measured against its own picture before tonight.** Why the miss is 2.5 frames is UNKNOWN; that `videoDepth` counts `bufferedVideo + 1` frames where the frame actually waits longer is the obvious place to look, an inference. Around it the loop holds a limit cycle of about ±1.5 ms with a 3–4 s period (1 s medians), the staircase it chases.
+- **The start of play differs by rate and gate** (one Play each here, from 0; the Play runs below have 40):
+
+| Run | Offset at the first sound | Then |
+|---|---|---|
+| 59.94, gate off | +85.5 ms | **Jump −131.8 ms at 1.62 s** (logged RESYNC −131.0), then −48.9 → −42 by 5 s |
+| 23.976, gate off | −91.7 ms | **Slew**, −2.08 ms/s, to −104 by about 6 s. No resync |
+| 59.94, gate on | −3.2 ms | **Slew**, −2.08 ms/s, to −43.5 by 19 s. No resync |
+| 23.976, gate on | −100.3 ms | Slew to −104.5 by 2 s |
+
+#### After Play: 40 Plays per gate at 59.94 (`p5994-off`, `p5994-on`)
+
+Each cycle: seek 0, Play 60 s, Pause, Play 60 s from there (mid-file, about 60 s in), Pause; 20 cycles per launch. **Settled** means the 1 s running median of the offset stays within ±2 ms of the Play's final value (the median of 49–59 s) from then on: the steady state is itself a limit cycle of about ±1.5 ms with a 3–4 s period, so a tighter test reads the cycle, not the settle.
+
+| | Gate off, from 0 | Gate off, mid-file | Gate on, from 0 | Gate on, mid-file |
+|---|---|---|---|---|
+| Offset at the first sound | +74.2 to +95.5 ms (median +90.3) | −60.1 to −35.9 (median −42.7) | −33.3 to −6.7 (median −17.7) | −37.4 to −16.9 (median −26.7) |
+| Resync jump on the wire | **20 of 20**: −105.9 to −146.3 ms, 1.20–2.18 s after the first sound, each one discontinuity and each a logged RESYNC | **0 of 20** | **0 of 20** | **0 of 20** |
+| How it gets to the final value | the jump, then −49 to −42 by about 5 s | already there, or a short walk | **slew** at the loop's 2 ms/s | **slew** at 2 ms/s |
+| Settled (median; range) | 2.1 s; 17 of 20 by 4.6 s, 3 more only cross ±2 ms later with the limit cycle (worst 2.4 ms) | 1.2 s; all by 7.5 s | 10.9 s; 3.4–32.6 s | 7.1 s; 1.6–11.3 s, 2 more at 31.9 and 41.9 s |
+| Final value | −42.59 to −42.11 ms | −42.54 to −42.00 | −42.74 to −42.02 | −42.63 to −42.08 |
+| Silence over 5 ms after the first sound | 0 | 0 | 0 | 0 |
+| Picture at Play on the wire | 20 of 20 clean | **20 of 20 clean** | 20 of 20 clean | 20 of 20 clean |
+
+- **Audible-class events (silence over 5 ms, or a jump over 1 ms): exactly the 20 resync jumps, one on every gate-off Play from 0, and nothing else in 80 Plays.** Between Plays, all of 103,431 (off) and 105,915 of 105,921 (on) nonzero corrections were on the wire at their sample and size, and no other step; the 6 unmatched are one place where a 5-sample callback put two corrections 5 samples apart, below the analyser's 6-sample check.
+- **The jump is a jump, not a slew:** one discontinuity of 5084–7024 samples, within one callback, logged by the bridge as RESYNC (`smoothed error −100.1 to −100.8 ms exceeds 100 ms`). The bridge snaps its cursor by the same amount it logs (−106 to −146 ms).
+- **Why only from 0, gate off:** at a Play from 0 the sound starts 74–96 ms *ahead* of its picture, and the anchor loop's error grows past 100 ms in 1.2–2.2 s. Mid-file the sound starts within 18 ms of its final offset and never comes near 100. Under gate on the first sound is never more than 34 ms off. What sets the +90 ms at a Play from 0 with gate off is UNKNOWN; it agrees with the build-25 runs (+93).
+- **1b's audio-clock re-anchor** (logged 40 times under gate on, once per Play) **does not reach SDI:** no jump in any gate-on Play.
+- **Gate on is quieter but slower.** No jump in 40 Plays, but the sound reaches its final offset by a 2 ms/s slew lasting up to 33 s, during which it is 5–36 ms less late than its final value, so nearer its picture than the steady −42 ms.
+- **The picture:** 80 of 80 Plays moved +1 a frame from the first new picture. §10.10's mid-file skip and repeat on a file with sound and gate off did not appear in 20 tries here. That fixture is the noise file, seeked to 0 and paused at 60 s; §10.10 used `cc-*` with tone and Pause/Play pairs at other positions. Why it is gone here is UNKNOWN.
+
+#### §10.16 predictions against results
+
+| # | Result | |
+|---|---|---|
+| W1 | 310,846 of 310,847 corrections exact; 0 wire steps without one; 42.9–43.4 a second; 77,166–78,113 per run, all ±1 or ±2 | **Held** |
+| W2 | After the first 5 s: 0 jumps, 0 silences, 0 resyncs, 0 underruns, in all four | **Held** |
+| W3 | 6 and 4 slips; offset moved one frame, back in 6.7–8.5 s and 19.6 s by ±2 steps; net after the first minute equal to slips × samples per frame within 8 and 21 samples | **Held** |
+| W4 | 0 slips; net +66 and +2 samples after the first minute (the run's whole net, −1897 at 59.94, is the 19 s Play slew) | **Held** |
+| W5 | −42.4 ms at 59.94 and −104.6 at 23.976: 2.5 frames at both | **Held**, on the frames guess |
+| W6 | Jumps in 20 of 40 Plays gate off (all 20 from 0, no mid-file one) and 0 of 40 gate on. The Plays without one do not crawl for 45 s: mid-file they start near the final value, gate on they slew for up to 33 s | **Missed** |
+| W7 | From 0, gate off: first sound +74 to +96 (predicted +85 to +100, mostly held); after the jump about −49; settled well inside 15 s; final −42.0 to −42.7 | **Held for gate off from 0.** Not for mid-file or gate on, whose first sound is −7 to −60 |
+| W8 | 0 silences over 5 ms; no jump over 1 ms but the resyncs | **Held** |
+| W9 | Re-anchor not on SDI: held. Gate on the same as off: **missed** (no jump at all). Gate off mid-file picture: **missed**, 20 of 20 clean, where about 13 skips or repeats were predicted | **Half** |
+| W10 | From 0 and mid-file differ completely with gate off | **Missed** |
+
+### 10.17 The default-output stall without Jump, 2026-11-10
+
+Same night and rules as §10.16. `BUGS.md`, *a change of the system default output silences SDI audio until the session ends*: until now seen only with Jump Desktop, which switches the default output to its own device.
+
+**Method** (`w1c-defout.py`, `w1c-defout-report.py`). One launch, gate off, `cc-5994-2450s.mov` (sound), destination SDI, output on, **capture closed**. One Play from 0. `defout set` (new mode of `defout.swift`; it reads the current default first, refuses unless exactly one device matches, reads back after, and touches nothing else) makes **Mac Studio Speakers** the default output 60 s after Play, the Scarlett again 30 s later; five times, 120 s apart. At +75 s a Pause and Play (does a rate change restart a stalled pump?), at +95 s a Pause, a seek and a Play (re-arms the request, so each switch starts from a running pump). The driver restores the Scarlett in a `finally` and reads it back. **SDI silence from the bridge's own samples:** `[AUDIO-CORR]` gives each PCM callback's card stream position, so a gap between two is the silence the card was given, to the sample. **Pulls** for the picture. **`sample <pid> 10`** when SDI has gone silent, plus one healthy sample as a control. **New measurement hook `[AUDIOWATCH]`** (`FrameEngine`, `#if MANIFOLD_CARDCLOCK`, pre-ship list): the AVFoundation audio pump's callbacks and enqueues, the audio renderer's *was flushed automatically* and *output configuration changed* notifications, and, once the pump has had no callback for 2 s while playing, the renderer's `isReadyForMoreMediaData`, status, error and the last enqueued pts against the clock. Built after §10.16's runs, so they used one binary throughout.
+
+**Predictions, written 2026-11-10 00:55, before the run.**
+
+| # | Prediction |
+|---|---|
+| D1 | **Each of the 5 switches to the built-in silences SDI**, 0.5–2 s after the switch (the tap's look-ahead runs out; `j-today` 0.65 s). The picture does not notice: 0 pull repeats or skips beyond Play's own |
+| D2 | **No recovery by itself:** silent through the restore to the Scarlett and the 45 s after it, 5 of 5 (§10.13: 337 s) |
+| D3 | **Pause and Play do not restart it:** Play only writes the synchronizer's rate and re-arms nothing. Silent after it, 5 of 5 |
+| D4 | **The seek does:** `beginReading` re-arms the request. PCM back within 1 s of the Play that follows it, 5 of 5 |
+| D5 | **The stack:** nothing blocked. `com.graviton.manifold.pump.audio` busy in the control sample, absent from every stall sample. So the pump is waiting for the renderer's `requestMediaDataWhenReady` callback |
+| D6 | **The renderer, from `[AUDIOWATCH]`:** an *output configuration changed* notification and a *was flushed automatically* notification within 1 s of each switch. At 2 s quiet: ready **true**, status rendering, no error, and the last enqueued pts behind the clock (a flushed queue). So it waits on a callback the renderer never makes after its automatic flush. That last part is a guess: whether AVFoundation should call again, or our pump should have acted on the flush, is what this run cannot say |
+| D7 | The restore to the Scarlett also stops a running pump (§10.13, `s-ph1-s4`). Not testable as built: the pump is already stalled at each restore. It shows only if D1 fails |
+
+At the end the default output must read Scarlett 18i20 USB.
+
+**Run** `d-defout`, 2026-11-10 04:21–04:33. Guarded before and after; default output read as the Scarlett before (04:21:34), set back by the driver after each switch, and **read back as Scarlett 18i20 USB at the end (04:33:14) and again at 04:33:19.** Five switches to Mac Studio Speakers, each set and read back within 0.3 s. Built with `[AUDIOWATCH]` (the §10.16 binary plus that hook).
+
+**Answer: it is the default output, not Jump. All 5 switches stopped SDI audio; none recovered by itself or by Pause and Play; a seek restarted it every time.** The cause, as far as one run shows it: at the switch AVFoundation flushes the audio renderer automatically, and after that flush the renderer never calls the pump's request block again, while reading ready.
+
+| Switch | Renderer *was flushed automatically* | SDI silent (last PCM) after the switch | Silence, from the bridge's stream positions | Back on PCM |
+|---|---|---|---|---|
+| 1 | at the switch (host 47011.702; flush time 60.107 s, 0.14 s behind the last enqueued pts) | 0.61 s | 96.21 s | 10 ms after the Play that follows the seek |
+| 2 | at the switch (flush time 173.030 s) | 1.37 s | 95.48 s | the same |
+| 3 | at the switch (flush time 289.989 s) | 0.97 s | 95.98 s | the same |
+| 4 | at the switch (flush time 407.009 s) | 0.96 s | 96.06 s | the same |
+| 5 | at the switch (flush time 523.838 s) | 0.65 s | 96.40 s | the same |
+
+- **D1 held:** silent 0.61–1.37 s after each switch: the tap's look-ahead running out, as `j-today`'s 0.65 s. The bridge logs one underrun event per switch (92.4–93.3 s each by its own count, from the moment the ring ran dry). **The picture did not notice:** no pull repeat or skip at any switch or restore.
+- **D2 held:** silent through each restore to the Scarlett and the 45 s after it. A restore posted no renderer notification.
+- **D3 held:** the Pause and Play at +75 s restarted nothing, 5 of 5. Play only writes the rate.
+- **D4 held:** the seek's `beginReading` re-arms the request; the first PCM came within one frame of the next Play (log host stamps are good to a frame), 5 of 5.
+- **D5 held, and more:** no thread blocked in any of the 10 stall samples. `com.graviton.manifold.pump.audio` was in the control sample and in none of the stall samples. **Also gone after each switch: the renderer's own device I/O, `com.apple.audio.IOThread.client` and `AQConverterThread`**, both present in the control. So after the automatic flush the renderer's audio queue is not running on any device, the Scarlett included after the restore. Its CoreMedia threads (`audioqueue.source`, `audiomentor`) sit idle on their condition variables.
+- **D6 half held.** Within 0.12 s of every switch as `defout` logged it (it polls at 5 Hz) the renderer posted *was flushed automatically*; **no *output configuration changed* notification came, at the switch or the restore.** From then on, at 2 s, 10 s and 76 s: `isReadyForMoreMediaData` **true**, status 1 (rendering), error none, `hasSufficientMediaDataForReliablePlaybackStart` **false**, the reader reading with no error, and the last enqueued pts falling behind the clock (−1.2 to −1.96 s at 2 s, −75 s at 76 s). The pump's last outcome was `waiting`: it returned with the request armed, as the contract says, and the renderer never called it again. **So the pump stops in AVFoundation's hands, waiting for a `requestMediaDataWhenReady` callback that does not come after an automatic flush, with the renderer ready and starved.** Nothing in the pump reacts to the flush notification (the file path observes none of the renderer's notifications; only the live path's `LiveAudioRendererProbe` does). Whether AVFoundation should call again, or a client is expected to re-arm on that notification, is not settled by this run; the second is what Apple's notification is for, an inference from its name and documentation, not a measurement.
+- **D7:** not testable as built, as written.
+- **Healthy, for the comparison:** with the pump running, the longest gap between its callbacks in a 30 s window was 1.02 s.
+
+**Measurement disturbed one stretch, recorded so it is not misread.** The control `sample` (host 46976.6–46987.5, 25 s after Play) cost 19 frames of picture (pulls +9, +7, +3 frames at 46977.1) and was followed by **7 short SDI underruns, 23–153 ms each, from 46979 to 47006**, before the first switch. Each fell exactly at the tap's newest pts (srcT 27.456 against tap 27.477; 28.587 against 28.629; 31.957 against 31.957): the tap had no lead over the card's cursor for that minute. The four 30-minute runs of §10.16, with no `sample`, had none in 7200 s of play. So the sample is the likely trigger; why the lead did not rebuild for 20 s after it is UNKNOWN. Not the stall: the pump was being called throughout.
+
+### 10.18 Renderer stalls, output off and on, 2026-11-10
+
+`BUGS.md`, the top 1.0 entry (*a playing file's picture freezes for good*): the watchdog recovers it; §10.15 measured 2 recoveries in 13.2 h, all with DeckLink output on, and 0.93 h with output off, too short to compare.
+
+**Method.** `cardlock-hunt.py cycle off` (gate off, watchdog on as shipped, 60 s Plays from random points with a seek before each, `cc-5994-2450s.mov` with sound, destination SDI, capture closed), `HUNT_STOP_FIRST=0`. One-hour blocks alternating output off (`HUNT_NO_OUTPUT=1`) and on, starting with off, until 08:00, so the two get matching hours and the same part of the night. Counted per block from each launch's log: `[RENDERER-RECOVER]` attempts and `[RENDERER-NEARMISS]`, and the hunt's own freeze and audio-silence detections.
+
+**Predictions, written 2026-11-10 00:55, before any block.**
+- R1. Recoveries at about §10.15's rate, one per 6–7 h, the same with output off and on. In about 1.5 h each, the expected count is about 0.2 each: **most likely 0 and 0**, which would not tell off from on. Only a rate several times higher on one side would show in one night.
+- R2. Near-misses: 0 on both sides (0 in §10.15's 16 h: the state does not clear by itself).
+- R3. Freezes that last (PICTURE STUCK, or a hunt freeze detection): 0. Every stall that comes recovers on its first re-arm.
+
+**Blocks**, 2026-11-10 04:33–07:55, `build/cardclock/hunt/s3-*`, one launch each, guarded, quit by PID, the §10.17 binary (with `[AUDIOWATCH]`). Default output the Scarlett throughout (`defout` logs) and at the end (07:55, read back).
+
+| Block | Output | Played | Plays | Near-misses | Recoveries | PICTURE STUCK | Hunt detections |
+|---|---|---|---|---|---|---|---|
+| `s3-off1` 04:33–05:24 | off | 0.78 h | 48 | 0 | 0 | 0 | 0 |
+| `s3-on1` 05:24–06:14 | on | 0.78 h | 48 | 0 | 0 | 0 | 0 |
+| `s3-off2` 06:14–07:05 | off | 0.78 h | 48 | 0 | 0 | 0 | 0 |
+| `s3-on2` 07:05–07:55 | on | 0.78 h | 48 | 0 | **1** | 0 | 0 |
+| **Output off** | | **1.57 h** | **96** | **0 (0 / h)** | **0 (0 / h)** | 0 | 0 |
+| **Output on** | | **1.57 h** | **96** | **0 (0 / h)** | **1 (0.64 / h)** | 0 | 0 |
+
+- **The one recovery** (`s3-on2`, Play 4, 16.9 s after Play, pts 341.32): the known state, renderer not ready with nothing of ours pending, status 1, no error, no flush requested, timebase at rate 1; in it 0.357 s, no callback for 0.518 s. First frame 28 ms after the re-arm; picture moving 0.400 s after the stall began. The same as §10.15's two.
+- **R1 held, and as predicted it cannot separate off from on:** 0 against 1 in 1.57 h each. If the rates were equal, a 0–1 split happens half the time. Together with §10.15: output on, 3 recoveries in 14.8 h (one per 4.9 h); output off, 0 in 2.5 h (1.57 h here plus 0.93 h of `wd-before-noout`). At the output-on rate, 2.5 h with none happens 60 % of the time. **Whether the stall needs the card is still UNKNOWN**; ruling out an equal rate at 95 % would take about 15 h of output-off running with none.
+- **R2 held:** 0 near-misses in 3.1 h, 0 now in 19.1 h of watchdog-on running.
+- **R3 held:** no stuck picture, no detection.
+- **The audio watch, as a side reading:** 0 *was flushed automatically* and 0 SDI underrun events in the 1.57 h with output on. Its only reports were a 2.0–2.2 s "quiet" at the start of some Plays: the last callback was during the paused preroll before the Play, with 0.8–1.0 s still queued, and the pump was called again 0.25–0.6 s into play. That is the watch's threshold counting from the preroll, not a stall.

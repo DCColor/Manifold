@@ -29,6 +29,12 @@ struct CardClockProbe {
 };
 CardClockProbe gCardClock;   // held for the process: a measurement build, env-gated
 const bool kCardClockLog = getenv("MANIFOLD_CARDCLOCK_LOG") != nullptr;
+#ifdef DEBUG
+// [AUDIO-CORR] (MANIFOLD_AUDIO_CORR_LOG=1; DEBUG; pre-ship removal, docs/BUGS.md; docs/CARD_CLOCK_FINDINGS.md §10.16). Measurement only:
+// one line per callback that schedules PCM, with the audio stream position of its first sample, the samples the card took, the anchor
+// loop's correction and what it was (c: steering, a: anchor snap, r: resync), so each discontinuity on the wire can be matched to one.
+const bool kAudioCorrLog = getenv("MANIFOLD_AUDIO_CORR_LOG") != nullptr;
+#endif
 double cardClockHostNow() {
     static mach_timebase_info_data_t tb = [] { mach_timebase_info_data_t t; mach_timebase_info(&t); return t; }();
     return (double)mach_absolute_time() * tb.numer / tb.denom / 1e9;
@@ -632,7 +638,9 @@ public:
         const double ideal = stagedPts + (audioDepth - videoDepth) + m_audio.trimSeconds;
 
         int32_t correction = 0;
+        char corrKind = 'c';   // [AUDIO-CORR] only
         if (!m_cursorAnchored) {
+            corrKind = 'a';
             m_cursorSeconds = ideal;    // fresh start / post-seek / unmute: snap, don't crawl
             m_errEma = 0.0;
             m_cursorAnchored = true;
@@ -643,6 +651,7 @@ public:
             m_errEma += kAudioErrorEmaAlpha * (err - m_errEma);
             if (std::fabs(m_errEma) > kAudioResyncSeconds) {
                 m_resyncs++;
+                corrKind = 'r';
                 fprintf(stdout, "DeckLinkAudio: !! RESYNC — smoothed error %+.1f ms exceeds %.0f ms; "
                                 "snapping source cursor %.3fs → %.3fs\n",
                         m_errEma * 1000.0, kAudioResyncSeconds * 1000.0, m_cursorSeconds, ideal);
@@ -711,7 +720,15 @@ public:
             }
         }
 
+        const BMDTimeValue streamBefore = m_audioStreamFrames;   // [AUDIO-CORR] only
         const uint32_t written = scheduleFrames(dst, toSchedule);
+#ifdef DEBUG
+        if (kAudioCorrLog)
+            fprintf(stdout, "[AUDIO-CORR] s=%lld n=%u got=%d c=%d k=%c e=%+.3f cur=%.6f\n", (long long)streamBefore, written, got,
+                    correction, corrKind, m_errEma * 1000.0, m_cursorSeconds);
+#else
+        (void)streamBefore; (void)corrKind;
+#endif
         // Split what the card accepted into REAL and SILENCE for the stopped-summary breakdown: the
         // buffer is `got` ring frames followed by `silencePad` zeros, so a short accept takes from the
         // tail first. Without this split the summary's total is indistinguishable from pure silence.
