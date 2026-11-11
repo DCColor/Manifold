@@ -4,13 +4,15 @@
 # after Play, the Scarlett again 30 s later, five times, 120 s apart. 75 s after each switch a Pause and Play (does a rate change restart a
 # stalled pump?); 95 s after it a Pause, a seek and a Play (re-arms the request, so the next switch starts from a running pump). During each
 # stall, `sample <pid> 10`.
-#   w1c-defout.py <fixture.mov> <label>
+#   w1c-defout.py <fixture.mov> <label> [stall|fix] [off|on]
+# `fix` (the automatic-flush fix, §10.19): the same five switches and restores in one Play with NO transport at all (no Pause and Play,
+# no seek), so each recovery is the fix's own. off/on is the Stage 1b gate (MANIFOLD_CARDLOCK_1B unset / =1). Default: stall, off.
 # The default output is read before anything changes, must be the Scarlett, and is set back to it in a `finally` and read back, whatever happens.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID. AX menu clicks on named items only, no keystrokes, no screenshots.
 import os, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
 PROC = f"{REPO}/scripts/manifold-proc.sh"; AXT = f"{REPO}/build/linkpace/linkpace-ax"; DEV = f"{REPO}/build/decklink-loopback"
-APP = f"{REPO}/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"
+APP = os.environ.get("W1C_APP") or f"{REPO}/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"   # W1C_APP: another build of this tree
 OUT = os.environ.get("W1C_OUT", os.path.expanduser("~/Code/_scratch/manifold-1c-wire/runs"))
 HOME_DEV, OTHER_DEV = "Scarlett 18i20", "Mac Studio Speakers"
 FIRST, EVERY, HOLD, N = 60, 120, 30, 5
@@ -26,6 +28,8 @@ def deny_licence_prompt():
     if sh("pgrep", "-x", "SecurityAgent").returncode: return
     t = sh("osascript", "-e", 'tell application "System Events" to tell process "SecurityAgent" to get value of static texts of window 1').stdout
     if "manifold" in t.lower(): sh("osascript", "-e", 'tell application "System Events" to tell process "SecurityAgent" to click button "Deny" of window 1')
+def resolve_running():
+    return any("/DaVinci Resolve.app/Contents/MacOS/" in l for l in sh("ps", "-axo", "comm=").stdout.splitlines())
 def default_output(): return sh(f"{DEV}/defout", "get").stdout.strip()
 def set_output(name, logf):
     r = sh(f"{DEV}/defout", "set", name); logf.write(r.stdout); logf.flush(); say(f"default output → {name}: {r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr.strip()} (exit {r.returncode})")
@@ -39,21 +43,25 @@ def pcm_in_last(log, seconds):
         if l.startswith("[AUDIO-CORR]") and host is not None: last_pcm = host
     return host is not None and last_pcm is not None and host - last_pcm < seconds
 
-def main(fixture, label):
-    guard(); os.makedirs(OUT, exist_ok=True); log = f"{OUT}/{label}.log"; title = os.path.basename(fixture)
+def main(fixture, label, mode="stall", gate=False):
+    guard()
+    if resolve_running(): say("Resolve is running: stopping, nothing changed"); sys.exit(4)
+    os.makedirs(OUT, exist_ok=True); log = f"{OUT}/{label}.log"; title = os.path.basename(fixture)
     before = default_output(); say(f"default output before: {before}")
     if HOME_DEV not in before: say("the default output is not the Scarlett: stopping, nothing changed"); sys.exit(4)
     sw = open(f"{OUT}/{label}.switches", "w"); sw.write(f"before {before}\n")
     defp = subprocess.Popen([f"{DEV}/defout", "100000", f"{OUT}/{label}.defout"])
     steps = ["wait 16", "play", f"wait {FIRST + 75}"]
-    for k in range(N):   # at switch + 75: Pause, Play; at + 95: Pause, seek, Play at + 97; then to the next switch + 75
+    for k in (range(N) if mode == "stall" else []):   # at switch + 75: Pause, Play; at + 95: Pause, seek, Play at + 97; then to the next switch + 75
         steps += ["pause", "wait 1", "play", "wait 19", "pause", f"seek {150 + 117 * k}", "wait 2", "play", "wait 98" if k < N - 1 else "wait 30"]
+    if mode == "fix": steps = ["wait 16", "play", f"wait {FIRST + EVERY * (N - 1) + HOLD + 45}"]
     steps += ["pause", "wait 2"]
     env = dict(os.environ, MANIFOLD_CARDCLOCK_LOG="1", MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1", MANIFOLD_AUDIO_CORR_LOG="1",
                MANIFOLD_DEBUG_TRANSPORT=";".join(steps))
     for k in ("MANIFOLD_CARDLOCK_1B", "MANIFOLD_RENDERER_RECOVER", "MANIFOLD_RENDERER_SELFTEST", "MANIFOLD_PUMPWATCH_SELFTEST"): env.pop(k, None)
+    if gate: env["MANIFOLD_CARDLOCK_1B"] = "1"
     p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"], stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
-    pid = p.pid; say(f"{label}: pid {pid}, gate off, {title}")
+    pid = p.pid; say(f"{label}: pid {pid}, gate {'on' if gate else 'off'}, mode {mode}, {title}")
     try:
         time.sleep(7)
         if sh(PROC, "check", str(pid)).returncode: say("the build did not come up"); return
@@ -104,4 +112,6 @@ def main(fixture, label):
         defp.terminate(); defp.wait(); guard(); say(f"{label}: done")
 
 if __name__ == "__main__":
-    main(os.path.abspath(sys.argv[1]), sys.argv[2])
+    mode = sys.argv[3] if len(sys.argv) > 3 else "stall"; g = sys.argv[4] if len(sys.argv) > 4 else "off"
+    assert mode in ("stall", "fix") and g in ("off", "on")
+    main(os.path.abspath(sys.argv[1]), sys.argv[2], mode, g == "on")

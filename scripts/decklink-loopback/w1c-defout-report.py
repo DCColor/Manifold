@@ -5,7 +5,7 @@
 # exact to the sample. Picture: the card's pulls ([CADENCE] pts). The pump: [AUDIOWATCH] and the tap lines.
 import re, sys
 d, label = sys.argv[1], sys.argv[2]
-host = None; pcm = []; pulls = []; tr = []; aw = []; tap = []; und = []
+host = None; fl = []; pcm = []; pulls = []; tr = []; aw = []; tap = []; und = []
 for l in open(f"{d}/{label}.log", errors="replace"):
     m = re.match(r"\[CADENCE\] #\d+ host (\S+) pts (\S+)", l)
     if m:
@@ -18,6 +18,7 @@ for l in open(f"{d}/{label}.log", errors="replace"):
     m = re.match(r"\[AUDIO-CORR\] s=(\d+) n=(\d+)", l)
     if m: pcm.append((host, int(m[1]), int(m[2]))); continue
     if l.startswith("[AUDIOWATCH]"): aw.append((host, l.strip())); continue
+    if l.startswith("[AUDIO-FLUSH]"): fl.append((host, l.strip())); continue
     m = re.search(r"AudioTap\[\w+\]: int32 .* pts=([\d.]+)s", l)
     if m: tap.append((host, float(m[1]))); continue
     if "UNDERRUN EVENT" in l: und.append((host, l.strip()))
@@ -65,4 +66,11 @@ gaps = [float(re.search(r"longest gap (\S+) s", x[1])[1]) for x in oks]
 if gaps: print(f"   ok windows {len(oks)}, longest gap in any: {max(gaps):.3f} s, median of the windows' longest: {sorted(gaps)[len(gaps) // 2]:.3f} s")
 for h, l in aw:
     if "] ok ·" not in l: print(f"   {h:.3f} {l[:900]}")
+print("[AUDIO-FLUSH] lines (the automatic-flush fix):"); [print(f"   {h:.3f} {l[:400]}") for h, l in fl]
+print("each default-output change → the next SDI silence over 5 ms that starts within 3 s of it, and the flush line nearest it:")
+for h, n in sw:
+    g = next(((a, b, gg) for a, b, gg in sil if gg >= 240 and -0.5 <= a - h < 3), None)
+    f = min(fl, key=lambda x: abs(x[0] - h), default=None)
+    print(f"   {h:.3f} {n}: " + (f"silence {g[2]} samples = {g[2] / SR * 1000:.1f} ms, from {g[0] - h:+.3f} s to {g[1] - h:+.3f} s" if g else "no SDI silence over 5 ms within 3 s")
+          + (f" · flush line {f[0] - h:+.3f} s" if f and abs(f[0] - h) < 3 else " · no flush line within 3 s"))
 print("underrun events:"); [print(f"   {h:.3f} {l[:200]}") for h, l in und]

@@ -613,7 +613,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// pump to retire and the VIDEO token had two — the exact collapse the paragraph above forbids,
     /// on the one path that never got the split. Both paths now establish audio currency here, and
     /// nothing arms an audio pump on `sessionToken`.
-    private let audioSessionToken = SessionToken()
+    ///
+    /// Nonisolated so the automatic-flush observer can note, on the thread that posts it, which arm the flush hit.
+    nonisolated private let audioSessionToken = SessionToken()
 
     /// ── THE THIRD TOKEN: retirement authority for the SCRUB PRODUCER ──────────────────────────
     ///
@@ -652,6 +654,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #endif
         synchronizer.addRenderer(audioRenderer)
         startRendererWatchdog()
+        // A change of output device flushes the audio renderer on AVFoundation's own initiative, and after that flush the renderer
+        // never calls the file pump again: the sound, SDI's included, stops until a seek (docs/CARD_CLOCK_FINDINGS.md §10.17). The arm
+        // the flush hit is noted here, on the posting thread; the handler runs on main. Weak, as the rate observer below.
+        audioFlushObserver = NotificationCenter.default.addObserver(
+            forName: .AVSampleBufferAudioRendererWasFlushedAutomatically, object: audioRenderer, queue: nil
+        ) { [weak self] note in
+            guard let self else { return }
+            let flushTime = (note.userInfo?[AVSampleBufferAudioRendererFlushTimeKey] as? NSValue)?.timeValue
+            let arm = self.audioSessionToken.peek()
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.audioRendererFlushedAutomatically(flushTime: flushTime, arm: arm) } }
+        }
         // Every rate change, from whichever of the many `rate` / `setRate` sites made it: the app's display
         // renderer stops its link while paused, and Play must restart it even when no new frame is enqueued
         // (the queue may already hold the frames Play needs). Weak: the observer must not keep the engine.
@@ -663,7 +676,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     deinit {
         rendererWatchdogTimer.cancel()
         if let rateObserver { NotificationCenter.default.removeObserver(rateObserver) }
+        if let audioFlushObserver { NotificationCenter.default.removeObserver(audioFlushObserver) }
     }
+
+    nonisolated(unsafe) private var audioFlushObserver: NSObjectProtocol?
 
     /// Called on the synchronizer's notification thread whenever its rate changes. Set once, at window setup.
     public nonisolated(unsafe) var onClockRateChange: (() -> Void)?
@@ -854,16 +870,48 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                      acts ? "READS AGAIN" : "skipped", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate, cardAudioMoving ? "yes" : "no"))
         #endif
         guard !cardAudioMoving, synchronizer.rate == 0, hasMedia, hasAudioToRoute else { return }
-        let clock = synchronizer.currentTime()
+        readSoundAgain(from: synchronizer.currentTime())
+    }
+
+    /// A new audio arm for the file at `time`, on either path, with the clock left as it is: the previous arm retired, the renderer
+    /// flushed and the tap emptied (`teardownAudioReading`), then a reader and a pump from `time`. A track switch's route, at a time.
+    private func readSoundAgain(from time: CMTime) {
         if useLibav {
             guard let source = libavAudioSource else { return }
             teardownAudioReading()
             let audioSession = audioSessionToken
             let audioToken = audioSession.next()
-            source.arm(fromSeconds: clock.seconds, isCurrent: { audioSession.isCurrent(audioToken) })
+            source.arm(fromSeconds: time.seconds, isCurrent: { audioSession.isCurrent(audioToken) })
         } else {
-            Task { await beginAudioReading(from: clock) }
+            Task { await beginAudioReading(from: time) }
         }
+    }
+
+    /// AVFoundation flushed the audio renderer by itself (`AVSampleBufferAudioRendererWasFlushedAutomatically`): the output device or
+    /// route changed, or a rate change asked for it. The renderer then never calls the pump's request block again, while reading ready,
+    /// so without this the file's sound, on the Mac and on SDI, stayed silent until a seek (docs/CARD_CLOCK_FINDINGS.md §10.17).
+    ///
+    /// Apple's documented response: resume enqueueing, after a flush serialized with the enqueueing (`AVSampleBufferAudioRenderer.h`).
+    /// The feed resumes from the flush time the renderer reports, the first sample it threw away. The clock is NOT stopped: Apple's
+    /// other variant (stop, set the clock to the flush time, restart) would hold the picture, and the picture is the reference. With
+    /// the clock running, the renderer drops what is already past, so it sounds like a short mute, the variant Apple describes for a
+    /// running timebase. The re-read flushes again, behind a token bump, which is the serialization the header asks for.
+    ///
+    /// Skipped, and said so, when the arm the flush hit is no longer current (a seek, a track switch or a re-read has already built a
+    /// new one from its own time), when no file arm exists (a live source pushes and resumes by itself), and while a Stage 1b renderer
+    /// move is in flight (the move re-reads at its end when it should). One line per occurrence, ungated.
+    private func audioRendererFlushedAutomatically(flushTime: CMTime?, arm: Int) {
+        let clock = synchronizer.currentTime()
+        let from = flushTime.flatMap { $0.isNumeric ? $0 : nil } ?? clock
+        let fileArm = hasMedia && (useLibav ? libavAudioSource != nil : audioReader != nil)
+        let skip: String? = !fileArm ? "no file audio arm" : !audioSessionToken.isCurrent(arm) ? "already re-armed since"
+            : cardAudioMoving ? "a renderer move is in flight" : nil
+        print(String(format: "[AUDIO-FLUSH] the audio renderer was flushed automatically at host %.6f: flush time %@, clock %.6f at rate %.2f; %@",
+                     CACurrentMediaTime(), flushTime.map { String(format: "%.6f", CMTimeGetSeconds($0)) } ?? "not reported",
+                     CMTimeGetSeconds(clock), synchronizer.rate,
+                     skip.map { "not re-read (\($0))" } ?? String(format: "reading the sound again from %.6f", CMTimeGetSeconds(from))))
+        guard skip == nil else { return }
+        readSoundAgain(from: from)
     }
 
     /// Every file transport rate, so the sound's own clock takes the same move. Live sources write `synchronizer` directly: the renderer is never moved for them.
@@ -5280,5 +5328,10 @@ private final class SessionToken: @unchecked Sendable {
     func isCurrent(_ token: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return token == value
+    }
+    /// The current session, without starting a new one.
+    func peek() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return value
     }
 }

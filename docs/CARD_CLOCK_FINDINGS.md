@@ -384,6 +384,8 @@ scheduled, with no correction. The loop stays as a monitor: if the smoothed erro
 
 Result: at 1× the card plays the file's samples in order, with none skipped or repeated, on the clock that plays the frames.
 
+**Superseded 2026-11-10 by §10.20**, which keeps this aim and replaces the mechanism: one mapping per run from card stream time to source samples, latched at the first timed pull, with the card's audio flushed at run edges.
+
 ### 10.4 Edge cases
 
 | Case | What happens |
@@ -1000,6 +1002,43 @@ Each cycle: seek 0, Play 60 s, Pause, Play 60 s from there (mid-file, about 60 s
 | W9 | Re-anchor not on SDI: held. Gate on the same as off: **missed** (no jump at all). Gate off mid-file picture: **missed**, 20 of 20 clean, where about 13 skips or repeats were predicted | **Half** |
 | W10 | From 0 and mid-file differ completely with gate off | **Missed** |
 
+#### Why 2.5 frames: the anchor read, and a control without it, 2026-11-10 (afternoon)
+
+**Cause, from the code: the bridge counts the handed frame's wait as 5 frames; it is 3 less the phase within the frame on air, so on average 2.5.** No fix yet (Robbie, 2026-11-10). `BUGS.md`, *SDI audio lags its picture by 2.5 frames, in shipped builds*.
+
+The anchor (`DeckLinkBridge.mm:638`) is `ideal = stagedPts + audioDepth − videoDepth`, the source time the picture on the wire should carry when this callback's samples reach it. Each term, read:
+- **`stagedPts`** is `currentDeckLinkSourcePts()` (`MetalVideoRenderer.swift:5480`), which returns `deckLinkHandedPts` (`:5484`): the frame the fill block copied into the card's frame at the most recent completion (`:5527`, from `copyLatestDeckLinkFrame`, called in `fillFrame` at `DeckLinkBridge.mm:802`). That frame was scheduled straight after, at stream time `idx × frame` (`:804`), **at the back of the card's queue**. Since `9aaff2d` (2026-10-26) the doc comment there says this frame "is the one on the wire"; it is the newest one queued.
+- **The queue.** The pool is 4 frames (`DeckLinkBridge.mm:1800`), each rescheduled the moment it completes, so between completions all 4 are scheduled: the one on air and 3 waiting, the handed frame last. `GetBufferedVideoFrameCount` (`:634`) read **4 in every logged callback**: 7,114 of 7,114 `vq=` values across the four 1800 s runs.
+- **The handed frame's real wait,** at a callback a fraction φ (0 ≤ φ < 1) into the frame on air: the rest of that frame, 1 − φ, then the 2 frames ahead of it: **3 − φ frames**.
+- **What the bridge subtracts:** `videoDepth = (bufferedVideo + 1) × frame` (`:637`) = **5 frames**. The comment (`:630-633`) says the staged frame "is picked up by the next frame-completion callback and then sits behind the frames already queued — hence the +1": that describes a frame not yet in the queue, and the handed frame is already in it and counted in `bufferedVideo`. And the frame on air is counted whole, when only 1 − φ of it is left.
+- **The miss: 5 − (3 − φ) = 2 + φ frames.** The audio callback runs on the card's audio, about 50 times a second, unrelated to the frame, so φ is spread evenly and the smoothed error settles at **2.5 frames**. `ideal` is that much too early in the source, so the samples scheduled are older than the picture they meet: the sound is late. The ±0.5 frame swing of φ is what the EMA reduces to the ±1.5 ms limit cycle.
+- `audioDepth` (`:636`) is right: the card's buffered audio is exactly what stands between a new sample and the wire, and audio and video share one stream clock (`:832-835`). The control below shows the card keeps that promise.
+- **Before `9aaff2d`, by the same reading (an inference, never measured):** `sourceTime` returned the front buffer, the frame the *next* completion would hand over and schedule a frame later, so its wait was 4 − φ and the miss 1 + φ, **1.5 frames**. The change to the handed frame added the extra frame without touching `+1`.
+
+**The arithmetic without the depths.** The bridge knows both stream positions exactly: the next audio sample goes out at `m_audioStreamFrames / 48000`, the handed frame at `idx × frame`. So `ideal = stagedPts + m_audioStreamFrames / 48000 − idx × frame` has neither φ nor a staircase, provided the handed pts and its `idx` are published together (today `idx` is taken at `:801` before the fill sets the pts). That is §10.20's anchor.
+
+**Control: the card and the capture by themselves.** `syncout.cpp` (new, `scripts/decklink-loopback/`) plays a file to device 0 with no anchor loop: ffmpeg decodes the ProRes to v210 on a pipe, frame n is scheduled at `n × frame`, the file's own PCM sample m at stream time m / 48000 (`bmdAudioOutputStreamTimestamped`), on one `StartScheduledPlayback(0)`. So each picture and its samples are handed over for the same instant, and the wire shows what the card and `capture` add. `w1c-control.sh` captures it exactly as `w1c-run.py` captures Manifold (`capture --audio --marks --luma`), and the same analysers read both. No Manifold build is involved. Fixtures: the §10.16 noise files, and the **59.94 sync clip master** generated today as ProRes 422 + PCM 24-bit (`scripts/syncclips/generate.sh 59.94`, 60.06 s, into `~/Code/_scratch/manifold-1c-wire/fixtures/`). For the sync clip, `w1c-syncclip.py` (new) finds each flash frame by its luma and locates the audio that arrived with it in the clip's own PCM (its −60 dB noise floor is seeded too).
+
+Predictions, written 15:20 before the control ran: the control reads **0 ± 1 sample** (median within ±0.05 ms) on both the noise file and the sync clip, with 0 discontinuities; Manifold on the sync clip reads −42.4 ± 2 ms after its start. If the control is not 0, the card and `capture` contribute that much and Manifold's own share is the difference.
+
+Runs 2026-11-10 15:19–15:32. Manifold not running; guard before and after each. **DaVinci Resolve was open throughout** (since 15:10, Robbie at the Mac) but did not hold the card: every `EnableVideoOutput` and `EnableAudioOutput` returned S_OK, and nothing was late or dropped.
+
+| Run | What | Played | Frames late / dropped | Discontinuities in play | A/V offset, every read frame |
+|---|---|---|---|---|---|
+| `ctl-5994` | noise fixture, 59.94 | 150 s, 8991 frames | 0 / 0 | **0** (one segment, 7.2 M samples) | **−0.58 ms**, constant from the first frame: 8998 frames at −0.575 to −0.592 (the 800.8-sample cadence) |
+| `ctl-2398` | noise fixture, 23.976 | 150 s, 3596 frames | 0 / 0 | **0** after the first readable picture | **−0.17 ms**, constant: 3543 frames all at −0.167 |
+| `ctl-sync` | sync clip master, 59.94 | 60 s, 3596 frames | 0 / 0 | | **−0.58 ms** at all 60 flashes (−0.59 to −0.58); beep onset −2.23 ms by threshold (the tone's 5 ms raised-cosine edge reads about 1.5 ms late by construction) |
+
+- **The card and `capture` together put the sound 28 samples late at 59.94 and 8 at 23.976, constant.** That is the whole of the path outside Manifold. Where in the card or the capture those few samples come from is UNKNOWN and does not matter here: they are 1/70 and 1/250 of the offset measured.
+- `ctl-2398`: one +4091-sample step at the first picture whose marker reads (picture 6, 2.24 s): the input relocking from the idle 59.94 to 23.976. Before it no picture reads, after it the offset is constant. Not a playout event.
+- **Manifold's own share: −42.38 + 0.58 = −41.80 ms = 2.505 frames at 59.94; −104.62 + 0.17 = −104.45 ms = 2.504 frames at 23.976.** The code reading predicts 2.5 at both, the offset of a frame count and not of a time.
+
+| # | Prediction | Result | |
+|---|---|---|---|
+| X1 | Control, noise, 59.94: 0 ± 1 sample, 0 discontinuities | −28 samples (−0.58 ms), constant; 0 discontinuities | **Missed** on the value by 27 samples; held on constancy and continuity |
+| X2 | Control, sync clip: 0 ± 1 sample | −0.58 ms at 60 of 60 flashes, the same as X1 | **Missed** as X1; the two fixtures agree to 0.01 ms |
+| X3 | Manifold, sync clip: −42.4 ± 2 ms | `m-sync` (18:02, gate off, the old anchor): **−42.72 ms**, median of 53 flashes after 10 s (−43.54 to −40.75); beep onset by threshold −44.29 | **Held**. Manifold's own share on beep-and-flash content: −42.14 ms = 2.53 frames |
+
 ### 10.17 The default-output stall without Jump, 2026-11-10
 
 Same night and rules as §10.16. `BUGS.md`, *a change of the system default output silences SDI audio until the session ends*: until now seen only with Jump Desktop, which switches the default output to its own device.
@@ -1070,3 +1109,199 @@ At the end the default output must read Scarlett 18i20 USB.
 - **R2 held:** 0 near-misses in 3.1 h, 0 now in 19.1 h of watchdog-on running.
 - **R3 held:** no stuck picture, no detection.
 - **The audio watch, as a side reading:** 0 *was flushed automatically* and 0 SDI underrun events in the 1.57 h with output on. Its only reports were a 2.0–2.2 s "quiet" at the start of some Plays: the last callback was during the paused preroll before the Play, with 0.8–1.0 s still queued, and the pump was called again 0.25–0.6 s into play. That is the watch's threshold counting from the preroll, not a stall.
+
+### 10.19 The default-output stall: the fix, 2026-11-10
+
+**Decided (Robbie, 2026-11-10):** independent of the card-clock work, for the next release. Handle the renderer's automatic flush by resuming the feed from the time it reports, per Apple's documented pattern. Production code, one log line per occurrence. `BUGS.md`, *a change of the system default output silences SDI audio until the session ends*.
+
+**The change** (`FrameEngine.swift`, uncommitted). An observer of `AVSampleBufferAudioRendererWasFlushedAutomatically` on the engine's audio renderer, registered in `init` and removed in `deinit` like the rate observer, ungated. On the posting thread it notes the flush time (`AVSampleBufferAudioRendererFlushTimeKey`) and the current audio session (`SessionToken.peek()`, new). On main, `audioRendererFlushedAutomatically` logs one `[AUDIO-FLUSH]` line and, if that session is still current and a file audio arm exists, calls `readSoundAgain(from: flushTime)`: the previous arm retired, the renderer flushed behind a token bump (the serialized flush the header asks for), the tap emptied, a new reader and pump from the flush time. That is `rereadSoundAfterMove`'s route, now one helper for both, on both file paths (AVFoundation and libav, whose pump stalls the same way). **The clock is not stopped:** Apple's flush-time variant stops the synchronizer, which would hold the picture. With the clock running the renderer drops what is already past, which is Apple's "short mute" variant, positioned at the flush time. Skipped and logged: a seek or switch already re-armed, no file arm (live sources push and resume by themselves), or a 1b renderer move in flight.
+
+**Predictions, written 2026-11-10 15:45, before the run.** `w1c-defout.py <cc-5994-2450s.mov> fx-off fix off`, then `fx-on fix on`: one Play, five switches to Mac Studio Speakers and back 30 s later, 120 s apart, **no transport at all**, capture closed, destination SDI.
+
+| # | Prediction |
+|---|---|
+| F1 | An `[AUDIO-FLUSH] … reading the sound again` line within 0.2 s of every switch: 5 of 5. Also at most restores, now that the pump is running when they come (§10.13 saw a restore stop a running pump): 3–5 of 5 |
+| F2 | **SDI recovers every time, with no seek:** after each change, PCM again within 0.5 s. The gap: from the re-read (the tap is emptied) until the new reader's samples reach the bridge's cursor, which sits a few frames behind the clock: **0.1–0.4 s per change** |
+| F3 | The picture does not notice: no pull repeat or skip at any change |
+| F4 | Gate on: the same. No `[AUDIO-FLUSH]` at the renderer moves of output start (a move flushes by its own call, not automatically) |
+| F5 | No stall: 0 `AUDIO PUMP QUIET` reports after any change. The default output reads the Scarlett at the end |
+
+**Results.** 2026-11-10 18:03–18:25 (`chain4.sh`), after a first attempt at 17:45 that Robbie, at the Mac, closed by hand. Each launch now waits until Resolve is closed and nobody has touched the Mac for 10 minutes. The same measurement build as §10.16's control evening (`.build-cc`, `-DMANIFOLD_CARDCLOCK`, the fix and the old anchor). Guard before and after each, `/Applications/Manifold.app` not run, Resolve not running. Capture closed, so the gap is read from the bridge's own stream positions (`w1c-defout-report.py`), not the wire. Reports: `runs/fx-off.report`, `runs/fx-on.report`.
+
+| Change | Gate off: SDI silence | Gate on: SDI silence |
+|---|---|---|
+| 1 → Speakers | 20.1 ms (964 samples) | none over 5 ms |
+| 1 → Scarlett | none | 19.0 ms (910) |
+| 2 → Speakers | 20.5 ms (985) | 20.0 ms (960) |
+| 2 → Scarlett | none | none |
+| 3 → Speakers | none | none |
+| 3 → Scarlett | none | none |
+| 4 → Speakers | none | none |
+| 4 → Scarlett | none | 21.4 ms (1027) |
+| 5 → Speakers | none | none |
+| 5 → Scarlett | none | 20.8 ms (999) |
+
+- **Every change, switch and restore alike, posted an automatic flush, and each got one `[AUDIO-FLUSH] … reading the sound again` line: 10 of 10 per run.** The flush time was 0–38 ms behind the clock. No `[AUDIO-FLUSH]` line came at any other time, so none came at output start, gate on.
+- **SDI recovered every time, with no seek and no transport:** 20 of 20 changes. The driver's check 20 s after each switch read PCM 10 of 10.
+- **The gap is one bridge callback of silence or nothing.** 6 of 20 changes left one underrun callback of 19–21 ms (`UNDERRUN EVENT`, 1 callback each). The other 14 left no silence over 5 ms. The tap is emptied at the re-read, and the new reader nearly always refills it before the bridge's cursor reaches the empty part.
+- **The picture:** gate on, no pull step and no pull repeat in the run. Gate off:
+  - The card dropped 3 frames at the first switch (frames 4272–4274, a +5-frame pull step at 96341.33).
+  - It dropped 25 frames during the driver's own `sample` of the process (96306.2–96317.1), which suspends it. That was the measurement, not a switch.
+  - 23 pull repeats over the run, not located against the changes.
+  - The pre-fix gate-off run (`d-defout`, §10.17) logged 20 card drops of its own. Whether a switch drops frames gate off without the fix is UNKNOWN: its drops were not located against its switches either.
+- **No stall:** no `AUDIO PUMP QUIET` after any change. The two reported in each run are the pump idle in the 16 s before Play (clock 0.0). The default output read the Scarlett at the end of both runs.
+
+| # | Result | |
+|---|---|---|
+| F1 | 5 of 5 switches and 5 of 5 restores, each run | **Held** |
+| F2 | 20 of 20 recovered with no seek; the gap 0 or one 19–21 ms callback, not 0.1–0.4 s | **Held** on recovery; **missed** on the gap, by being shorter |
+| F3 | Gate on: no step or repeat. Gate off: 3 frames dropped at 1 of 10 changes; **the repeat (below): none at 10 of 10** | **Held gate on; gate off 1 of 20 changes** |
+| F4 | Gate on the same; no flush line at output start | **Held** |
+| F5 | 0 QUIET after any change; the Scarlett at the end | **Held** |
+
+**The gate-off drops, located (Robbie, 2026-11-10 evening).** `w1c-drops.py` (new) dates each `DeckLink D3: !! Dropped|DisplayedLate` line from the run's `[CARDCLOCK]` lines (completed count → host, good to about 0.1 s) and sets each group against the output changes and the driver's `sample` windows.
+- **Pre-fix (`d-defout`, §10.17), gate off: no drop at any of its 10 changes.** Its 20 drops are frame 4 at start and 19 inside `sample control`.
+- **`fx-off`:** frame 4, 25 inside `sample control`, and **frames 4272–4274, 0.14 s after the first switch**, the only drops at a change. The desktop lost 4 frames in the same second (`[PLAYBACK-STATS] t=60.150 dropped=4`). That was between the switch (`set` at 96341.235) and the automatic-flush notice (96341.376), before which the fix does nothing. So it came before the handler ran.
+- **Repeat, `fx2-off` (19:24–19:35, the same build, gate off, 5 switches and 5 restores):**
+  - **0 card drops in the whole run**, none at any of the 10 changes. None inside `sample` either, this time.
+  - No desktop drop.
+  - 10 of 10 `[AUDIO-FLUSH]` re-reads; SDI on PCM 20 s after every switch.
+  - **No SDI silence over 5 ms at any change**, and no pump stall.
+- **So the drops do not line up with switches:** 1 of 30 changes across the three gate-off runs, 1 of 20 with the fix, 0 of 10 without. That one came before the fix's handler. It reads as an occasional cost of the system's device switch, not the fix's, though one event cannot settle that.
+
+### 10.20 Stage 1c, the plan: SDI audio on the card's own timeline, 2026-11-10
+
+**Plan only: nothing here is built.** Written after §10.16's wire results and the 2.5-frame reading. It replaces §10.3's *The change, under card lock only*, and keeps its aim.
+
+**Decided (Robbie, 2026-11-10).** With the card as master, SDI audio is scheduled on the card's own timeline: each frame's audio at that frame's stream time, so picture and sound are locked by construction. No steering corrections, no start jump, no slew, no constant offset.
+
+**The idea in one line.** Under card lock the source time on the wire is a fixed function of the card's stream time for the whole of a run: picture slot `idx` carries source time `Φ + idx × frame`, with `Φ` fixed from the latch to the next transport move (§10.1). So card audio sample `s` carries source sample `s + D`, with `D` an integer fixed once per run. The bridge then plays the file's samples in order, one per sample scheduled, and never reads the picture again to decide where it is.
+
+**The cadence comes free.** Each frame's audio starts at stream sample `A(idx) = ⌊idx × 48000 × frame⌋`, exact integer arithmetic in the mode's own timescale: at 59.94 that is 800, 801, 801, 801, 801 samples (4004 per 5 frames; the order depends only on where the run starts), 2002 at 23.976, 1601/1602 at 29.97, exact at 24, 25, 30, 50 and 60. With one mapping per run, every frame gets exactly its share and nothing has to count it.
+
+**What changes.**
+
+| Piece | Today | 1c |
+|---|---|---|
+| What the pull publishes | `deckLinkHandedPts`, a pts with no slot (`MetalVideoRenderer.swift:5527`); `idx` taken before the fill (`DeckLinkBridge.mm:801`) | The pair (slot `idx`, pts), whether the pull was timed, and a run number that changes at every transport move, written together under `deckLinkLock` |
+| Anchor | `stagedPts + audioDepth − (bufferedVideo + 1) × frame`, steered ±2 samples per callback toward its smoothed error (§10.16) | **Latch** at the first timed pull of a run whose picture has moved: `D = round(pts × 48000) − A(idx)`. Then the cursor is `s + D` for every sample scheduled. No error, no correction |
+| Depth loop | Tops the card up to 200 ms | Unchanged: it says how many, the mapping says which |
+| Monitor | The loop | The exact error, `pts − (idx × frame + D / 48000)`, at each new pair: 0 in a run under lock. Over half a source frame, a re-latch, logged and counted (`[SDI-AUDIO] re-latch`). Expected never in steady play |
+| Run edges | Silence while paused or shuttling; by reading, the PCM already queued (up to 200 ms) plays on past a Pause; the first callback after Play snaps to `ideal` | `FlushBufferedAudioSamples` at each run edge, then reschedule from the card's current stream time (below) |
+
+**Why a flush at the edges.** Audio is queued about 200 ms ahead; a picture is decided 3 frames ahead (§10.16). At a Play the 150 ms or so of audio already queued after the first new picture is silence, scheduled before anyone knew. Kept, the sound would start 150 ms after the picture, with those samples skipped. So at the latch the bridge flushes the card's audio and schedules again from the card's current stream position: silence up to `A(idx₀)`, the file from there. At a Pause it flushes and schedules the file only up to the end of the last moving frame, then silence. **What `FlushBufferedAudioSamples` does to a running stream (the samples on the wire now, the stream position after) is UNKNOWN.** The SDK header declares it and no more. First step: a `syncout --flush-at T` probe on the loop, no Manifold, before any app code.
+
+**Events.**
+
+| Event | Picture (card lock, §10.1) | SDI audio, 1c |
+|---|---|---|
+| Play from 0 or mid-file | Starts; lock latches | Silence until the first moving slot, then the file from exactly that frame's first sample: no jump, no slew |
+| Seek, frame step, loop wrap | `beginReading`; a new run | Run ends: flush, silence until the new run's first timed pull, then latch again. Across a loop's wrap the sound has whatever gap the picture holds, and no stale end-of-file samples |
+| Scrub drag, shuttle ≠ 1×, reverse jog | No lock writes | Silence, as today (the decode pump runs only at 1×) |
+| Pause | Rate 0 | Flush; the file to the end of the last moving frame, then silence. The sound stops with the picture, not 200 ms after |
+| Output start | Renderer moves (1b) | No audio until the first timed pull after the start, then latched as at Play |
+| Output stop | Ends | Nothing to do |
+| File rate ≠ mode rate (25p on 59.94, 23.976 on 24.000) | The clock runs in card seconds, so the cadence shows in the picture (§10.4) | Unchanged: the mapping is in time, not in frames, so the sound keeps its true duration and stays continuous. The A/V offset per frame follows the cadence, a sawtooth inside one source frame (23.976 on 24.000: 0 to 41.7 ms over each 41.7 s), and no slip |
+| Underrun (tap behind the cursor) | — | Silence for what is missing; the cursor still advances with the stream, so the sound comes back in place, never late. Counted, as today |
+| **44.1 kHz source** | — | Today SDI audio is **disabled** for any rate but 48 kHz (`DeckLinkService.swift:1176-1182`). 1c resamples once, at the tap's ingest, with `PolyphaseResampler` at the fixed ratio 160/147, onto the source axis at 48 kHz, and compensates its fixed group delay in `D`. Everything after is unchanged. The Mac renderer is untouched (AVFoundation plays 44.1 itself). 88.2 and 96 kHz take the same route; 32 kHz too |
+
+**Gate off (today's path) until 1b ships.** Card lock does not exist, the picture still slips a frame each time the card and the file drift apart, and a run-wide mapping would have to re-latch at every slip: a jump of a frame of audio, worse than today's walk. So the gate-off path keeps the anchor loop. **One separable change is available for it, not decided:** compute `ideal` from exact stream positions, `stagedPts + s_next / 48000 − idx × frame` (§10.16), with the pair published together. By reading, that removes the 2.5-frame lag and the staircase, so the loop corrects only after a slip (a frame's worth of samples, walked back at 2 ms/s, as now) and applies nothing in between. It could go into the next release on its own. Whether it also removes the +90 ms start error behind the gate-off RESYNC at a Play from 0 is UNKNOWN: that start error's cause is not explained. Snapping only after the first timed pull, as 1c does, is the likely cure.
+
+**Predictions, written 2026-11-10 before any code.** All against the control: the card and `capture` alone read −28 samples at 59.94 and −8 at 23.976 (§10.16). So "offset 0" on the wire means **Manifold − control = 0 ± 1 sample**.
+
+| # | Run | Prediction |
+|---|---|---|
+| C0 | `syncout --flush-at` probe, no Manifold | A flush mid-run leaves the stream position where it was, and samples scheduled after it at their stream times land as scheduled. If not, the edge design changes before any app code |
+| C1 | `cont`, gate on, 1800 s, 59.94 and 23.976 | **0 discontinuities in steady play** (today 77,000–78,000 per run). `[AUDIO-CORR]` shows `c=0` in every callback after the latch. Re-latches 0, underruns 0 |
+| C2 | The same | **Offset 0 ± 1 sample from the first audio block**, every frame to the end. Its whole range in the run is under 2 samples (today p1–p99 3.1 ms, gate on) |
+| C3 | `plays`, gate on, 20 cycles, 59.94 and 23.976 | **No jump at Play** in 80 Plays, from 0 or mid-file: the first sound arrives with the first moving picture, at offset 0 ± 1 sample, and stays there. No slew. No silence over 5 ms after the first sound |
+| C4 | Pause in the same runs | The sound ends within 1 sample of the end of the last moving picture (today, by reading and never measured, up to the 200 ms already queued, less the 3 frames of picture still queued) |
+| C5 | New `transport` mode: seek, step, loop on a 20 s file, shuttle 2× and back, output stop and start mid-Play | Each run is clean as C3. Loop: the gap equals the picture's hold at the wrap, if any, and no end-of-file sample after it. 0 discontinuities inside any run |
+| C6 | 25p fixture on a fixed 59.94 mode; 23.976 on 24.000, 600 s each | 0 discontinuities. The offset follows the cadence's sawtooth within one source frame and never steps |
+| C7 | 44.1 kHz noise fixture, 59.94, 600 s | SDI carries sound (today none). 0 discontinuities; offset 0 ± 1 sample of 48 kHz after the delay. Located against a 48 kHz reference made by the same resampler offline |
+| C8 | Gate off, `cont` and `plays`, unchanged code | Today's figures (§10.16) exactly: nothing on the gate-off path moved |
+| C9 | T15 and T16 (§10.5) | Output off and live sources unchanged |
+
+**The wire tests.** All with `w1c-run.py` and `w1c-wire.py` as in §10.16, plus a control run (`w1c-control.sh`) in the same session for the card's own constant. New: a `transport` mode in `w1c-run.py` (the debug transport has play, pause, seek, step, shuttle and loop; no scrub verb, so scrub stays attended), a 25p and a 44.1 kHz fixture from `mkfixture.sh`, and the `--flush-at` option in `syncout.cpp`. `w1c-wire.py` gains the offset relative to the control and a per-Play first-sound check against the first moving picture.
+
+**Out of scope.** Destination Computer (Stage 2). The card's own 28 / 8 samples are left alone: they are the card's and the capture's together, and which part is the output's is not known.
+
+### 10.21 The anchor fix, ahead of 1c: the handed frame's own slot, 2026-11-10 (evening)
+
+Robbie, 2026-11-10 evening: fix the anchor term in production code, independent of the 1c redesign; verify on the loop, gate off and on, at 23.976 and 59.94, against the `syncout` control (§10.16); and say whether live streams share it. Uncommitted.
+
+**Live streams share the anchor, and the 2.5 frames, from the code.**
+- SDI audio has one path for every source. The bridge reads `engine.audioTap` (`DeckLinkService.swift:1185-1214`, `WindowDeck.swift:1551`) at the source time the anchor gives. Sound reaches that tap from:
+  - every live sink, through `LiveAudioSink.enqueue`, which tees into the tap before the renderer (`FrameEngine.swift:3625`): WHEP, SRT and NDI;
+  - SRT's and NDI's fallback routes (`SRTFrameRouter.swift:2071`, `NDIService.swift:2392`);
+  - HLS through `HLSAudioTap` (`WindowDeck.swift:1609`);
+  - files (`FrameEngine.swift:3407`, `:5062`).
+- The anchor's pts is `currentDeckLinkSourcePts()`, the handed frame, which `copyLatestDeckLinkFrame` sets on every fill whatever the source (`MetalVideoRenderer.swift:5526-5527`). A live source takes the newest frame (`:5551-5554`), still scheduled at the back of the queue. So a stream to SDI was late by the same 2 + φ **card** frames: 41.7 ms at 59.94, 104.3 ms at 23.976. The miss counts frames of the output's queue, not of the source.
+- **A source slower than the output was later still (inference, from the code; not measured).** The old term took the newest handed pts as if that frame had just gone to the back of the queue. A frame repeated in several slots (a 30p stream on a 59.94 output, 24p on 59.94) went out from its first slot, so on its repeats the term read later again, by 0 to 2 slots. On average that is +0.5 card frame at 2 slots a frame and +0.8 at a 2-3 cadence. The new term counts such a frame from its first slot.
+- **Calibration (`AUDIO_RESAMPLER_DESIGN.md` §19.1-§19.2):** the per-source offset O is measured on the stream's own timestamps (beep against flash, decoded axis), not on SDI. SDI applies the same O as a read offset (`AudioTapBuffer.setLiveReadOffset`, `FrameEngine.swift:4851`), so SDI and the desktop move together. O never contained the bridge's lag. **With the fix, a calibrated stream on SDI is in sync with its picture where it was 2.5 card frames late, and a saved O needs no change.** The exception is an O set by ear while watching SDI: it would have absorbed the lag, and it now reads about 2.5 card frames early. The desktop path is unchanged. §19.10's by-ear note ("a bit tighter sync" on the Mac than on SDI, at the same O) is consistent with SDI having been the late one.
+
+**The change** (`App/DeckLink/DeckLinkBridge.mm`):
+- `fillFrame` publishes, after each fill, the pts it handed and the slot it went out in (`noteHandedFrame`, `:993`, `:1000`), under a lock: fills run on the start thread during preroll and on the SDK's video thread after, and the audio callback reads (`handedFrame`, `:1011`).
+- The anchor is `ideal = handedPts + (m_audioStreamFrames / rate − handedIdx × frame) + trim` (`:658`). Both streams share the t = 0 of `StartScheduledPlayback(0)`, so neither queue depth is sampled and no callback phase enters. `bufferedVideo` stays only for the periodic log's `vq=`.
+- A frame handed in consecutive slots counts from its first, for up to `kAudioMaxRepeatSlots` = 3 slots after it (`:370`). That covers 24p and 30p in 59.94 and 15p. Held longer (pause, a held picture), it counts from its newest slot, as the old term did.
+- No handed frame yet: silence and no anchor (`:649`), as for a NaN pts before.
+- The hidden trim key (`manifold.decklink.audioTrimSeconds`) still adds to the target.
+
+**Predictions, written 2026-11-10 evening, before any run of the fixed build** (`.build-anchor`, the same flags as `.build-cc`; runs `chain5.sh`, after chain4):
+
+| # | Run | Prediction |
+|---|---|---|
+| A1 | `a5994-off`, `a5994-on`: cont, 300 s, noise fixture | Steady offset after 60 s, median **−0.58 ± 1 ms** (the control's), both gates. Before: −42.38 / −42.35 |
+| A2 | `a2398-off`, `a2398-on` | Median **−0.17 ± 1 ms**, both gates. Before: −104.65 / −104.62 |
+| A3 | `a-sync`: the sync clip, 59.94, gate off | −0.58 ± 1 ms at every flash after 10 s (`ctl-sync`: −0.58) |
+| A4 | Corrections, A1-A2 | At matched rates the handed pts advance exactly a frame a slot, so the target has no staircase and no φ. **Gate on: under 1 nonzero correction a second after 60 s** (before: 43 a second). Gate off: corrections only in the walk back after each picture slip, about 400 per slip (801 samples at ±2), and none between. The ±1.5 ms limit cycle goes; p1-p99 of the offset under 1 ms gate on |
+| A5 | `ap5994-off`/`-on`: 5 Plays from 0 and 5 mid-file per gate | **The start is the same shape, shifted by the 42 ms** (inference: what sets the first-sound offset is UNKNOWN, §10.16). Gate off from 0: first sound about +115 to +140 ms, and **one RESYNC jump in each of 5, of −106 to −146 ms, 1.2-2.2 s in, no worse than before**. Mid-file and gate on: no jump, first sound within ±40 ms of the final value, final −0.6 ± 1 ms. Silence over 5 ms after the first sound: 0 |
+| A6 | Starts in A1-A2 | Before plus the shift: 59.94 off, about +128 then the jump; 23.976 off, about +13 then a slew; 59.94 on, about +39 then a slew; 23.976 on, about +4 |
+
+If A1-A3 hold, Manifold's own share of the SDI offset is under a millisecond, and the 28 and 8 samples are the card's and the capture's. §10.20's 1c anchor keeps this term and replaces the loop around it.
+
+**Results.** 2026-11-10 18:25–19:23 (`chain5.sh`), 7 launches of `.build-anchor`, each guarded before and after. Each launch waited for Resolve to be closed and the Mac to be idle 10 minutes. Capture open throughout; analysers as §10.16. Before = §10.16's runs on `.build-cc` (old anchor); the cont runs then were 1800 s, now 300 s.
+
+| | 59.94 gate off | 59.94 gate on | 23.976 gate off | 23.976 gate on |
+|---|---|---|---|---|
+| Control (`syncout`) | −0.58 | −0.58 | −0.17 | −0.17 |
+| **Steady offset after 60 s, before** | −42.38 ms | −42.35 | −104.65 | −104.62 |
+| **Steady offset after 60 s, after** | **−0.49 ms** | **−0.49** | **−0.17** | **−0.10** |
+| After − control | +0.09 ms | +0.09 | 0.00 | +0.07 |
+| p1 / p99 after (before) | −0.88 / +11.75, the slips (−52.85 / −40.53) | **−0.50 / −0.48** (−43.68 / −40.57) | −0.47 / +36.75, a slip (−136.83 / −103.31) | **−0.10 / −0.10** (−106.21 / −103.33) |
+| Nonzero corrections a second in play, before | 43.4 | 43.2 | 43.2 | 42.9 |
+| … after, whole run; per minute | 4.3; 685 0 0 574 39 | 2.0; 611 0 0 0 0 | 4.2; 49 0 0 0 1215 | 4.0; 1215 0 0 0 0 |
+| Corrections matched on the wire | 1297 of 1297 | 611 of 611 | 1263 of 1263 | 1215 of 1215 |
+| Offset at the first sound, then (before) | +132.9, RESYNC jump −130.4 ms at +1.48 s (+85.5, jump −131.8) | +16.1, slew to −0.6 by 10 s (−3.2, slew 19 s) | **+83.2, RESYNC jump −164.8 ms at +1.0 s** (−91.7, slew, no jump) | **+41.5, slew to −0.1 by 20 s** (−100.3, settled in 2 s) |
+
+- **The sync clip** (`a-sync`, gate off): median **−0.58 ms** over 53 flashes, the control's figure exactly (`m-sync`, old anchor: −42.72). 42 flashes read −0.58 to −0.59. The rest are one picture slip at 52.4 s, read −16.2 ms and walked back at about 2 ms/s.
+- **Steady state:** within 0.1 ms of the control at both rates and both gates. **A1, A2, A3 held.** Gate on, the offset's whole p1-p99 range is 0.02 ms and 0.00 ms; before, it was 3.1 and 2.9 ms. The ±1.5 ms limit cycle is gone.
+- **Corrections: none at all in steady play** at both rates, gate on, after the first minute. Before, there were 43 a second. Gate off, they come only in the first minute and in the walk back after a picture slip: 574 at 59.94 and 1215 at 23.976 for one slip each. That is more than A4's "about 400", because the walk is mostly 2-sample steps with some single ones. The walk takes 7.7 s and 19.7 s, as before (§10.16). **A4 held**, except the per-slip count.
+- **Every correction the bridge made reached the wire one for one** (4386 of 4386). Nothing else broke the sound.
+
+**After Play, 59.94** (`ap5994-off/on`, 5 cycles each: 5 Plays from 0 and 5 mid-file per gate):
+
+| | Gate off, from 0 | Gate off, mid-file | Gate on, from 0 | Gate on, mid-file |
+|---|---|---|---|---|
+| First sound, after (before, §10.16) | +116.2 to +132.9 ms (+74 to +96) | 3 of 5 at −0.55; 2 at −17.2, one frame late (−60 to −36) | +16.1 (3), +32.8 (2) (−33 to −7) | 3 of 5 at −0.55; 2 at +16.1 (−37 to −17) |
+| Jump on the wire | **5 of 5**, −130.4 to −147.7 ms, 1.18–1.48 s in, each a logged RESYNC (20 of 20, −106 to −146) | 0 (0) | 0 (0) | 0 (0) |
+| Final | −0.55 to −0.57 | −0.55 to −0.65 | −0.47 to −0.50 | −0.48 to −0.55 |
+| Silence over 5 ms after the first sound | 0 | 0 | 0 | 0 |
+
+- **At 59.94 the start is no worse, and closer:** the same single RESYNC jump on every gate-off Play from 0, of the same size. Mid-file and gate-on Plays start at most 2 frames off, and 9 of 20 start on it. The gate-on slew lasts at most about 20 s; before, it was up to 33 s.
+- **At 23.976 the start is worse, on one Play each:** a new −165 ms jump gate off, and a 42 ms, 20 s slew gate on, where before there was a 13 ms slew and a 4 ms one. **A6 missed** at 23.976 (predicted about +13 and +4).
+- **Why (from these numbers; the mechanism is an inference):** every first-sound error is a whole number of frames, with the sound ahead. 59.94: +1, +2 and 7–8 frames; 23.976: +1 and +2 frames, which became +4 by 0.5 s. The anchor snaps at the first unmuted callback to the frame on the wire. At a Play the picture stays on the paused frame for some slots after that callback, so the sound starts ahead by as many frames as the picture holds, and comes back when the picture moves. Before the fix, the −2.5-frame bias cancelled about 2.5 frames of that hold. At 23.976 that left a small error. At 59.94 it did not: a 2.5-frame bias is 42 ms there, against holds of up to 133 ms. What sets the length of the hold is UNKNOWN; it is the "+90 ms at a Play from 0" of §10.16, which the bias had shifted.
+- **Not fixed here.** One direction, not built: keep the anchor unset, sending silence, until the first handed frame whose pts differs from the paused one. The first sound would then start with the moving picture, with no jump and no slew, and up to the hold's length later than now. That is a change of behaviour at Play, so it is Robbie's call. §10.20's 1c anchors at the first timed pull instead, which removes the question.
+**After Play, 23.976** (`ap2398-off/on`, `chain7.sh`, 19:35–19:50: 3 Plays from 0 and 3 mid-file per gate):
+
+| | Gate off, from 0 | Gate off, mid-file | Gate on, from 0 | Gate on, mid-file |
+|---|---|---|---|---|
+| First sound | +41.52 ms, 3 of 3 (exactly one frame); +165.6 at 0.5 s | −0.19 (1), +41.52 (2) | +41.52, 3 of 3 | +41.52, 3 of 3 |
+| Jump on the wire | **3 of 3: −164.83 ms at 0.98–1.00 s**, each a logged RESYNC (−165.0) | 0 | 0 | 0 |
+| Then | settled at once | slew to the final value in 19–22 s | slew, 19–22 s | slew, 19–22 s |
+| Final | −0.19 | −0.12 | −0.12 | −0.12 to −0.15 |
+| Silence over 5 ms after the first sound | 0 | 0 | 0 | 0 |
+
+- **Every 23.976 Play starts one frame ahead (11 of 12),** and only Plays from 0 with the gate off then go to four frames ahead and jump. The Play-from-0 hold is longer than the others at both rates: 59.94 gate off gave 7–8 frames.
+- **No earlier measurement of 23.976 Plays exists** (§10.16 measured Plays at 59.94 only). The 1800 s runs' single Play from 0 started 13 ms (gate off) and 4 ms (gate on) from its final value. So against that, the fix makes the 23.976 start worse on every Play: a jump gate off from 0, and a one-frame, 20 s slew everywhere else.
+- **For Robbie:** the fix is right in steady state and at 59.94, and makes the 23.976 start worse. Commit it with the start-of-play change above (hold silence until the first moving frame), or without it and accept the 23.976 start, or keep it out until 1c. Raw captures of every §10.21 run are deleted; the reports, `.av.csv` and `.summary.json` are kept in `~/Code/_scratch/manifold-1c-wire/runs/`.

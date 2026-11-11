@@ -9,7 +9,9 @@
 // SIGINT / SIGTERM) sets the prior value back and releases the configuration object. It never calls
 // WriteConfigurationToPreferences, so per the SDK (2.5.15) the change cannot outlive the process. Run the probe after.
 //   build/decklink-loopback/capture --device 0 --seconds 6 [--input hdmi] [--ref f.v210] [--dumpdir d --dumpmax 8] [--label x]
-//       [--marks out.txt [--band x0 width]] [--audio out.raw]
+//       [--marks out.txt [--band x0 width]] [--audio out.raw] [--luma]
+// --luma (SDI A/V offset control, docs/CARD_CLOCK_FINDINGS.md §10.16): adds " y<mean 10-bit Y of row 540>" to each marks line, so a
+// flash frame (the sync clips, scripts/syncclips) can be found on the wire.
 // --audio (picture recovery, docs/CARD_CLOCK_FINDINGS.md §10.16): also enables the input's audio, 48 kHz 32-bit, channels 1–2,
 // writes the samples as received (interleaved little-endian int32) and adds " a<sample frames>" to each marks line, so every
 // received picture carries the audio that arrived with it.
@@ -52,7 +54,7 @@ static std::string flagsStr(int64_t f) {
 }
 
 struct Args { int device = 0; double seconds = 6; std::string ref, dumpdir, label = "capture", input, marks, audio; int dumpmax = 0;
-              long bandX = 0, bandW = -1; } A;
+              long bandX = 0, bandW = -1; bool luma = false; } A;
 static FILE *marksFile = nullptr;
 static FILE *audioFile = nullptr;
 static std::string dominanceNow = "?";
@@ -224,9 +226,15 @@ public:
             if (marksFile && w >= 20 && h >= 56) {
                 const long bw = A.bandW > 0 ? A.bandW : w;
                 const long tm = fieldMark((const uint8_t *)bytes, rb, 0, A.bandX, bw), bm = fieldMark((const uint8_t *)bytes, rb, 1, A.bandX, bw);
-                fprintf(marksFile, "%ld %.5f %s %s %s%s%s\n", i, (double)t / 240000, tm < 0 ? "?" : std::to_string(tm).c_str(),
+                std::string luma;
+                if (A.luma) {   // the first Y of each 6-pixel group across the middle row
+                    const uint32_t *row = (const uint32_t *)((const uint8_t *)bytes + (size_t)rb * (h / 2)); double sum = 0; long cnt = 0;
+                    for (long k = 0; k + 3 < rb / 4; k += 4) { sum += (row[k] >> 10) & 0x3FF; cnt++; }
+                    char b[32]; snprintf(b, sizeof b, " y%.1f", cnt ? sum / cnt : -1.0); luma = b;
+                }
+                fprintf(marksFile, "%ld %.5f %s %s %s%s%s%s\n", i, (double)t / 240000, tm < 0 ? "?" : std::to_string(tm).c_str(),
                         bm < 0 ? "?" : std::to_string(bm).c_str(), dominanceNow.c_str(), (ff & bmdFrameHasNoInputSource) ? " NOINPUT" : "",
-                        audioFile ? (" a" + std::to_string(aframes)).c_str() : "");
+                        audioFile ? (" a" + std::to_string(aframes)).c_str() : "", luma.c_str());
             }
             if (full != lastPic && dumps < A.dumpmax && !A.dumpdir.empty()) {
                 char p[1024]; snprintf(p, sizeof p, "%s/%s-rx%05ld.v210", A.dumpdir.c_str(), A.label.c_str(), i);
@@ -266,7 +274,7 @@ int main(int argc, char **argv) {
         if (a == "--device") A.device = std::stoi(nx()); else if (a == "--seconds") A.seconds = std::stod(nx());
         else if (a == "--ref") A.ref = nx(); else if (a == "--dumpdir") A.dumpdir = nx(); else if (a == "--dumpmax") A.dumpmax = std::stoi(nx());
         else if (a == "--label") A.label = nx(); else if (a == "--input") A.input = nx();
-        else if (a == "--marks") A.marks = nx(); else if (a == "--audio") A.audio = nx();
+        else if (a == "--marks") A.marks = nx(); else if (a == "--audio") A.audio = nx(); else if (a == "--luma") A.luma = true;
         else if (a == "--band") { A.bandX = std::stol(nx()); A.bandW = std::stol(nx()); }
     }
     if (!A.marks.empty() && !(marksFile = fopen(A.marks.c_str(), "w"))) { printf("cannot write marks\n"); return 2; }

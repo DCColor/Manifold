@@ -97,7 +97,7 @@ for l in open(f"{d}/{label}.marks"):
         if len(f) > 1 and f[1][1:].lstrip("-").isdigit(): off += max(int(f[1][1:]), 0)
         continue
     if len(f) < 5: continue   # a line cut short when capture was stopped
-    n = f[2] if f[2] != "?" else f[3]; a = int(f[-1][1:]) if f[-1].startswith("a") else 0
+    n = f[2] if f[2] != "?" else f[3]; a = next((int(x[1:]) for x in f[5:] if x[:1] == "a" and x[1:].lstrip("-").isdigit()), 0)   # " a<n>", before any " y<luma>"
     m = None
     if n != "?":
         m16 = int(n)

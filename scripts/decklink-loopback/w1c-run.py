@@ -4,14 +4,14 @@
 # whole transport script, so every received picture and every received sample is kept. Analysis: w1c-wire.py.
 #   w1c-run.py cont  <fixture.mov> <on|off> <label> <seconds>   one Play from 0, <seconds> of play, Pause
 #   w1c-run.py plays <fixture.mov> <on|off> <label> <cycles>    per cycle: seek 0, Play 60 s, Pause, Play 60 s (mid-file), Pause
-# on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
+# W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
 # `capture` moves the card's output clock while it is open (§5); A/V offset and continuity are read on the same wire, so that is acceptable.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID through manifold-proc.sh. AX menu clicks on named items only,
 # no keystrokes, no screenshots. The destination is a launch argument (argument domain): nothing is written to defaults.
 import os, signal, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
 PROC = f"{REPO}/scripts/manifold-proc.sh"; AXT = f"{REPO}/build/linkpace/linkpace-ax"; DEV = f"{REPO}/build/decklink-loopback"
-APP = f"{REPO}/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"
+APP = os.environ.get("W1C_APP") or f"{REPO}/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"   # W1C_APP: another build of this tree
 OUT = os.environ.get("W1C_OUT", os.path.expanduser("~/Code/_scratch/manifold-1c-wire/runs"))
 
 def sh(*a): return subprocess.run(a, capture_output=True, text=True)
@@ -54,7 +54,7 @@ def run(fixture, gate, label, steps, budget):
     menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
     if "CARDCLOCK-REF] start" not in open(log, errors="replace").read(): say("output did not start"); quit_build(); sys.exit(4)
     cap = subprocess.Popen([f"{DEV}/capture", "--device", "0", "--seconds", "99999", "--label", label, "--marks", f"{OUT}/{label}.marks",
-                            "--audio", f"{OUT}/{label}.raw"], stdout=open(f"{OUT}/{label}.cap", "w"), stderr=subprocess.STDOUT)
+                            "--audio", f"{OUT}/{label}.raw"] + (["--luma"] if os.environ.get("W1C_LUMA") == "1" else []), stdout=open(f"{OUT}/{label}.cap", "w"), stderr=subprocess.STDOUT)
     with open(log, "a") as f: f.write(f"[DRV] CAP-OPEN mono {time.monotonic():.3f}\n")
     last = time.monotonic()
     while True:
