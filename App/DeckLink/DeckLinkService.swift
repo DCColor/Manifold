@@ -1213,11 +1213,11 @@ final class DeckLinkService: ObservableObject {
                 Int32(tap.read(framesStartingAt: startTime, frameCount: Int(frameCount), into: dst))
             })
         // Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): the frame each fill handed, for a file's runs on the card's timeline.
-        config.handed = { [weak self] pts, timed, byTime, handSeq in
+        config.handed = { [weak self] pts, timed, byTime, handSeq, due, sourceFrame in
             if let renderer = self?.renderer {
-                renderer.currentDeckLinkHanded(pts: pts, timed: timed, byTime: byTime, handSeq: handSeq)
+                renderer.currentDeckLinkHanded(pts: pts, timed: timed, byTime: byTime, handSeq: handSeq, due: due, sourceFrame: sourceFrame)
             } else {
-                pts.pointee = .nan; timed.pointee = false; byTime.pointee = false; handSeq.pointee = 0
+                pts.pointee = .nan; timed.pointee = false; byTime.pointee = false; handSeq.pointee = 0; due.pointee = .nan; sourceFrame.pointee = 0
             }
         }
         config.cardTimeline = FrameEngine.sdiSoundOnCardTimeline

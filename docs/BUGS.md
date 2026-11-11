@@ -3858,6 +3858,16 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 
 **Never committed.** `CARD_CLOCK_FINDINGS.md` §10.12, Fault 1. A renderer move loses the renderer's queue, the pump refills from further on, and two moves pushed the frames at the cursor out of the tap's 4 s ring. `rereadSoundAfterMove` reads the sound again from the clock when a move ends parked. 1b before: 6 of 10 sessions. After: 0 of 14 that ran through (one further session froze, entry above).
 
+## ☐ OPEN 2026-11-11 — 1c (UNCOMMITTED) — SDI audio faults found in the 1c follow-up (chain13)
+
+`CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`. None is fixed.
+- **The card's audio does not start, or starts offset, at output start.** 5 of 100 restarts while playing at 59.94 (0 of 100 at 23.976): no SDI sound for the session; the callback ran, the card never consumed its 9,600-sample preroll (`!! holding over 1 s`). Same mechanism, partial: the card's audio consumption point sat +989 samples off its video stream time for a whole first session (f-tr-2398: sound +20.35 ms off), and +386 in chain11 (`v-tr-5994-off`, +7.45 ms). Normal sessions: 2–4 samples. Cause UNKNOWN. The bridge can measure it from its own edge lines.
+- **An edge's rewrite was appended by the card, not added** (c6-tr-2398, the first Pause, 1 edge in chain13): 474 samples of sound past the run's end, then their exact inverse. Cause UNKNOWN; detectable from the buffered count.
+- **C6: a run after a seek can sit a card frame late** (c6-tr-2997, after the loop seek: −17.26 ms for the run). The line comes from the latch slot's due time, which was a card frame past its pts. Fix direction in §10.23.
+- **C6 at 25p on 59.94:** 90 of 14,949 frames first shown up to 0.18 ms before their sound (line fixed at the latch, picture's due wandering under steering).
+- **Seeks while playing still lose 15–29 samples at 59.94:** the audio reader starts at the seek target, and the landing frame's sound starts before it. Decode path, not the bridge.
+- **1b: the picture skips a frame at slot 67 after output start** (61 of 100 restarts at 23.976, 20 of 100 at 59.94); the sound follows it. The slot-timeline window's minimum holds a preroll offset. Proposed fix in §10.23, not built.
+
 ## ☐ OPEN 2026-11-10 — FIX BUILT 2026-11-10 EVENING, VERIFIED ON THE LOOP, UNCOMMITTED — PRE-EXISTING, IN SHIPPED BUILDS (0.9.0–0.9.2) — SDI audio lags its picture by 2.5 frames
 
 `CARD_CLOCK_FINDINGS.md` §10.16, *Why 2.5 frames*. **Not fixed (Robbie, 2026-11-10: explain first).** Stage 1c's anchor (§10.20) removes it by construction.
@@ -3875,6 +3885,10 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 ## ☐ RECORDED 2026-11-06 — PRE-EXISTING — SDI audio is not sample-continuous, and takes about 44 s to settle after Play
 
 **In 1.0 scope (decided, Robbie, 2026-11-06), as Stage 1c of `CARD_CLOCK_FINDINGS.md` §10.** Details: its §10.3.
+
+**Decided after 1c's chain12 (Robbie, 2026-11-10; `CARD_CLOCK_FINDINGS.md` §10.22, *Decided after chain12*):**
+- Gate off keeps today's loop (§10.21) and is not fixed. When 1b, 1c and Stage 2 ship together in 0.9.3, the card lock becomes the default for all file playback with output on; `MANIFOLD_CARDLOCK_1B` stays only as a diagnostic switch.
+- After an output restart, sound joining up to 26 ms after the picture is accepted. The 80 ms file audio queue and the 8-frame gate-silence timeout are confirmed.
 
 **Also under 1c (Robbie, 2026-11-07):** Stage 1b's audio-clock re-anchor of −70 to −81 ms, 2–6 s after Play, is not accepted. It is the same family as the −84 ms post-Play settle below (`CARD_CLOCK_FINDINGS.md` §10.12 B4, §10.13).
 

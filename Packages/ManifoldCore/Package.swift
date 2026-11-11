@@ -714,7 +714,7 @@ let package = Package(
         ),
         .target(
             name: "ManifoldCore",
-            dependencies: ["CFFmpeg", "ScopeCompute", "LiveAudioResample", "CardClock", "SyncCalibration",
+            dependencies: ["CFFmpeg", "ScopeCompute", "AudioResample", "LiveAudioResample", "CardClock", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
                            "AudioFileInfo", "StillImageInfo"],

@@ -247,7 +247,7 @@ struct AudioSource {
     std::function<bool(void)> isSilent;                                      // mute / pause / shuttle gate, or destination
     std::function<bool(void)> isDestinationSilent;                           // the log's label: destination is Computer
     std::function<int32_t(double, int32_t, int32_t *)> read;                 // ring read (D4b-1)
-    std::function<void(double *, bool *, bool *, uint64_t *)> handed;        // Stage 1c: the handed frame per fill (§10.22)
+    std::function<void(double *, bool *, bool *, uint64_t *, double *, double *)> handed;   // Stage 1c: the handed frame per fill (§10.22, §10.23)
     bool cardTimeline = false;                                               // Stage 1c: the card is the file's clock (1b on)
 };
 
@@ -547,15 +547,22 @@ public:
     }
 
     // Stage 1c (§10.22): one slot as the fill saw it, and one run of a file's sound on the card's timeline.
-    struct Slot { int64_t idx = -1; double pts = NAN; bool timed = false, handed = false; };
-    struct Run { bool valid = false; int64_t start = 0, end = INT64_MAX, D = 0; uint64_t serial = 0; };
+    // `due` (timed pulls only) and `srcFrame`: the picture's line and the source's frame, for a rate mismatch (C6, §10.23).
+    struct Slot { int64_t idx = -1; double pts = NAN; bool timed = false, handed = false; double due = NAN, srcFrame = 0; };
+    // A run at a rate mismatch (`cad`) also carries the picture's line: frame pts0 + k × fs is first shown at the first slot i whose
+    // due time phi + i × card frame reaches it. `confirmed`: the frame grid (pts0) checked against the next frame that moved.
+    struct Run { bool valid = false; int64_t start = 0, end = INT64_MAX, D = 0; uint64_t serial = 0;
+                 bool cad = false, confirmed = true; double phi = 0, pts0 = 0, fs = 0; int64_t lineIdx = -1; };
     void logRunsSummary() const {
         if (!m_audio.handed) return;
         fprintf(stdout, "[SDI-AUDIO] stopped — latches %llu, run ends %llu (%llu off the line on a timed pull), re-latches %llu, late edges %llu (%lld samples), edges on a deep queue %llu, "
-                        "missing %lld samples (%lld filled in later), audio callbacks %llu, %s\n",
+                        "missing %lld samples (%lld filled in later), audio callbacks %llu, rate-mismatch runs %llu (grid fixed at confirm %llu, frames shown before their sound %llu, worst %.1f samples), "
+                        "seek starts found by the fine search %llu (%lld samples recovered), %s\n",
                 (unsigned long long)m_latches, (unsigned long long)m_runEnds, (unsigned long long)m_timedEnds, (unsigned long long)m_relatches,
                 (unsigned long long)m_lateEdges, (long long)m_lateEdgeFrames, (unsigned long long)m_deepEdges, (long long)m_runMissingFrames, (long long)m_filledLate,
-                (unsigned long long)m_audioCallbacks.load(), m_audio.cardTimeline ? "card timeline (gate on)" : "gate off: no runs, the §10.21 loop");
+                (unsigned long long)m_audioCallbacks.load(), (unsigned long long)m_cadRuns, (unsigned long long)m_cadGridFixes, (unsigned long long)m_envMisses,
+                m_envWorst, (unsigned long long)m_fineStarts, (long long)m_fineRecovered,
+                m_audio.cardTimeline ? "card timeline (gate on)" : "gate off: no runs, the §10.21 loop");
     }
 
     // Stats (read after stop for the run summary).
@@ -1053,13 +1060,13 @@ private:
         if (m_audio.handed) {
             // Stage 1c: every slot, in order, for the audio callback's runs (§10.22). A fill that handed nothing new (a neutral or
             // held picture) is a slot with no frame of the run.
-            double hp = NAN; bool timed = false, byTime = false; uint64_t seq = 0;
-            m_audio.handed(&hp, &timed, &byTime, &seq);
+            double hp = NAN, due = NAN, srcFrame = 0; bool timed = false, byTime = false; uint64_t seq = 0;
+            m_audio.handed(&hp, &timed, &byTime, &seq, &due, &srcFrame);
             const bool handed = seq != m_lastHandSeq;
             m_lastHandSeq = seq;
             m_byTime.store(byTime);
             os_unfair_lock_lock(&m_handedLock);
-            m_slots[m_slotWrites % kSlotRing] = Slot{ idx, handed ? hp : NAN, handed && timed, handed };
+            m_slots[m_slotWrites % kSlotRing] = Slot{ idx, handed ? hp : NAN, handed && timed, handed, handed && timed ? due : NAN, srcFrame };
             m_slotWrites++;
             os_unfair_lock_unlock(&m_handedLock);
         }
@@ -1087,6 +1094,49 @@ private:
 
     int64_t A(int64_t n) const { return n * (int64_t)m_audio.sampleRate * (int64_t)m_frameDuration / (int64_t)m_timeScale; }
     double samplesPerSlot() const { return (double)m_audio.sampleRate * (double)m_frameDuration / (double)m_timeScale; }
+    double cardFrameSeconds() const { return (double)m_frameDuration / (double)m_timeScale; }
+
+    // ----- Rate mismatch (C6, docs/CARD_CLOCK_FINDINGS.md §10.23): a source frame that is not one card frame (25p, 23.976 or 29.97
+    // on 59.94; 23.976 on 24.000). The picture is a staircase: a frame is first shown at the first slot whose due time (the pull's
+    // target plus its hysteresis, `Slot::due`) reaches its pts, and repeated until the next one is due. One run is still one mapping,
+    // s + D, so the sound stays continuous across every cadence step; only the picture repeats.
+    bool mismatched(double srcFrame) const { return srcFrame > 0 && std::fabs(srcFrame / cardFrameSeconds() - 1.0) > 5e-4; }
+
+    // The sound's line is the picture's LOWER ENVELOPE: the latest mapping under which no frame's sound starts after its first showing,
+    // D = max over the frames of (pts × rate − i × samples per slot). At matched rates every frame has the same phase and this is the
+    // frame grid, as `latchRun` takes it; at 2:1 and 5:2 (29.97 and 23.976 on 59.94) the phases are 1 or 2 and it is again a frame's
+    // own grid; at 25p on 59.94 (2400/1001 slots a frame) the phases fill the slot and it is the due line to under a sample. Taken over
+    // 2002 frames, beyond every period here (1001 at 25p on 59.94, 1000 at 23.976 on 24.000).
+    int64_t envelopeD(double phi, double pts0, double fs) const {
+        const double fc = cardFrameSeconds(), rate = (double)m_audio.sampleRate, spf = samplesPerSlot();
+        double best = -INFINITY;
+        for (int k = 0; k < 2002; k++) {
+            const double p = pts0 + k * fs;
+            const double i = std::ceil((p - phi) / fc - 1e-6);   // the first slot whose due time reaches p
+            best = std::max(best, p * rate - i * spf);
+        }
+        return llround(best);
+    }
+
+    // The picture's line from one timed slot: its due time carried back to slot 0, never below what that slot showed (a frame is
+    // shown only once due).
+    double lineFrom(const Slot &sl) const {
+        const double fc = cardFrameSeconds();
+        const double lower = sl.pts - (double)sl.idx * fc;
+        return std::isfinite(sl.due) ? std::max(sl.due - (double)sl.idx * fc, lower) : lower;
+    }
+
+    // Is `sl` the frame the run's picture line shows at its slot? Within 1 ms of a frame's due time either neighbour is accepted (the
+    // pull's slot clock wobbles about 0.4 ms).
+    bool onCadLine(const Run &r, const Slot &sl) const {
+        const double due = r.phi + (double)sl.idx * cardFrameSeconds();
+        const double k = std::floor((due - r.pts0) / r.fs + 1e-6);
+        const double pred = r.pts0 + k * r.fs;
+        if (std::fabs(sl.pts - pred) < 0.0005) return true;
+        if ((pred + r.fs) - due < 0.001 && std::fabs(sl.pts - (pred + r.fs)) < 0.0005) return true;
+        if (due - pred < 0.001 && std::fabs(sl.pts - (pred - r.fs)) < 0.0005) return true;
+        return false;
+    }
 
     // The sound card position `a` should carry, for n positions, into `dst` (wire layout). Zero outside every run and under the gate.
     void fillDesired(int64_t a, int32_t n, bool silent, int32_t *dst, int64_t &pcm, int64_t &missing, int64_t *firstMissing = nullptr) {
@@ -1105,10 +1155,22 @@ private:
             const double rate = (double)m_audio.sampleRate;
             auto readAt = [&](int64_t p, int32_t k) { return m_audio.read ? std::max(0, m_audio.read((double)(p + r->D) / rate, k, src)) : 0; };
             // The ring answers 0 for a read that starts before what it holds, so after a seek the chunk holding the first decoded sample
-            // would read as empty: find where the data starts, 1 ms at a time, and read from there.
+            // would read as empty: find where the data starts, 1 ms at a time (and the chunk's last position), then back one sample at a
+            // time to the first that holds data, and read from there. The coarse step alone lost up to 47 samples at a seek (§10.22).
             int64_t from = lo;
             int32_t got = readAt(from, (int32_t)(hi - from));
-            while (got == 0 && from + 48 < hi) { from += 48; if (readAt(from, 1) == 1) got = readAt(from, (int32_t)(hi - from)); }
+            if (got == 0 && hi - lo > 1) {
+                int64_t hit = -1;
+                for (int64_t q = lo + 48; q < hi; q += 48) if (readAt(q, 1) == 1) { hit = q; break; }
+                if (hit < 0 && readAt(hi - 1, 1) == 1) hit = hi - 1;
+                if (hit >= 0) {
+                    const int64_t stop = std::max(lo + 1, hit - 47);   // stop − 1 is known to hold nothing (lo, or the last coarse step)
+                    int64_t q = hit;
+                    while (q > stop && readAt(q - 1, 1) == 1) q--;
+                    if (q < hit) { m_fineStarts++; m_fineRecovered += hit - q; }
+                    from = q; got = readAt(from, (int32_t)(hi - from));
+                }
+            }
             for (int32_t f = 0; f < got; f++)
                 for (uint32_t c = 0; c < sc; c++) dst[(size_t)(from - a + f) * dc + c] = src[(size_t)f * sc + c];
             // What the tap no longer has (a seek empties it while the old run still has frames to play): the prefetch ring.
@@ -1203,6 +1265,65 @@ private:
         m_gateOpenAt = -1;
     }
 
+    // C6: a run at a rate mismatch latches on the first slot that moved, at once: the next frame that moves can be 2 or 3 slots on,
+    // too late for the sound's start. Its frame grid is confirmed on that next frame (`processSlots`).
+    void latchCad(const Slot &slot, int64_t startSlot, bool withPrev, bool silent, const char *why) {
+        Run r; r.valid = true; r.cad = true; r.confirmed = false; r.fs = slot.srcFrame; r.pts0 = slot.pts; r.phi = lineFrom(slot);
+        r.lineIdx = slot.idx;
+        r.D = envelopeD(r.phi, r.pts0, r.fs);
+        r.start = A(startSlot); r.end = INT64_MAX; r.serial = ++m_runSerial; m_preTo = r.start;
+        m_run = r; m_runActive = true; m_errEma = 0.0; m_steerErr = NAN; m_latches++; m_cadRuns++; m_gateSlots = 0;
+        BMDTimeValue now = 0; double speed = 0;
+        m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
+        const double rate = (double)m_audio.sampleRate;
+        fprintf(stdout, "[SDI-AUDIO] latch #%llu (%s): rate mismatch, source frame %.6f s on a card frame %.6f s; line from slot %lld pts %.6f "
+                        "due %.6f (phi %.6f), sound from slot %lld%s, D %lld (the slot's own %.1f; envelope %+.1f samples), from stream %lld (source %.6f s); "
+                        "now %lld; gate opened at %lld, so %lld samples (%.1f ms) of silence before the sound%s\n",
+                (unsigned long long)m_latches, why, r.fs, cardFrameSeconds(), (long long)slot.idx, slot.pts, slot.due, r.phi, (long long)startSlot,
+                withPrev ? " (the held frame's last showing)" : "", (long long)r.D, slot.pts * rate - (double)slot.idx * samplesPerSlot(),
+                (double)r.D - (slot.pts * rate - (double)slot.idx * samplesPerSlot()), (long long)r.start, (double)(r.start + r.D) / rate,
+                (long long)now, (long long)m_gateOpenAt, (long long)(m_gateOpenAt >= 0 ? r.start - m_gateOpenAt : -1),
+                m_gateOpenAt >= 0 ? (r.start - m_gateOpenAt) / (rate / 1000.0) : -1.0, m_audioStreamFrames > r.start ? "; rewriting what is queued" : "");
+        fflush(stdout);
+        const int64_t late = rewriteFrom(r.start, silent, "latch");
+#ifdef DEBUG
+        if (kAudioCorrLog) {
+            const int64_t first = r.start + late;
+            fprintf(stdout, "[AUDIO-CORR] s=%lld n=0 got=0 c=0 k=a e=+0.000 cur=%.6f\n", (long long)first, (double)(first + r.D) / rate);
+        }
+#endif
+        m_gateOpenAt = -1;
+    }
+
+    // C6: the next frame that moved, `sl`, checks the run's frame grid. One source frame after the latch's: confirmed, and the frame
+    // duration taken from the two pts (exact, the file's own). Otherwise the latch's frame was off the grid (the first frame after a
+    // seek carries the seek's time, §10.22): the line is taken from this one, D recomputed, and what is queued rewritten from the
+    // run's start or 1 ms past the card, whichever is later. Logged and counted.
+    void confirmCad(const Slot &sl, bool silent) {
+        const double step = sl.pts - m_run.pts0;
+        const double steps = std::round(step / m_run.fs);
+        if (steps >= 1 && std::fabs(step - steps * m_run.fs) < 0.0001) {
+            m_run.fs = step / steps;
+            m_run.confirmed = true;
+            const int64_t D = envelopeD(m_run.phi, m_run.pts0, m_run.fs);
+            if (D == m_run.D) return;
+            fprintf(stdout, "[SDI-AUDIO] rate mismatch: frame %.9f s from the pts (hint %.9f): D %lld → %lld\n", m_run.fs, sl.srcFrame,
+                    (long long)m_run.D, (long long)D);
+            m_run.D = D;
+        } else {
+            m_cadGridFixes++;
+            const int64_t was = m_run.D;
+            m_run.pts0 = sl.pts; m_run.phi = lineFrom(sl); m_run.lineIdx = sl.idx; m_run.confirmed = true;
+            m_run.D = envelopeD(m_run.phi, m_run.pts0, m_run.fs);
+            fprintf(stdout, "[SDI-AUDIO] rate mismatch: the latch's frame was off the grid (step %.6f s, frame %.6f s): line from slot %lld pts %.6f, "
+                            "D %lld → %lld\n", step, m_run.fs, (long long)sl.idx, sl.pts, (long long)was, (long long)m_run.D);
+            if (m_run.D == was) return;
+        }
+        fflush(stdout);
+        m_preTo = m_run.start; m_run.serial = ++m_runSerial;   // the prefetch holds the old mapping's sound
+        rewriteFrom(m_run.start, silent, "rate mismatch: grid confirmed");
+    }
+
     void endRun(int64_t idx, bool silent, const char *why) { endRunAt(A(idx), idx, silent, why); }
     void endRunAt(int64_t end, int64_t idx, bool silent, const char *why) {
         m_run.end = end;
@@ -1230,9 +1351,22 @@ private:
             const bool hasPts = sl.handed && std::isfinite(sl.pts);
             const bool moved = hasPts && sl.pts != m_prevSlotPts;
             bool endedHere = false;
+            if (live && m_runActive && m_run.cad && hasPts && sl.timed && moved && !m_run.confirmed) {
+                confirmCad(sl, silent);   // the grid first, then this slot is checked against it
+            }
             if (live && m_runActive) {
                 const double e = hasPts ? sl.pts * rate - ((double)sl.idx * spf + (double)m_run.D) : NAN;
-                if (hasPts && std::fabs(e) <= spf * 0.5) {
+                const bool onLine = m_run.cad ? hasPts && onCadLine(m_run, sl) : hasPts && std::fabs(e) <= spf * 0.5;
+                if (m_run.cad && onLine && sl.timed && moved) {
+                    // The envelope promises no frame is shown before its sound starts: e ≤ 0 at every first showing. Counted if not.
+                    if (e > 2.0) {
+                        m_envMisses++; m_envWorst = std::max(m_envWorst, e);
+                        if (m_envMisses <= 5)
+                            fprintf(stdout, "[SDI-AUDIO] rate mismatch: slot %lld pts %.6f shown %.1f samples before its sound starts\n",
+                                    (long long)sl.idx, sl.pts, e);
+                    }
+                }
+                if (onLine) {
                     if (sl.timed && moved) m_steerErr = e;
                     // The gate silent while the picture stays on the line: a mute, or the destination moved to the Mac.
                     if (silent && ++m_gateSlots >= kGateSlots) {
@@ -1249,7 +1383,8 @@ private:
                     // slot is a re-latch.
                     if (hasPts && sl.timed) {
                         m_timedEnds++;
-                        fprintf(stdout, "[SDI-AUDIO] off the line on a timed pull: slot %lld pts %.6f is %+.1f samples off\n", (long long)sl.idx, sl.pts, e);
+                        fprintf(stdout, "[SDI-AUDIO] off the line on a timed pull: slot %lld pts %.6f is %+.1f samples off%s\n", (long long)sl.idx, sl.pts, e,
+                                m_run.cad ? " (rate mismatch: not the frame the run's line shows here)" : "");
                     }
                     endRun(sl.idx, silent, !sl.handed ? "no frame handed" : sl.timed ? "off the line on a timed pull" : "untimed pull");
                     endedHere = true;
@@ -1260,7 +1395,18 @@ private:
             // frame after a seek can carry the seek's time rather than its own (600.000000 for the frame at 599.999400, §10.22), so
             // the line is taken from a frame whose step from the one before is exactly one frame. The sound still starts at the
             // first slot that moved.
-            if (live && !m_runActive) {
+            if (live && !m_runActive && mismatched(sl.srcFrame)) {
+                // C6: latch at once on the first timed slot that moved; the sound starts with the held frame's last showing when the
+                // slot before showed the frame just before.
+                const bool eligible = !silent && hasPts && sl.timed && moved && buffered <= (uint32_t)kRunsCommittedFrames;
+                if (eligible) {
+                    const bool fromPrev = m_prevSlotIdx == sl.idx - 1 && std::isfinite(m_prevSlotPts)
+                        && std::fabs((sl.pts - m_prevSlotPts) - sl.srcFrame) * rate < 2.0;
+                    if (endedHere) m_relatches++;
+                    latchCad(sl, fromPrev ? sl.idx - 1 : sl.idx, fromPrev, silent, "first slot that moved");
+                }
+                m_cand.valid = false;
+            } else if (live && !m_runActive) {
                 const bool eligible = !silent && hasPts && sl.timed && moved && buffered <= (uint32_t)kRunsCommittedFrames;
                 if (m_cand.valid && eligible && sl.idx == m_cand.line.idx + 1) {
                     const bool oneFrame = std::fabs((sl.pts - m_cand.line.pts) * rate - spf) < 2.0;
@@ -1568,6 +1714,8 @@ private:
     std::vector<int32_t> m_pre; std::vector<int64_t> m_preKey; std::vector<uint64_t> m_preRun;
     int64_t m_preTo = 0; uint64_t m_runSerial = 0;
     struct Candidate { bool valid = false; Slot line; int64_t startSlot = 0; bool fromPrev = false; int tries = 0; } m_cand;
+    uint64_t m_cadRuns = 0, m_cadGridFixes = 0, m_envMisses = 0, m_fineStarts = 0;   // C6 and the seek's fine search (§10.23)
+    double m_envWorst = 0; int64_t m_fineRecovered = 0;
     int64_t m_pendingFrom = -1;                       // the first queued position scheduled as zeros for sound not decoded yet
     int64_t m_filledLate = 0;                         // samples written in later that way
     std::vector<int32_t> m_hist;
@@ -2248,8 +2396,8 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         src.isDestinationSilent = [destinationBlock]() -> bool { return destinationBlock() ? true : false; };
         src.read       = [readBlock](double t, int32_t n, int32_t *dst) -> int32_t { return readBlock(t, n, dst); };
         if (DeckLinkAudioHandedBlock handedBlock = [audioConfig.handed copy]) {
-            src.handed = [handedBlock](double *pts, bool *timed, bool *byTime, uint64_t *seq) {
-                BOOL t = NO, b = NO; handedBlock(pts, &t, &b, seq); *timed = t; *byTime = b;
+            src.handed = [handedBlock](double *pts, bool *timed, bool *byTime, uint64_t *seq, double *due, double *srcFrame) {
+                BOOL t = NO, b = NO; handedBlock(pts, &t, &b, seq, due, srcFrame); *timed = t; *byTime = b;
             };
         }
         src.cardTimeline = audioConfig.cardTimeline;

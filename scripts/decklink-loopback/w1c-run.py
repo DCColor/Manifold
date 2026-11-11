@@ -9,6 +9,8 @@
 #       wrap at 1920 s, Pause, loop off. Needs a 1920 s fixture.
 #   w1c-run.py restarts <fixture.mov> <on|off> <label> <n>  Play, output stop and start (the arbiter pauses), Play, then n output
 #       stops and starts while playing (the debug step does not go through the arbiter, as ⌃⌥O and a device switch do not), Pause.
+# W1C_MODE=<label> (e.g. 1080p59.94) pins the output mode for the launch, a launch argument like the destination (argument domain, nothing
+# written), for a fixture whose rate differs from the output's (Stage 1c follow-up C6, §10.23).
 # W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
 # `capture` moves the card's output clock while it is open (§5); A/V offset and continuity are read on the same wire, so that is acceptable.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID through manifold-proc.sh. AX menu clicks on named items only,
@@ -43,7 +45,8 @@ def run(fixture, gate, label, steps, budget):
                MANIFOLD_AUDIO_CORR_LOG="1", MANIFOLD_DEBUG_TRANSPORT=steps)
     for k in ("MANIFOLD_CARDLOCK_1B", "MANIFOLD_RENDERER_RECOVER", "MANIFOLD_RENDERER_SELFTEST", "MANIFOLD_PUMPWATCH_SELFTEST"): env.pop(k, None)
     if gate: env["MANIFOLD_CARDLOCK_1B"] = "1"
-    p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"], stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
+    mode_args = ["-manifold.decklink.manualOutputMode", os.environ["W1C_MODE"]] if os.environ.get("W1C_MODE") else []
+    p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"] + mode_args, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     pid = p.pid; say(f"{label}: pid {pid}, gate {'on' if gate else 'off'}, {title}")
     cap = None
     def quit_build():
@@ -58,6 +61,8 @@ def run(fixture, gate, label, steps, budget):
     sh(AXT, str(pid), "place", title, "ASUS"); time.sleep(1.5)
     menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
     if "CARDCLOCK-REF] start" not in open(log, errors="replace").read(): say("output did not start"); quit_build(); sys.exit(4)
+    if os.environ.get("W1C_MODE") and f"restored manual output mode {os.environ['W1C_MODE']}" not in open(log, errors="replace").read():
+        say(f"the output mode {os.environ['W1C_MODE']} was not applied"); quit_build(); sys.exit(4)
     cap = subprocess.Popen([f"{DEV}/capture", "--device", "0", "--seconds", "99999", "--label", label, "--marks", f"{OUT}/{label}.marks",
                             "--audio", f"{OUT}/{label}.raw"] + (["--luma"] if os.environ.get("W1C_LUMA") == "1" else []), stdout=open(f"{OUT}/{label}.cap", "w"), stderr=subprocess.STDOUT)
     with open(log, "a") as f: f.write(f"[DRV] CAP-OPEN mono {time.monotonic():.3f}\n")

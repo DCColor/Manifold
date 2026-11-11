@@ -105,8 +105,9 @@ typedef double (^DeckLinkAudioSourceTimeBlock)(void);
 /// Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): asked once after each fill, on the thread that filled. The pts of the frame last
 /// handed to the card, whether that pull was timed (the frame due at its slot on a running clock), whether the source pulls by time
 /// (a file) or takes the newest frame (live), and a count that moves on each frame the renderer hands over (a fill that handed
-/// nothing, a neutral or a held picture, leaves it).
-typedef void (^DeckLinkAudioHandedBlock)(double *pts, BOOL *timed, BOOL *byTime, uint64_t *handSeq);
+/// nothing, a neutral or a held picture, leaves it). C6 (§10.23): on a timed pull, the pull's due time (the latest pts a frame may have
+/// and be shown at this slot; NaN otherwise), and the source's frame duration in seconds (0 when not known).
+typedef void (^DeckLinkAudioHandedBlock)(double *pts, BOOL *timed, BOOL *byTime, uint64_t *handSeq, double *due, double *sourceFrame);
 
 /// YES → the SDI audio stream must carry SILENCE this callback (user mute, pause, or an off-speed
 /// JKL shuttle). The card is still fed (zeros), never starved. Called on the SDK audio-callback thread.

@@ -477,6 +477,10 @@ final class MetalVideoRenderer {
     private var deckLinkHandedTimed = false
     private var deckLinkHandSeq: UInt64 = 0
     private var deckLinkPullTimedNow = false
+    /// Stage 1c follow-up (C6, §10.23): on a timed pull, the latest source time a frame may have and be due at this slot (the pull's
+    /// target plus its hysteresis band). The picture's line: a frame is first shown at the first slot whose due time reaches its pts.
+    private var deckLinkPullDueNow: Double = .nan
+    private var deckLinkHandedDue: Double = .nan
     /// Recent display-tick intervals while output runs; their median sets the pull margin.
     private var deckLinkTickIntervals: [Double] = []
     private var deckLinkLastTick: Double = 0
@@ -5131,6 +5135,7 @@ final class MetalVideoRenderer {
         deckLinkLastPullTimed = false
         deckLinkHandedPts = .nan
         deckLinkHandedTimed = false
+        deckLinkHandedDue = .nan
     }
 
     /// The slot the next convert writes: an empty one, else the oldest. Called with `deckLinkLock` held.
@@ -5484,13 +5489,18 @@ final class MetalVideoRenderer {
     /// this time and those pixels are always the same frame.
     /// Stage 1c (SDK thread, after each fill; docs/CARD_CLOCK_FINDINGS.md §10.22): the frame last handed, whether its pull was timed,
     /// whether this source pulls by time (a file), and the count of frames handed, all under the staging lock, so they are one pull's.
+    /// C6 (§10.23): also the pull's due time (NaN unless timed) and the source's frame duration (0 when not known), so the bridge can
+    /// place a file whose rate differs from the output's on the picture's own line.
     func currentDeckLinkHanded(pts: UnsafeMutablePointer<Double>, timed: UnsafeMutablePointer<ObjCBool>,
-                               byTime: UnsafeMutablePointer<ObjCBool>, handSeq: UnsafeMutablePointer<UInt64>) {
+                               byTime: UnsafeMutablePointer<ObjCBool>, handSeq: UnsafeMutablePointer<UInt64>,
+                               due: UnsafeMutablePointer<Double>, sourceFrame: UnsafeMutablePointer<Double>) {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         pts.pointee = deckLinkFrameReady ? deckLinkHandedPts : .nan
         timed.pointee = ObjCBool(deckLinkHandedTimed)
         byTime.pointee = ObjCBool(deckLinkPullByTime)
         handSeq.pointee = deckLinkHandSeq
+        due.pointee = deckLinkHandedTimed ? deckLinkHandedDue : .nan
+        sourceFrame.pointee = deckLinkSourceFrame
     }
 
     func currentDeckLinkSourcePts() -> Double {
@@ -5542,6 +5552,7 @@ final class MetalVideoRenderer {
         let pts = deckLinkSlotPts[slot]
         deckLinkHandedPts = pts.isFinite ? pts : .nan
         deckLinkHandedTimed = deckLinkPullTimedNow
+        deckLinkHandedDue = deckLinkPullTimedNow ? deckLinkPullDueNow : .nan
         deckLinkHandSeq &+= 1
         return deckLinkSlotSignal[slot]
     }
@@ -5549,6 +5560,7 @@ final class MetalVideoRenderer {
     /// The ring slot to hand over for scheduled frame `index`. Called with `deckLinkLock` held.
     private func deckLinkPullSlotLocked(index: Int64, host: Double, clock: Double?) -> Int {
         deckLinkPullTimedNow = false   // Stage 1c: true only on the timed branch below
+        deckLinkPullDueNow = .nan
         let newest = deckLinkFrontIndex
         guard deckLinkPullByTime, deckLinkCardFrame > 0, let clock, clock.isFinite else {
             deckLinkLastPull = nil
@@ -5583,6 +5595,8 @@ final class MetalVideoRenderer {
         deckLinkLastPullTimed = true
         deckLinkPullTimedNow = true
         let target = clock - (host - slotHost) - deckLinkPullMarginLocked
+        let hysteresis = 0.002
+        deckLinkPullDueNow = target + hysteresis   // C6: a frame one past the one handed last is taken up to here
         // Never an older frame than the one handed last, unless that frame is ahead of the clock: a loop's wrap or a
         // seek back started a new timeline, and its frames are all "older".
         let floor = handed.isFinite && handed <= clock + deckLinkCardFrame ? handed : -Double.infinity
@@ -5600,7 +5614,6 @@ final class MetalVideoRenderer {
                 if next.map({ pts[k] < pts[$0] }) ?? true { next = k }
             }
             if let next {
-                let hysteresis = 0.002
                 if due.map({ pts[$0] <= floor }) ?? true {
                     if pts[next] <= target + hysteresis { due = next }          // would repeat
                 } else if let d = due, pts[d] > pts[next], pts[d] > target - hysteresis {

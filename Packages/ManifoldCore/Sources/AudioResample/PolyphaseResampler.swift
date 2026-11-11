@@ -123,6 +123,17 @@ public final class PolyphaseResampler {
         return UInt64(inc)
     }
 
+    /// Start the phase at `startPhase` (Q32.32, at least one input frame) instead of one input frame, before the first `process`.
+    /// The first output's reconstruction instant is then `startPhase / 2^32 - 1 - taps/2` input frames after the first input frame
+    /// (at one input frame, `-taps/2`: the group delay). The SDI tap (`AudioTapBuffer`, C7) uses it to put a stream that starts
+    /// mid-file on the same 48 kHz grid, with the same phase bits, as one that started at the file's first sample.
+    public func setStartPhase(_ startPhase: UInt64) {
+        precondition(outputFrameCount == 0, "the start phase is set before the first process")
+        precondition(startPhase >= Self.one, "the window needs one input frame of history")
+        phase = startPhase
+        absolutePhase = startPhase
+    }
+
     /// The absolute reconstruction instant, in input frames, of the next output frame.
     public var nextInputPosition: Double { Double(absolutePhase) / Double(Self.one) }
 

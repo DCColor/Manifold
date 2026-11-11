@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # SDI audio on the wire (docs/CARD_CLOCK_FINDINGS.md §10.16), from one w1c-run.py run. Needs numpy (a venv: ~/Code/_scratch/manifold-1c-wire/.venv).
-#   w1c-wire.py <runs dir> <label> <fixture .ref.raw> <5994|2398> [cont|plays|segs]
+#   w1c-wire.py <runs dir> <label> <fixture .ref.raw> <5994|2398|25|2997> [cont|plays|segs]   (the FIXTURE's picture rate)
+# Stage 1c follow-up (§10.23): W1C_CARD=<5994|2398|…> when the output's rate differs from the fixture's (C6): each segment then also reports
+# the offset at each picture's FIRST SHOWING (the wire frame where the picture changes), which at a rate mismatch is a sawtooth inside one
+# card frame whose lower edge is the matched-rate offset; the per-frame offset over a frame's repeats grows by a card frame each.
+# W1C_TOL=<n>: samples match within n (Int32 units; 256 = 1 LSB of 24 bits), for a reference made offline by another build of the same
+# resampler (C7). 0, the default: exact.
 # segs (Stage 1c, §10.22): every stretch of sound between digital silences of 5 ms or more, on its own: the offset at its first sample and
 # how far it moves inside, discontinuities inside it, the picture held before it, and where it ends against its picture (the sound's last
 # sample against the end of the frame it falls in, in samples; the card's own constant is −28 at 59.94 and −8 at 23.976, §10.16).
@@ -15,7 +20,17 @@
 import bisect, collections, json, re, sys
 import numpy as np
 d, label, refpath, ratecode = sys.argv[1:5]; mode = sys.argv[5] if len(sys.argv) > 5 else "cont"
-FPS = {"5994": 60000 / 1001, "2398": 24000 / 1001}[ratecode]; SPF = 48000 / FPS; SR = 48000
+import os
+FPS = {"5994": 60000 / 1001, "2398": 24000 / 1001, "25": 25.0, "2997": 30000 / 1001}[ratecode]; SPF = 48000 / FPS; SR = 48000
+CARD = os.environ.get("W1C_CARD"); CARD_FPS = {"5994": 60000 / 1001, "2398": 24000 / 1001, "25": 25.0, "2997": 30000 / 1001, "24": 24.0}.get(CARD) if CARD else None
+TOL = int(os.environ.get("W1C_TOL", "0"))
+# C7: a 44.1 kHz file's sound reaches SDI through a 64-tap resampler. A run that starts on the first decoded sample (play after a frame
+# step) starts with ~34 samples of the filter's window filling, which differ from the continuous file. W1C_ONSET=<n> lets a segment after
+# a silence be located up to n samples in; those samples are counted as onset (reported), not as a step. 0 (default): exact from sample 0.
+ONSET = int(os.environ.get("W1C_ONSET", "0"))
+onset_skips = []   # (wire index, samples differing, max |diff| in 24-bit LSB)
+def same(a, b):
+    return (a == b) if TOL == 0 else (np.abs(a.astype(np.int64) - b.astype(np.int64)) <= TOL)
 rx = np.fromfile(f"{d}/{label}.raw", dtype="<i4").reshape(-1, 2)
 ref = np.fromfile(refpath, dtype="<i4").reshape(-1, 2)
 x0 = np.ascontiguousarray(rx[:, 0]); x1 = np.ascontiguousarray(rx[:, 1]); r0 = np.ascontiguousarray(ref[:, 0])
@@ -28,7 +43,7 @@ keys = (k24[:-1] << 24) | k24[1:]; order = np.argsort(keys, kind="stable"); skey
 
 def verify(i, p, n=16):
     if p < 0 or p + n > M or i + n > N: return False
-    return bool(np.array_equal(x0[i:i + n], r0[p:p + n]))
+    return bool(np.all(same(x0[i:i + n], r0[p:p + n])))
 def glocate(i):
     for k in range(i, min(i + 256, N - 1)):
         if x0[k] == 0 or x0[k + 1] == 0: continue
@@ -42,7 +57,7 @@ def local(i, exp, W=64, L=16):
     lo = max(0, exp - W); hi = min(M, exp + W + L)
     if hi - lo < L or i + L > N: return -1
     win = np.lib.stride_tricks.sliding_window_view(r0[lo:hi], L)
-    hit = np.flatnonzero((win == x0[i:i + L]).all(axis=1))
+    hit = np.flatnonzero(same(win, x0[i:i + L][None, :]).all(axis=1))
     if not len(hit):
         # The bridge sometimes runs a callback of only 9-12 samples, with its own correction, so a second discontinuity can fall
         # inside 16 samples. Then 6 samples, within ±8 of where the source was expected (a single 2-sample key is all but unique).
@@ -69,7 +84,7 @@ while i < N:
     while j < N:
         n = min(1 << 16, N - j, M - (p + (j - i)))
         if n <= 0: break
-        eq = x0[j:j + n] == r0[p + (j - i):p + (j - i) + n]
+        eq = same(x0[j:j + n], r0[p + (j - i):p + (j - i) + n])
         if eq.all(): j += n; continue
         j += int(np.argmin(eq)); break
     segs.append((i, p, j - i)); exp = p + (j - i)
@@ -80,6 +95,20 @@ while i < N:
         q = local(z, exp + (z - j), 64)
         if q < 0: q = local(z, exp, 64)
         if q < 0: q = glocate(z)
+        if q < 0 and ONSET:
+            for sk in range(8, ONSET + 1, 8):
+                q2 = local(z + sk, exp + (z - j) + sk, 64)
+                if q2 < 0: q2 = glocate(z + sk)
+                if q2 >= sk:
+                    q0 = q2 - sk
+                    dd = int(np.max(np.abs(x0[z:z + sk].astype(np.int64) - r0[q0:q0 + sk].astype(np.int64)))) >> 8
+                    nd = int(np.count_nonzero(x0[z:z + sk] != r0[q0:q0 + sk]))
+                    onset_skips.append((z, nd, dd))
+                    events.append((j, "silence", q0 - exp, z - j)); segs.append((z, q0, sk))
+                    i, p = z + sk, q2; break
+            else:
+                events.append((j, "silence", None, z - j)); i, p = z, q
+            continue
         events.append((j, "silence", (q - exp) if q >= 0 else None, z - j)); i, p = z, q; continue
     q = local(j, exp)
     if q < 0: q = glocate(j)
@@ -174,6 +203,8 @@ for e in big[:60]: print(f"  JUMP at {T(e[0]):.3f} s: {e[2]} samples ({(e[2] or 
 if len(big) > 60: print(f"  … {len(big) - 60} more jumps")
 for e in [e for e in events if e[1] == "silence"][:80]: print(f"  SILENCE at {T(e[0]):.3f} s: {e[3]} samples ({e[3] / 48:.1f} ms), source moved {e[2]} across it")
 for e in [e for e in events if e[1] == "unlocated"][:10]: print(f"  UNLOCATED at {T(e[0]):.3f} s")
+if ONSET: print(f"  onsets located past the first samples (W1C_ONSET={ONSET}): {len(onset_skips)}"
+                + "".join(f"\n    at {T(z):.3f} s: {nd} samples differ from the file, max {dd} LSB (24-bit)" for z, nd, dd in onset_skips))
 print(f"  picture events (step ≠ +1): {len(pic)}")
 for w, k, a, b, n in pic[:80]: print(f"    at {T(w):.3f} s (frame {k}): " + (f"{a} held {n} extra frame(s)" if a == b else f"{a} → {b} ({b - a:+d})"))
 print(f"  [AUDIO-CORR] callbacks {len(corr)} (c: {sum(c[3] == 'c' for c in corr)}, a: {sum(c[3] == 'a' for c in corr)}, r: {sum(c[3] == 'r' for c in corr)}); "
@@ -283,7 +314,15 @@ if mode == "segs":
         pe = frames[ek][1] if ek >= 0 else None
         after = [frames[m][1] for m in range(ek + 1, min(len(frames), ek + 4))]
         held_after = bool(after) and pe is not None and all(x == pe for x in after if x is not None)
-        segl.append(dict(start=T(w0), end=T(wE), dur=T(wE - w0), src0=src_at(w0) / SR, first=first, at05=at(0.5), at1=at(1), at5=at(5),
+        cad = None
+        if CARD_FPS:   # first showings after the segment's first 2 s, and every frame's offset (over its repeats)
+            ks = [m for m in range(max(fk, 1), ek + 1) if frames[m][0] >= w0 + 2 * SR and frames[m][1] is not None and frames[m - 1][1] is not None]
+            fs_ = [fold(av[m][1]) for m in ks if av[m][1] is not None and frames[m][1] != frames[m - 1][1]]
+            al_ = [fold(av[m][1]) for m in ks if av[m][1] is not None]
+            if fs_:
+                cad = dict(n=len(fs_), min=min(fs_), p1=pct(fs_, 1), med=pct(fs_, 50), p99=pct(fs_, 99), max=max(fs_), all_min=min(al_), all_max=max(al_),
+                           card_frame_ms=1000 / CARD_FPS, repeats=sum(1 for m in ks if frames[m][1] == frames[m - 1][1]))
+        segl.append(dict(start=T(w0), end=T(wE), dur=T(wE - w0), src0=src_at(w0) / SR, first=first, at05=at(0.5), at1=at(1), at5=at(5), cad=cad,
                          last=win[-1][1] if win else float("nan"), span=span, steps=len(stp), jumps=[(T(e[0] - w0), e[2]) for e in jmp],
                          pic0=pic0, hold_before=hold, first_pos_in_frame=(w0 - fstarts[fk]) if fk >= 0 else None,
                          frames_to_motion=(mv - fk) if mv is not None else None, end_pic=pe, end_in_frame=end_in, frame_len=flen,
@@ -294,5 +333,9 @@ if mode == "segs":
               f"last {g['last']:+7.2f} · max |Δ| {g['span']:.2f} ms · steps {g['steps']} · jumps {g['jumps'] or 'none'} · picture {g['pic0']} held {g['hold_before']} frames before, "
               f"first sample {g['first_pos_in_frame']} into its frame, picture moves {g['frames_to_motion']} frames on · ends {g['end_from_boundary']} samples from its frame's end "
               f"(picture {g['end_pic']}, {'held' if g['picture_held_after'] else 'moving'} after)")
+        if g.get("cad"):
+            c = g["cad"]
+            print(f"       first showings ({c['n']}, after 2 s): min {c['min']:+.3f} · p1 {c['p1']:+.3f} · median {c['med']:+.3f} · p99 {c['p99']:+.3f} · max {c['max']:+.3f} ms "
+                  f"(span {c['max'] - c['min']:.2f} ms; a card frame is {c['card_frame_ms']:.2f}); every frame incl. {c['repeats']} repeats: {c['all_min']:+.2f} to {c['all_max']:+.2f} ms")
     out["segments"] = segl
 json.dump(out, open(f"{d}/{label}.summary.json", "w"), indent=1, default=str)

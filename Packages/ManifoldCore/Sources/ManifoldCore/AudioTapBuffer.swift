@@ -3,6 +3,7 @@ import AVFoundation
 import CoreMedia
 import AudioToolbox
 import LiveAudioResample
+import AudioResample
 
 /// D4b-1: PCM audio TAP + PTS-keyed ring buffer.
 ///
@@ -161,6 +162,8 @@ public final class AudioTapBuffer: @unchecked Sendable {
     /// point (seek, libav re-read, stop) so a PTS jump never serves samples from before the seek. The
     /// format is retained (same file/track); the anchor re-establishes on the next ingested buffer.
     public func reset() {
+        upLock.lock(); defer { upLock.unlock() }
+        upsampler = nil   // C7: the next buffer starts a new resampled stream, at its own position
         lock.lock(); defer { lock.unlock() }
         writeHead = 0
         framesWritten = 0
@@ -272,9 +275,99 @@ public final class AudioTapBuffer: @unchecked Sendable {
             AudioChannelLayoutBridge.isUsable($0) ? $0 : nil
         } ?? []
 
+        // C7: a file's 44.1 kHz sound is resampled once, here, to 48 kHz: the only rate SDI embeds (`isSupportedForSDI`). Everything
+        // after the ring (the bridge's runs, the edges, the A/V mapping) is then the 48 kHz path, unchanged. Live producers keep their
+        // own rate (a 44.1 kHz live source stays refused on SDI, as before). The Mac's renderer plays the file itself.
+        if (path == .avFoundation || path == .libav), Int(rate.rounded()) == Upsampler.inputRate {
+            upLock.lock(); defer { upLock.unlock() }
+            scratch.withUnsafeBufferPointer { buf in
+                upsample(buf, frames: frames, channels: ch, pts: pts, path: path, roles: roles)
+            }
+            return
+        }
+        upLock.lock(); upsampler = nil; upLock.unlock()
         scratch.withUnsafeBufferPointer { buf in
             append(buf, frames: frames, channels: ch, sampleRate: rate, pts: pts, path: path,
                    roles: roles)
+        }
+    }
+
+    // MARK: - C7: 44.1 kHz files to 48 kHz (docs/CARD_CLOCK_FINDINGS.md §10.23)
+
+    /// One resampled stream: from the input sample `k0` (the file's own 44.1 kHz index) to the 48 kHz grid of the file's time axis.
+    ///
+    /// ⚠️ ON THE FILE'S OWN 48 kHz GRID, WITH THE GROUP DELAY TAKEN OUT. Output `m` is the band-limited value at input instant
+    /// `m × 147/160` (to the Q32.32 increment: 0.008 input samples an hour), so it sits at source time `m / 48000` exactly, whether the
+    /// stream started at the file's first sample or after a seek. The start phase is set so that a stream from `k0` uses the same phase
+    /// bits as one from 0 (`PolyphaseResampler.setStartPhase`): once its 64-tap window is past the seek, its samples are the same.
+    /// The first ~35 outputs after a start see no history (zeros before the seek's first sample), as any cut would.
+    final class Upsampler {
+        static let inputRate = 44_100
+        static let outputRate = 48_000.0
+        let resampler: PolyphaseResampler
+        let channels: Int
+        let k0: Int64              // the first input sample's index on the file's 44.1 kHz axis
+        var inputFrames: Int64 = 0  // input frames taken since k0
+        var nextOutput: Int64       // the next output's index on the file's 48 kHz axis
+        var anchored = false        // the ring re-anchored at this stream's first output
+        init(channels: Int, k0: Int64) {
+            self.channels = channels
+            self.k0 = k0
+            let rs = PolyphaseResampler(channels: channels, ratio: Self.outputRate / Double(Self.inputRate))
+            let inc = rs.phaseIncrement
+            let num = UInt64(k0) << 32
+            let m0 = (num + inc - 1) / inc                                     // the first output at or after input k0
+            rs.setStartPhase((1 << 32) + m0 * inc + (UInt64(rs.latencyFrames) << 32) - num)
+            resampler = rs
+            nextOutput = Int64(m0)
+        }
+    }
+    /// The resampled stream; guarded by `upLock`, which is always taken before `lock` (ingest → append; reset).
+    private var upsampler: Upsampler?
+    private let upLock = NSLock()
+    private var upLogged = false
+
+    /// `upLock` held. Resample `frames` interleaved Int32 frames at 44.1 kHz and append the 48 kHz result, keyed on its own axis.
+    private func upsample(_ src: UnsafeBufferPointer<Int32>, frames: Int, channels ch: Int, pts: Double,
+                          path: SourcePath, roles: [String]) {
+        let k = Int64((pts * Double(Upsampler.inputRate)).rounded())
+        guard k >= 0 else { return }
+        if let u = upsampler, u.channels == ch, u.k0 + u.inputFrames == k {
+            // continuous
+        } else {
+            if let u = upsampler {
+                print("AudioTap[\(path.rawValue)]: 44.1 kHz → 48 kHz stream restarted at input \(k) (expected \(u.k0 + u.inputFrames))")
+            }
+            upsampler = Upsampler(channels: ch, k0: k)
+        }
+        guard let u = upsampler else { return }
+        if !upLogged {
+            upLogged = true
+            print("AudioTap[\(path.rawValue)]: 44100 Hz file sound resampled to 48000 Hz for SDI (polyphase, \(u.resampler.prototype.taps) taps, "
+                + "group delay \(u.resampler.latencyFrames) input samples taken out of the time axis)")
+        }
+        var input = [[Float]](repeating: [Float](repeating: 0, count: frames), count: ch)
+        for f in 0..<frames { for c in 0..<ch { input[c][f] = Float(src[f * ch + c]) / 2147483648.0 } }
+        let cap = u.resampler.maximumOutputFrames(for: frames)
+        var output = [[Float]](repeating: [Float](repeating: 0, count: cap), count: ch)
+        let produced = u.resampler.process(input: input, output: &output)
+        u.inputFrames += Int64(frames)
+        guard produced > 0 else { return }
+        // To 24 bits, rounded: what SDI carries, so the card's own truncation changes nothing.
+        var out = [Int32](repeating: 0, count: produced * ch)
+        for f in 0..<produced {
+            for c in 0..<ch {
+                let v = (Double(output[c][f]) * 8_388_608.0).rounded()
+                out[f * ch + c] = Int32(max(-8_388_608.0, min(8_388_607.0, v))) << 8
+            }
+        }
+        let outPTS = Double(u.nextOutput) / Upsampler.outputRate
+        let force = !u.anchored
+        u.anchored = true
+        u.nextOutput += Int64(produced)
+        out.withUnsafeBufferPointer { buf in
+            append(buf, frames: produced, channels: ch, sampleRate: Upsampler.outputRate, pts: outPTS, path: path,
+                   roles: roles, forceAnchor: force)
         }
     }
 
@@ -306,7 +399,8 @@ public final class AudioTapBuffer: @unchecked Sendable {
     /// Int32 frames into the window, and fire `onFormatChange` after the lock is dropped. `src` holds
     /// `frames * channels` interleaved Int32.
     private func append(_ src: UnsafeBufferPointer<Int32>, frames: Int, channels ch: Int,
-                        sampleRate rate: Double, pts: Double, path: SourcePath, roles: [String]) {
+                        sampleRate rate: Double, pts: Double, path: SourcePath, roles: [String],
+                        forceAnchor: Bool = false) {
         lock.lock()
         // (Re)configure on first buffer or a format change (rate/channels): size the ring to the window.
         //
@@ -376,7 +470,8 @@ public final class AudioTapBuffer: @unchecked Sendable {
         }
         // Anchor the session clock, or re-anchor on an unexpected PTS jump (seek/gap not routed
         // through reset()).
-        if basePTS.isNaN {
+        if basePTS.isNaN || forceAnchor {
+            if forceAnchor { writeHead = 0; framesWritten = 0 }   // C7: a resampled stream's first output anchors the window
             basePTS = pts
         } else {
             let expected = basePTS + Double(framesWritten) / sampleRate
