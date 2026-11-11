@@ -40,7 +40,7 @@ Stage **P1**:
 
 **Later stages, not in P1:**
 - audit item 2, stream secrets in `streamBookmarks` — **built as P2, 2026-10-23** (below);
-- item 7, the licensing port to the shared client's rules;
+- item 7, the licensing port to the shared client's rules — **done, 2026-10-28** (§8);
 - item 8, shipping Release builds rather than Profile.
 
 **Decided after the first P1 results (Robbie, 2026-10-19):**
@@ -152,7 +152,7 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
     activation request and never cleared; deactivation clears the email and type and keeps the id,
     so re-activating reuses the machine slot. A record that cannot be read is never overwritten.
   - `trial.firstLaunch`, `trial.lastSeen`, `trial.voided`: these deliberately outlive the app
-    (`LicenseManager.swift:84-85`).
+    (`LicenseManager.swift:88-89`).
 - **Service `tools.graviton.manifold.streams`:** one item per bookmark UUID. **P2:** the item holds
   the bookmark's full URL and SRT passphrase (`StreamSecret`); before P2 it held the passphrase only,
   and only for bookmarks that had one. The list and the migration of an already-migrated list read no
@@ -356,8 +356,9 @@ installed copies do until they update.
 >
 > **What Manifold sends to Graviton.** When it starts, and when you choose Check for Updates,
 > Manifold downloads a small version file from releases.graviton.tools. When you activate a license,
-> Manifold sends your license key and a machine identifier to license.graviton.tools, and checks the
-> license with that server [every launch — item 7 changes this to at most weekly]. These requests
+> Manifold sends your license key and a machine identifier to license.graviton.tools. After that,
+> Manifold checks the license with that server at most once every 7 days, or at each launch while an
+> activation is still waiting to reach the server or the license is locked. These requests
 > reveal your IP address and app version to Graviton's servers, as any web request does. Your
 > license email is stored only in your macOS Keychain.
 >
@@ -399,7 +400,11 @@ installed copies do until they update.
 2. Which build ships publicly (item 8). Profile builds carry the debug-only file writes above.
 3. What the NDI runtime itself sends (Vizrt's documentation).
 4. `NSBonjourServices` (e.g. `_ndi._tcp`) for NDI discovery on macOS 15+.
-5. The hardware-UUID machine id (item 7) will differ from every existing id: does the server need a
-   migration path?
-6. The shared client's trial rules.
+5. ~~The hardware-UUID machine id (item 7) will differ from every existing id: does the server need a
+   migration path?~~ **Resolved: no.** Existing installs keep their stored UUID; only new installs
+   derive the id from the hardware UUID (`LicenseRecord/LicenseRecordStore.swift:20-22`, `:137-142`).
+6. ~~The shared client's trial rules.~~ **Resolved: it has none.** Trials are not in the shared
+   client (Graviton-Releases `shared/SHARED_README.md:198`). Manifold's trial is its own: 7 days,
+   Keychain-backed, voided by a clock rollback, and applied only while the client says unlicensed
+   (`App/LicenseManager.swift:16-18`, `:56-57`).
 7. What the licence server logs, and for how long.

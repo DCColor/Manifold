@@ -30,6 +30,17 @@ required spellings — see `IDENTITY.md`. Do not "fix" one to match the other.
 - `project.yml` — XcodeGen input; version, build number, signing, embedded dylibs
 - `ThirdParty/*/README.md` — provenance for the gitignored vendored libraries
 
+## Licensing
+
+Licensing is `Packages/ManifoldCore/Sources/LicenseClient/`, a Swift port of Graviton-Releases
+`shared/license.js`. Behaviour changes start in `license.js` and are ported here by hand, with
+its tests, per Graviton-Releases `CLAUDE.md` § "Shared license client — decisions". Never change
+the rules here alone. The trial is Manifold's own (`App/LicenseManager.swift`); the shared
+client has none.
+
+- Server and protocol: Graviton_Licenses `LICENSING_SYSTEM.md`
+- Client behaviour: Graviton-Releases `shared/SHARED_README.md` § license.js
+
 ## Test environment
 
 - Device-level audio measurement is **Audio Hijack + the OBS recorder instance only**. There is no
