@@ -1192,7 +1192,7 @@ final class DeckLinkService: ObservableObject {
     private func makeAudioConfig(for format: AudioTapBuffer.Format?) -> DeckLinkAudioConfig? {
         guard let format, let tap = audioTap else { return nil }
         let trim = Self.audioTrimSeconds
-        return DeckLinkAudioConfig(
+        let config = DeckLinkAudioConfig(
             sampleRate: format.sampleRate,
             sourceChannelCount: format.channelCount,
             deckLinkChannelCount: format.deckLinkChannelCount,
@@ -1212,6 +1212,16 @@ final class DeckLinkService: ObservableObject {
             read: { startTime, frameCount, dst in
                 Int32(tap.read(framesStartingAt: startTime, frameCount: Int(frameCount), into: dst))
             })
+        // Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): the frame each fill handed, for a file's runs on the card's timeline.
+        config.handed = { [weak self] pts, timed, byTime, handSeq in
+            if let renderer = self?.renderer {
+                renderer.currentDeckLinkHanded(pts: pts, timed: timed, byTime: byTime, handSeq: handSeq)
+            } else {
+                pts.pointee = .nan; timed.pointee = false; byTime.pointee = false; handSeq.pointee = 0
+            }
+        }
+        config.cardTimeline = FrameEngine.sdiSoundOnCardTimeline
+        return config
     }
 
     /// The tap's capture format appeared or changed (new file, or the first decoded buffer of one). The

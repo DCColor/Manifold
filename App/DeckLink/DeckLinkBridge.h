@@ -102,6 +102,12 @@ typedef void (^DeckLinkCardFrameBlock)(int64_t slot, double completedHostSeconds
 
 typedef double (^DeckLinkAudioSourceTimeBlock)(void);
 
+/// Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): asked once after each fill, on the thread that filled. The pts of the frame last
+/// handed to the card, whether that pull was timed (the frame due at its slot on a running clock), whether the source pulls by time
+/// (a file) or takes the newest frame (live), and a count that moves on each frame the renderer hands over (a fill that handed
+/// nothing, a neutral or a held picture, leaves it).
+typedef void (^DeckLinkAudioHandedBlock)(double *pts, BOOL *timed, BOOL *byTime, uint64_t *handSeq);
+
 /// YES → the SDI audio stream must carry SILENCE this callback (user mute, pause, or an off-speed
 /// JKL shuttle). The card is still fed (zeros), never starved. Called on the SDK audio-callback thread.
 typedef BOOL (^DeckLinkAudioSilentBlock)(void);
@@ -135,6 +141,11 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// the log, so a run with audio routed to the Mac does not read as a transport gate that stuck.
 @property (nonatomic, copy, readonly) DeckLinkAudioSilentBlock isDestinationSilent;
 @property (nonatomic, copy, readonly) DeckLinkAudioReadBlock read;
+/// Stage 1c: the handed frame per fill. nil → the §10.21 anchor loop for every source.
+@property (nonatomic, copy, nullable) DeckLinkAudioHandedBlock handed;
+/// Stage 1c: YES when the card is the file's clock (Stage 1b on): a file's sound is mapped to the card's timeline once per run and
+/// never steered. NO: the same runs and edges, with the anchor loop steering inside a run, because the picture can slip.
+@property (nonatomic) BOOL cardTimeline;
 
 - (instancetype)initWithSampleRate:(double)sampleRate
                 sourceChannelCount:(NSInteger)sourceChannelCount

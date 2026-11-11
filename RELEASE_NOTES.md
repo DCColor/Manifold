@@ -5,6 +5,12 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.9.3
+
+Draft. The update dialog's notes: plain text, most consequential first.
+
+- SDI sound was about 2.5 frames late against its picture in 0.9.0 to 0.9.2. It is now in sync. Stream calibrations stay valid. If you set a stream's audio offset by ear against an SDI monitor, it will now play about 2.5 frames early: reset it.
+
 ## 0.9.2
 
 The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the

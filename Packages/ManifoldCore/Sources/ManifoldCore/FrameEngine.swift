@@ -800,6 +800,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// sounding on the Mac stays on the Mac's device until Stage 2, and a live source (`hasMedia` false) has its own clock.
     /// THE ONE PLACE THE SWITCH IS READ FOR THE SOUND: off, this is never true with sound, so `updateCardAudioRoute` never moves the
     /// renderer, `audioSynchronizer` stays nil, and everything hung off them (the re-read, the anchor, the second rate write) cannot run.
+    /// Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): with Stage 1b on, the card is a file's clock while it owns the sound, so the SDI
+    /// bridge maps a file's sound to the card's timeline once per run and never steers it. Off, the bridge keeps the same runs and edges
+    /// and steers inside a run, because the picture can slip. The same switch as `cardLockApplies`, read for the bridge at output start.
+    public nonisolated static var sdiSoundOnCardTimeline: Bool { CardClockAudio.stage1b }
+
     private var cardLockApplies: Bool {
         hasMedia && mediaKind == .video && (audioPresence == .absent || (CardClockAudio.stage1b && deckLinkOwnsAudio && hasAudioToRoute))
     }

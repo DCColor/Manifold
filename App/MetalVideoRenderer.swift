@@ -473,6 +473,10 @@ final class MetalVideoRenderer {
     private var deckLinkLastPullTimed = false
     /// The source pts of the frame last handed to the card: what is on the wire (`currentDeckLinkSourcePts`).
     private var deckLinkHandedPts: Double = .nan
+    /// Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): whether the pull that handed it was timed, and a count of frames handed.
+    private var deckLinkHandedTimed = false
+    private var deckLinkHandSeq: UInt64 = 0
+    private var deckLinkPullTimedNow = false
     /// Recent display-tick intervals while output runs; their median sets the pull margin.
     private var deckLinkTickIntervals: [Double] = []
     private var deckLinkLastTick: Double = 0
@@ -5126,6 +5130,7 @@ final class MetalVideoRenderer {
         deckLinkLastPull = nil
         deckLinkLastPullTimed = false
         deckLinkHandedPts = .nan
+        deckLinkHandedTimed = false
     }
 
     /// The slot the next convert writes: an empty one, else the oldest. Called with `deckLinkLock` held.
@@ -5477,6 +5482,17 @@ final class MetalVideoRenderer {
     /// just started, no file loaded, or a resolution mismatch is holding neutral), which the audio path
     /// reads as "nothing to align to" and answers with silence. Same lock as the staging buffers, so
     /// this time and those pixels are always the same frame.
+    /// Stage 1c (SDK thread, after each fill; docs/CARD_CLOCK_FINDINGS.md §10.22): the frame last handed, whether its pull was timed,
+    /// whether this source pulls by time (a file), and the count of frames handed, all under the staging lock, so they are one pull's.
+    func currentDeckLinkHanded(pts: UnsafeMutablePointer<Double>, timed: UnsafeMutablePointer<ObjCBool>,
+                               byTime: UnsafeMutablePointer<ObjCBool>, handSeq: UnsafeMutablePointer<UInt64>) {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        pts.pointee = deckLinkFrameReady ? deckLinkHandedPts : .nan
+        timed.pointee = ObjCBool(deckLinkHandedTimed)
+        byTime.pointee = ObjCBool(deckLinkPullByTime)
+        handSeq.pointee = deckLinkHandSeq
+    }
+
     func currentDeckLinkSourcePts() -> Double {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
         guard deckLinkFrameReady else { return .nan }
@@ -5525,11 +5541,14 @@ final class MetalVideoRenderer {
         }
         let pts = deckLinkSlotPts[slot]
         deckLinkHandedPts = pts.isFinite ? pts : .nan
+        deckLinkHandedTimed = deckLinkPullTimedNow
+        deckLinkHandSeq &+= 1
         return deckLinkSlotSignal[slot]
     }
 
     /// The ring slot to hand over for scheduled frame `index`. Called with `deckLinkLock` held.
     private func deckLinkPullSlotLocked(index: Int64, host: Double, clock: Double?) -> Int {
+        deckLinkPullTimedNow = false   // Stage 1c: true only on the timed branch below
         let newest = deckLinkFrontIndex
         guard deckLinkPullByTime, deckLinkCardFrame > 0, let clock, clock.isFinite else {
             deckLinkLastPull = nil
@@ -5562,6 +5581,7 @@ final class MetalVideoRenderer {
         // the next timed pull picks up from the frame handed then.
         guard dc > 0, dc <= dh + 0.002 else { return newest }
         deckLinkLastPullTimed = true
+        deckLinkPullTimedNow = true
         let target = clock - (host - slotHost) - deckLinkPullMarginLocked
         // Never an older frame than the one handed last, unless that frame is ahead of the clock: a loop's wrap or a
         // seek back started a new timeline, and its frames are all "older".

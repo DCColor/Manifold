@@ -33,7 +33,7 @@ enum DebugStepHook {
     }
 }
 
-/// MEASUREMENT ONLY (pre-ship removal, docs/BUGS.md). `MANIFOLD_DEBUG_TRANSPORT="wait 15;play;wait 20;seek 300;pause;step 1;shuttle 2;loop;dest computer"`:
+/// MEASUREMENT ONLY (pre-ship removal, docs/BUGS.md). `MANIFOLD_DEBUG_TRANSPORT="wait 15;play;wait 20;seek 300;pause;step 1;shuttle 2;loop;dest computer;output stop;output start"`:
 /// once a file has loaded, run each step on the engine, as the keys do. Seek, step and shuttle are key-only and an unattended run
 /// sends no keystrokes. Each step logs the host time and the clock, for `cardlock-summary.py`. Unset, nothing happens.
 @MainActor
@@ -58,6 +58,7 @@ enum DebugTransportHook {
                 case "shuttle": engine.setShuttleRate(Float(arg))
                 case "loop": engine.toggleLoop()
                 case "dest": DeckLinkService.shared.setAudioDestination(step[1] == "sdi" ? .sdi : .computer)
+                case "output": if step.count > 1, step[1] == "stop" { DeckLinkService.shared.stopScheduledOutput() } else { DeckLinkService.shared.startScheduledOutput() }
                 default: print("[TRANSPORT] unknown step")
                 }
             }

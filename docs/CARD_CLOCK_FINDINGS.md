@@ -1305,3 +1305,151 @@ If A1-A3 hold, Manifold's own share of the SDI offset is under a millisecond, an
 - **Every 23.976 Play starts one frame ahead (11 of 12),** and only Plays from 0 with the gate off then go to four frames ahead and jump. The Play-from-0 hold is longer than the others at both rates: 59.94 gate off gave 7–8 frames.
 - **No earlier measurement of 23.976 Plays exists** (§10.16 measured Plays at 59.94 only). The 1800 s runs' single Play from 0 started 13 ms (gate off) and 4 ms (gate on) from its final value. So against that, the fix makes the 23.976 start worse on every Play: a jump gate off from 0, and a one-frame, 20 s slew everywhere else.
 - **For Robbie:** the fix is right in steady state and at 59.94, and makes the 23.976 start worse. Commit it with the start-of-play change above (hold silence until the first moving frame), or without it and accept the 23.976 start, or keep it out until 1c. Raw captures of every §10.21 run are deleted; the reports, `.av.csv` and `.summary.json` are kept in `~/Code/_scratch/manifold-1c-wire/runs/`.
+
+### 10.22 Stage 1c, built: SDI audio on the card's own timeline, 2026-11-10 (night)
+
+**Decided (Robbie, 2026-11-10 night):** no interim release; 1b, 1c, Stage 2, the output-change stall fix (§10.19) and the anchor fix (§10.21) ship together as 0.9.3. The anchor fix stays as it is; the interim start-of-play change (§10.21) is not built. Build 1c as §10.20 plans, keeping the new anchor. Verify at 23.976 and 59.94, gate off and on: steady state within 0.1 ms of the `syncout` control, no per-callback corrections, the offset at the first sound within ±1 ms, no jump, the silence at Play measured; Play from 0 and mid-file, seek, loop, pause, output stop and start. Uncommitted.
+
+#### C0: what a mid-run flush does (`syncout --flush-at`, no Manifold), 2026-11-10 20:04–20:07
+
+`syncout` (new options `--flush-at T --flush-every P --flush-lead MS`): at each flush, `FlushBufferedAudioSamples`, then read the buffered count and `GetScheduledStreamTime(48000)`, then schedule the file again from its own sample at that stream time + the lead. 5 flushes per run, `c0-5994-l10` (10 ms lead, 60 s) and `c0-2398-l1` (1 ms lead).
+- **The flush does not empty the card's audio.** 4715–5976 samples (98–125 ms) stay buffered after it, at both rates. They are committed: they play.
+- **Anything scheduled into that committed window is added to what is there.** Rescheduling the same file samples there put exactly twice the source on the wire, sample for sample (`rx == 2 × ref` on every sample), from the restart to the window's end. After the window, only the new samples play.
+- **The window's end is the stream time read after the flush plus the buffered count then, +0 to +2 samples:** 10 of 10 flushes. The stream position is unchanged by the flush, and samples scheduled at a stream time after it, 1 ms ahead included, land exactly there: the offset is −0.55 ms before and after every flush.
+- **C0 (§10.20): half held.** The stream position held, and samples after the flush land as scheduled. But a flush cannot remove the last ~110 ms.
+
+**What that means for the edges.** The committed window can still be rewritten exactly. Scheduling *(what it should carry − what was scheduled there)* into it leaves exactly what it should carry, because the card adds. At a Play the window holds silence, so the new sound simply goes in. At a Pause it holds the sound queued past the picture's end, so its negative cancels it to digital zero. The bridge therefore keeps a history of what it scheduled at each stream position (the last 65,536 samples).
+
+#### The design, as built
+
+- **Per slot, from the fill:** the frame's pts, its slot `idx`, whether the pull was timed (`MetalVideoRenderer`, now recorded per pull), and whether the source pulls by time (files) or takes the newest frame (live). Written to a 32-entry ring under a lock by `fillFrame`, read in order by the audio callback, which keeps all audio state on its own thread.
+- **Live sources** (no pull by time): the §10.21 anchor and its loop, unchanged.
+- **Files, a run:** the bridge latches at the first **timed** slot whose pts differs from the slot before, with the gate open: `Φ = pts − idx × frame`, `D = round(Φ × 48000)`; card sample `s` carries source sample `s + D` from then on. **The sound starts at `A(idx − 1)`**, the last showing of the frame the picture held, when that slot carried the frame just before (it does at a Play: the paused frame), so that frame's own sound plays with it; otherwise at `A(idx)`. `A(n) = ⌊n × 48000 × frame⌋`.
+- **Edges by rewrite:** flush, read the window's end, schedule *desired − history* over `[max(edge, now + 1 ms), end + 2)`, then schedule normally from there. At a latch the desired sound is the file; at a run end it is zero.
+- **A run ends** at the first slot whose pts is not `Φ + idx × frame` (within half a frame) and whose pull was not timed: Pause (and its landing), seek, step, loop wrap, shuttle. The sound is cut at `A(idx)`, the end of the last frame that moved with the run.
+- **Inside a run:** the cursor is `s + D` for every sample; an underrun is zeros for what is missing and the cursor still advances. **Gate on:** no steering at all; a timed slot off the mapping by more than half a frame is a re-latch, logged `[SDI-AUDIO] re-latch` and counted (expected never). **Gate off:** the picture can slip, so a timed slot off the mapping is not an edge: the §10.21 loop steers `D` toward it, ≤ 2 samples per callback, from the exact error. Between slips that error is under half a sample, so it corrects nothing.
+- **The gate** (pause, shuttle, mute, destination Computer): zeros for new positions, the run kept; it is the slots that end it. A mute and unmute resumes in place.
+- **Output start:** no run until the first timed moving slot. **Output stop:** nothing to do.
+- Not built here: §10.20's 44.1 kHz resample (C7) and the rate-mismatch window (C6): the brief's tests are 48 kHz at matched rates. The in-run check uses half a card frame, which is right only at matched rates. A 25p file on a 59.94 output would end and relatch its run at every cadence step under gate on: UNKNOWN until measured, and a decision below.
+
+#### Revised after the first smoke run: no flush, an 80 ms queue, 2026-11-10 night
+
+**Smoke run `t1-smoke`** (20:27, one `transport` cycle, 59.94, gate on, the design above). Inside each run the offset was constant (spread 0.01 ms), and each run's sound ended 26 samples into the frame after its last moving one, which is the card's own constant. But two faults:
+- **One stray sample after the first Pause:** −0.039 FS, in digital silence, 87.5 ms after the edge. That is the committed window's end, which is known only to ±2 samples, so the rewrite wrote 1 sample on the wrong side of it.
+- **The first ~100 ms of sound was missing after a seek or a step.** The tap is filled only once play starts, so those positions went out as zeros. The run was still on its line once the sound came.
+
+**C0b, the queue without a flush** (`syncout --overlay-at`, `--audio-depth`, no Manifold, 20:33–20:37):
+- With the usual 200–430 ms queue, the negative of everything queued, scheduled 1 ms past the card's position, gives three zones on the wire, 4 of 4:
+  - the first 123–898 samples **ignored** (in flight);
+  - then about 4,950 samples **added** (digital zero: the committed window);
+  - then the rest **replaced** (the inverted sound plays).
+- **With the queue held at 80 ms** (`--audio-depth 80`), the same overlay gives digital zero over the whole range, from 1 ms past the card's position to the queue's end, and the source again sample-exact right after it. That held 12 of 12, at 59.94 and 23.976. Everything queued is committed, and the card adds.
+
+**So the edges changed:**
+- A file's queue is held at 80 ms (live sources keep 200 ms).
+- An edge never flushes. It schedules *desired − history* from `max(edge, now + 1 ms)` to the queue's end, which is exact.
+- A latch waits until the queue is within 4,400 samples, which matters only after output start or a switch from a live source.
+- **Sound not yet decoded** when its positions were scheduled is written in on later callbacks, the same way, while it is still ahead of the card.
+- The read finds where the ring's data starts inside a chunk, 1 ms at a time, instead of reading a whole chunk as empty.
+
+**Smoke runs 2 and 3** (20:40, 20:47, 20:51; one `transport` cycle each: 59.94 gate on twice, then 23.976 gate off):
+- **Smoke 2: no discontinuities, nothing unlocated, every run starting at −0.53 to −0.56 ms** (control −0.55). 11,620 late-decoded samples were written in afterwards, with none missing on the wire. Three faults remained:
+  - **Pause cut the last 375 samples of the last frame.** The gate goes silent at Pause, and with an 80 ms queue its zeros began before the picture's last handed frame had finished, about 3 frames ahead.
+  - **A seek while playing latched 29 samples off.** The first frame after the seek carried the seek's time, 600.000000, where its own is 599.999400, so the line was taken off the frame grid.
+  - **Two "re-latches"** were the picture stepping back a frame on a timed pull, just before a seek and at the loop's wrap: run ends, not re-latches.
+- **Fixed:**
+  - The gate no longer cuts a run. A run ends where its picture leaves the line, and after 8 slots of gate silence with the picture still on the line (a mute, or destination Computer).
+  - A latch is confirmed on the next slot: the line comes from a frame whose step from the one before is exactly one frame; the sound still starts at the first slot that moved.
+  - Re-latches are counted only when a new run latches at that same slot. Timed run ends are counted apart.
+- **Smoke 3:**
+  - **59.94 gate on: every run starts at −0.54 to −0.56 ms and holds it to 0.01 ms, with 0 steps.** Every Pause and seek end falls 26 samples into the next frame, which is the card's constant.
+  - **23.976 gate off: every run at −0.19 ms** (control −0.19), and Pause ends exact. But two seek-while-playing ends were 32 and about 1,800 samples short. At 23.976 the picture is handed up to 125 ms ahead, beyond the 80 ms queue, and the seek empties the tap before the old run's last frames are read. Also 3 corrections of −2 samples in the last 60 ms before the loop's wrap: the picture holds the file's last frame on timed pulls, which gate off reads as a slip.
+- **Fixed:** a prefetch ring. Each callback copies the current run's sound from the tap up to 133 ms past the queue, keyed by stream position and run. What the tap has lost by the time a position is scheduled comes from there.
+
+The predictions below were written before any code and are unchanged.
+
+#### Predictions, written 2026-11-10 night, before any 1c code
+
+Against the control, which reads −0.58 ms at 59.94 and −0.17 ms at 23.976 (§10.16). "First sound" means the first sample of a run on the wire.
+
+| # | Run | Prediction |
+|---|---|---|
+| D1 | `cont` 300 s, 59.94 and 23.976, gate on | Steady offset = control ± 0.1 ms; its whole p1–p99 range ≤ 0.05 ms. **0 discontinuities in the run, 0 nonzero corrections** (`[AUDIO-CORR] c=0` in every callback). 0 re-latches, 0 underruns after the first sound |
+| D2 | The same, gate off | Steady offset = control ± 0.1 ms. Corrections only in the walk after a picture slip (§10.21: about 600 at 59.94, 1200 at 23.976 per slip); none between slips, none in the first minute |
+| D3 | First sound, every run, both gates and rates | **Offset = control ± 1 ms at the first sample; no jump and no slew:** the offset at 0.5, 1, 5 s and at the end of the run within ±0.1 ms of it. The first sample is the first sample of the frame the picture held, ±1 sample (it falls in that frame's last showing). In at most 1 in 10 runs it is later, by the callback's lateness (≤ 20 ms), never earlier |
+| D4 | Silence at Play | Measured by the bridge (`[SDI-AUDIO] latch` logs the gate's opening and the run's start, in stream samples) and on the wire (the held picture's frames before the first sound). Prediction: **the silence equals the picture's hold at Play, less one frame**, the frame whose own sound starts it. No sound before the picture moves |
+| D5 | Pause | The sound ends within 2 samples of the end of the last frame that moved, then digital zero: no sample of the queued sound after it, and no inverted sound. Today (§10.21 build): about 150 ms of sound past the picture (by reading) |
+| D6 | Seek while playing, loop wrap, frame step while paused, then Play | Each a run end and a new run: the old sound ends with its last frame as D5, the new one starts as D3. No sample from the wrong side of the edge |
+| D7 | Output stop, then start, while playing | After the start, the first sound as D3. No stale sound from before the stop |
+| D8 | Inside every run, both gates | 0 discontinuities other than gate-off slip walks. Every wire step matched to a logged correction |
+| D9 | Live sources | Not run here: their path is unchanged code |
+
+#### Verification, chain11 (2026-11-10, 21:05–22:51): results against D1–D8
+
+Build: `.build-cc`, 1c with the prefetch ring, `-DMANIFOLD_CARDCLOCK`. Each run is one launch, with the wire captured throughout. Each launch waited for 10 minutes of HID idle with Resolve closed.
+- `transport`: 2 cycles.
+- `cont`: 300 s.
+- `plays`: 5 cycles, 10 Plays.
+
+Each ran at 59.94 and 23.976, gate on and off. Reports are `runs/v-{tr,c,p}-<rate>-<gate>.{segs,cont,plays}.report` in `~/Code/_scratch/manifold-1c-wire`. Session controls: −0.55 ms at 59.94 and −0.19 ms at 23.976.
+
+**Analyser fix.** `w1c-wire.py` stopped locating at the fixture's end, so it read nothing after the loop's wrap. It now relocates there as a step. The transport `segs` reports were re-run (`*.segs2.report`), and the figures below come from those.
+
+**Gate on: every prediction holds except D7, one session in four.**
+
+| # | Gate on, 59.94 | Gate on, 23.976 |
+|---|---|---|
+| D1 `cont` | median −0.56 ms, p1–p99 −0.57 to −0.55 (0.02 ms). 0 steps, 0 nonzero corrections in 15,000 callbacks, 0 underruns | −0.19 ms at p1, median and p99. 0 steps, 0 corrections, 0 underruns |
+| D3 first sound | 23 runs: −0.54 to −0.58 ms. At 0.5, 1 and 5 s and at the run's end: within 0.02 ms of the first. 0 slews | 24 runs: all −0.17 or −0.19 ms (the session's control), constant to 0.00 ms |
+| D3 first sample's place | 26 samples into its frame (the card's constant, as the control) in 15 of 23. Later by 48–209 samples (1–4.4 ms) in 8: 3 seeks while playing lost exactly 48 samples (below), and 5 latches were late edges (the callback came after the run's start; 48–209 samples) | 8–9 samples into its frame (the card's constant) in 23 of 24. One output-start latch 1,124 samples late (below) |
+| D4 silence at Play (gate opening → first sound, bridge) | 55–77 ms (10 Plays and `cont`) | 138–182 ms |
+| D4 on the wire | The sound starts one frame before the picture moves, with the held frame's last showing, in every Play. No sound before | as 59.94 |
+| D5 Pause | Every Pause ends 26 samples into the frame after the last that moved, then digital zero. The control ends there too | 8 samples into it (control ≈ 9), then digital zero |
+| D6 seek while playing | The old run ends at its frame boundary (picture moving after). A 34–67 ms silence, then the new run at the control offset | Seek 600: one frame (41.7 ms) of silence. Seek 300: a clean cut with no silence, the offset −0.167 ms on both sides of the picture's change |
+| D6 loop wrap | The sound runs to the file's last sample (the fixture's sound ends 42 samples before its last frame does), then silence over the 9 held frames, then the new run from 0 at the control | the same; the sound ends 60 samples before the last frame does, then 4 held frames |
+| D6 step while paused, then Play | no sound on the steps; Play as D3 | as 59.94 |
+| D7 output stop, start | Cycle 1: the stop pauses playback (`[ARBITER] exclusive device released — every deck paused`), and the Play after it is as D3. **Cycle 2, restarted while playing: no SDI sound at all for the rest of that output session** (below) | Both cycles as D3. The restart while playing latched 23 ms late: the live path's 200 ms preroll queue has to drain under 4,400 samples first |
+| D8 | 0 steps, 0 unlocated samples, every sample on the wire exact against the source in all four gate-on runs | the same |
+
+**D7 failure: no sound after an output restart while playing** (`v-tr-5994-on`, its third output session, 258–322 s).
+- What happened:
+  - The audio stop line reads `scheduled=9600f … real=0f`: the 200 ms preroll the live path writes, and nothing after it.
+  - The runs path logged nothing in that session: no latch and no `runs` line. That line prints once per second of scheduled audio, so nothing at all was scheduled after the preroll.
+  - Video ran normally: 3,876 frames completed, none late.
+- Its preroll is the only difference from the sessions that worked: playing at the start (`silent=false → no handed frame to anchor to`).
+- The same restart while playing worked in the other three runs (23.976 on, both rates off).
+- The log cannot tell whether the audio callback stopped coming, or kept coming while the card stopped taking samples. **Cause UNKNOWN.**
+- The test reached this state through the debug `output start` step, which skips the arbiter. ⌃⌥O and a device switch (`DeckLinkService.toggleOutput`, `selectDevice`) skip it too, so a user can reach it.
+- Diagnostics added for the follow-up:
+  - `[SDI-AUDIO] runs path entered`;
+  - `!! holding over 1 s` (the queue not draining);
+  - `!! no audio callback in the last 48 frames`, checked from the video callback;
+  - the callback count in the stop line.
+
+**The first 48 samples after a seek while playing are lost.** The tap's data after a seek begins inside a chunk. The read finds where it starts in 1 ms (48-sample) steps, so up to 47 samples of the new run go out as zeros. They are not filled in later, because the card has passed them. On the wire it shows as 48 samples (1 ms) at 59.94: the first sample lands 74 samples into the frame instead of 26. Fix, not made: after the 48-sample step that finds data, search back within those 48 samples one sample at a time.
+
+**Gate off (the runs, steered after a picture slip, which §10.20 did not plan): faults, so it is dropped.**
+- **D2:** `v-c-2398-off` had one picture slip, at 72.7 s (frame 1533 → 1535). The sound sat one frame (−41.8 ms) out and walked back in 1,004 corrections of 2 samples, taking 19.5 s, as §10.21's loop does. `v-tr-2398-off` did the same after an output start: 864 corrections.
+- **D3:** `v-tr-5994-off`, first output session: all 5 runs at **+7.45 ms**, against a control of −0.55. The first sample landed 442–490 samples into its frame instead of 26. The second and third sessions in the same launch, `v-c-5994-off` and all 10 Plays of `v-p-5994-off` were right (−0.55 to −0.58). Cause UNKNOWN.
+- **D6 loop wrap:** the held last frame is a timed pull off the line. Gate off reads it as a slip, so the run kept going past the file's end. The wire carries samples not in the source there, instead of silence.
+- **D8:** `v-tr-5994-off`, before the cycle 2 Pause: 430 samples on the wire match no part of the source. A rewrite whose history no longer matched what the card held puts a sum of two sounds on the wire. 98 logged corrections were not found on the wire.
+- §10.20 kept gate off on today's path (the §10.21 loop), with C8 "nothing on the gate-off path moved". **Changed after chain11:** the runs are used only under card lock (`cardTimeline`). With the gate off, a file goes back to the §10.21 loop, as a live source does. That path's figures are the anchor fix's (§10.21).
+
+**D9** (live sources): not run. Their path is unchanged code.
+
+#### Follow-up, chain12 (2026-11-10, 23:00–23:29): restarts while playing, and gate off back on the §10.21 loop
+
+Build: the chain11 build, with two changes. Runs are used only with `cardTimeline` set, so a file with the gate off is back on the §10.21 loop. The callback diagnostics above are added. Mode `restarts`: Play, output stop and start (the arbiter pauses), Play, then 10 output stops and starts while playing, Pause.
+
+**Gate on, `restarts` at 59.94 and 23.976 (`v2-rs-*-on`): 22 restarts while playing, the sound back after every one.** The chain11 failure did not recur, and none of the new diagnostics fired: no `!! holding`, no `!! no audio callback`. Each session entered the runs path on its 3rd callback with the 200 ms preroll queued, as in chain11. **The chain11 failure stays UNKNOWN:** it happened 1 time in 23 restarts while playing. The diagnostics stay in, so that the next occurrence names its cause.
+- Every session's first sound is at the control: −0.55 to −0.58 ms at 59.94, and −0.19 at 23.976. It is constant to 0.02 ms through the session, with 0 corrections, 0 unlocated samples and no silences inside a session.
+- After a restart while playing, the first sound is late into its frame: 24–1,263 samples (up to 26 ms). The latch waits for the live path's 200 ms preroll to drain under 4,400 samples, then starts at the next slot that moves. The offset is exact from that first sample. The picture runs on without sound for those milliseconds.
+- **23.976 only: in 5 of 11 restarts the picture skipped one frame on slot 67, about 2.8 s after output start** (e.g. 1024 → 1026). The run ended on that timed pull (`off the line on a timed pull: … +2002.0 samples off`). The next run latched at the new frame, so the sound cut forward one frame with the picture: the offset was −0.187 ms before and after it, with one frame read at −41.9 ms at the cut. The skip is the picture's, under card lock (1b), not 1c's. Its cause is UNKNOWN; the 1b card-lock latch (`[CARDLOCK] latched (run)`) is the likely moment.
+
+**Gate off on the §10.21 loop (`v2-tr-{5994,2398}-off`, `v2-c-2398-off`): today's behaviour, as C8 expects.**
+- Play from 0, and Play after a step: the first sound is +42 to +147 ms off, then a RESYNC (7 per transport run, 1 in `cont`).
+- Seeks while playing: 6–17 ms off, walked back over seconds.
+- Corrections: 1,264 in the 300 s `cont`, and 3,400–4,900 per transport run.
+- Steady state: −0.17 ms (23.976) and −0.54 ms (59.94) once settled.
+
+**Raw captures** (`.raw`, `.cap`, `.marks`) of chain11, chain12, the smoke runs, the C0 probes and `ctl2` are deleted. Reports, logs, `av.csv` and `summary.json` are kept in `~/Code/_scratch/manifold-1c-wire/runs`.

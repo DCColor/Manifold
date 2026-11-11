@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # SDI audio on the wire (docs/CARD_CLOCK_FINDINGS.md §10.16), from one w1c-run.py run. Needs numpy (a venv: ~/Code/_scratch/manifold-1c-wire/.venv).
-#   w1c-wire.py <runs dir> <label> <fixture .ref.raw> <5994|2398> [cont|plays]
+#   w1c-wire.py <runs dir> <label> <fixture .ref.raw> <5994|2398> [cont|plays|segs]
+# segs (Stage 1c, §10.22): every stretch of sound between digital silences of 5 ms or more, on its own: the offset at its first sample and
+# how far it moves inside, discontinuities inside it, the picture held before it, and where it ends against its picture (the sound's last
+# sample against the end of the frame it falls in, in samples; the card's own constant is −28 at 59.94 and −8 at 23.976, §10.16).
 # Every received sample is located in the fixture's own PCM (seeded white noise, so a 2-sample key is all but unique and 16 samples
 # verify it). Walking the capture, each place where the received samples stop following the source is classified:
 #   step:    the source position moves by d samples (+ skipped, - repeated) and continues;
@@ -70,7 +73,7 @@ while i < N:
         if eq.all(): j += n; continue
         j += int(np.argmin(eq)); break
     segs.append((i, p, j - i)); exp = p + (j - i)
-    if j >= N or exp >= M: break
+    if j >= N: break   # a source end (loop wrap) is relocated below as a step, not the end of the analysis
     z = zero_run(j)
     if z - j >= 4:   # digital silence
         if z >= N: events.append((j, "silence", 0, z - j)); break
@@ -208,7 +211,7 @@ if mode == "cont":
         base = np.median(bef) if bef else float("nan")
         back = next((t for t, o in aft if abs(o - base) < 1.0), None)
         print(f"    picture {a}→{b} (held {n if a == b else 0}) at {T(w):.1f} s: offset before {base:+.2f} ms, first after {aft[0][1] if aft else float('nan'):+.2f}, back within 1 ms after {back} s")
-else:
+elif mode == "plays":
     plays = []
     for k, w0 in enumerate(onsets):
         end = next((e[0] for e in events if e[1] == "silence" and e[0] > w0 and e[3] >= 240 * 4), N)
@@ -247,4 +250,49 @@ else:
               f"final {pl['final']:+6.2f} · settled ±2 ms at {pl['settle_2ms']:.1f} s, ±1 ms at {pl['settle_1ms']:.1f} s (30–60 s range {pl['wobble_30_60']:.2f}) · silences≥5ms {pl['silences']} · small {pl['small_steps']} · "
               f"picture moves {pl['picture_motion_after']} s after first sound {pl['picture_seq'][:6]} · later picture events {pl['picture_events']}")
     out["plays"] = plays
+if mode == "segs":
+    sil = sorted((e[0], e[0] + e[3]) for e in events if e[1] == "silence" and e[3] >= 240)
+    bounds = []; w = 0
+    for a0, a1 in sil:
+        if a0 > w: bounds.append((w, a0))
+        w = a1
+    if w < N: bounds.append((w, N))
+    segl = []
+    for w0, wE in bounds:
+        if wE - w0 < 4800 or src_at(w0) is None: continue
+        # The marker is 16 bits: after a seek its unwrapping can land a whole 65536 frames off. Fold to the nearest wrap.
+        WRAP = 65536 * SPF / SR * 1000
+        fold = lambda o: o - WRAP * round(o / WRAP)
+        win = [(T(ww - w0), fold(o)) for ww, o in av if o is not None and w0 <= ww < wE]
+        first = offset_ms(w0)
+        if first is None and win: first = win[0][1]
+        if first is not None: first = fold(first)
+        if first is None: continue
+        ev = [e for e in events if w0 < e[0] < wE]
+        stp = [e for e in ev if e[1] == "step"]; jmp = [e for e in stp if e[2] is None or abs(e[2]) >= 48]
+        def at(t): v = [o for tt, o in win if tt >= t]; return v[0] if v else float("nan")
+        span = max(abs(o - first) for t, o in win) if win else float("nan")
+        fk = bisect.bisect_right(fstarts, w0) - 1
+        pic0 = frames[fk][1] if fk >= 0 else None
+        hold = 0; kk = fk - 1
+        while kk >= 0 and frames[kk][1] is not None and frames[kk][1] == pic0: hold += 1; kk -= 1
+        mv = next((m for m in range(fk + 1, min(len(frames), fk + 600)) if frames[m][1] is not None and pic0 is not None and frames[m][1] != pic0), None)
+        ek = bisect.bisect_right(fstarts, wE - 1) - 1
+        end_in = (wE - fstarts[ek]) if ek >= 0 else None
+        flen = (fstarts[ek + 1] - fstarts[ek]) if 0 <= ek < len(frames) - 1 else None
+        pe = frames[ek][1] if ek >= 0 else None
+        after = [frames[m][1] for m in range(ek + 1, min(len(frames), ek + 4))]
+        held_after = bool(after) and pe is not None and all(x == pe for x in after if x is not None)
+        segl.append(dict(start=T(w0), end=T(wE), dur=T(wE - w0), src0=src_at(w0) / SR, first=first, at05=at(0.5), at1=at(1), at5=at(5),
+                         last=win[-1][1] if win else float("nan"), span=span, steps=len(stp), jumps=[(T(e[0] - w0), e[2]) for e in jmp],
+                         pic0=pic0, hold_before=hold, first_pos_in_frame=(w0 - fstarts[fk]) if fk >= 0 else None,
+                         frames_to_motion=(mv - fk) if mv is not None else None, end_pic=pe, end_in_frame=end_in, frame_len=flen,
+                         end_from_boundary=(end_in - flen) if (end_in is not None and flen is not None) else None, picture_held_after=held_after))
+    print(f"  sound segments (between silences of 5 ms or more): {len(segl)}")
+    for k, g in enumerate(segl, 1):
+        print(f"   #{k:2d} {g['start']:8.3f}–{g['end']:8.3f} s ({g['dur']:6.1f} s) src {g['src0']:8.3f}: first {g['first']:+7.2f} ms · 0.5 s {g['at05']:+7.2f} · 1 s {g['at1']:+7.2f} · 5 s {g['at5']:+7.2f} · "
+              f"last {g['last']:+7.2f} · max |Δ| {g['span']:.2f} ms · steps {g['steps']} · jumps {g['jumps'] or 'none'} · picture {g['pic0']} held {g['hold_before']} frames before, "
+              f"first sample {g['first_pos_in_frame']} into its frame, picture moves {g['frames_to_motion']} frames on · ends {g['end_from_boundary']} samples from its frame's end "
+              f"(picture {g['end_pic']}, {'held' if g['picture_held_after'] else 'moving'} after)")
+    out["segments"] = segl
 json.dump(out, open(f"{d}/{label}.summary.json", "w"), indent=1, default=str)

@@ -4,6 +4,11 @@
 # whole transport script, so every received picture and every received sample is kept. Analysis: w1c-wire.py.
 #   w1c-run.py cont  <fixture.mov> <on|off> <label> <seconds>   one Play from 0, <seconds> of play, Pause
 #   w1c-run.py plays <fixture.mov> <on|off> <label> <cycles>    per cycle: seek 0, Play 60 s, Pause, Play 60 s (mid-file), Pause
+#   w1c-run.py transport <fixture.mov> <on|off> <label> <cycles>  per cycle (Stage 1c, §10.22): Play from 0, Pause, Play mid-file, seek
+#       twice while playing, Pause, step 1 twice, Play, output stop and start while playing, Pause, seek 1905, loop on, play through the
+#       wrap at 1920 s, Pause, loop off. Needs a 1920 s fixture.
+#   w1c-run.py restarts <fixture.mov> <on|off> <label> <n>  Play, output stop and start (the arbiter pauses), Play, then n output
+#       stops and starts while playing (the debug step does not go through the arbiter, as ⌃⌥O and a device switch do not), Pause.
 # W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
 # `capture` moves the card's output clock while it is open (§5); A/V offset and continuity are read on the same wire, so that is acceptable.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID through manifold-proc.sh. AX menu clicks on named items only,
@@ -76,5 +81,13 @@ if __name__ == "__main__":
     if mode == "cont": steps = f"wait 16;play;wait {n};pause;wait 2"; budget = n + 120
     elif mode == "plays":
         steps = "wait 16;" + ";".join("seek 0;wait 3;play;wait 60;pause;wait 3;play;wait 60;pause;wait 3" for _ in range(n)); budget = n * 135 + 120
-    else: sys.exit("mode: cont | plays")
+    elif mode == "transport":   # Stage 1c (§10.22): every run edge, per cycle; the file must be 1920 s (the loop wraps at its end)
+        cyc = ("seek 0;wait 3;play;wait 20;pause;wait 4;play;wait 15;seek 600;wait 15;seek 300;wait 10;pause;wait 3;step 1;wait 2;step 1;wait 2;"
+               "play;wait 15;output stop;wait 5;output start;wait 20;pause;wait 3;seek 1905;wait 3;loop;play;wait 30;pause;wait 3;loop;wait 2")
+        steps = "wait 16;" + ";".join(cyc for _ in range(n)); budget = n * 230 + 120
+    elif mode == "restarts":   # §10.22 follow-up: output stop and start while playing, n times (the first stop pauses: the arbiter)
+        steps = ("wait 16;seek 0;wait 3;play;wait 10;output stop;wait 3;output start;wait 5;play;wait 12;"
+                 + "".join("output stop;wait 3;output start;wait 12;" for _ in range(n)) + "pause;wait 3")
+        budget = n * 15 + 170
+    else: sys.exit("mode: cont | plays | transport | restarts")
     run(fixture, g == "on", label, steps, budget)

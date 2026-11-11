@@ -204,6 +204,8 @@ void cardClockLogReference(const char *when, IDeckLinkOutput *output) {
     DeckLinkAudioSilentBlock _isDestinationSilent;
     DeckLinkAudioReadBlock _read;
 }
+@synthesize handed = _handed;
+@synthesize cardTimeline = _cardTimeline;
 - (instancetype)initWithSampleRate:(double)sampleRate
                 sourceChannelCount:(NSInteger)sourceChannelCount
               deckLinkChannelCount:(NSInteger)deckLinkChannelCount
@@ -245,6 +247,8 @@ struct AudioSource {
     std::function<bool(void)> isSilent;                                      // mute / pause / shuttle gate, or destination
     std::function<bool(void)> isDestinationSilent;                           // the log's label: destination is Computer
     std::function<int32_t(double, int32_t, int32_t *)> read;                 // ring read (D4b-1)
+    std::function<void(double *, bool *, bool *, uint64_t *)> handed;        // Stage 1c: the handed frame per fill (§10.22)
+    bool cardTimeline = false;                                               // Stage 1c: the card is the file's clock (1b on)
 };
 
 #pragma mark - D3 scheduled player (synthetic, pluggable fill source)
@@ -452,7 +456,9 @@ public:
     }
 
     CallResult startPlayback() {
-        return { "StartScheduledPlayback", m_output->StartScheduledPlayback(0, m_timeScale, 1.0) };
+        const HRESULT hr = m_output->StartScheduledPlayback(0, m_timeScale, 1.0);
+        if (hr == S_OK) m_playbackStarted = true;   // Stage 1c: edges flush, and a flush needs a running stream
+        return { "StartScheduledPlayback", hr };
     }
 
     // --- D4b-2 audio setup (ordering matters; see the start sequence in the bridge) ---
@@ -472,6 +478,12 @@ public:
         m_maxCallbackFrames = (int32_t)maxFrames;
         m_srcScratch.assign(maxFrames * m_audio.srcChannels, 0);   // ring layout (source channels)
         m_outScratch.assign(maxFrames * m_audio.dlChannels, 0);    // wire layout (padded channels)
+        if (m_audio.handed) {   // Stage 1c: what was scheduled where, and the run's sound read ahead of the queue
+            m_hist.assign((size_t)kHistFrames * m_audio.dlChannels, 0);
+            m_pre.assign((size_t)kPreFrames * m_audio.srcChannels, 0);
+            m_preKey.assign((size_t)kPreFrames, -1);
+            m_preRun.assign((size_t)kPreFrames, 0);
+        }
         m_audioEnabled = true;
         return { "EnableAudioOutput", S_OK };
     }
@@ -534,6 +546,18 @@ public:
         if (m_output) { m_output->Release(); m_output = NULL; }
     }
 
+    // Stage 1c (§10.22): one slot as the fill saw it, and one run of a file's sound on the card's timeline.
+    struct Slot { int64_t idx = -1; double pts = NAN; bool timed = false, handed = false; };
+    struct Run { bool valid = false; int64_t start = 0, end = INT64_MAX, D = 0; uint64_t serial = 0; };
+    void logRunsSummary() const {
+        if (!m_audio.handed) return;
+        fprintf(stdout, "[SDI-AUDIO] stopped — latches %llu, run ends %llu (%llu off the line on a timed pull), re-latches %llu, late edges %llu (%lld samples), edges on a deep queue %llu, "
+                        "missing %lld samples (%lld filled in later), audio callbacks %llu, %s\n",
+                (unsigned long long)m_latches, (unsigned long long)m_runEnds, (unsigned long long)m_timedEnds, (unsigned long long)m_relatches,
+                (unsigned long long)m_lateEdges, (long long)m_lateEdgeFrames, (unsigned long long)m_deepEdges, (long long)m_runMissingFrames, (long long)m_filledLate,
+                (unsigned long long)m_audioCallbacks.load(), m_audio.cardTimeline ? "card timeline (gate on)" : "gate off: no runs, the §10.21 loop");
+    }
+
     // Stats (read after stop for the run summary).
     void setCardFrame(DeckLinkCardFrameBlock block) { m_cardFrame = block; }   // before the start, so no callback races it
     int64_t  framesScheduled() const { return m_nextIndex.load(); }
@@ -592,10 +616,25 @@ public:
     //                 depths — measured, not assumed — so the delta compensates the pipeline skew every
     //                 callback. Steering is a ≤2-sample skip/repeat per callback (see the constants).
     HRESULT RenderAudioSamples(bool preroll) override {
+        m_audioCallbacks.fetch_add(1, std::memory_order_relaxed);
         if (!m_running.load() || !m_audioEnabled) return S_OK;
 
         uint32_t buffered = 0;
         if (m_output->GetBufferedAudioSampleFrameCount(&buffered) != S_OK) return E_FAIL;
+
+        // Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): a file's sound on the card's own timeline, in runs, under card lock (gate on)
+        // only. A live source, and a file with the gate off, keep the §10.21 anchor loop below (§10.20: gate off is today's path).
+        if (m_audio.handed && m_audio.cardTimeline && m_byTime.load()) {
+            if (!m_runsMode) {
+                m_runsMode = true; m_runActive = false; m_run = Run(); m_prev = Run(); m_errEma = 0.0; m_cand = Candidate();
+                fprintf(stdout, "[SDI-AUDIO] runs path entered: preroll %d, playback started %d, buffered %u, stream %lld, audio callbacks %llu\n",
+                        (int)preroll, (int)m_playbackStarted.load(), buffered, (long long)m_audioStreamFrames,
+                        (unsigned long long)m_audioCallbacks.load());
+                fflush(stdout);
+            }
+            return renderRuns(preroll);
+        }
+        if (m_runsMode) { m_runsMode = false; m_runActive = false; m_cursorAnchored = false; }
 
         const double rate = (double)m_audio.sampleRate;
         const int32_t targetFrames = (int32_t)std::lround(rate * kAudioTargetDepthSeconds);
@@ -823,6 +862,18 @@ public:
         tagFrame(frame, idx, m_signal);   // the signal this frame's picture was rendered under (colour S7, D1)
         m_output->ScheduleVideoFrame(frame, idx * m_frameDuration, m_frameDuration, m_timeScale);
 
+        // Diagnostic (§10.22, verification): the audio callback must keep coming while the output runs.
+        if (m_audioEnabled && (idx % 48) == 0) {
+            const uint64_t ac = m_audioCallbacks.load(std::memory_order_relaxed);
+            if (ac == m_audioCallbacksSeen) {
+                uint32_t ab = 0; m_output->GetBufferedAudioSampleFrameCount(&ab);
+                fprintf(stdout, "[SDI-AUDIO] !! no audio callback in the last 48 frames (frame %lld): callbacks %llu, audio buffered %u, queue end %lld\n",
+                        (long long)idx, (unsigned long long)ac, ab, (long long)m_audioStreamFrames);
+                fflush(stdout);
+            }
+            m_audioCallbacksSeen = ac;
+        }
+
         // Periodic queue-depth + completion summary (~every 48 frames ≈ 2 s).
         if ((idx % 48) == 0) {
             uint32_t buffered = 0; m_output->GetBufferedVideoFrameCount(&buffered);
@@ -999,12 +1050,349 @@ private:
     // the start thread during preroll and on the SDK's video thread after; the audio callback reads, so under a lock.
     void noteHandedFrame(int64_t idx) {
         if (!m_audioEnabled || !m_audio.sourceTime) return;
+        if (m_audio.handed) {
+            // Stage 1c: every slot, in order, for the audio callback's runs (§10.22). A fill that handed nothing new (a neutral or
+            // held picture) is a slot with no frame of the run.
+            double hp = NAN; bool timed = false, byTime = false; uint64_t seq = 0;
+            m_audio.handed(&hp, &timed, &byTime, &seq);
+            const bool handed = seq != m_lastHandSeq;
+            m_lastHandSeq = seq;
+            m_byTime.store(byTime);
+            os_unfair_lock_lock(&m_handedLock);
+            m_slots[m_slotWrites % kSlotRing] = Slot{ idx, handed ? hp : NAN, handed && timed, handed };
+            m_slotWrites++;
+            os_unfair_lock_unlock(&m_handedLock);
+        }
         const double pts = m_audio.sourceTime();
         os_unfair_lock_lock(&m_handedLock);
         if (!std::isfinite(pts)) { m_handedPts = NAN; m_handedFirstIdx = m_handedLastIdx = -1; }
         else if (pts != m_handedPts || m_handedFirstIdx < 0) { m_handedPts = pts; m_handedFirstIdx = m_handedLastIdx = idx; }
         else m_handedLastIdx = idx;
         os_unfair_lock_unlock(&m_handedLock);
+    }
+
+    // ===== Stage 1c: a file's sound on the card's own timeline (docs/CARD_CLOCK_FINDINGS.md §10.20, §10.22) =====================
+    //
+    // A RUN is a stretch of play whose picture follows one line, slot idx ↔ source time Φ + idx × frame. Inside it, card sample s
+    // carries source sample s + D, D = round(Φ × rate): one mapping, so each frame gets exactly its samples (800/801 at 59.94) and
+    // nothing is steered. A run starts (LATCH) at the first timed slot whose picture moved, with the gate open; its sound starts with
+    // the slot before when that slot showed the frame just before (at a Play, the paused frame's last showing). It ends at the first
+    // slot off the line whose pull was not timed (pause, seek, step, loop wrap, shuttle), at that slot's first sample.
+    // EDGES: audio is queued ~200 ms ahead and the picture ~3 frames, so an edge lands inside what is already scheduled. A flush
+    // removes all but the ~110 ms the card has committed, and the card ADDS whatever is scheduled into that committed window
+    // (C0, §10.22). So the edge schedules (desired − what was scheduled) there, from the history ring, and schedules normally after it.
+    // Gate on only (the card is the file's clock): a timed slot off the line ends the run, logged; expected never in play. With the
+    // gate off a file keeps the §10.21 loop (§10.20; the runs' gate-off steering was measured and dropped, §10.22). The !cardTimeline
+    // branches below are therefore not reached.
+
+    int64_t A(int64_t n) const { return n * (int64_t)m_audio.sampleRate * (int64_t)m_frameDuration / (int64_t)m_timeScale; }
+    double samplesPerSlot() const { return (double)m_audio.sampleRate * (double)m_frameDuration / (double)m_timeScale; }
+
+    // The sound card position `a` should carry, for n positions, into `dst` (wire layout). Zero outside every run and under the gate.
+    void fillDesired(int64_t a, int32_t n, bool silent, int32_t *dst, int64_t &pcm, int64_t &missing, int64_t *firstMissing = nullptr) {
+        const uint32_t sc = m_audio.srcChannels, dc = m_audio.dlChannels;
+        memset(dst, 0, (size_t)n * dc * sizeof(int32_t));
+        // The gate does not cut a run: its sound plays until the picture leaves the line (pause, seek, shuttle end the run there),
+        // so it stops with the last frame that moved. A gate silent while the picture keeps moving (mute, destination Computer)
+        // ends the run after kGateSlots slots (processSlots). Outside a run there is nothing to play.
+        (void)silent;
+        if (n <= 0) return;
+        for (const Run *r : { &m_prev, &m_run }) {
+            if (!r->valid) continue;
+            const int64_t lo = std::max(a, r->start), hi = std::min(a + (int64_t)n, r->end);
+            if (lo >= hi) continue;
+            int32_t *src = m_srcScratch.data();
+            const double rate = (double)m_audio.sampleRate;
+            auto readAt = [&](int64_t p, int32_t k) { return m_audio.read ? std::max(0, m_audio.read((double)(p + r->D) / rate, k, src)) : 0; };
+            // The ring answers 0 for a read that starts before what it holds, so after a seek the chunk holding the first decoded sample
+            // would read as empty: find where the data starts, 1 ms at a time, and read from there.
+            int64_t from = lo;
+            int32_t got = readAt(from, (int32_t)(hi - from));
+            while (got == 0 && from + 48 < hi) { from += 48; if (readAt(from, 1) == 1) got = readAt(from, (int32_t)(hi - from)); }
+            for (int32_t f = 0; f < got; f++)
+                for (uint32_t c = 0; c < sc; c++) dst[(size_t)(from - a + f) * dc + c] = src[(size_t)f * sc + c];
+            // What the tap no longer has (a seek empties it while the old run still has frames to play): the prefetch ring.
+            int32_t fromPre = 0;
+            if (!m_pre.empty()) {
+                for (int64_t q = lo; q < hi; q++) {
+                    if (q >= from && q < from + got) continue;
+                    const size_t slot = (size_t)(q % kPreFrames);
+                    if (m_preKey[slot] != q || m_preRun[slot] != r->serial) continue;
+                    for (uint32_t c = 0; c < sc; c++) dst[(size_t)(q - a) * dc + c] = m_pre[slot * sc + c];
+                    fromPre++;
+                }
+            }
+            got += fromPre;
+            pcm += got; missing += (hi - lo) - got;
+            if (firstMissing && (hi - lo) - got > 0) {
+                const int64_t fm = got > 0 && from > lo ? lo : (got > 0 ? from + got : lo);
+                *firstMissing = std::min(*firstMissing, fm);
+            }
+        }
+    }
+
+    void remember(int64_t a, int32_t n, const int32_t *frames) {
+        const uint32_t dc = m_audio.dlChannels;
+        for (int32_t f = 0; f < n; f++)
+            memcpy(&m_hist[(size_t)((a + f) % kHistFrames) * dc], frames + (size_t)f * dc, dc * sizeof(int32_t));
+    }
+
+    // Make every position from `edge` on carry what the runs now say. Returns how late the rewrite started, in samples (0: on time).
+    // NO FLUSH (§10.22, C0 and C0b): a flush cannot remove the ~100 ms the card has committed, and where that window ends is known only
+    // to ±2 samples, which left a stray sample of the old sound in the silence after a Pause. With the queue held under the committed
+    // window (kRunsDepthFrames), every queued sample is committed, and the card ADDS what is scheduled over it: so (desired − what was
+    // scheduled there, from the history ring) leaves exactly the desired sound, from 1 ms past the card's position to the queue's end.
+    int64_t rewriteFrom(int64_t edge, bool silent, const char *why, bool quiet = false) {
+        if (edge >= m_audioStreamFrames) return 0;   // not scheduled yet: the top-up will write it
+        BMDTimeValue now = 0; double speed = 0; uint32_t buffered = 0;
+        m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
+        m_output->GetBufferedAudioSampleFrameCount(&buffered);
+        const int64_t lo = std::max<int64_t>(edge, (int64_t)now + kEdgeGuardFrames), hi = m_audioStreamFrames;
+        int64_t pcm = 0, missing = 0, written = 0, firstMissing = INT64_MAX;
+        for (int64_t a = lo; a < hi; ) {
+            const int32_t n = (int32_t)std::min<int64_t>(hi - a, m_maxCallbackFrames);
+            int32_t *dst = m_outScratch.data();
+            fillDesired(a, n, silent, dst, pcm, missing, &firstMissing);
+            const uint32_t dc = m_audio.dlChannels;
+            for (int64_t i = 0; i < (int64_t)n * dc; i++) {
+                const size_t h = (size_t)((a + i / dc) % kHistFrames) * dc + (size_t)(i % dc);
+                const int64_t want = dst[i], had = m_hist[h];
+                m_hist[h] = (int32_t)want;
+                dst[i] = (int32_t)std::max<int64_t>(INT32_MIN, std::min<int64_t>(INT32_MAX, want - had));
+            }
+            uint32_t w = 0;
+            m_output->ScheduleAudioSamples(dst, (uint32_t)n, a, (BMDTimeScale)m_audio.sampleRate, &w);
+            written += w;
+            if (w < (uint32_t)n) { m_shortSchedules++; break; }
+            a += n;
+        }
+        m_pendingFrom = firstMissing == INT64_MAX ? -1 : firstMissing;   // still to fill when the sound arrives
+        if (quiet) { if (pcm > 0) m_filledLate += pcm; return 0; }
+        const int64_t late = std::max<int64_t>(0, lo - edge);
+        if (late > 0) { m_lateEdges++; m_lateEdgeFrames += late; }
+        if (buffered > (uint32_t)kRunsCommittedFrames) m_deepEdges++;
+        fprintf(stdout, "[SDI-AUDIO] edge (%s) at stream %lld: now %lld, queued %u to %lld; rewrote %lld..%lld (%lld written, %lld of them sound, "
+                        "%lld missing), late %lld samples%s\n",
+                why, (long long)edge, (long long)now, buffered, (long long)hi, (long long)lo, (long long)hi, (long long)written, (long long)pcm,
+                (long long)missing, (long long)late, buffered > (uint32_t)kRunsCommittedFrames ? " · QUEUE DEEPER THAN THE COMMITTED WINDOW" : "");
+        fflush(stdout);
+        return late;
+    }
+
+    void latchRun(const Slot &slot, int64_t startSlot, bool withPrev, bool silent, const char *why) {
+        const double spf = samplesPerSlot();
+        const int64_t D = llround(slot.pts * (double)m_audio.sampleRate - (double)slot.idx * spf);
+        Run r; r.valid = true; r.start = A(startSlot); r.end = INT64_MAX; r.D = D; r.serial = ++m_runSerial; m_preTo = r.start;
+        m_run = r; m_runActive = true; m_errEma = 0.0; m_steerErr = NAN; m_latches++; m_gateSlots = 0;
+        BMDTimeValue now = 0; double speed = 0;
+        m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
+        fprintf(stdout, "[SDI-AUDIO] latch #%llu (%s): line from slot %lld pts %.6f, sound from slot %lld%s, D %lld, from stream %lld (source %.6f s); now %lld; "
+                        "gate opened at %lld, so %lld samples (%.1f ms) of silence before the sound%s\n",
+                (unsigned long long)m_latches, why, (long long)slot.idx, slot.pts, (long long)startSlot, withPrev ? " (the held frame's last showing)" : "",
+                (long long)D, (long long)r.start, (double)(r.start + D) / m_audio.sampleRate, (long long)now, (long long)m_gateOpenAt,
+                (long long)(m_gateOpenAt >= 0 ? r.start - m_gateOpenAt : -1), m_gateOpenAt >= 0 ? (r.start - m_gateOpenAt) / (m_audio.sampleRate / 1000.0) : -1.0,
+                m_audioStreamFrames > r.start ? "; rewriting what is queued" : "");
+        fflush(stdout);
+        const int64_t late = rewriteFrom(r.start, silent, "latch");
+#ifdef DEBUG
+        if (kAudioCorrLog) {   // the run's first sample on the card's stream, for w1c-wire.py's s0
+            const int64_t first = r.start + late;
+            fprintf(stdout, "[AUDIO-CORR] s=%lld n=0 got=0 c=0 k=a e=+0.000 cur=%.6f\n", (long long)first, (double)(first + D) / m_audio.sampleRate);
+        }
+#endif
+        m_gateOpenAt = -1;
+    }
+
+    void endRun(int64_t idx, bool silent, const char *why) { endRunAt(A(idx), idx, silent, why); }
+    void endRunAt(int64_t end, int64_t idx, bool silent, const char *why) {
+        m_run.end = end;
+        m_prev = m_run; m_run = Run(); m_runActive = false; m_steerErr = NAN; m_runEnds++;
+        fprintf(stdout, "[SDI-AUDIO] run end (%s) at slot %lld: sound to stream %lld (source %.6f s)\n",
+                why, (long long)idx, (long long)m_prev.end, (double)(m_prev.end + m_prev.D) / m_audio.sampleRate);
+        fflush(stdout);
+        rewriteFrom(m_prev.end, silent, why);
+    }
+
+    // The slots handed since the last callback, in order.
+    void processSlots(bool silent, bool live, uint32_t buffered) {
+        Slot local[kSlotRing]; int n = 0;
+        os_unfair_lock_lock(&m_handedLock);
+        const uint64_t w = m_slotWrites;
+        uint64_t lost = 0;
+        if (w - m_slotReads > (uint64_t)kSlotRing) { lost = w - m_slotReads - kSlotRing; m_slotReads = w - kSlotRing; }
+        for (uint64_t k = m_slotReads; k < w; k++) local[n++] = m_slots[k % kSlotRing];
+        m_slotReads = w;
+        os_unfair_lock_unlock(&m_handedLock);
+        if (lost && m_runActive && live && n) endRun(local[0].idx, silent, "slots lost");
+        const double spf = samplesPerSlot(), rate = (double)m_audio.sampleRate;
+        for (int k = 0; k < n; k++) {
+            const Slot &sl = local[k];
+            const bool hasPts = sl.handed && std::isfinite(sl.pts);
+            const bool moved = hasPts && sl.pts != m_prevSlotPts;
+            bool endedHere = false;
+            if (live && m_runActive) {
+                const double e = hasPts ? sl.pts * rate - ((double)sl.idx * spf + (double)m_run.D) : NAN;
+                if (hasPts && std::fabs(e) <= spf * 0.5) {
+                    if (sl.timed && moved) m_steerErr = e;
+                    // The gate silent while the picture stays on the line: a mute, or the destination moved to the Mac.
+                    if (silent && ++m_gateSlots >= kGateSlots) {
+                        BMDTimeValue now = 0; double speed = 0;
+                        m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
+                        endRunAt((int64_t)now + kEdgeGuardFrames, sl.idx, silent, "gate silent with the picture moving: mute or destination");
+                    }
+                    if (!silent) m_gateSlots = 0;
+                } else if (hasPts && sl.timed && !m_audio.cardTimeline) {
+                    m_steerErr = e;   // gate off: a picture slip; the loop walks the sound to it
+                } else {
+                    // Off the run's line. On a timed pull under card lock that is not expected in play; it is seen as the picture
+                    // stepping back a frame on the pull before a seek or a loop's wrap. Counted apart; a new run latching on this very
+                    // slot is a re-latch.
+                    if (hasPts && sl.timed) {
+                        m_timedEnds++;
+                        fprintf(stdout, "[SDI-AUDIO] off the line on a timed pull: slot %lld pts %.6f is %+.1f samples off\n", (long long)sl.idx, sl.pts, e);
+                    }
+                    endRun(sl.idx, silent, !sl.handed ? "no frame handed" : sl.timed ? "off the line on a timed pull" : "untimed pull");
+                    endedHere = true;
+                }
+            }
+            // A latch rewrites what is queued, so it waits until the queue is within the committed window (after output start, or
+            // a switch from a live source, it is still the 200 ms of the live path). It is CONFIRMED on the next slot: the first
+            // frame after a seek can carry the seek's time rather than its own (600.000000 for the frame at 599.999400, §10.22), so
+            // the line is taken from a frame whose step from the one before is exactly one frame. The sound still starts at the
+            // first slot that moved.
+            if (live && !m_runActive) {
+                const bool eligible = !silent && hasPts && sl.timed && moved && buffered <= (uint32_t)kRunsCommittedFrames;
+                if (m_cand.valid && eligible && sl.idx == m_cand.line.idx + 1) {
+                    const bool oneFrame = std::fabs((sl.pts - m_cand.line.pts) * rate - spf) < 2.0;
+                    if (oneFrame || ++m_cand.tries >= 3) {
+                        const Slot line = oneFrame ? m_cand.line : sl;
+                        if (endedHere) m_relatches++;
+                        latchRun(line, m_cand.startSlot, m_cand.fromPrev, silent, oneFrame ? "first slot that moved, confirmed by the next"
+                                                                                           : "first slot that moved; no one-frame step in 3 slots");
+                        m_cand.valid = false;
+                    } else {
+                        m_cand.line = sl;   // the frame before was off the grid: take the line from this one
+                    }
+                } else if (eligible) {
+                    const bool fromPrev = m_prevSlotIdx == sl.idx - 1 && std::isfinite(m_prevSlotPts)
+                        && std::fabs((sl.pts - m_prevSlotPts) * rate - spf) < 2.0;
+                    m_cand.valid = true; m_cand.line = sl; m_cand.startSlot = fromPrev ? sl.idx - 1 : sl.idx; m_cand.fromPrev = fromPrev; m_cand.tries = 0;
+                } else {
+                    m_cand.valid = false;
+                }
+            }
+            m_prevSlotPts = hasPts ? sl.pts : NAN; m_prevSlotIdx = sl.idx;
+        }
+    }
+
+    // Copy the current run's sound from the tap into the prefetch ring, up to kPrefetchFrames past the queue: at 23.976 the picture
+    // is handed up to 125 ms ahead, beyond the 80 ms queue, and a seek empties the tap before the old run's last frames are scheduled.
+    void prefetch() {
+        if (!m_runActive || m_pre.empty() || !m_audio.read) return;
+        const uint32_t sc = m_audio.srcChannels;
+        const int64_t from = std::max({ m_preTo, m_audioStreamFrames, m_run.start });
+        const int64_t to = std::min<int64_t>(m_audioStreamFrames + kPrefetchFrames, m_run.end);
+        if (to <= from) return;
+        const int32_t n = (int32_t)std::min<int64_t>(to - from, m_maxCallbackFrames);
+        int32_t *src = m_srcScratch.data();
+        const int32_t got = std::max(0, m_audio.read((double)(from + m_run.D) / (double)m_audio.sampleRate, n, src));
+        for (int32_t f = 0; f < got; f++) {
+            const size_t slot = (size_t)((from + f) % kPreFrames);
+            m_preKey[slot] = from + f; m_preRun[slot] = m_run.serial;
+            memcpy(&m_pre[slot * sc], src + (size_t)f * sc, sc * sizeof(int32_t));
+        }
+        m_preTo = from + got;   // a short read (not decoded yet) is tried again next callback
+    }
+
+    HRESULT renderRuns(bool preroll) {
+        const double rate = (double)m_audio.sampleRate;
+        const bool silent = m_audio.isSilent ? m_audio.isSilent() : true;
+        const bool live = !preroll && m_playbackStarted.load();
+        if (live && !silent && m_wasSilent) {
+            BMDTimeValue now = 0; double speed = 0;
+            m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
+            m_gateOpenAt = (int64_t)now;
+        }
+        m_wasSilent = silent;
+        uint32_t queued = 0;
+        m_output->GetBufferedAudioSampleFrameCount(&queued);
+        processSlots(silent, live, queued);
+
+        // Gate off only: steer D toward the exact error, as §10.21's loop (0 between slips: the error is under half a sample).
+        int32_t correction = 0;
+        if (live && m_runActive && !m_audio.cardTimeline && std::isfinite(m_steerErr)) {
+            m_errEma += kAudioErrorEmaAlpha * (m_steerErr - m_errEma);
+            if (std::fabs(m_errEma) > kAudioResyncSeconds * rate) {
+                m_resyncs++;
+                fprintf(stdout, "DeckLinkAudio: !! RESYNC (run) — smoothed error %+.1f ms; D %lld → %lld\n",
+                        m_errEma / rate * 1000.0, (long long)m_run.D, (long long)(m_run.D + llround(m_steerErr)));
+                fflush(stdout);
+                m_run.D += llround(m_steerErr); m_errEma = 0.0; m_steerErr = 0.0;
+            } else {
+                correction = (int32_t)std::lround(std::max((double)-kAudioMaxCorrectionFrames,
+                                                           std::min((double)kAudioMaxCorrectionFrames, m_errEma * 0.10)));
+                if (correction) { m_run.D += correction; m_steerErr -= correction; m_errEma -= correction; }
+            }
+        }
+
+        // Sound that was not decoded yet when its positions were scheduled (zeros): write it in once it is there, while it is still
+        // ahead of the card. After a seek or a step the first ~100 ms are decoded only once play starts.
+        if (live && m_pendingFrom >= 0) {
+            BMDTimeValue now = 0; double speed = 0;
+            m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
+            if (m_pendingFrom < (int64_t)now + kEdgeGuardFrames) m_pendingFrom = (int64_t)now + kEdgeGuardFrames;
+            if (m_pendingFrom >= m_audioStreamFrames) m_pendingFrom = -1;
+            else rewriteFrom(m_pendingFrom, silent, "fill", true);
+        }
+
+        if (live) prefetch();
+
+        uint32_t buffered = 0;
+        if (m_output->GetBufferedAudioSampleFrameCount(&buffered) != S_OK) return E_FAIL;
+        const int32_t targetFrames = (int32_t)kRunsDepthFrames;   // under the committed window: see rewriteFrom
+        if ((int32_t)buffered >= targetFrames) {
+            if (preroll) endAudioPrerollIfNeeded();
+            // Diagnostic (§10.22, verification): a queue that stays at or above the depth for over a second of stream time means the
+            // card is not consuming it.
+            BMDTimeValue hnow = 0; double hspeed = 0;
+            m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &hnow, &hspeed);
+            if (m_holdSince < 0) m_holdSince = (int64_t)hnow;
+            else if (!m_holdLogged && (int64_t)hnow - m_holdSince > (int64_t)m_audio.sampleRate) {
+                m_holdLogged = true;
+                fprintf(stdout, "[SDI-AUDIO] !! holding over 1 s: buffered %u, now %lld (speed %.3f), queue end %lld, preroll %d, playback started %d\n",
+                        buffered, (long long)hnow, hspeed, (long long)m_audioStreamFrames, (int)preroll, (int)m_playbackStarted.load());
+                fflush(stdout);
+            }
+            return S_OK;
+        }
+        m_holdSince = -1; m_holdLogged = false;
+        const int32_t want = std::min(targetFrames - (int32_t)buffered, m_maxCallbackFrames);
+        if (want <= 0) return S_OK;
+        int64_t pcm = 0, missing = 0, firstMissing = INT64_MAX;
+        int32_t *dst = m_outScratch.data();
+        const int64_t s = m_audioStreamFrames;
+        fillDesired(s, want, silent, dst, pcm, missing, &firstMissing);
+        if (firstMissing != INT64_MAX && m_pendingFrom < 0) m_pendingFrom = firstMissing;
+        remember(s, want, dst);
+        const uint32_t written = scheduleFrames(dst, want);
+        if (missing > 0) { m_runMissingFrames += missing; m_underruns++; }
+        m_pcmFramesScheduled += std::min<int64_t>(written, pcm);
+        m_silenceFramesScheduled += written - std::min<int64_t>(written, pcm);
+#ifdef DEBUG
+        if (kAudioCorrLog && pcm > 0)
+            fprintf(stdout, "[AUDIO-CORR] s=%lld n=%u got=%lld c=%d k=c e=%+.3f cur=%.6f\n", (long long)s, written, (long long)pcm, correction,
+                    m_errEma / rate * 1000.0, (double)(s + m_run.D) / rate);
+#endif
+        if (m_audioStreamFrames - m_lastAudioLogFrames >= (BMDTimeValue)m_audio.sampleRate) {
+            m_lastAudioLogFrames = m_audioStreamFrames;
+            fprintf(stdout, "[SDI-AUDIO] runs: %s, D %lld, buffered %u, latches %llu, run ends %llu, re-latches %llu, late edges %llu (%lld samples), "
+                            "missing %lld samples, err %+.2f samples, gate %s\n",
+                    m_runActive ? "in a run" : "between runs", (long long)m_run.D, buffered, (unsigned long long)m_latches, (unsigned long long)m_runEnds,
+                    (unsigned long long)m_relatches, (unsigned long long)m_lateEdges, (long long)m_lateEdgeFrames, (long long)m_runMissingFrames,
+                    std::isfinite(m_steerErr) ? m_steerErr : 0.0, silent ? "silent" : "open");
+            fflush(stdout);
+        }
+        return S_OK;
     }
 
     // Audio callback: the handed frame's pts and the slot its source time counts from. false: none yet, or the renderer has none.
@@ -1153,6 +1541,38 @@ private:
     std::vector<int32_t> m_srcScratch;      // preallocated: ring layout (source channels)
     std::vector<int32_t> m_outScratch;      // preallocated: wire layout (padded channels)
     BMDTimeValue m_audioStreamFrames = 0;   // audio streamTime, in sample frames (timeScale = sampleRate)
+    // Stage 1c (§10.22). The slot ring: written by fills under m_handedLock, read in order by the audio callback.
+    static const int kSlotRing = 64;
+    Slot m_slots[kSlotRing];
+    uint64_t m_slotWrites = 0, m_slotReads = 0;
+    uint64_t m_lastHandSeq = 0;                       // fill thread only
+    std::atomic<bool> m_byTime{false};
+    std::atomic<bool> m_playbackStarted{false};
+    std::atomic<uint64_t> m_audioCallbacks{0};   // every RenderAudioSamples call (diagnostic)
+    uint64_t m_audioCallbacksSeen = 0;            // video thread: the count at the last check
+    int64_t m_holdSince = -1; bool m_holdLogged = false;   // audio thread: the runs path holding at depth
+    // Runs: audio callback only.
+    Run m_run, m_prev;
+    bool m_runsMode = false, m_runActive = false, m_wasSilent = true;
+    double m_prevSlotPts = NAN; int64_t m_prevSlotIdx = -1;
+    int64_t m_gateOpenAt = -1;
+    double m_steerErr = NAN;                          // gate off: the exact error, samples (+: the picture is ahead of the sound)
+    static const int64_t kHistFrames = 65536;         // what was scheduled at each stream position, for the edges' rewrite
+    static const int64_t kEdgeGuardFrames = 48;       // an edge rewrites no nearer than 1 ms after the card's position (C0, C0b: 1 ms lands)
+    static const int64_t kRunsDepthFrames = 3840;     // a file's queue: 80 ms, under the committed window (4715–5976 measured, C0)
+    static const int64_t kRunsCommittedFrames = 4400; // a queue at most this deep is all committed: a latch waits for it
+    uint64_t m_deepEdges = 0, m_timedEnds = 0;
+    static const int kGateSlots = 8;                  // slots of gate silence with the picture on the line before the run ends
+    int m_gateSlots = 0;
+    static const int64_t kPreFrames = 16384, kPrefetchFrames = 6400;   // the prefetch ring; how far past the queue it reads (133 ms)
+    std::vector<int32_t> m_pre; std::vector<int64_t> m_preKey; std::vector<uint64_t> m_preRun;
+    int64_t m_preTo = 0; uint64_t m_runSerial = 0;
+    struct Candidate { bool valid = false; Slot line; int64_t startSlot = 0; bool fromPrev = false; int tries = 0; } m_cand;
+    int64_t m_pendingFrom = -1;                       // the first queued position scheduled as zeros for sound not decoded yet
+    int64_t m_filledLate = 0;                         // samples written in later that way
+    std::vector<int32_t> m_hist;
+    uint64_t m_latches = 0, m_runEnds = 0, m_relatches = 0, m_lateEdges = 0;
+    int64_t m_lateEdgeFrames = 0, m_runMissingFrames = 0;
     // The anchor's frame (noteHandedFrame / handedFrame): written by fills, read by the audio callback, under m_handedLock.
     os_unfair_lock m_handedLock = OS_UNFAIR_LOCK_INIT;
     double m_handedPts = NAN;
@@ -1827,6 +2247,12 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
         src.isSilent   = [silentBlock]() -> bool { return silentBlock() ? true : false; };
         src.isDestinationSilent = [destinationBlock]() -> bool { return destinationBlock() ? true : false; };
         src.read       = [readBlock](double t, int32_t n, int32_t *dst) -> int32_t { return readBlock(t, n, dst); };
+        if (DeckLinkAudioHandedBlock handedBlock = [audioConfig.handed copy]) {
+            src.handed = [handedBlock](double *pts, bool *timed, bool *byTime, uint64_t *seq) {
+                BOOL t = NO, b = NO; handedBlock(pts, &t, &b, seq); *timed = t; *byTime = b;
+            };
+        }
+        src.cardTimeline = audioConfig.cardTimeline;
         step = player->enableAudio(src);
         if (!step.ok()) {
             [log addObject:[NSString stringWithFormat:
@@ -1975,6 +2401,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
                     (unsigned long long)_player->audioShortReadCount(),
                     (unsigned long long)_player->audioShortScheduleCount(),
                     (unsigned long long)_player->audioResyncCount());
+            _player->logRunsSummary();
             if (pcm == 0 && silence > 0) {
                 fprintf(stdout, "DeckLinkAudio: stopped — real=0f: NO audio reached SDI this run. The "
                                 "stream was continuous silence; the zero underruns/shortReads/resyncs "
