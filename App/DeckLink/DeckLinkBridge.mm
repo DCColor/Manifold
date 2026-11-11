@@ -18,6 +18,7 @@
 
 #if DEBUG
 #include <mach/mach_time.h>
+#include <os/lock.h>
 // [CARDCLOCK] (MANIFOLD_CARDCLOCK_LOG=1; DEBUG; pre-ship removal, docs/BUGS.md; docs/CARD_CLOCK_FINDINGS.md). Measurement only, reads
 // nothing but status. Once a second from the completion callback: the completed-frame count, the host time, the frame's completion
 // timestamp (the SDK: locked to the system clock) and the output's hardware reference clock (the SDK: locked to the rate the hardware
@@ -363,6 +364,10 @@ static const double kAudioCriticalDepthSeconds = 0.050;
 static const double kAudioErrorEmaAlpha = 0.02;      // ~1 s time constant at a 50 Hz callback
 static const int32_t kAudioMaxCorrectionFrames = 2;
 static const double kAudioResyncSeconds = 0.100;
+// The anchor's frame (docs/CARD_CLOCK_FINDINGS.md §10.21): a frame handed in several consecutive slots is on the wire from the
+// first, so its source time counts from that slot. That covers a source slower than the output (24p in 59.94: 2–3 slots; 15p:
+// 4). A frame held longer (pause, a held picture) counts from its newest slot, as the depth term did before it.
+static const int64_t kAudioMaxRepeatSlots = 3;   // newest − first, slots
 
 #ifdef DEBUG
 // BRANCH TRACE burst length (dev diagnostic — see logAudioBranch). The first N callbacks print
@@ -573,10 +578,17 @@ public:
     //                 gaps, no repeats, no clicks). It is steered toward the source time the video on
     //                 the wire will carry when these samples reach it:
     //
-    //                   ideal = stagedPts + (audioDepth − videoDepth) + trim
+    //                   ideal = handedPts + (audioStreamTime − handedStreamTime) + trim
     //
-    //                 stagedPts is the source PTS of the frame in the DeckLink staging buffer (the frame
-    //                 the fill block hands the card). audioDepth/videoDepth are the two pipelines' queue
+    //                 handedPts is the source PTS of the frame the fill block last handed the card, and
+    //                 handedStreamTime the stream time it was scheduled at (its slot × the frame duration);
+    //                 audioStreamTime is where the samples about to be scheduled land. Both streams share
+    //                 the t=0 of StartScheduledPlayback(0,…), so the difference is exact: no queue depth is
+    //                 sampled and no callback phase enters (docs/CARD_CLOCK_FINDINGS.md §10.16, §10.21).
+    //                 Until 2026-11-10 the term was stagedPts + (audioDepth − videoDepth), videoDepth =
+    //                 (bufferedVideo + 1) frames: it counted 5 frames for a frame that is 3 − φ from the
+    //                 wire, so SDI sound ran 2.5 frames late (docs/BUGS.md). What follows describes it.
+    //                 audioDepth/videoDepth were the two pipelines' queue
     //                 depths — measured, not assumed — so the delta compensates the pipeline skew every
     //                 callback. Steering is a ≤2-sample skip/repeat per callback (see the constants).
     HRESULT RenderAudioSamples(bool preroll) override {
@@ -627,15 +639,23 @@ public:
             return scheduleSilence(want) ? S_OK : E_FAIL;
         }
 
-        // Pipeline-depth delta. audioDepth: these samples queue BEHIND `buffered`, so they reach the
-        // wire that much later. videoDepth: the staged frame is picked up by the next frame-completion
-        // callback and then sits behind the frames already queued — hence the +1. Both are measured
-        // from the card each callback, so a changing queue depth self-compensates.
-        uint32_t bufferedVideo = 0;
+        // The handed frame and its slot (docs/CARD_CLOCK_FINDINGS.md §10.21). The samples scheduled now land at
+        // stream time m_audioStreamFrames / rate; the handed frame went out at handedIdx × frame. The source time
+        // of those samples is the frame's pts plus the difference. This replaced a queue-depth estimate that
+        // counted the handed frame 2 + φ frames too far from the wire (docs/BUGS.md, "SDI audio lags its
+        // picture by 2.5 frames").
+        double handedPts = NAN;
+        int64_t handedIdx = -1;
+        if (!handedFrame(handedPts, handedIdx)) {
+            m_cursorAnchored = false;
+            logAudioBranch("SILENCE · no handed frame to anchor to", silent, -1, want);
+            return scheduleSilence(want) ? S_OK : E_FAIL;
+        }
+        uint32_t bufferedVideo = 0;   // the periodic log's vq= only
         m_output->GetBufferedVideoFrameCount(&bufferedVideo);
-        const double audioDepth = (double)buffered / rate;
-        const double videoDepth = (double)(bufferedVideo + 1) * (double)m_frameDuration / (double)m_timeScale;
-        const double ideal = stagedPts + (audioDepth - videoDepth) + m_audio.trimSeconds;
+        const double audioStreamTime = (double)m_audioStreamFrames / rate;
+        const double handedStreamTime = (double)handedIdx * (double)m_frameDuration / (double)m_timeScale;
+        const double ideal = handedPts + (audioStreamTime - handedStreamTime) + m_audio.trimSeconds;
 
         int32_t correction = 0;
         char corrKind = 'c';   // [AUDIO-CORR] only
@@ -970,7 +990,30 @@ private:
         if (m_fill(frameIndex, (uint8_t *)bytes, m_rowBytes, m_width, m_height, &signal)) m_signal = signal;
         buffer->EndAccess(bmdBufferAccessWrite);
         buffer->Release();
+        noteHandedFrame(frameIndex);
         return { "GetBytes", S_OK };
+    }
+
+    // The audio anchor's frame (docs/CARD_CLOCK_FINDINGS.md §10.21): after each fill, the pts the fill handed the card (the
+    // renderer's `currentDeckLinkSourcePts`, the same read the anchor made before) and the slot it went out in. Fills run on
+    // the start thread during preroll and on the SDK's video thread after; the audio callback reads, so under a lock.
+    void noteHandedFrame(int64_t idx) {
+        if (!m_audioEnabled || !m_audio.sourceTime) return;
+        const double pts = m_audio.sourceTime();
+        os_unfair_lock_lock(&m_handedLock);
+        if (!std::isfinite(pts)) { m_handedPts = NAN; m_handedFirstIdx = m_handedLastIdx = -1; }
+        else if (pts != m_handedPts || m_handedFirstIdx < 0) { m_handedPts = pts; m_handedFirstIdx = m_handedLastIdx = idx; }
+        else m_handedLastIdx = idx;
+        os_unfair_lock_unlock(&m_handedLock);
+    }
+
+    // Audio callback: the handed frame's pts and the slot its source time counts from. false: none yet, or the renderer has none.
+    bool handedFrame(double &pts, int64_t &idx) {
+        os_unfair_lock_lock(&m_handedLock);
+        pts = m_handedPts;
+        idx = (m_handedLastIdx - m_handedFirstIdx) <= kAudioMaxRepeatSlots ? m_handedFirstIdx : m_handedLastIdx;
+        os_unfair_lock_unlock(&m_handedLock);
+        return std::isfinite(pts) && idx >= 0;
     }
 
     // A fresh frame (not a pooled one, which the card may still hold) filled with video black, or NULL. Made while
@@ -1110,6 +1153,10 @@ private:
     std::vector<int32_t> m_srcScratch;      // preallocated: ring layout (source channels)
     std::vector<int32_t> m_outScratch;      // preallocated: wire layout (padded channels)
     BMDTimeValue m_audioStreamFrames = 0;   // audio streamTime, in sample frames (timeScale = sampleRate)
+    // The anchor's frame (noteHandedFrame / handedFrame): written by fills, read by the audio callback, under m_handedLock.
+    os_unfair_lock m_handedLock = OS_UNFAIR_LOCK_INIT;
+    double m_handedPts = NAN;
+    int64_t m_handedFirstIdx = -1, m_handedLastIdx = -1;
     double m_cursorSeconds = 0.0;           // SOURCE time of the next sample frame to schedule
     bool m_cursorAnchored = false;          // false → snap to the video's source time next callback
     double m_errEma = 0.0;                  // smoothed (ideal − cursor), seconds
