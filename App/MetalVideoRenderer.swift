@@ -5568,9 +5568,17 @@ final class MetalVideoRenderer {
         }
         // The slot timeline: the earliest recent pull, carried forward a card frame per slot. Kept while paused, so it
         // is settled by the time Play is pressed.
+        // Only a PACED pull (more than half a card frame after the one before) is recorded. The preroll's pulls (slots 0–3)
+        // and a catch-up burst come within ~1.5 ms of each other, so their offsets sit up to ~3 frames low; in the window
+        // they set its minimum until they leave it at slot 67, when the target jumped that much later at once and the
+        // pull skipped a frame (61 of 100 output starts at 23.976, 20 of 100 at 59.94; CARD_CLOCK_FINDINGS.md §10.23,
+        // item 5). With no paced pull yet, the pull's own offset stands in, as before.
         let slotBase = Double(index) * deckLinkCardFrame
-        deckLinkSlotOffsets.append(host - slotBase)
-        if deckLinkSlotOffsets.count > 64 { deckLinkSlotOffsets.removeFirst() }
+        let paced = deckLinkLastPull.map { host - $0.host > deckLinkCardFrame / 2 } ?? false
+        if paced {
+            deckLinkSlotOffsets.append(host - slotBase)
+            if deckLinkSlotOffsets.count > 64 { deckLinkSlotOffsets.removeFirst() }
+        }
         let slotHost = slotBase + (deckLinkSlotOffsets.min() ?? (host - slotBase))
         let last = deckLinkLastPull
         deckLinkLastPull = (host, clock)

@@ -3860,7 +3860,16 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 
 ## ☐ OPEN 2026-11-11 — 1c (UNCOMMITTED) — SDI audio faults found in the 1c follow-up (chain13)
 
-`CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`. None is fixed.
+`CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`.
+
+**Follow-up 2, same day (§10.24; chain14; uncommitted). Status of each item below:**
+- **Silent start: NOT fixed, and in shipped builds.** 1 of 101 restarts at 59.94 gate on, 1 of 51 gate off on the old start sequence (today's path), 0 of 102 at 23.976. The bridge now detects it (`checkStart`) and logs `!! output start`, but flushing and rescheduling does not revive the card (its queue stayed at 5,999 through 3 restarts); only a full output stop and start has. Recovery method: Robbie's decision (§10.24).
+- **Offset start: not seen in 254 starts** (every start gap −2 to +4 samples) after three start-sequence fixes against the SDK manual: EndAudioPreroll after the audio preroll completes, StartScheduledPlayback serialised with RenderAudioSamples, the stop waiting for ScheduledPlaybackHasStopped.
+- **Appended edge: detected, not corrected.** 5 in chain14, all `fill` edges at the end of the file.
+- **C6 late run after a seek: fixed** (the line from the first showings; the 29.97 loop-seek run is exact). **C6 25p first showings:** 1 rewrite of +5 samples in 600 s. Each run's last frame before a Pause or seek can read 9–17 ms early: it is first shown paused, after the run ends (§10.24).
+- **Seek loss in the decode path: fixed.** Three seeks at 59.94 (two loop wraps, one seek to 310) still lose 78–126 samples, from a latch that reaches the card late. Decision pending.
+- **Slot-67 skip: fixed** (0 of 203 restarts). 6 one-frame holds at random slots in 101 gate-on restarts at 59.94 remain, sound following each.
+
 - **The card's audio does not start, or starts offset, at output start.** 5 of 100 restarts while playing at 59.94 (0 of 100 at 23.976): no SDI sound for the session; the callback ran, the card never consumed its 9,600-sample preroll (`!! holding over 1 s`). Same mechanism, partial: the card's audio consumption point sat +989 samples off its video stream time for a whole first session (f-tr-2398: sound +20.35 ms off), and +386 in chain11 (`v-tr-5994-off`, +7.45 ms). Normal sessions: 2–4 samples. Cause UNKNOWN. The bridge can measure it from its own edge lines.
 - **An edge's rewrite was appended by the card, not added** (c6-tr-2398, the first Pause, 1 edge in chain13): 474 samples of sound past the run's end, then their exact inverse. Cause UNKNOWN; detectable from the buffered count.
 - **C6: a run after a seek can sit a card frame late** (c6-tr-2997, after the loop seek: −17.26 ms for the run). The line comes from the latch slot's due time, which was a card frame past its pts. Fix direction in §10.23.

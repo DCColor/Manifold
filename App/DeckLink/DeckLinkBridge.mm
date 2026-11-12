@@ -14,6 +14,7 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <mutex>
 #include <unistd.h>
 
 #if DEBUG
@@ -373,6 +374,32 @@ static const double kAudioResyncSeconds = 0.100;
 // 4). A frame held longer (pause, a held picture) counts from its newest slot, as the depth term did before it.
 static const int64_t kAudioMaxRepeatSlots = 3;   // newest − first, slots
 
+// ── OUTPUT START: THE SDK'S ORDER, AND A CHECK THAT THE CARD'S SOUND STARTED WITH ITS PICTURE (CARD_CLOCK_FINDINGS.md §10.24) ──
+// The manual (§2.4.2) and its samples end the audio preroll only once it is complete, start playback with no audio write in
+// flight, and wait for ScheduledPlaybackHasStopped after a stop. The waits are bounded so a card that never answers cannot hang
+// a start or a stop.
+static const int kAudioPrerollWaitMs = 500;     // video preroll done → the audio preroll's completion, at most
+static const int kStopWaitMs = 500;             // StopScheduledPlayback → ScheduledPlaybackHasStopped, at most
+// At each output start the card's audio consumption point (queue end − queued) is read against its video stream time. In 199
+// normal starts it sat 2–4 samples off; the faults were +386, +989 and "never consumed" (§10.23). Beyond the tolerance, or with
+// nothing consumed 250 ms after the start, the audio is cleared and restarted.
+static const int64_t kStartGapToleranceFrames = 12;   // 0.25 ms
+static const int64_t kStartSettleFrames = 480;        // measure once 10 ms has played
+static const int64_t kStartTimeoutFrames = 12000;     // 250 ms
+static const int64_t kStartRestartLeadFrames = 960;   // a restarted stream's first sample: 20 ms past the card's position
+static const int kStartMaxRestarts = 3;
+
+#ifdef DEBUG
+// Test switches for the output-start check (DEBUG builds only, read once per start; nothing persisted):
+//   MANIFOLD_SDI_AUDIO_START=legacy   the start and stop as before §10.24 (no preroll wait, no start lock, no stop wait): what
+//                                     shipped builds do, for measuring them.
+//   MANIFOLD_SDI_AUDIO_RECOVER=0      measure and log, but do not restart the audio.
+//   MANIFOLD_SDI_AUDIO_START_FAULT=stall      the start's audio is scheduled 10 s ahead, so the card consumes nothing: the
+//                                             "not consuming" branch on a healthy card.
+//   MANIFOLD_SDI_AUDIO_START_FAULT=gap:<n>    the first measurement reads n samples off: the "offset" branch on a healthy card.
+static bool envIs(const char *name, const char *value) { const char *v = getenv(name); return v && strcmp(v, value) == 0; }
+#endif
+
 #ifdef DEBUG
 // BRANCH TRACE burst length (dev diagnostic — see logAudioBranch). The first N callbacks print
 // verbatim because the gate's answer in the first half-second IS the question being asked; after
@@ -455,11 +482,45 @@ public:
         return { "ScheduleVideoFrame", S_OK };
     }
 
+    // StartScheduledPlayback with no RenderAudioSamples in flight (§10.24): the callback skips while this holds the lock, and the
+    // start waits for one already running. The SDK's SignalGenerator starts from inside its audio callback, which serialises the
+    // two the same way. Legacy (DEBUG switch): as before, unserialised.
     CallResult startPlayback() {
+        std::unique_lock<std::recursive_mutex> g(m_audioCbMutex, std::defer_lock);
+        if (!m_legacyStart) g.lock();
         const HRESULT hr = m_output->StartScheduledPlayback(0, m_timeScale, 1.0);
-        if (hr == S_OK) m_playbackStarted = true;   // Stage 1c: edges flush, and a flush needs a running stream
+        if (hr == S_OK) {
+            if (m_audioEnabled) {   // the start check (§10.24), armed before the callbacks can see the stream as started
+                m_sc = StartCheck(); m_sc.active = true; m_sc.origin = m_audioOrigin; m_sc.expect = 0;
+            }
+            m_playbackStarted = true;   // Stage 1c: edges flush, and a flush needs a running stream
+        }
         return { "StartScheduledPlayback", hr };
     }
+
+    // The audio preroll's end (§10.24). The manual: "When audio preroll is complete, call EndAudioPreroll", then start. The callback
+    // ends it itself once the queue reaches its depth; this waits for that (bounded), and ends it here only if it never came.
+    struct PrerollResult { double waitedMs; bool byCallback; uint32_t buffered; uint64_t callbacks; };
+    PrerollResult finishAudioPreroll() {
+        using Clock = std::chrono::steady_clock;
+        const auto t0 = Clock::now();
+        PrerollResult r = { 0, false, 0, 0 };
+        if (!m_audioEnabled) return r;
+        if (!m_legacyStart) {
+            while (m_prerollingAudio.load() && Clock::now() - t0 < std::chrono::milliseconds(kAudioPrerollWaitMs)) usleep(500);
+        }
+        r.byCallback = !m_prerollingAudio.load();
+        {
+            std::unique_lock<std::recursive_mutex> g(m_audioCbMutex, std::defer_lock);
+            if (!m_legacyStart) g.lock();
+            endAudioPrerollIfNeeded();
+        }
+        r.waitedMs = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        m_output->GetBufferedAudioSampleFrameCount(&r.buffered);
+        r.callbacks = m_audioCallbacks.load();
+        return r;
+    }
+    bool legacyStart() const { return m_legacyStart; }
 
     // --- D4b-2 audio setup (ordering matters; see the start sequence in the bridge) ---
 
@@ -484,6 +545,17 @@ public:
             m_preKey.assign((size_t)kPreFrames, -1);
             m_preRun.assign((size_t)kPreFrames, 0);
         }
+#ifdef DEBUG
+        m_legacyStart = envIs("MANIFOLD_SDI_AUDIO_START", "legacy");
+        m_recoverStart = !envIs("MANIFOLD_SDI_AUDIO_RECOVER", "0");
+        if (envIs("MANIFOLD_SDI_AUDIO_START_FAULT", "stall")) {   // the preroll lands 10 s ahead: nothing is consumed
+            m_audioStreamFrames = m_audioOrigin = 10 * (int64_t)m_audio.sampleRate;
+        }
+        if (const char *f = getenv("MANIFOLD_SDI_AUDIO_START_FAULT"); f && strncmp(f, "gap:", 4) == 0) m_faultGap = atoll(f + 4);
+        if (m_legacyStart || !m_recoverStart || m_audioOrigin || m_faultGap)
+            fprintf(stdout, "[SDI-AUDIO] test switches: start %s, recovery %s, fault %s\n", m_legacyStart ? "LEGACY" : "as the SDK",
+                    m_recoverStart ? "on" : "OFF (measure only)", getenv("MANIFOLD_SDI_AUDIO_START_FAULT") ?: "none");
+#endif
         m_audioEnabled = true;
         return { "EnableAudioOutput", S_OK };
     }
@@ -526,7 +598,19 @@ public:
             const auto t0 = Clock::now();
             IDeckLinkMutableVideoFrame *black = endOnBlack ? makeBlackFrame() : NULL;
             BMDTimeValue actualStop = 0;
-            m_output->StopScheduledPlayback(0, &actualStop, m_timeScale);
+            m_stoppedSignal = false;
+            const HRESULT stopHr = m_output->StopScheduledPlayback(0, &actualStop, m_timeScale);
+            // §10.24: the SDK's FilePlayback waits for ScheduledPlaybackHasStopped before going on; until 2026-11-11 this unset the
+            // callback at once, so it never came (0 in 200 restarts) and the next start could follow a stop the driver had not
+            // finished. Bounded, logged.
+            if (!m_legacyStart && stopHr == S_OK && m_playbackStarted.load()) {
+                const auto w0 = Clock::now();
+                while (!m_stoppedSignal.load() && Clock::now() - w0 < std::chrono::milliseconds(kStopWaitMs)) usleep(500);
+                const double ms = std::chrono::duration<double, std::milli>(Clock::now() - w0).count();
+                fprintf(stdout, "DeckLink D3: stop — %s %.1f ms after StopScheduledPlayback\n",
+                        m_stoppedSignal.load() ? "ScheduledPlaybackHasStopped" : "⚠️ no ScheduledPlaybackHasStopped in", ms);
+                fflush(stdout);
+            }
             m_output->SetScheduledFrameCompletionCallback(NULL);
             if (m_audioEnabled) {
                 m_prerollingAudio = false;
@@ -551,18 +635,23 @@ public:
     struct Slot { int64_t idx = -1; double pts = NAN; bool timed = false, handed = false; double due = NAN, srcFrame = 0; };
     // A run at a rate mismatch (`cad`) also carries the picture's line: frame pts0 + k × fs is first shown at the first slot i whose
     // due time phi + i × card frame reaches it. `confirmed`: the frame grid (pts0) checked against the next frame that moved.
+    // C6 follow-up (§10.24, item 2): [lo, hi) bounds phi from the frames actually shown. A frame first shown at slot i was due there
+    // (phi ≥ pts − i × card frame) and, when slot i − 1 showed the frame before, not due there (phi < pts − (i − 1) × card frame).
+    // `above`: first showings since the last re-derive that put phi at or past hi (a frame shown a slot later than the line says).
     struct Run { bool valid = false; int64_t start = 0, end = INT64_MAX, D = 0; uint64_t serial = 0;
-                 bool cad = false, confirmed = true; double phi = 0, pts0 = 0, fs = 0; int64_t lineIdx = -1; };
+                 bool cad = false, confirmed = true; double phi = 0, pts0 = 0, fs = 0; int64_t lineIdx = -1;
+                 double lo = -INFINITY, hi = INFINITY; int above = 0; };
     void logRunsSummary() const {
         if (!m_audio.handed) return;
         fprintf(stdout, "[SDI-AUDIO] stopped — latches %llu, run ends %llu (%llu off the line on a timed pull), re-latches %llu, late edges %llu (%lld samples), edges on a deep queue %llu, "
                         "missing %lld samples (%lld filled in later), audio callbacks %llu, rate-mismatch runs %llu (grid fixed at confirm %llu, frames shown before their sound %llu, worst %.1f samples), "
-                        "seek starts found by the fine search %llu (%lld samples recovered), %s\n",
+                        "seek starts found by the fine search %llu (%lld samples recovered), lines re-derived from first showings %llu, "
+                        "edges appended by the card %llu, %s\n",
                 (unsigned long long)m_latches, (unsigned long long)m_runEnds, (unsigned long long)m_timedEnds, (unsigned long long)m_relatches,
                 (unsigned long long)m_lateEdges, (long long)m_lateEdgeFrames, (unsigned long long)m_deepEdges, (long long)m_runMissingFrames, (long long)m_filledLate,
                 (unsigned long long)m_audioCallbacks.load(), (unsigned long long)m_cadRuns, (unsigned long long)m_cadGridFixes, (unsigned long long)m_envMisses,
-                m_envWorst, (unsigned long long)m_fineStarts, (long long)m_fineRecovered,
-                m_audio.cardTimeline ? "card timeline (gate on)" : "gate off: no runs, the §10.21 loop");
+                m_envWorst, (unsigned long long)m_fineStarts, (long long)m_fineRecovered, (unsigned long long)m_cadRederives,
+                (unsigned long long)m_appendedEdges, m_audio.cardTimeline ? "card timeline (gate on)" : "gate off: no runs, the §10.21 loop");
     }
 
     // Stats (read after stop for the run summary).
@@ -625,6 +714,11 @@ public:
     HRESULT RenderAudioSamples(bool preroll) override {
         m_audioCallbacks.fetch_add(1, std::memory_order_relaxed);
         if (!m_running.load() || !m_audioEnabled) return S_OK;
+        // §10.24: never inside StartScheduledPlayback or the preroll's end; the start holds this lock across them. Skipping one call
+        // costs nothing (the queue is 80–200 ms deep), and the callback never waits on the start thread, so the two cannot deadlock.
+        std::unique_lock<std::recursive_mutex> cbLock(m_audioCbMutex, std::try_to_lock);
+        if (!cbLock.owns_lock()) { m_audioCbSkipped++; return S_OK; }
+        if (m_playbackStarted.load() && m_sc.active) checkStart();
 
         uint32_t buffered = 0;
         if (m_output->GetBufferedAudioSampleFrameCount(&buffered) != S_OK) return E_FAIL;
@@ -893,7 +987,7 @@ public:
     }
 
     HRESULT ScheduledPlaybackHasStopped(void) override {
-        fprintf(stdout, "DeckLink D3: ScheduledPlaybackHasStopped\n"); fflush(stdout);
+        m_stoppedSignal = true;   // stop() waits for this (§10.24); it logs the wait
         return S_OK;
     }
 
@@ -933,6 +1027,73 @@ private:
         memset(m_outScratch.data(), 0, (size_t)frames * m_audio.dlChannels * sizeof(int32_t));
         m_silenceFramesScheduled += scheduleFrames(m_outScratch.data(), frames);
         return true;
+    }
+
+    // ----- Output start: did the card's sound start with its picture? (docs/CARD_CLOCK_FINDINGS.md §10.24) -----
+    // The card's audio consumption point is the queue's end less what it still holds; against the video's stream time it reads 2–4
+    // samples in a normal start. At 59.94 the card sometimes never consumed its preroll (5 of 100 restarts: no SDI sound for the
+    // whole session), or started its sound 386 or 989 samples off its picture for the session (§10.23). Both paths (a file's runs
+    // and the anchor loop) and every source are checked, once per output start: the gap measured once 10 ms has played, and
+    // "consuming" by 250 ms. A fault clears the card's audio and restarts the stream 20 ms ahead, up to kStartMaxRestarts times,
+    // one line each. Audio callback only (`m_sc` is armed by the start before the stream is marked started).
+    struct StartCheck { bool active = false; int restarts = 0; int64_t origin = 0, expect = 0; };
+    void checkStart() {
+        const BMDTimeScale rate = (BMDTimeScale)m_audio.sampleRate;
+        BMDTimeValue n1 = 0, n2 = 0; double sp = 0; uint32_t q = 0;
+        m_output->GetScheduledStreamTime(rate, &n1, &sp);
+        m_output->GetBufferedAudioSampleFrameCount(&q);
+        m_output->GetScheduledStreamTime(rate, &n2, &sp);
+        if (n2 - n1 > 8) return;   // preempted between the reads: the next callback measures
+        const int64_t now = (int64_t)(n1 + n2) / 2;
+        if (now < m_sc.expect + kStartSettleFrames) return;
+        const int64_t point = (int64_t)m_audioStreamFrames - (int64_t)q;
+        const int64_t consumed = point - m_sc.origin;
+        int64_t gap = point - now;
+#ifdef DEBUG
+        if (m_faultGap && m_sc.restarts == 0) gap += m_faultGap;
+#endif
+        if (consumed > 0 && std::llabs(gap) <= kStartGapToleranceFrames) {
+            m_sc.active = false;
+            fprintf(stdout, "[SDI-AUDIO] output start: the card's sound started with its picture, %+lld samples%s; %llu audio callbacks "
+                            "skipped during the start\n", (long long)gap,
+                    m_sc.restarts ? (m_sc.restarts == 1 ? " (after 1 restart)" : " (after restarts)") : "",
+                    (unsigned long long)m_audioCbSkipped);
+            fflush(stdout);
+        } else if (consumed > 0) {
+            restartStartAudio("started off its picture", gap, now, q);
+        } else if (now >= m_sc.expect + kStartTimeoutFrames) {
+            restartStartAudio("is not consuming its queue", gap, now, q);
+        }
+    }
+
+    void restartStartAudio(const char *what, int64_t gap, int64_t now, uint32_t queued) {
+        const BMDTimeScale rate = (BMDTimeScale)m_audio.sampleRate;
+        if (!m_recoverStart || m_sc.restarts >= kStartMaxRestarts) {
+            m_sc.active = false;
+            fprintf(stdout, "[SDI-AUDIO] !! output start: the card's sound %s (consumption point %+lld samples, now %lld, queued %u to %lld); %s\n",
+                    what, (long long)gap, (long long)now, queued, (long long)m_audioStreamFrames,
+                    m_recoverStart ? "giving up after the restarts" : "NOT restarted (measure only)");
+            fflush(stdout);
+            return;
+        }
+        m_sc.restarts++;
+        const int64_t oldEnd = m_audioStreamFrames;
+        m_output->FlushBufferedAudioSamples();
+        uint32_t left = 0; m_output->GetBufferedAudioSampleFrameCount(&left);
+        BMDTimeValue n = 0; double sp = 0; m_output->GetScheduledStreamTime(rate, &n, &sp);
+        // Past anything the flush could not remove (the card keeps what it has committed, §10.22 C0).
+        const int64_t origin = (int64_t)n + kStartRestartLeadFrames + (int64_t)left;
+        m_audioStreamFrames = m_audioOrigin = origin;
+        // What was scheduled is gone: no history to rewrite against, no run, no anchor. The next timed slot that moves latches anew.
+        std::fill(m_hist.begin(), m_hist.end(), 0);
+        m_runActive = false; m_run = Run(); m_prev = Run(); m_cand = Candidate(); m_pendingFrom = -1;
+        m_cursorAnchored = false; m_errEma = 0.0; m_holdSince = -1; m_holdLogged = false; m_steerErr = NAN;
+        m_sc.origin = m_sc.expect = origin;
+        fprintf(stdout, "[SDI-AUDIO] !! output start: the card's sound %s (consumption point %+lld samples, now %lld, queued %u to %lld); "
+                        "cleared (%u left) and restarted at stream %lld, restart %d of %d\n",
+                what, (long long)gap, (long long)now, queued, (long long)oldEnd, left,
+                (long long)origin, m_sc.restarts, kStartMaxRestarts);
+        fflush(stdout);
     }
 
     // Once per second of scheduled audio: the card's depth, where we are in the SOURCE, what the ring
@@ -1204,12 +1365,14 @@ private:
     // to ±2 samples, which left a stray sample of the old sound in the silence after a Pause. With the queue held under the committed
     // window (kRunsDepthFrames), every queued sample is committed, and the card ADDS what is scheduled over it: so (desired − what was
     // scheduled there, from the history ring) leaves exactly the desired sound, from 1 ms past the card's position to the queue's end.
-    int64_t rewriteFrom(int64_t edge, bool silent, const char *why, bool quiet = false) {
+    // `remap`: a mapping change inside a run, rewritten from 1 ms past the card by design; not a late edge.
+    int64_t rewriteFrom(int64_t edge, bool silent, const char *why, bool quiet = false, bool remap = false) {
         if (edge >= m_audioStreamFrames) return 0;   // not scheduled yet: the top-up will write it
         BMDTimeValue now = 0; double speed = 0; uint32_t buffered = 0;
         m_output->GetScheduledStreamTime((BMDTimeScale)m_audio.sampleRate, &now, &speed);
         m_output->GetBufferedAudioSampleFrameCount(&buffered);
-        const int64_t lo = std::max<int64_t>(edge, (int64_t)now + kEdgeGuardFrames), hi = m_audioStreamFrames;
+        // Nothing below the stream's first scheduled position exists to rewrite (after an output-start restart, §10.24).
+        const int64_t lo = std::max<int64_t>({ edge, (int64_t)now + kEdgeGuardFrames, m_audioOrigin }), hi = m_audioStreamFrames;
         int64_t pcm = 0, missing = 0, written = 0, firstMissing = INT64_MAX;
         for (int64_t a = lo; a < hi; ) {
             const int32_t n = (int32_t)std::min<int64_t>(hi - a, m_maxCallbackFrames);
@@ -1228,9 +1391,22 @@ private:
             if (w < (uint32_t)n) { m_shortSchedules++; break; }
             a += n;
         }
+        // §10.24, item 5: the card ADDS a rewrite into what it holds, so its queued count does not grow. Once in chain13 (c6-tr-2398,
+        // a Pause) it APPENDED the rewrite after the queue's end instead: the sound ran on by the rewrite's length, then its inverse.
+        // Detected here from the queued count (grown by more than half of what was written); logged, no correction yet.
+        if (written > 0) {
+            uint32_t after = 0; m_output->GetBufferedAudioSampleFrameCount(&after);
+            if ((int64_t)after > (int64_t)buffered + written / 2) {
+                m_appendedEdges++;
+                fprintf(stdout, "[SDI-AUDIO] !! edge (%s) at stream %lld APPENDED by the card, not added: queued %u before the rewrite, %u after, "
+                                "%lld samples rewritten (%lld..%lld)\n",
+                        why, (long long)edge, buffered, after, (long long)written, (long long)lo, (long long)hi);
+                fflush(stdout);
+            }
+        }
         m_pendingFrom = firstMissing == INT64_MAX ? -1 : firstMissing;   // still to fill when the sound arrives
         if (quiet) { if (pcm > 0) m_filledLate += pcm; return 0; }
-        const int64_t late = std::max<int64_t>(0, lo - edge);
+        const int64_t late = remap ? 0 : std::max<int64_t>(0, lo - edge);
         if (late > 0) { m_lateEdges++; m_lateEdgeFrames += late; }
         if (buffered > (uint32_t)kRunsCommittedFrames) m_deepEdges++;
         fprintf(stdout, "[SDI-AUDIO] edge (%s) at stream %lld: now %lld, queued %u to %lld; rewrote %lld..%lld (%lld written, %lld of them sound, "
@@ -1270,6 +1446,11 @@ private:
     void latchCad(const Slot &slot, int64_t startSlot, bool withPrev, bool silent, const char *why) {
         Run r; r.valid = true; r.cad = true; r.confirmed = false; r.fs = slot.srcFrame; r.pts0 = slot.pts; r.phi = lineFrom(slot);
         r.lineIdx = slot.idx;
+        // §10.24: the latch slot is the run's first showing; its bounds start the check that every later first showing continues
+        // (`observeCad`). lineFrom already keeps phi at or above the lower one.
+        r.lo = slot.pts - (double)slot.idx * cardFrameSeconds();
+        r.hi = withPrev ? r.lo + cardFrameSeconds() : INFINITY;
+        if (r.phi >= r.hi) r.above = 1;
         r.D = envelopeD(r.phi, r.pts0, r.fs);
         r.start = A(startSlot); r.end = INT64_MAX; r.serial = ++m_runSerial; m_preTo = r.start;
         m_run = r; m_runActive = true; m_errEma = 0.0; m_steerErr = NAN; m_latches++; m_cadRuns++; m_gateSlots = 0;
@@ -1314,6 +1495,7 @@ private:
             m_cadGridFixes++;
             const int64_t was = m_run.D;
             m_run.pts0 = sl.pts; m_run.phi = lineFrom(sl); m_run.lineIdx = sl.idx; m_run.confirmed = true;
+            m_run.lo = -INFINITY; m_run.hi = INFINITY; m_run.above = 0;   // the latch frame's bounds were the seek's time, not the line's
             m_run.D = envelopeD(m_run.phi, m_run.pts0, m_run.fs);
             fprintf(stdout, "[SDI-AUDIO] rate mismatch: the latch's frame was off the grid (step %.6f s, frame %.6f s): line from slot %lld pts %.6f, "
                             "D %lld → %lld\n", step, m_run.fs, (long long)sl.idx, sl.pts, (long long)was, (long long)m_run.D);
@@ -1322,6 +1504,45 @@ private:
         fflush(stdout);
         m_preTo = m_run.start; m_run.serial = ++m_runSerial;   // the prefetch holds the old mapping's sound
         rewriteFrom(m_run.start, silent, "rate mismatch: grid confirmed");
+    }
+
+    // C6 follow-up (§10.24, item 2): the run's line checked against every first showing, not taken from one slot's due time at the
+    // latch. A frame shown before its sound (phi under the frames' lower bound by more than 2 samples) moves the line up at once;
+    // frames shown a slot later than the line says (phi at or past the upper bound) move it down on the second in a row, since a
+    // single one can be the pull's hysteresis choosing the frame after. A move that changes D rewrites what is queued from 1 ms past
+    // the card, logged and counted. Fixes c6-tr-2997's run a card frame late after the loop seek, and the 25p first showings up to
+    // 0.18 ms before their sound as the pull's due line wandered under steering (§10.23).
+    // A frame more than a card frame off the line is not this run's (a seek that lands on the run's grid, chain14 c614-tr-25): the
+    // line check ends the run. A D that moves by kCadRewriteTolFrames or less (0.083 ms at 48 kHz, inside the ±0.1 ms target) is
+    // kept: the line moves, the queue is not rewritten, since each rewrite is a step of that size on the wire (11 in 600 s at 25p).
+    static constexpr int64_t kCadRewriteTolFrames = 4;
+    void observeCad(const Slot &sl, bool prevEarlier, bool silent) {
+        Run &r = m_run;
+        const double k = std::round((sl.pts - r.pts0) / r.fs);
+        if (k < 0 || std::fabs(sl.pts - (r.pts0 + k * r.fs)) > 0.0005) return;   // not a frame of the run's grid: the line check handles it
+        const double fc = cardFrameSeconds(), rate = (double)m_audio.sampleRate;
+        const double lo = sl.pts - (double)sl.idx * fc, hi = prevEarlier ? lo + fc : INFINITY;
+        if (lo > r.phi + fc || lo < r.phi - 2.0 * fc) return;
+        r.lo = std::max(r.lo, lo); r.hi = std::min(r.hi, hi);
+        if (r.lo >= r.hi) { r.lo = lo; r.hi = hi; }   // the line moved under the pull's steering: the latest showing stands
+        double phi = r.phi; const char *why = nullptr;
+        if (phi < r.lo - 2.0 / rate) { phi = r.lo; why = "a frame shown before its sound"; }
+        else if (phi >= r.hi) {
+            if (++r.above >= 2) { phi = std::max(r.lo, r.hi - 1.0 / rate); why = "frames shown a slot later than the line says"; }
+        } else r.above = 0;
+        if (!why) return;
+        r.above = 0;
+        const double was = r.phi;
+        r.phi = phi;
+        const int64_t D = envelopeD(r.phi, r.pts0, r.fs);
+        if (std::llabs(D - r.D) <= kCadRewriteTolFrames) return;
+        m_cadRederives++;
+        fprintf(stdout, "[SDI-AUDIO] rate mismatch: line from the first showings (%s): slot %lld pts %.6f, bounds [%.6f, %.6f), phi %.6f → %.6f, "
+                        "D %lld → %lld (%+lld samples)\n", why, (long long)sl.idx, sl.pts, r.lo, r.hi, was, r.phi, (long long)r.D, (long long)D,
+                (long long)(D - r.D));
+        fflush(stdout);
+        r.D = D; m_preTo = r.start; r.serial = ++m_runSerial;   // the prefetch holds the old mapping's sound
+        rewriteFrom(r.start, silent, "rate mismatch: line from the first showings", false, true);
     }
 
     void endRun(int64_t idx, bool silent, const char *why) { endRunAt(A(idx), idx, silent, why); }
@@ -1353,6 +1574,10 @@ private:
             bool endedHere = false;
             if (live && m_runActive && m_run.cad && hasPts && sl.timed && moved && !m_run.confirmed) {
                 confirmCad(sl, silent);   // the grid first, then this slot is checked against it
+            }
+            if (live && m_runActive && m_run.cad && m_run.confirmed && hasPts && sl.timed && moved) {
+                const bool prevEarlier = m_prevSlotIdx == sl.idx - 1 && std::isfinite(m_prevSlotPts) && m_prevSlotPts < sl.pts;
+                observeCad(sl, prevEarlier, silent);   // then the line, from this first showing
             }
             if (live && m_runActive) {
                 const double e = hasPts ? sl.pts * rate - ((double)sl.idx * spf + (double)m_run.D) : NAN;
@@ -1695,6 +1920,15 @@ private:
     std::atomic<bool> m_byTime{false};
     std::atomic<bool> m_playbackStarted{false};
     std::atomic<uint64_t> m_audioCallbacks{0};   // every RenderAudioSamples call (diagnostic)
+    // Output start and stop (§10.24). The callback try-locks this; the start holds it across EndAudioPreroll and StartScheduledPlayback.
+    std::recursive_mutex m_audioCbMutex;
+    uint64_t m_audioCbSkipped = 0;                // audio thread: callbacks skipped while the start held the lock
+    StartCheck m_sc;                              // armed by startPlayback, then audio thread only
+    int64_t m_audioOrigin = 0;                    // the stream position of the first audio scheduled (0; 10 s under the stall test)
+    bool m_legacyStart = false, m_recoverStart = true;   // DEBUG test switches; production: SDK order, recovery on
+    int64_t m_faultGap = 0;                       // DEBUG test switch
+    std::atomic<bool> m_stoppedSignal{false};     // ScheduledPlaybackHasStopped seen
+    uint64_t m_appendedEdges = 0, m_cadRederives = 0;   // §10.24 items 5 and 2
     uint64_t m_audioCallbacksSeen = 0;            // video thread: the count at the last check
     int64_t m_holdSince = -1; bool m_holdLogged = false;   // audio thread: the runs path holding at depth
     // Runs: audio callback only.
@@ -2446,11 +2680,14 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     }
     [log addObject:[NSString stringWithFormat:@"preroll: %d frames scheduled (indices 0..%d)", poolSize, poolSize - 1]];
 
-    // Close the audio preroll window if the callback hasn't already (it ends it itself the moment the
-    // buffer hits the target depth). Exactly-once — the two threads race for it by design.
+    // The audio preroll's end (§10.24): the manual's "when audio preroll is complete". The callback ends it itself the moment the
+    // queue reaches its depth; wait for that (bounded), and end it here only if it never came. Until 2026-11-11 it was ended here
+    // as soon as the video preroll was scheduled, whatever the audio had reached.
     if (player->audioEnabled()) {
-        player->endAudioPrerollIfNeeded();
-        [log addObject:@"audio: EndAudioPreroll — audio stream armed"];
+        const auto pr = player->finishAudioPreroll();
+        [log addObject:[NSString stringWithFormat:@"audio: EndAudioPreroll — %@ after %.1f ms, %u samples queued, %llu audio callbacks%@",
+                        pr.byCallback ? @"preroll complete (ended by the callback)" : @"⚠️ preroll not complete, ended here",
+                        pr.waitedMs, pr.buffered, (unsigned long long)pr.callbacks, player->legacyStart() ? @" [LEGACY start]" : @""]];
     }
 
     step = player->startPlayback();

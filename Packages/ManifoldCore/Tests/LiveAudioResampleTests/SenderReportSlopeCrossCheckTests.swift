@@ -448,17 +448,22 @@ final class SenderReportSlopeCrossCheckTests: XCTestCase {
             s.sample(enqueuedFrontier: p.timebase + 0.400)
             t += 0.02
         }
-        let deadline = Date().addingTimeInterval(2)
+        // Each window is emitted as its own block on the global (concurrent) utility queue, and the
+        // loop above closes all three within milliseconds, so their companions can run in any order
+        // and the companion appends its facts before its line is logged. Wait for every companion
+        // LINE (the last thing each block does), then read the windows in session-time order.
+        let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            box.lock.lock(); let n = box.facts.count; box.lock.unlock()
+            box.lock.lock(); let n = box.logged.filter { $0.contains("companion") }.count; box.lock.unlock()
             if n >= 3 { break }
             Thread.sleep(forTimeInterval: 0.01)
         }
         box.lock.lock(); defer { box.lock.unlock() }
         XCTAssertGreaterThanOrEqual(box.facts.count, 3)
-        XCTAssertEqual(box.facts[0].rendererDepthMedian ?? 0, 0.400, accuracy: 0.001)
-        XCTAssertEqual(box.facts[0].elapsed, 10, accuracy: 0.1)
-        XCTAssertFalse(box.facts[0].excluded, "a healthy window is read by the level hold")
+        guard let first = box.facts.min(by: { $0.elapsed < $1.elapsed }) else { return }
+        XCTAssertEqual(first.rendererDepthMedian ?? 0, 0.400, accuracy: 0.001)
+        XCTAssertEqual(first.elapsed, 10, accuracy: 0.1)
+        XCTAssertFalse(first.excluded, "a healthy window is read by the level hold")
         XCTAssertEqual(box.logged.filter { $0.contains("steering window") }.count, 0)
         XCTAssertEqual(box.logged.filter { $0.contains("companion") }.count, box.facts.count)
     }

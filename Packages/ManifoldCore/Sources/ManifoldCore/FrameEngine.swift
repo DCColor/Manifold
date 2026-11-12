@@ -5304,7 +5304,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // suspension went on to call `play()` (docs/BUGS.md, "closing a window while its file is still
         // loading").
         guard sessionToken.isCurrent(token) else { return }
-        await beginAudioReading(from: start)
+        // ── THE SOUND STARTS WITH THE FIRST FRAME, NOT AT THE TARGET ─────────────────────────────────────────────
+        // The video reader's first frame is the one whose interval holds `start` (599.999396 for a seek to 600 at 59.94),
+        // so its sound begins up to a frame before the target. Read from `start`, those samples were never decoded, and
+        // SDI's first run lost them: 15–29 samples at 59.94 (CARD_CLOCK_FINDINGS.md §10.23, item 1). The audio reader
+        // starts at that frame's time instead. The clock stays at `start`; the system renderer drops what is already
+        // past it, as at any splice. The libav path already arms at the frame's time (`beginLibavReading`).
+        let audioStart = frameGrid.map { CMTimeMinimum(start, $0.time(ofFrame: $0.frame(atSeconds: start.seconds))) } ?? start
+        await beginAudioReading(from: audioStart)
         guard sessionToken.isCurrent(token) else { return }
 
         if resumePlaying { play() }

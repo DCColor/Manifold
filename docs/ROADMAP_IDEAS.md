@@ -49,6 +49,26 @@ the D3 halfband (COLOR_MANAGEMENT_FINDINGS.md §6.10, Stage 3b).
 Depends on: native chroma decode (Stage 3b, S1–S2). 12-bit needs the float32 offscreen deferred in D5.
 Size guess: ?
 
+## SDI sound from live 44.1 kHz sources, and from 88.2/96 kHz files
+Status: idea (Robbie, 2026-11-11)
+Version: after 0.9.3
+
+What: (1) a live source whose sound is 44.1 kHz (SRT, WHEP, NDI) reaches SDI resampled to 48 kHz, as a 44.1 kHz file
+already does; (2) a file at 88.2 or 96 kHz reaches SDI resampled to 48 kHz.
+
+Why: SDI embeds 48 kHz only (`DeckLinkService.isSupportedForSDI`). Today those sources play on SDI with no sound: the
+output starts video-only and says so in the log. Since 1c follow-up C7 (CARD_CLOCK_FINDINGS.md §10.23) a 44.1 kHz
+FILE is resampled once, in the tap (`AudioTapBuffer`, `PolyphaseResampler`, 64 taps), on the file's own time axis.
+
+Open questions:
+- Live: the tap's resampled stream is keyed on the file's time axis. A live source's axis is its own clock, re-anchored
+  at joins and gaps, so where a resampled stream restarts, and how its group delay is kept out of the source's offset O
+  (AUDIO_RESAMPLER_DESIGN.md §19.1), needs its own design. Verified against a non-Cloudflare server (CLAUDE.md).
+- 88.2/96 kHz: 2:1 decimation for 96 kHz, a 147:160 ratio for 88.2; the prototype filter's band edge for each.
+
+Depends on: Stage 1c (0.9.3).
+Size guess: ?
+
 ## HEVC over WHEP
 Status: idea (2026-10-07)
 Version: ?
