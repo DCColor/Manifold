@@ -101,12 +101,18 @@ public final class AudioTapBuffer: @unchecked Sendable {
     /// prefills 1.64–2.01 s (MEASURED); mid-file the tap leads the cursor by up to 1.96 s with the
     /// look-ahead, and by up to 2.43 s when the renderer is unmuted. A 2 s window overwrote the
     /// cursor's samples in each of those cases (the start-of-play underrun, and 83–88 underruns a
-    /// minute unmuted). 4 s leaves ≥ 1.5 s of headroom over every case measured.
+    /// minute unmuted). 4 s left ≥ 1.5 s of headroom over every case measured then.
     ///
-    /// MEMORY: 4 s × rate × channels × 4 bytes (Int32), allocated when the format is set. At 48 kHz:
-    /// 768 KB per channel — 1.5 MB stereo, 6.1 MB at 8 ch, 12.3 MB at 16 ch (double that at 96 kHz).
-    /// Twice the 2 s window's cost. One ring per engine.
-    private let windowSeconds: Double = 4.0
+    /// 8 s since 2026-11-12 (docs/CARD_CLOCK_FINDINGS.md §10.26): just after a DeckLink output start while
+    /// a file plays, the tap leads the picture by up to 4.87 s (restart stress at 23.976 and 59.94; steady
+    /// play 2.5 s), so a 4 s window had already dropped the samples the card's first run needed: the sound
+    /// came back 100–500 samples into its frame at 59.94 and up to 387 ms late at 23.976. 8 s leaves
+    /// ≥ 3 s over that.
+    ///
+    /// MEMORY: 8 s × rate × channels × 4 bytes (Int32), allocated when the format is set. At 48 kHz:
+    /// 1.5 MB per channel — 3.1 MB stereo, 12.3 MB at 8 ch, 24.6 MB at 16 ch (double that at 96 kHz).
+    /// One ring per engine.
+    private let windowSeconds: Double = 8.0
 
     /// If an incoming buffer's PTS deviates from the expected running time by more than this, treat it
     /// as a discontinuity (a seek not routed through `reset()`, or a gap) and re-anchor rather than

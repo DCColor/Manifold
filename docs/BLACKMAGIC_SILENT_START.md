@@ -10,7 +10,7 @@ on an SDI loop with a capture tool built on the same SDK. Internal reference: `C
 | Card | DeckLink 8K Pro, output on sub-device "DeckLink 8K Pro (1)" (the card enumerates 4 sub-devices) |
 | Profile | 4 sub-devices. Profile name: **to confirm in Desktop Video Setup before sending** |
 | Driver | Desktop Video 16.4.0 (`DeckLinkAPI.framework` 16.4) |
-| SDK compiled against | Desktop Video SDK 16.0 (`BLACKMAGIC_DECKLINK_API_VERSION` 0x10000000), `DeckLinkAPIDispatch.cpp` from the same SDK |
+| SDK compiled against | Desktop Video SDK 16.0 (`BLACKMAGIC_DECKLINK_API_VERSION` 0x10000000), `DeckLinkAPIDispatch.cpp` from the same SDK. 16.0 (released 2026-04-08) is the current SDK: driver releases 16.4 and 16.5 shipped without new headers |
 | Host | Mac Studio (Mac16,9), Apple silicon, macOS 26.7.1 (25G241) |
 | Mode | 1080p59.94 (`bmdModeHD1080p5994`), v210, 2 channels 48 kHz 32-bit integer embedded audio |
 
@@ -62,6 +62,12 @@ samples from `GetScheduledStreamTime(48000)` 10 ms after Start, and stays there.
 | 1080p59.94, the sequence above, second configuration | 52 | 0 |
 | 1080p59.94, the sequence above, 3,203-sample preroll | 102 | 1 |
 | 1080p23.976 | 102 (and 100 earlier) | 0 |
+| **1080p59.94, the sequence above, the device's SDI input closed** | **102** | **0** |
+
+Every row but the last was measured with a capture client (our tool, on the same SDK) holding the same sub-device's SDI input
+open for the whole run, receiving the output through a loop cable. On this card an open input moves the output's clock by up to
+about ±125 ppm while it is open. With the input closed for the whole run, 102 starts had no silent start (2026-11-12). Against 7 in
+303 with it open, that points at the open input, though 102 starts is not enough to be sure.
 
 The silent starts are not tied to where in the card's frame Start was called. A related, rarer variant has been seen twice in first
 sessions: the audio started, but at a consumption point 386 and 989 samples off the video stream time, and stayed there for the
@@ -78,8 +84,20 @@ session. Neither has recurred in 408 starts since the sequence changes below.
 - **A full stop and start of the output.** This has revived the audio every time. It is our recovery now, at the cost of a
   visible restart of the picture. In all 8 silent starts we have logged, the next full start played audio
   normally. That includes the one natural silent start since we made the restart automatic.
+- **When that stop and start are back to back** (the start begun within a few milliseconds of `DisableVideoOutput` and the
+  release), we found a second failure, at 1080p23.976 while video plays: the new session's queued audio is gone within ~20 ms
+  of `StartScheduledPlayback` (`GetBufferedAudioSampleFrameCount` reads 0, or ~3,800 short, while the stream time has advanced
+  ~800–1,300 samples), and the embedded audio then plays off its picture for the whole session, mostly 0.85–0.99 s late (once +219 ms, once −3.9 ms
+  after a gap). 8 of 11 such restarts at 23.976
+  (with 80, 167 and 200 ms audio prerolls alike), 1 of 25 at 59.94. Paused, never. **With 500 ms between the stop and the start,
+  12 of 12 were normal.** We now wait 500 ms. Is there a required settle time after `DisableAudioOutput` / `DisableVideoOutput`
+  before the same output is enabled and started again?
 - **A shallower audio preroll.** We tried prerolling only the audio covering the 4 prerolled video frames (3,203 samples) instead of
-  200 ms. Over 102 starts: 1 silent start, the same rate. The card consumed 1 sample and then nothing, and the output restart revived it. The first video frame was also shown 2–7 times before the picture moved at 69 of 100 starts, against 0 at 200 ms. We went back to 200 ms.
+  200 ms. Over 102 starts: 1 silent start, the same rate. The card consumed 1 sample and then nothing, and the output restart revived it.
+  (We first wrote here that the first video frame was held longer at those starts. That was our analysis: it counted our own
+  picture's start-up hold, which is the same at 200 ms, against audio that now began earlier. The picture did not change.)
+  Since 2026-11-12 our file playback, in the configuration under test, prerolls 80 ms of audio, or the 4 video frames' duration if
+  that is longer (167 ms at 1080p23.976).
 
 ## Questions
 
@@ -90,4 +108,3 @@ session. Neither has recurred in 408 starts since the sequence changes below.
 3. Is there a supported way to restart the audio stream during scheduled playback without stopping the video (for example
    `DisableAudioOutput` / `EnableAudioOutput` while playback runs)?
 4. Is there a state we can read after Start that tells us the audio has engaged, short of watching the buffered count?
-5. Would building against the 16.4 SDK headers, rather than 16.0, change anything here?

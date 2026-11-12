@@ -1597,6 +1597,8 @@ Decisions (Robbie, 2026-11-11) on §10.24's "Decisions needed". Build: `.build-c
 
 Not updated, as decided.
 
+**Superseded 2026-11-12 (§10.26, item 2):** 16.0 is the current SDK; there is no 16.4 SDK to download. Driver updates ship without new headers.
+
 #### Status
 
 - Silent start: **recovered in production code** (verified: 26 of 26 injected, 1 of 1 natural). Cause still UNKNOWN; asked of Blackmagic (`docs/BLACKMAGIC_SILENT_START.md`).
@@ -1604,3 +1606,184 @@ Not updated, as decided.
 - Seek re-sync: **every seek, loop wrap and Play after a seek starts on its landing frame at 59.94 and 23.976 (chain16), 0 late edges.**
 - Holds: present gate off as well; cause UNKNOWN.
 - Output restart during play: the first frames' sound can be lost (tap race at 23.976, 387 ms and 151 ms in two runs; 3 frames at 59.94). New finding, open (`BUGS.md`).
+
+**Follow-up 4 (§10.26, 2026-11-12):** the output restart during play is fixed (preroll depth for a file on the card's timeline, an 8 s tap). Two items above are corrected there: the shallow preroll did not make the start picture worse (the analyser counted the renderer's own start hold), and the ~950 samples "missed" at 59.94 were past the end of the file at the loop's wrap, not at the restart. The silent-start recovery now waits 500 ms between stop and start. Preroll depth: no longer 200 ms for a file on the card's timeline.
+
+### 10.26 Stage 1c follow-up 4: sound with the first moving frame after an output restart, the SDK, silent starts with capture closed, 2026-11-12
+
+Decisions (Robbie, 2026-11-12) on §10.25. Gate on throughout. Build: `.build-cc`, `-DMANIFOLD_CARDCLOCK`, Profile, uncommitted. Builds in order: `fu6` (preroll 80 ms, tap 8 s), `fu6b` (preroll at least the video preroll's, the parked re-read), `fu6c` (DEBUG `recover` fault), `fu6d` (DEBUG recovery gap switch), **`fu6e` (the 500 ms recovery wait in production: the final build)**. Chains: `chain17` smoke and smoke2 (`s17-*`, `s17b-*`), then by a script edit made while it ran, `f17-tr-2398` and `nc17-5994` on `fu6b`; `chain18` (`s18-recover-*`, `fu6c`); `chain19` (`s19-*`, `fu6d`); `chain20` (the verification, `fu6e`). `fu6b` to `fu6e` differ only in the silent-start recovery, which neither `f17-tr-2398` nor `nc17-5994` reached. Each launch gated on Resolve closed and 10 min HID idle, guarded before and after, launched by absolute path, quit by PID. Runs in `~/Code/_scratch/manifold-1c-wire/runs`.
+
+#### Item 1: why the sound came late after an output restart
+
+Two causes, read from §10.24–§10.25's runs before any change (`an/starthold.py`, `an/taplead.py`, `an/restarts.py`, new):
+
+- **The 200 ms preroll held the latch back.** After an output start the picture is held while the renderer's clock settles (~50 ms, the 1b renderer move): slots 0–3 are the preroll, 4–6 untimed, and the picture moves at play rate from slot 7 or 8 (`rs14-5994`: 41 and 45 of 92 starts). A run latches only once the queue is inside the committed window (4,400 samples), and the preroll left 9,600. So the run latched at slot 9–10, 1–3 slots after the frame before the first move (`rs14-5994`: 0 of 99 restart segments on that frame on the wire). That is the "3 frames".
+- **The tap had already dropped the samples.** In steady play the tap leads the picture by ~2.5 s; just after an output start it led by up to **4.87 s** (`rs14-2398`; 4.56 at 59.94), past its 4 s window. Each running renderer move pushes it about a second on (`FrameEngine.rereadSoundAfterMove`, §10.12). So the run's first samples were gone: 58 of 99 restart segments at 59.94 started 109–794 samples into their frame (`rs14-5994`), and at 23.976 the sound came back up to 387 ms late (§10.25).
+- **§10.25's preroll verdict was the analyser, not the picture.** With the shallow preroll (`rs15-5994-pv`) the picture started moving at the same slots as with 200 ms (7–8), and the sound started on the held frame's last showing in 69 of 100 restarts (the other 31 lost samples to the tap). The "first picture frame held 1–6 extra slots" counted the renderer's own start hold, which is there at 200 ms too, against a sound that now began before it. The picture did not get worse.
+
+#### What was built
+
+- **Preroll depth** (`DeckLinkBridge.mm`, `beginAudioPreroll`): a file whose sound goes on the card's timeline (gate on, a source that pulls by time; read from the renderer at preroll) prerolls the runs' 80 ms (3,840 samples), **or the video preroll's duration if longer** (8,008 samples at 23.976, 7,680 at 25p, 6,406 at 29.97; 3,840 from 50p up). The queue is then inside the committed window by the first timed move, and the run latches there, as at Play and seek. Everything else (live sources, gate off) keeps 200 ms. One line per start: `[SDI-AUDIO] audio preroll: N samples`. DEBUG: `MANIFOLD_SDI_AUDIO_PREROLL=200` forces the old depth, `video` the video preroll's alone.
+- **Tap window 4 s → 8 s** (`AudioTapBuffer.swift`, `windowSeconds`): 3.1 MB stereo at 48 kHz, 24.6 MB at 16 channels.
+- **The silent-start recovery waits 500 ms between its stop and its start** (`DeckLinkService.swift`, `recoverSilentStart`, `silentStartRestartGap`; production). Found in the first smoke: §10.25's recovery had been tested at 59.94 only. At 23.976, back to back while playing, the recovery's own start often lost its whole audio queue within ~20 ms of Start, its start check read "off its picture" and gave up after 3 flushes, and the sound ran off its picture on the wire for the session, **mostly 0.85–0.99 s late**: 2 of 2 injected stalls on `fu6` (`s17-stall-2398`), 2 of 2 on `fu6b` (167 ms preroll, `s17b-stall-2398`), **1 of 2 with the old 200 ms preroll** (`s17b-stall-2398-200`: −3.9 ms after a 903-sample gap; so not this round's change), and 3 of 5 forced on clean starts (`s18-recover-2398`, below: not the stall's queue 10 s ahead either). At 59.94, 1 of 5 forced recoveries while playing (`s18-recover-5994`, +219 ms on the wire). Paused recoveries were good in every run (2 per run). **With 500 ms between stop and start: 12 of 12 at 23.976 started with their picture, 8 of them while playing, every session's sound exact on the wire** (`s19-recover-2398-g500` 7 of 7, `s19-stall-2398-g500` 5 of 5). Why back to back fails is UNKNOWN. The cost: the picture is off the wire 0.5 s longer at a recovery. Dropped, and logged, if the output stops or restarts during the wait. DEBUG: `MANIFOLD_SDI_RECOVERY_GAP_MS` overrides it (0: back to back).
+- **DEBUG fault `MANIFOLD_SDI_AUDIO_START_FAULT=recover`** (`DeckLinkBridge.mm`, `checkStart`): a start that consumed normally is handed to the silent-start recovery anyway, so the recovery can be exercised without `stall`'s preroll 10 s ahead. Logged `[SDI-AUDIO] test: this start consumed normally …`.
+- **Play after an output restart made while paused** (`FrameEngine.swift`, `rereadSoundAfterMove`): a parked renderer move now reads the sound again from the frame on screen (the frame whose interval holds the clock), not from the clock, the seek's rule (§10.23 item 1). Found in the first smoke: the paused frame's samples before the clock were never in the tap (686 samples at 59.94, 1,260 at 23.976; in `rs14-5994` and `rs15-5994-pv` too).
+
+#### Item 1: results
+
+Session controls (`syncout`, per-frame medians, `ctl20-*`): **−0.567 ms at 59.94, −0.208 ms at 23.976** (chain14: −0.550, −0.187). Wire checks per sound segment (`an/restarts.py`): the first offset, where the first sample falls in its frame (the card's constant: 26–27 samples at 59.94, 9–10 at 23.976; later means samples lost), steps. Bridge: `missing` samples per output session (scheduled as zeros, never filled) and each latch's sound slot. Final build `fu6e` unless noted.
+
+| Run | What | Result |
+|---|---|---|
+| `rs20-5994` | 50 output restarts while playing, 59.94 | **50 of 50 restart segments start 26–28 samples into their frame, first offset −0.588 to −0.546 ms, 0 samples missing in all 55 sessions.** Every latch: sound from the slot before the first timed move, the held frame's last showing (slot 7/8 → 6/7 mostly). 1 step: a one-frame picture hold 1.6 s into one session, the sound following it (the known holds, §10.24–§10.25; 1 in 50). **3 natural silent starts in 55, each recovered** by the output restart with its 500 ms wait, sound exact on the wire after it. Before (`rs14-5994`, 200 ms, 4 s tap): 58 of 99 segments started 109–794 samples late, 0 of 99 on the held frame |
+| `rs20-2398` | 50 restarts while playing, 23.976 | **50 of 50 start 9 samples into their frame at −0.187 ms, 0 steps, 0 missing in 52 sessions, 52 of 52 starts with their picture.** 49 located by the analyser; the 50th by hand (`an/session.py`): the analyser lost it after an output-stop gap that was not digital zero (below). It is 11.783 s of sound, 0 samples off one mapping, its first sample 9 samples into the last showing of the held frame 13506, at that frame's source time to the sample |
+| `rs20-stall-5994` | 10 injected silent starts while playing (`stall`), 59.94 | **10 of 10 recovered (12 of 12 with the 2 paused)**, 0 `NOT restarted`, 0 missing; each restart segment 25–27 samples into its frame, −0.563 to −0.513 ms (the card's start gap, +1 to +4 samples, spreads the first offset by that much), 0 steps |
+| `rs20-stall-2398` | 10 injected silent starts while playing, 23.976 | **10 of 10 recovered (12 of 12)**, 0 missing. 8 of 10 segments exact (10 samples in, −0.208 ms). **The last 2 (sessions 11 and 12): the sound sits 29 samples (0.60 ms) early against its picture on the wire**, constant for each whole session and sample-exact on one mapping; the first sample is frame N's own sound, 19 samples before frame N's first showing. The bridge saw a normal start in both (+2 and +1 samples, latch on the held frame's last showing), so the start check cannot see this. Capture's frames all carried 2,002 samples. Cause UNKNOWN (open) |
+| `rs20-recover-5994` | 5 recoveries forced on clean starts while playing, 59.94 | 7 of 7 started with their picture; 5 of 5 restart segments 25–26 samples in. Back to back (`s18-recover-5994`): 1 of 5 failed, +219 ms |
+| `f20-tr-5994`, `f17-tr-2398` | Every run edge (Play, Pause, seeks, steps, the transport's output restart while playing, loop wrap) | Every segment starts 25–27 (59.94) and 8 (23.976) samples into its frame at the control offset, 0 late edges. **The transport's output restart while playing:** 59.94 starts 25 samples into its frame (chain14–16: 3 frames late); **23.976 starts 8 samples into its frame, nothing missing (chain15: 18,582 samples, 387 ms; chain16: 7,248)**. Seek to 600 at 23.976 starts on whichever frame the picture showed first (14385 in cycle 2, 14386 in cycle 1, where 14385 was never shown) |
+| `s17b-*` (smoke) | Play after an output restart made while paused | 59.94: 24 samples into its frame, 23.976: 9 (`s17-5994` before the fix: 712; `s17-stall-2398`: 1,269; `rs14-5994`: 226) |
+
+**Pass criteria (Robbie): 0 lost samples, sound on the first moving frame, normal offset.**
+- **0 lost samples: met** in every restart while playing, at both rates, natural and injected silent starts included (bridge: 0 missing in all 169 output sessions of `rs20-*`; wire: every segment's first sample at the card's constant).
+- **Sound on the first moving frame: met, as at Play.** The run latches on the first timed slot whose picture moved, and the sound starts with the frame before it, the held frame's last showing. One qualification: while the renderer's clock settles after the 1b renderer move (~50 ms), the picture can step once or twice on untimed pulls before it moves at play rate (`an/starthold.py`: 10 of 47 starts at 59.94; slots 0–3 are the preroll). Those frames get no sound; the sound begins with the frame shown just before the first timed move.
+- **Normal offset: met** at 59.94 (−0.59 to −0.51 ms against −0.567) and at 23.976 (−0.187 / −0.208 against −0.208), **except 2 of 10 injected recoveries at 23.976, 0.60 ms early** (above, open).
+
+**Corrections to §10.25.**
+- The preroll verdict (above): the start picture did not get worse.
+- "The same step at 59.94 missed 954 samples (chain14: 941)": **not at the output restart.** In every 59.94 transport run (chain14 to chain20) the bridge's `missing` count rises during the Play from 1905 s through the loop's wrap at the end of the file: the fixture's sound is exactly 1,920.000 s and the last frame runs to 1,920.003 s and is held into the wrap. So those are positions past the end of the file's sound, an inference from the lengths, not a loss. At 59.94 the restart's fault was the 3 frames.
+
+**Found on the way, open:**
+- **The output-stop gap is sometimes not digital zero.** In `rs20-2398` and `rs14-2398`, at the same wire time (584.0 s) in both, the 3 s gap after one output stop carried about 15 non-zero samples per frame for 2.75–3 s, with no Manifold audio scheduled. Every other gap in every run is exact zero. It made the analyser lose the next session. Cause UNKNOWN (the card idles between sessions with its input looped back; capture open).
+- The 29-sample early sessions above.
+
+
+
+#### Item 2: the SDK
+
+**Desktop Video SDK 16.0 (released 2026-04-08) is the current SDK. There is no 16.4 SDK: driver updates (16.4, 16.5) ship without new headers** (Robbie, 2026-11-12). We compile against 16.0 (`docs/BlackmagicDeckLinkSDK16.0`), so "compiled against 16.0 against the 16.4 driver" is **not a suspect** and is struck from the open list: §10.25's "Item 3" (no download, no diff), question 5 of `docs/BLACKMAGIC_SILENT_START.md` (removed), and the "SDK updated to the 16.4 driver" retest condition of the parked HDMI entries in `BUGS.md`. Next (Robbie): install Desktop Video 16.5 and run 100 restarts at 59.94 for a driver before/after; not done in this round.
+
+#### Item 3: silent starts with capture closed
+
+**Every earlier restart-stress run had capture open.** `w1c-run.py` opens `capture --audio --marks` on device 0's input for the whole launch (each run has its `.raw`, `.marks`, `.cap` and a `segs` report): `rs-*` (chain13), `rs14-*`, `rs15-*`. So every silent start counted so far happened with the card's input open, which moves its output clock (§5).
+
+**`nc17-5994`, capture CLOSED** (`W1C_NOCAP=1`, new; device 0's input never opened; 13:43–14:09; build `fu6b`): 100 output stops and starts while playing at 59.94, gate on, plus the launch's start and the paused restart. Silent starts read from the bridge's start check alone (`an/starts.py`, new).
+
+| Run | Capture | Starts | Silent |
+|---|---|---|---|
+| `rs-5994` (chain13, old sequence) | open | 100 | 5 |
+| `rs14-5994` | open | 101 | 1 |
+| `rs15-5994-pv` | open | 102 | 1 |
+| **`nc17-5994`** | **closed** | **102** | **0** |
+
+All 102 started with their picture, at +1 to +4 samples (+2/+3 in 98), the same gaps as capture open. **Capture open: 7 in 303 at 59.94 gate on (2.3 %); closed: 0 in 102.** That points at the open input, but does not settle it: at 1 in 100, no silent start in 102 happens 36 % of the time (at 2.3 %, 9 %). A second capture-closed run of 100, or the other system's (below), would make it 0 in 200+.
+
+#### Item 3: the 100-restart stress on another DeckLink system
+
+**What to copy.** One folder, made here by `zsh scripts/decklink-loopback/w1c-kit.sh ~/Code/_scratch/manifold-1c-kit ~/Code/_scratch/manifold-1c-wire/fixtures/w1c-5994-1920s.mov` (4.1 GB, almost all of it the fixture; made 2026-11-12 from the final build `fu6e` and ready there now). It mirrors this tree: the measurement build exactly as run in chain20 (`.build-cc/…/Profile/Manifold.app`, 49 MB, `-DMANIFOLD_CARDCLOCK`, gate switch read from the launch environment), `scripts/manifold-proc.sh`, `scripts/decklink-loopback/w1c-run.py`, `defout`, `probe`, `linkpace-ax`, the fixture, and `run-other.sh`. Copy it with `rsync -a` or a disk to `~/Code/_scratch/manifold-1c-kit` on the other Mac (not AirDrop: it quarantines the app).
+
+**What to build there: nothing**, provided that Mac is Apple silicon (Manifold is arm64 only; on an Intel Mac this kit cannot run). The app carries its FFmpeg dylibs. The other Mac needs Desktop Video installed with the card on 1080p59.94-capable output, `python3` (Xcode Command Line Tools), and Terminal allowed under Privacy & Security → Accessibility and → Automation (System Events), which `w1c-run.py` uses to click the File menu by name. **No loop cable is needed:** capture stays closed.
+
+**Before the run.** Quit DaVinci Resolve, Media Express, and anything else that can hold the card; `/Applications/Manifold.app` not running. If that Mac's Manifold trial has ended and it has no licence, the build opens on the licence window and the run stops at "output did not start"; it needs a licence or a trial there.
+
+**The command** (about 30 minutes; do not touch the Mac while it runs, a launched build takes focus):
+
+```sh
+zsh ~/Code/_scratch/manifold-1c-kit/run-other.sh
+```
+
+It guards, records the card (`probe`) and the Mac (`sw_vers`, model), then runs `W1C_NOCAP=1 w1c-run.py restarts … on other-nc-5994 100`: launch by absolute path, destination SDI as a launch argument (nothing written to defaults), output on, Play, a paused restart, then 100 output stops and starts while playing, Pause, quit by PID, guard. It prints one line of counts: output starts, sound started with its picture, silent starts, recovered, not restarted, started off its picture.
+
+**What to send back:** `runs/other-nc-5994.log` (the whole run; the counts are read from its `[SDI-AUDIO]` lines), `.defout`, `.probe.txt`, `.host.txt`. Nothing in them is a key or a credential.
+
+
+
+#### Item 5: cleanup
+
+`~/Code/_scratch/manifold-1c-wire/runs`: every run whose label no document cites, by name or by a glob such as `rs15-*`, deleted (`an/cited.py`, which lists both). Files of a cited run with an extra suffix (`.segs2`, `d-defout-*.sample`, `fx*-control.sample`) kept with their run. Deleted 2026-11-12: 22 runs, 114 files, 52 MB (`ap2398-on`, `ap5994-on`, `c0-d80-*`, `c0-ovl`, `ctl2-*`, `smoke-1`, `t2-smoke`, `t3-*`, `v-c-*-on`, `v-p-*` but `v-p-5994-off`, `v-tr-2398-on`, `v2-*`). None held a wire recording; §10.22's C0b and smoke runs, described there without labels, were among them. Left: 98 cited runs (7.2 GB with this round's). The fixtures kept (13 files).
+
+#### Status
+
+- **Output restart while playing:** the sound starts with the first timed moving frame, as at Play, with nothing lost, at 59.94 and 23.976, through natural and injected silent starts (`rs20-*`). Fixed by the preroll depth and the 8 s tap; Play after a restart made while paused, by the parked re-read.
+- **Silent-start recovery:** now waits 500 ms between its stop and start (back to back it could leave the sound up to a second late, mostly at 23.976). 2 of 10 recovered sessions at 23.976 still sat 0.60 ms early: open.
+- **SDK:** 16.0 is current; struck as a suspect.
+- **Silent starts, capture closed:** 0 of 102 against 7 of 303 open. Not settled; the other system's run and a second closed run would.
+- **Stage 2:** planned, §10.27. Nothing built.
+- Next (Robbie): Desktop Video 16.5, then 100 restarts at 59.94 for a driver before/after.
+
+### 10.27 Stage 2, the plan: destination Computer with output on, the card as master, 2026-11-12
+
+**Plan only: nothing here is built.** Asked by Robbie, 2026-11-12 (follow-up 4, item 4). It replaces §10.2's target and §10.5's T8–T12 where they differ; everything else in §10.1–§10.7 stands. Line numbers are this working tree (HEAD `1ee7b5a` plus §10.26's uncommitted changes).
+
+**Aim.** Output on, destination Computer, a file playing: the card is the master clock (as at destination SDI today), the Mac's sound is resampled to follow the card (§10.2 option A), and it lines up with **the SDI picture**, not the window (§10.7 decision 2). A flip between SDI and Computer is a mute flip: no renderer move, no rate write, no hold.
+
+#### What exists after 1b and 1c
+
+- The picture's synchronizer is steered onto the card's line once a second (`cardClockTick`, `FrameEngine.swift:955`), with the audio renderer on its own synchronizer, `audioSynchronizer` (`moveAudioToOwnClock`, `:819`), at rate 1 on the Mac's device. Every transport move goes to both (`setTransportRate`, `parkTransport`, `:925`).
+- That applies only while the card owns the sound: `cardLockApplies` (`:808`) needs `deckLinkOwnsAudio`. At destination Computer the renderer is back on the picture's synchronizer, card lock is released, and the SDI picture slips as before Stage 1. A flip on air moves the renderer (48 / 65 ms clock loss, §10.1).
+- While muted, the sound's clock is put back on the picture when they part by 20 ms (`holdCardAudioNearPicture`, `:938`; `CardClockAudio.partBound`). That position write mutes the renderer for 50–60 ms, which is why it is allowed only while muted.
+- The SDI bridge knows, per run, the exact line between the card's stream and the file: card sample `s` carries source sample `s + D` (§10.22), latched on the first moving frame (§10.25, §10.26). With the completion stamps (`CardClockSampleRing`) that gives **the content time on the SDI wire at any host time**, continuous, with no pts staircase.
+
+#### The design
+
+1. **The second synchronizer, for both destinations.** `cardLockApplies` drops the `deckLinkOwnsAudio` term: while output runs and a file with sound plays, the renderer lives on `audioSynchronizer` whatever the destination. The destination only sets `audioRenderer.isMuted` and the bridge's gate (`isSilent`), as today. Output off: unchanged, no second synchronizer (T15).
+2. **The resampler.** One `LiveAudioResampleStage` (`LiveAudioResample/LiveAudioResampleStage.swift:105`) per audio arm, in the pump's enqueue closure **after the tap**, so the tap and SDI keep original samples (§10.2's "Where it sits"). Built only while card lock holds; output off runs today's closures. Its output axis is `audioSynchronizer`'s timeline.
+3. **The steering.** A small class beside the live one (§10.2: the live steering's bulk serves things a file does not have), using `LiveAudioResampleController` with its adopted gains. Per input buffer:
+   - **Mac:** `m = stage.inputTime(atOutputTime: audioSynchronizer.currentTime())`, the content heard now;
+   - **SDI picture:** `w = Φ + cardTime(host)`, the content on the wire at the same host instant: `Φ` from the bridge's current run (published by the bridge with its serial; new, below), `cardTime(host)` from the stamp line card lock already fits. One paired read, discarded over 200 µs (`pairedReadLimit`);
+   - **Error:** `e = m − (w + K)`. `K` is the one constant: the difference between the synchronizer's idea of "heard" and the Scarlett's connector, and the card's completion stamp and its SDI connector. It is **measured, not assumed** (the test below), and stored per output device only if the measurement says it differs by device.
+   - No run (paused, between a seek and its latch, gate silent): `ρ` held, integrator held, no error read.
+   - **The bridge publishes** one record per run change: `{serial, Φ (source s at card sample 0), rate mismatch line if C6, active}`, under the handed lock, read by the engine on main. It already holds all of it (`m_run`).
+4. **Coarse alignment, once per run.** The SDI wire starts a run `L` after the picture clock (the pull margin plus the frames between pull and wire, about 100 ms at 59.94 by reading, §10.7; the bridge measures it exactly at each latch). At Play, `audioSynchronizer` starts at the paused time `T` at host `H + L` (a future-dated start from a stop is harmless, §10.2), so its first sample is heard with the wire's first moving frame. `L` is the last run's measured value, else the prediction from the slot timeline. After the run latches, `e` is read; above 20 ms it is a coarse miss: one position write (mutes 50–60 ms), logged `[CARDLOCK] Mac sound re-anchored to the SDI picture`, counted. Expected 0 in steady play.
+5. **1b's 20 ms re-anchor retires.** The steering holds the sound within a millisecond in both destinations, muted or not, so `holdCardAudioNearPicture` has nothing to do and would mute an audible renderer.
+
+#### Transport events
+
+| Event | Picture clock | `audioSynchronizer` | Stage, steering |
+|---|---|---|---|
+| Play | As today; lock latches | Rate 1 at `T`, host `H + L` | Runs from the first latched run; integrator kept from the last run |
+| Pause | Rate 0 | Rate 0 at the same host time (`parkTransport`) | Held |
+| Seek, step, loop wrap, scrub release | `beginReading`, lock re-latches | Re-anchored to the new run as at Play, once the bridge latches the landing frame | New stage with the arm; integrator held (no re-acquisition); filter reset (`coarseEvent`) |
+| Shuttle ≠ 1×, scrub drag, reverse | As today | Same rate, muted as today | Held |
+| Track switch | Untouched | One position write: the new stage's axis starts on content time | New stage, integrator held |
+| Output start while playing | Renderer moves off (clock loses ~48 ms, §10.1); **at destination Computer that is an audible gap, measured below** | Created | Built at the first run |
+| Output stop while playing | Renderer moves back (~65 ms) | Released | Destroyed; the Mac sound is on its device again, as today |
+| SDI → Computer | Nothing | Nothing | Nothing: **unmute only**. The bridge's run ends after 8 silent slots (§10.22) |
+| Computer → SDI | Nothing | Nothing | Nothing: mute; the bridge latches a new run on the next moving frame |
+| Audio device change (incl. §10.19's automatic flush) | Unaffected | Its clock changes under it | `readSoundAgain(from: flushTime)` (`:885`, `:910`) builds a new stage at the flush time on the same axis, so the alignment carries over. **Integrator reset** if the default output's UID changed (a new device has its own rate against the card), held otherwise. The flush handler keeps its skip during a renderer move |
+
+**The output-change stall fix (§10.19) and Stage 2.** The fix re-reads from the flush time with the clock running. Under Stage 2 that clock is `audioSynchronizer`, which the flush does not stop, so the new stage's first sample lands on the aligned axis; what changes is the device's rate (the integrator above) and possibly `K` (if `K` is per device). The re-read empties the tap; at destination SDI §10.19 measured 0 or one 19–21 ms callback of SDI silence per change. Not changed here.
+
+#### Verifying the Mac's sound against the SDI picture
+
+Nothing today measures the Mac's sound against the SDI picture on one timebase. The Audio Hijack + OBS route (`AV_SYNC_FINDINGS.md` §1.2) records each on its own clock and cannot be set against `capture`'s host stamps. **Proposed: Robbie's cable, recorded with host timestamps beside the SDI capture.**
+
+⚠️ **This is a hardware loop on the Scarlett, which `AV_SYNC_FINDINGS.md` §1.2 and `CLAUDE.md` (Test environment) rule out (Robbie, 2026-09-30).** Robbie proposed it in follow-up 4 (2026-11-12). It needs his explicit yes, and those two rules amended to allow this one cable for Stage 2, before anything is plugged in. If not: the fallback is §10.5's T12 (attended, Audio Hijack + OBS, slope only, no absolute offset and no per-event figures).
+
+**What to plug in (one cable):**
+- A balanced 1/4" TRS to 1/4" TRS cable from **Scarlett 18i20 Line Output 3** (rear) to **Scarlett Input 8** (front combo jack, TRS). Input 8: gain at minimum, PAD on, INST and AIR off, 48 V off.
+- In Focusrite Control, route **Playback 1** to Line Output 3 (and nothing else to it). Write down the routing before, put it back after; it is the interface's state, not the Mac's.
+- Keep device 0's SDI output looped to its input, as today.
+- Optional, for T9 (the built-in device): a 3.5 mm TRS to 1/4" TRS cable from the Mac Studio's headphone jack to Scarlett Input 7, same settings.
+- Audio Hijack and the OBS recorder closed for these runs.
+
+**Tools (new, not shipped, `scripts/decklink-loopback/`):**
+- `devrec.swift`: a Core Audio IOProc on the Scarlett that writes Input 8 (and 7) to a raw file, and for every IO cycle the input `AudioTimeStamp` (`mSampleTime`, `mHostTime`) and the device's reported input and output latency, safety offset and buffer size. A gap in `mSampleTime` is logged as a drop (ffmpeg's avfoundation input compresses drops silently, `AV_SYNC_FINDINGS.md` §1.2, so this checks every cycle). `--ping`: a click out of Line Output 3 by its own output IOProc, recorded on Input 8: the round trip against the reported output + input latency.
+- `capture --host`: each marks line also carries the received frame's hardware reference timestamp on the host clock.
+- `w2-mac.py`: locates the Scarlett recording in the seeded-noise fixture by cross-correlation over 100 ms windows (analog, so not bit-exact; sub-sample by parabolic peak), giving the Mac's content time at each host time; `w1c-wire.py` already gives the SDI picture's. Their difference, per window, is **the Mac's sound against the SDI picture**, both at their inputs. `K` is then that difference less the Scarlett's input latency (validated by `--ping`) and the SDI loop's input delay (the output's completion stamp against `capture`'s arrival stamp for the same frame, both on the card's clock).
+- Analysis states its own uncertainty: the `--ping` residual (round trip measured − reported) bounds the split between output and input latency.
+
+#### Predictions and pass criteria, written 2026-11-12 before any code
+
+| # | Run | Prediction | Pass |
+|---|---|---|---|
+| W0 | `devrec --ping`, 20 clicks, no Manifold | Round trip = reported output + input latency within 0.2 ms; no `mSampleTime` gap in 10 min | Residual stated; 0 gaps |
+| W1 | **Today's build (1c)**, destination Computer, output on, 59.94, 30 min Play | Card lock off at Computer, so the SDI picture slips one frame about every 16 min (card − Scarlett ≈ 17.6 ppm, §10.5). Mac − SDI picture: a ramp of ~1.06 ms/min with a 16.7 ms step back at each slip. The constant: the Mac **ahead** of the SDI picture by about 100 ms (§10.7, by reading) | Baseline only: records the constant and the ramp |
+| W2 | Stage 2, same, 59.94 and 23.976, 30 min each | Mac − SDI picture constant: **spread ≤ 0.2 ms after the first 2 min, 0 steps**. `ρ − 1` settles at card − Scarlett, about −17.6 ppm, within 0.5. 0 position writes on `audioSynchronizer` between Play and Pause | Spread ≤ 0.2 ms, 0 steps, 0 writes; after `K`, \|Mac − SDI picture\| ≤ 1 ms with the stated uncertainty |
+| W3 | Stage 2, the transport loop (`w1c-run.py transport`), destination Computer | Each run's offset within ±0.5 ms of W2's constant within 2 s of its start; the first sound with the landing frame ±1 ms | All runs |
+| W4 | 10 SDI ↔ Computer flips while playing | No renderer move, no rate write (log). On each unmute the first located window within ±0.5 ms of W2; SDI's run ends and re-latches as today | 10 of 10 |
+| W5 | §10.19 interaction: 5 default-output switches to the built-in and back, Computer | One `[AUDIO-FLUSH]` re-read per change; back on the Scarlett, the offset within ±1 ms of W2 within 2 s; integrator reset logged per UID change | 10 of 10 |
+| W6 | Output stop and start while playing, Computer, 20 times | An audible gap at each renderer move: 48–65 ms (§10.1), on the Scarlett recording. After the start, the offset back at W2's within 2 s of the first run | Gap measured and reported; offset as W2 |
+| W7 | T9: the built-in, through the headphone jack (optional cable) | As W2 with `ρ` at the built-in's own difference; `K` differs from the Scarlett's by the devices' latency difference | Spread ≤ 0.2 ms; `K` per device decided from this |
+| — | T15 (output off) and T16 (live control) | Unchanged | As §10.5 |
+
+**Unknown going in.** Whether `audioSynchronizer.currentTime()` already includes the device's output latency (if not, `K` is per device and Stage 2 reads the latency from Core Audio). How soon an unmute is heard (§4.5 measured that a muted renderer keeps advancing, not how unmuting lands). Whether the 48 / 65 ms move at output start or stop can be made inaudible at destination Computer; accepted for the picture (§10.7 decision 3), not yet decided for sound.

@@ -1153,8 +1153,27 @@ final class DeckLinkService: ObservableObject {
         print(full)
         bridge.stopScheduledPlayback()
         renderer?.stopDeckLinkOutput()
-        startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: true)
+        // The start waits half a second after the stop (§10.26). Back to back while playing, the recovery's start often threw its audio
+        // queue away and its sound ran up to a second late for the session: at 23.976 every injected recovery while playing, 2 of 2 and
+        // 2 of 2 (`s17-stall-2398`, `s17b-stall-2398`), 3 of 5 forced on clean starts (`s18-recover-2398`); at 59.94 1 of 5
+        // (`s18-recover-5994`). With 500 ms between them, 12 of 12 at 23.976 started with their picture, sound exact on the wire
+        // (`s19-*-2398-g500`). The picture is off the wire that much longer. Dropped if the output stops or restarts meanwhile.
+        var gap = Self.silentStartRestartGap
+        #if DEBUG
+        if let ms = Double(ProcessInfo.processInfo.environment["MANIFOLD_SDI_RECOVERY_GAP_MS"] ?? "") { gap = ms / 1000 }   // test switch
+        #endif
+        guard gap > 0 else { startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: true); return }
+        let stopped = startGeneration
+        queue.asyncAfter(deadline: .now() + gap) { [weak self] in
+            guard let self, self.startGeneration == stopped, self.activeStart != nil else {
+                print("[SDI-AUDIO] the silent-start recovery's start dropped: the output stopped or restarted during its wait"); return
+            }
+            self.startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: true)
+        }
     }
+
+    /// The silent-start recovery's wait between its stop and its start (§10.26).
+    static let silentStartRestartGap: TimeInterval = 0.5
 
     /// Stop scheduled playback cleanly + disarm the renderer's push convert (D3 race-safe stop). Audio
     /// tears down inside the bridge's stop, symmetric with setup (stop playback → unset the audio

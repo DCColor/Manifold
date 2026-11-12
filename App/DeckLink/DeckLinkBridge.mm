@@ -551,15 +551,18 @@ public:
         m_legacyStart = envIs("MANIFOLD_SDI_AUDIO_START", "legacy");
         m_recoverStart = !envIs("MANIFOLD_SDI_AUDIO_RECOVER", "0");
         if (envIs("MANIFOLD_SDI_AUDIO_PREROLL", "video")) m_prerollVideoOnly = true;
-        if (envIs("MANIFOLD_SDI_AUDIO_PREROLL", "200")) m_prerollVideoOnly = false;
+        if (envIs("MANIFOLD_SDI_AUDIO_PREROLL", "200")) { m_prerollVideoOnly = false; m_prerollFull = true; }
         if (envIs("MANIFOLD_SDI_AUDIO_START_FAULT", "stall") && !m_outputRestart) {   // the preroll lands 10 s ahead: nothing is consumed
             m_audioStreamFrames = m_audioOrigin = 10 * (int64_t)m_audio.sampleRate;
         }
         if (const char *f = getenv("MANIFOLD_SDI_AUDIO_START_FAULT"); f && strncmp(f, "gap:", 4) == 0 && !m_outputRestart) m_faultGap = atoll(f + 4);
-        if (m_legacyStart || !m_recoverStart || m_audioOrigin || m_faultGap || getenv("MANIFOLD_SDI_AUDIO_PREROLL"))
+        // §10.26: a start that consumed normally is handed to the silent-start recovery anyway, so the whole-output restart is exercised
+        // without `stall`'s preroll 10 s ahead (whose ~470,000 queued samples the stop has to discard).
+        if (envIs("MANIFOLD_SDI_AUDIO_START_FAULT", "recover") && !m_outputRestart) m_faultRecover = true;
+        if (m_legacyStart || !m_recoverStart || m_audioOrigin || m_faultGap || m_faultRecover || getenv("MANIFOLD_SDI_AUDIO_PREROLL"))
             fprintf(stdout, "[SDI-AUDIO] test switches: start %s, recovery %s, fault %s, preroll %s\n", m_legacyStart ? "LEGACY" : "as the SDK",
-                    m_recoverStart ? "on" : "OFF (measure only)", m_audioOrigin || m_faultGap ? getenv("MANIFOLD_SDI_AUDIO_START_FAULT") : "none",
-                    m_prerollVideoOnly ? "the video preroll's frames" : "200 ms");
+                    m_recoverStart ? "on" : "OFF (measure only)", m_audioOrigin || m_faultGap || m_faultRecover ? getenv("MANIFOLD_SDI_AUDIO_START_FAULT") : "none",
+                    m_prerollVideoOnly ? "the video preroll's frames" : m_prerollFull ? "200 ms (forced)" : "as production");
 #endif
         m_audioEnabled = true;
         return { "EnableAudioOutput", S_OK };
@@ -575,6 +578,30 @@ public:
         const double prerollVideoSeconds = (double)m_pool.size() * (double)m_frameDuration / (double)m_timeScale;
         m_prerollTargetFrames = (int32_t)std::lround((double)m_audio.sampleRate
                                                      * (m_prerollVideoOnly ? prerollVideoSeconds : kAudioTargetDepthSeconds));
+        // §10.26 item 1: a file whose sound goes on the card's own timeline (the runs, gate on) prerolls only the runs' depth, 80 ms,
+        // inside the committed window. A run latches only once the queue is in that window (a latch rewrites it). With 200 ms
+        // queued, an output started while a file plays reached it ~10 slots in, and the run latched 1–3 frames after the picture's
+        // first move (rs14-5994: sound from slot 8–9, picture moving from 7–8; the "3 frames" of §10.25). At 80 ms it latches
+        // on the first timed slot that moved, as Play and seek do. Whether the source pulls by time is the renderer's, set with
+        // the source's format, before any output start. The preroll's audio is silence either way (no handed frame yet).
+        // Never less than the video preroll's own duration (the manual: preroll "sufficient for the video frames scheduled"): at
+        // 23.976 the four frames are 167 ms, and an 80 ms preroll there left the silent-start recovery's start with its queue
+        // thrown away and its sound 0.85–0.91 s late for the session, 2 of 2 restarts while playing (s17-stall-2398). The queue
+        // still reaches the committed window long before 23.976's first timed move (slot 5, 208 ms): the callbacks top up only
+        // to the 80 ms depth. So 3,840 samples at 50p and above, the video preroll's at slower rates.
+        bool runsPreroll = false;
+        if (!m_prerollFull && m_audio.handed && m_audio.cardTimeline) {
+            double hp = NAN, due = NAN, srcFrame = 0; bool timed = false, byTime = false; uint64_t seq = 0;
+            m_audio.handed(&hp, &timed, &byTime, &seq, &due, &srcFrame);
+            if (byTime) {
+                runsPreroll = true;
+                const int32_t videoFrames = (int32_t)std::lround((double)m_audio.sampleRate * prerollVideoSeconds);
+                m_prerollTargetFrames = std::min(m_prerollTargetFrames, std::max((int32_t)kRunsDepthFrames, videoFrames));
+            }
+        }
+        fprintf(stdout, "[SDI-AUDIO] audio preroll: %d samples%s\n", m_prerollTargetFrames,
+                runsPreroll ? " (a file on the card's timeline: the runs' depth, or the video preroll's if longer)" : "");
+        fflush(stdout);
         m_prerollingAudio = true;
         m_output->SetAudioCallback(this);
         m_output->BeginAudioPreroll();
@@ -1067,6 +1094,15 @@ private:
         int64_t gap = point - now;
 #ifdef DEBUG
         if (m_faultGap && m_sc.restarts == 0) gap += m_faultGap;
+#endif
+#ifdef DEBUG
+        if (m_faultRecover && consumed > 0 && std::llabs(gap) <= kStartGapToleranceFrames) {
+            fprintf(stdout, "[SDI-AUDIO] test: this start consumed normally (%+lld samples); handed to the silent-start recovery as if it had not\n",
+                    (long long)gap);
+            fflush(stdout);
+            silentStart(gap, now, q);
+            return;
+        }
 #endif
         if (consumed > 0 && std::llabs(gap) <= kStartGapToleranceFrames) {
             m_sc.active = false;
@@ -2016,10 +2052,12 @@ private:
     int64_t m_audioOrigin = 0;                    // the stream position of the first audio scheduled (0; 10 s under the stall test)
     bool m_legacyStart = false, m_recoverStart = true;   // DEBUG test switches; production: SDK order, recovery on
     bool m_prerollVideoOnly = false;              // §10.25 item 2: preroll the video preroll's frames' audio, not 200 ms. DEBUG
-                                                  // switch only: not kept (rs15-5994-pv: silent starts 1 of 102, unchanged; the
-                                                  // first picture frame held 2–4 extra slots at 69 of 101 starts, 0 at 200 ms)
+                                                  // switch only (rs15-5994-pv: silent starts 1 of 102, unchanged). The "first picture
+                                                  // frame held" it seemed to cause is the renderer's own start, at 200 ms too (§10.26)
+    bool m_prerollFull = false;                   // DEBUG (MANIFOLD_SDI_AUDIO_PREROLL=200): 200 ms for a file on the card's timeline too
     int32_t m_prerollTargetFrames = 9600;         // set by beginAudioPreroll
     int64_t m_faultGap = 0;                       // DEBUG test switch
+    bool m_faultRecover = false;                  // DEBUG test switch (MANIFOLD_SDI_AUDIO_START_FAULT=recover, §10.26)
     std::atomic<bool> m_stoppedSignal{false};     // ScheduledPlaybackHasStopped seen
     uint64_t m_appendedEdges = 0, m_cadRederives = 0;   // §10.24 items 5 and 2
     uint64_t m_audioCallbacksSeen = 0;            // video thread: the count at the last check

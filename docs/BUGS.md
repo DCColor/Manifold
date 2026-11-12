@@ -238,7 +238,7 @@ held back until after release, and the numbered defect entries follow.
        2108-1 included, apart from the two open loopback entries below. Its HDMI-wire half was measured on 2026-10-25 (`23070cb`):
        pictures and PQ match; HLG is not signalled, SDR after PQ sends no InfoFrame, and a same-mode colorimetry change
        drops the link for a frame (entries below). The reference monitor remains. The HDMI entries are parked
-       (2026-10-25): retest on a second Mac, on the LG over HDMI, and with the SDK updated to the 16.4 driver.**
+       (2026-10-25): retest on a second Mac and on the LG over HDMI. (The third condition, the SDK updated to the 16.4 driver, is void: SDK 16.0 is the current SDK and driver 16.4 shipped no new headers; Robbie, 2026-11-12.)**
    - ☐ **`preferredDynamicRange` in place of `wantsExtendedDynamicRangeContent`** (added 2026-10-30, Robbie). The EDR opt-in on
      Manifold's PQ and HLG layers is deprecated in macOS 26 (`CALayer.h`: "Use preferredDynamicRange instead",
      `macos(14.0, 26.0)`). AVFoundation's own video layers use `preferredDynamicRange`: `.high` in a bare `AVPlayerLayer`,
@@ -2673,7 +2673,7 @@ it, or quits, the card should hold black whatever its idle setting, and the last
 
 ## ⏸ PARKED 2026-10-25 — KNOWN LIMITATION (S7-5 HDMI loopback) — DeckLink: HLG is not signalled on HDMI to this sink; no SDK route changes it
 
-**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable); and with the vendored SDK (16.0) updated to match the installed Desktop Video 16.4 driver.
+**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable). (Struck 2026-11-12: "the vendored SDK (16.0) updated to match the 16.4 driver". 16.0, released 2026-04-08, is the current SDK; driver updates 16.4 and 16.5 ship without new headers. Robbie.)
 
 **Found by the HDMI loopback** (`23070cb`); **every SDK route checked 2026-10-25** (§6.11, *S7-5 HDMI follow-up*, item 3).
 - **What:** an HLG source reaches HDMI as Rec.2020 with no transfer signalled. **SDI carries HLG** (EOTF 3, dynamic
@@ -2693,7 +2693,7 @@ it, or quits, the card should hold black whatever its idle setting, and the last
 
 ## ⏸ PARKED 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, a sink can stay in PQ after PQ → HLG, after HLG → SDR, and after a colorimetry change; setting the HDR flag on SDR does not help
 
-**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable); and with the vendored SDK (16.0) updated to match the installed Desktop Video 16.4 driver.
+**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable). (Struck 2026-11-12: "the vendored SDK (16.0) updated to match the 16.4 driver". 16.0, released 2026-04-08, is the current SDK; driver updates 16.4 and 16.5 ship without new headers. Robbie.)
 Robbie's decision on the options below waits for the retest. Black on stop (below) is separate: it ends an output on SDR, it does not change signalling between files.
 
 **Found by the HDMI loopback** (`23070cb`). **Re-measured 2026-10-25 within one output session** (§6.11, *S7-5 HDMI
@@ -2734,7 +2734,7 @@ sessions reset the sink whatever the flag (s4, flag clear, reset the same way).
 
 ## ⏸ PARKED 2026-10-25 (S7-5 HDMI loopback) — DeckLink: on HDMI, a colorimetry change at an unchanged mode drops the link for one frame, then two frames arrive partly written
 
-**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable); and with the vendored SDK (16.0) updated to match the installed Desktop Video 16.4 driver.
+**⏸ PARKED 2026-10-25** (with the other HDMI entries; `docs/HDMI_HDR_SIGNALLING_DECKLINK.md`). Retest: on a second Mac with a DeckLink; on Robbie's LG over HDMI (HLG-capable). (Struck 2026-11-12: "the vendored SDK (16.0) updated to match the 16.4 driver". 16.0, released 2026-04-08, is the current SDK; driver updates 16.4 and 16.5 ship without new headers. Robbie.)
 
 **Found by the HDMI loopback** (`23070cb`; `COLOR_MANAGEMENT_FINDINGS.md` §6.11, *S7-5 by loopback — HDMI*, transitions).
 - **What:** 9-1-9 → 1-1-1 (Rec.2020 → Rec.709, both 1080p25), 2 of 2 runs. The HDMI input reports **one no-input
@@ -3862,13 +3862,23 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 
 `CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`.
 
+**Follow-up 4, 2026-11-12 (§10.26; chain17–20; uncommitted):**
+- **Output restart while playing: FIXED** (including the silent-start recovery's restart). Two causes: the 200 ms audio preroll kept the queue outside the committed window, so the run latched 1–3 frames after the picture's first move (the "3 frames" at 59.94); and just after an output start the tap led the picture by up to 4.87 s, past its 4 s window, so the run's first samples were gone (the 387 ms at 23.976). Now a file on the card's timeline prerolls 80 ms, or the video preroll's duration if longer (`DeckLinkBridge.mm`, `beginAudioPreroll`), and the tap keeps 8 s (`AudioTapBuffer.swift`). Verified on the wire, gate on: 50 restarts while playing per rate, every one starting at the card's constant position in its frame (26–28 samples at 59.94, 9 at 23.976) at the control offset, 0 samples missing in 169 sessions; 3 natural and 20 injected silent starts (while playing) recovered, the sound after each at its frame's start with nothing lost, and at the control offset except 2 at 23.976 (0.60 ms early, open below) (`rs20-*`).
+- **Play after an output restart made while paused: FIXED.** The parked renderer move read the sound again from the clock, not from the frame on screen, so that frame's first 686–1,260 samples were lost (`FrameEngine.swift`, `rereadSoundAfterMove`, the seek's rule).
+- **Silent-start recovery restarted back to back: FIXED by a 500 ms wait** (`DeckLinkService.swift`, `recoverSilentStart`). At 23.976 while playing, 8 of 11 recovery restarts lost their audio queue at Start and played the sound off its picture for the session, mostly 0.85–0.99 s late (with the old 200 ms preroll too); at 59.94 1 of 25. With the wait: 12 of 12, and 20 of 20 in `rs20-stall-*`. The cost: the picture is off the wire 0.5 s longer at a recovery. Why back to back fails is UNKNOWN; asked of Blackmagic (`docs/BLACKMAGIC_SILENT_START.md`).
+- **OPEN: 2 of 10 recovered sessions at 23.976 sat 0.60 ms early** (29 samples) against their picture on the wire, constant and sample-exact; the bridge's start check read normal, so it cannot see this (`rs20-stall-2398`, sessions 11–12).
+- **OPEN: an output-stop gap that is not digital zero:** ~15 non-zero samples per frame for ~3 s after one output stop, at the same wire time in `rs14-2398` and `rs20-2398`, nothing scheduled by Manifold. Cause UNKNOWN.
+- **Corrected:** §10.25's "the shallow preroll held the first picture frame" was the analyser counting the renderer's own start hold; the ~950 samples "missed" at the 59.94 restart step were past the end of the file at the loop's wrap.
+- **SDK:** 16.0 (2026-04-08) is the current SDK; there is no 16.4 SDK. Struck as a suspect, here and in the parked HDMI entries.
+- **Silent starts with capture closed: 0 of 102** at 59.94 (`nc17-5994`), against 7 of 303 with capture open (every earlier stress run had it open). Suggestive, not settled.
+
 **Follow-up 3, same day (§10.25; chain15/16; uncommitted):**
 - **Silent start: RECOVERED** (cause still UNKNOWN; asked of Blackmagic, `docs/BLACKMAGIC_SILENT_START.md`). When nothing is consumed 12,000 samples after Start, the service restarts the whole output once per output start and logs one `!! output start … restarting the whole output` line. Counted in Export Diagnostics' PICTURE RECOVERY (`SDI output start`). Verified: 26 of 26 injected silent starts and 1 of 1 natural one (rs15-5994-pv) recovered, each with sound on the wire. The cost is a visible picture restart about 0.3 s into the session.
-- **Preroll depth: 200 ms stays.** Prerolling only the video preroll's audio left silent starts unchanged (1 of 102) and held the first picture frame 1–6 extra slots at 69 of 100 starts.
+- **Preroll depth: 200 ms stays.** Prerolling only the video preroll's audio left silent starts unchanged (1 of 102) and held the first picture frame 1–6 extra slots at 69 of 100 starts. (Corrected in follow-up 4: the hold was the renderer's own start, there at 200 ms too; a file on the card's timeline now prerolls 80 ms or the video preroll's.)
 - **Late latch at loop wraps and seeks: fixed.** The latch is now provisional on the first frame that moves. 0 late edges at 59.94 (chain14: 3). A seek's landing frame stamped with the seek's time and then held, or paused on before Play, still lost its frame's sound (in chain14 too). Fixed in fu5: chain16 starts every seek, wrap and Play after a seek on its landing frame at both rates.
 - **One-frame holds at 59.94: also gate off** (1 in 50 restarts; gate on 3–5 in 100). Cause UNKNOWN.
 - **Live steering window order: serial queue** (`LiveAudioResampleSteering.swift:331`).
-- **NEW: output restart during play can lose up to 387 ms of SDI sound** (f15-tr-2398: 18,582 samples; f16-tr-2398: 7,248; at 59.94 the sound starts 3 frames after the restarted picture, chain14 too). The run's first read lost a race with the tap's refill, which evicted past its 4 s cap. Open.
+- **NEW: output restart during play can lose up to 387 ms of SDI sound** (f15-tr-2398: 18,582 samples; f16-tr-2398: 7,248; at 59.94 the sound starts 3 frames after the restarted picture, chain14 too). The run's first read lost a race with the tap's refill, which evicted past its 4 s cap. Fixed in follow-up 4 (above).
 
 **Follow-up 2, same day (§10.24; chain14; uncommitted). Status of each item below:**
 - **Silent start: NOT fixed, and in shipped builds.** 1 of 101 restarts at 59.94 gate on, 1 of 51 gate off on the old start sequence (today's path), 0 of 102 at 23.976. The bridge now detects it (`checkStart`) and logs `!! output start`, but flushing and rescheduling does not revive the card (its queue stayed at 5,999 through 3 restarts); only a full output stop and start has. Recovery method: Robbie's decision (§10.24).

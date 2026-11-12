@@ -865,9 +865,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     }
 
     /// A renderer taken off a synchronizer gives up what it held, and the pump refills it from where it had got to, so each move
-    /// puts the tap about a second further on. The tap keeps 4 s: parked, two moves pushed the frames at the clock out of it, and
+    /// puts the tap about a second further on. The tap kept 4 s: parked, two moves pushed the frames at the clock out of it, and
     /// SDI was silent for up to 0.9 s after Play (§10.12). So a move with the clock stopped reads the sound again from the clock,
-    /// as a track switch does. Running moves are left alone: re-reading there would drop the tap under SDI's cursor.
+    /// as a track switch does. Running moves are left alone: re-reading there would drop the tap under SDI's cursor. A running
+    /// move at output start still put the tap up to 4.87 s ahead, past the 4 s window, and the first run's sound was lost; the
+    /// window is 8 s since 2026-11-12 (§10.26).
     private func rereadSoundAfterMove() {
         #if MANIFOLD_CARDCLOCK
         let acts = !cardAudioMoving && synchronizer.rate == 0 && hasMedia && hasAudioToRoute
@@ -875,7 +877,12 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                      acts ? "READS AGAIN" : "skipped", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate, cardAudioMoving ? "yes" : "no"))
         #endif
         guard !cardAudioMoving, synchronizer.rate == 0, hasMedia, hasAudioToRoute else { return }
-        readSoundAgain(from: synchronizer.currentTime())
+        // From the frame on screen, not the clock: parked, the frame shown is the one whose interval holds the clock, and SDI's
+        // run at the next Play starts with that frame's last showing. Read from the clock, the samples between that frame's time
+        // and the clock were never in the tap: Play after an output restart made while paused lost them (686 samples at clock
+        // 10.041 on frame 10.027, s17-5994; CARD_CLOCK_FINDINGS.md §10.26). The seek's rule (`beginReading`, §10.23 item 1).
+        let clock = synchronizer.currentTime()
+        readSoundAgain(from: frameGrid.map { CMTimeMinimum(clock, $0.time(ofFrame: $0.frame(atSeconds: clock.seconds))) } ?? clock)
     }
 
     /// A new audio arm for the file at `time`, on either path, with the clock left as it is: the previous arm retired, the renderer
