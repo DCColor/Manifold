@@ -1543,3 +1543,64 @@ Smoke note: two smoke runs showed picture holds and multi-frame skips with 0 dro
 4. **The 59.94 one-frame holds** (6 of 101 gate-on restarts): investigate now or after 0.9.3.
 5. **Appended fill edges at end of file:** a correction rule, or log only.
 6. **Production steering order:** `FrameEngine.swift:3838`'s companion receives windows through the same concurrent queue as the test. Its ordering is UNKNOWN; a serial queue would guarantee it.
+
+Robbie's decisions on these (2026-11-11), what was built and the results: §10.25.
+
+### 10.25 Stage 1c follow-up 3: silent-start recovery, preroll depth, the 16.4 SDK, seek re-sync, holds gate off, the steering queue, 2026-11-11
+
+Decisions (Robbie, 2026-11-11) on §10.24's "Decisions needed". Build: `.build-cc`, `-DMANIFOLD_CARDCLOCK`, Profile, uncommitted (`fu4-build.log`; item 4's follow-up `fu5-build.log`). Chain `chain15`: smoke 22:25–22:28 (`s15-stall`), main 22:28–23:29 (`rs15-*`, `f15-tr-*`); `chain16` (item 4 follow-up, `f16-tr-*`). Each launch gated on Resolve closed and 10 min HID idle, guarded before and after. Runs are in `~/Code/_scratch/manifold-1c-wire/runs`. Session control as §10.24: −0.550 ms at 59.94, −0.187 ms at 23.976.
+
+#### What was built
+
+- **1, silent-start recovery: restart the whole output, at most once per output start** (production).
+  - `DeckLinkBridge.mm` `checkStart` → `silentStart`: once 12,000 samples pass with nothing consumed, the bridge stops checking and hands one line to the service's `silentStart` block (`DeckLinkBridge.h`), with `restart` set unless this start is itself the recovery's (`outputRestart`) or recovery is switched off.
+  - `DeckLinkService.swift` `recoverSilentStart`, on the service queue: stops the bridge and the renderer's DeckLink output, then `startOutputOnQueue(…, recovery: true)`. It logs one line, `[SDI-AUDIO] !! output start: the card's sound did not start: … restarting the whole output (once per output start)`. A start generation counter makes a late callback from a start that has since been stopped or replaced do nothing (and logs that). The recovery's own start logs `started with its picture, ±N samples (the silent-start recovery's output restart)`. If it too is silent, it logs `NOT restarted` and stays silent: there is no second restart.
+  - A start that began consuming off its picture still gets the §10.24 flush restarts first. If those time out with nothing consumed, the silent-start path takes over (seen once, below).
+  - Counted in `SDIStartRecoveryStats` (`DeckLinkService.swift`). Export Diagnostics' PICTURE RECOVERY section gains `SDI output start : N silent start(s) (X recovered by an output restart, Y not restarted) since launch` and `Last silent start:` (`DiagnosticsExport.swift:915-917`). `SDI-AUDIO` is added to the log tags the export collects.
+  - The DEBUG fault switches (`stall`, `gap:`) do not apply to the recovery's own start, so each injected fault can be seen recovered.
+- **2, preroll depth** (DEBUG switch `MANIFOLD_SDI_AUDIO_PREROLL=video|200`): `beginAudioPreroll` prerolls `rate × pool frames × frame duration` (3,203 samples at 59.94) instead of 200 ms, in both the anchor and the runs paths. **Not kept** (results): the default stays 200 ms and the switch stays DEBUG-only.
+- **4, seek re-sync on the first frame that moves** (`latchRun`, `confirmRun`, `processSlots`). A matched-rate run latches at once on the first timed slot that moved, provisionally. The next timed slot settles it:
+  - one frame on: confirmed;
+  - the same frame (the first frame held): the start moves to this slot, the held frame's last showing, and the queue is rewritten. Lateness is measured against the new start;
+  - a step off by between 2 samples and half a frame: the line is re-derived from this slot and the start kept (`latch: line from the next frame`);
+  - anything else: confirmed, then checked against the line as any other slot.
+  
+  The candidate (`m_cand`) that waited for the next slot is gone. Run starts emit `[AUDIO-CORR] k=a` (`noteRunStart`). The stop summary counts `provisional latches moved to a held first frame` and `re-derived from the next frame`.
+  - **Follow-up after chain15** (`fu5`): the "held frame's last showing" test now accepts any step forward under 1.5 frames instead of one frame ±2 samples, because a seek's landing frame carries the seek's time (below).
+- **6, live steering's window queue is serial**: `LiveAudioResampleSteering.swift:331` `emitQueue`, a serial utility queue, now carries both `emit` and `emitWindow` (they used the concurrent global utility queue). So the companion at `FrameEngine.swift:3838` receives windows in order. The test `SenderReportSlopeCrossCheckTests` now also asserts that order (`box.facts.map(\.elapsed) == sorted`): class 21 of 21.
+- **7, `docs/BLACKMAGIC_SILENT_START.md`**: the report for Blackmagic developer support.
+
+#### Results
+
+| Item | Run | Result |
+|---|---|---|
+| 1, injected silent starts | `s15-stall` (2 restarts), `rs15-stall` (20 restarts) | **Every injected silent start recovered: 4 of 4 and 22 of 22.** One `restarting the whole output` per silent start, 0 `NOT restarted`. Each recovery's start read +1 to +3 samples. On the wire: 22 sound segments for 22 recovered sessions, every one starting at −0.54 to −0.58 ms (the control) with 0 steps. The recovery costs a visible picture restart about 0.3 s into the session (the analyser counts it as picture events). |
+| 1, natural silent start | `rs15-5994-pv` | **1 in 102 starts, recovered.** The card consumed 1 sample of 3,841 and then nothing. So it was first read as off its picture (−1,056 samples) and flushed once (3,840 left). It then timed out with nothing consumed and **the output restart recovered it: +3 samples, sound on the wire**. |
+| 2, preroll depth, 100 restarts at 59.94 gate on | `rs15-5994-pv` against `rs14-5994` (§10.24) | **Silent starts: 1 of 102 (chain14: 1 of 101; chain13: 5 of 100): unchanged.** **Start gaps moved one sample later:** +2/+3 in 97 (chain14 +1/+2 in 96), range +1 to +4. **The first picture frame was held 1–6 extra slots before the sound and the picture's first move at 69 of 100 starts (chain14: 0 of 99; each run's first session excluded).** The sound started on that frame's last showing, as designed, but the picture stalls 17–100 ms at most starts. Mid-session one-frame holds: 3 (chain14: 5). Late latch edges 1 (the silent session), chain14 28. **Verdict: not kept.** Silent starts did not drop, and the start picture got worse. |
+| 4, seeks and loop wraps at 59.94 | `f15-tr-5994` against `f14-tr-5994` | **Fixed:** both loop wraps (end of file → 0) now start 26 and 25 samples into frame 0 (chain14: 152 and 127, the late latch). The cycle-2 seek to 600 starts on −29572 at 599.999 (chain14 lost that frame: −29571 at 600.016). The cycle-2 seek to 300 starts on −47554 at 300.000 (chain14: −47553). The seek to 310 starts 25 into its frame (chain14 105). **Late latch edges: 0 (chain14: 3, 303 samples).** Provisional latches re-derived from the next frame: 3. **Still losing a frame, in chain14 too:** (a) the cycle-1 seek to 300, whose landing frame (stamped 300.000000) was shown twice and the sound began on the next frame (−47553); (b) both Plays after a paused seek to 1905, where the paused frame (stamped 1905.000000) got no sound and the sound began on the next frame (1905.003). In both, the landing frame carries the seek's time, not its own pts, so its step to the next frame (786 and 149 samples) failed the one-frame ±2 test for "the held frame's last showing". Fixed in `fu5`; chain16 below. |
+| 4, after the `fu5` fix, 59.94 and 23.976 | `f16-tr-5994`, `f16-tr-2398` | **Every seek and loop wrap now starts its sound on the landing frame, with 0 steps and 0 late edges.** 59.94: the seek to 300 starts on −47554 at 300.000 in both cycles. Both Plays after the paused seek to 1905 start on the paused frame −16887 at 1904.986, from its last showing. Loop wraps start 27 samples into frame 0, and the seeks to 600 on −29572 at 599.999. 23.976: Play after the paused seek starts on −19862 at 1904.986 (chain15: −19861); every other seek and wrap 9 samples into its frame. Every segment's offset −0.54 to −0.58 ms (59.94) and −0.19 ms (23.976), the controls. **Not seek or loop:** the output restart during play again lost sound at 23.976 (7,248 samples missing, first sample 1,183 into its frame; the tap race above), and at 59.94 started 3 frames after the restarted picture (−45750 after −45753, as in chain14). |
+| 4, seeks and loop wraps at 23.976 | `f15-tr-2398` | Every seek and loop wrap starts 8 samples into its frame (the control). Unchanged from chain14 except the output restart below. |
+| 4, output restart during play (the transport loop's `output stop/start` step) | `f15-tr-2398` session 3 | **18,582 samples missing at the restart, 387 ms of silence on the wire** after the latch (sound from source 330.592 instead of 330.205). chain14: 68 samples. The latch read the tap at 330.205 while the tap, refilling after the restart (pts 333.0 → 334.1 in 50 ms), evicted its oldest samples past its 4 s cap. The rewrite found nothing to read until source 330.58. A race between the tap's refill and the run's first read, not a seek. Not fixed, not in scope. The same step at 59.94 (`f15-tr-5994`) missed 954 samples (chain14: 941). |
+| 5, one-frame holds, 50 restarts at 59.94 gate OFF | `rs15-5994-off` (today's start sequence) | **1 one-frame hold** (69.05 s, frame 2959, 9.4 s into its session), plus the +2 skip at 29.6 s that every gate-off run shows at its first session. chain14's gate-off run (old sequence, 51 restarts): 0. Gate on: 5 in 100 (chain14), 3 in 101 (`rs15-5994-pv`). **So the holds occur gate off too.** At 1 in 50 against 3–5 in 100, the rates cannot be told apart at these counts. Measure only (`an/holds.py`). The same run had 0 silent starts in 52 and 0 late edges. |
+| 6 | unit tests | `LiveAudioResampleTests.SenderReportSlopeCrossCheckTests` 21 of 21, with the new order assertion. |
+
+#### Item 3: the 16.4 SDK
+
+**The 16.4 SDK headers are not on this Mac.** What is present: `docs/BlackmagicDeckLinkSDK16.0` (what we compile against, `BLACKMAGIC_DECKLINK_API_VERSION` 0x10000000), an old 10.11.2 SDK inside the NDI SDK examples, and `/Library/Frameworks/DeckLinkAPI.framework` 16.4, which ships no headers. Blackmagic's public 16.4 release notes list DeckLink IP HD (NMOS registry) support and a Cintel fix; nothing on scheduled playback or audio. Sources: [Blackmagic SDK page](https://www.blackmagicdesign.com/es/developer/products/capture-and-playback/sdk-and-software), [Newsshooter](https://www.newsshooter.com/2026/08/24/blackmagic-design-desktop-video-16-4-update/), [No Film School](https://nofilmschool.com/desktop-video-update-16-4).
+
+**To download:** "Desktop Video SDK 16.4" from the Blackmagic developer page (Capture and Playback → SDK and software). Suggested place: next to 16.0, as `docs/BlackmagicDeckLinkSDK16.4`. Then diff, for scheduled playback and audio:
+- `Mac/include/DeckLinkAPI.h`: IDeckLinkOutput, IDeckLinkVideoOutputCallback, IDeckLinkAudioOutputCallback, their IIDs;
+- `DeckLinkAPITypes.h`, `DeckLinkAPIModes.h`;
+- `DeckLinkAPIVersion.h`;
+- any new `DeckLinkAPI_v16_0.h`-style compatibility header (one would mean an interface IID changed);
+- the SDK ReadMe's release notes.
+
+Not updated, as decided.
+
+#### Status
+
+- Silent start: **recovered in production code** (verified: 26 of 26 injected, 1 of 1 natural). Cause still UNKNOWN; asked of Blackmagic (`docs/BLACKMAGIC_SILENT_START.md`).
+- Preroll depth: 200 ms stays.
+- Seek re-sync: **every seek, loop wrap and Play after a seek starts on its landing frame at 59.94 and 23.976 (chain16), 0 late edges.**
+- Holds: present gate off as well; cause UNKNOWN.
+- Output restart during play: the first frames' sound can be lost (tap race at 23.976, 387 ms and 151 ms in two runs; 3 frames at 59.94). New finding, open (`BUGS.md`).

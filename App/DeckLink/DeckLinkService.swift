@@ -574,6 +574,9 @@ final class DeckLinkService: ObservableObject {
     /// replayed it, putting back the tag of whatever was on screen when output was switched on (BUGS.md). Each start
     /// now reads the renderer's current signal (`deckLinkStartSignal`), and each picture brings its own.
     private var activeStart: (deviceIndex: Int, mode: OutputMode)?
+    /// Each output start's number (queue only), so a silent-start recovery that arrives after the output has stopped or been
+    /// re-established for another reason does nothing (docs/CARD_CLOCK_FINDINGS.md §10.25).
+    private var startGeneration = 0
     private var colorObserver: NSObjectProtocol?
 
     /// D4a: the output DISPLAY MODE derived from the loaded file (video cadence). Resolution follows
@@ -1004,8 +1007,10 @@ final class DeckLinkService: ObservableObject {
     /// D4a mode-switch (which stops the old output on the same queue first, guaranteeing teardown
     /// completes before this re-establishes). Arms the renderer's convert at the mode's resolution
     /// (native 1:1) and drives the bridge's mode/scheduling from the mode's family + standard rate.
-    private func startOutputOnQueue(deviceIndex: Int, mode: OutputMode) {
+    /// `recovery`: this start is a silent-start recovery's (§10.25), and is not recovered again.
+    private func startOutputOnQueue(deviceIndex: Int, mode: OutputMode, recovery: Bool = false) {
         self.activeStart = (deviceIndex, mode)   // so an audio restart can replay it
+        self.startGeneration &+= 1
 
         // Arm the renderer's push convert (allocate v210 staging sized to the OUTPUT frame = the mode's
         // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
@@ -1087,6 +1092,14 @@ final class DeckLinkService: ObservableObject {
         let startSignal = self.heldSignal ?? self.renderer?.deckLinkStartSignal() ?? .sdr709
         print("DeckLink: output start — signal until the first picture: \(startSignal.logLine)")
         self.bridge.cardFrame = { [weak self] slot, host in self?.cardFrameSink?(slot, host) }
+        // A silent start (the card accepted the start's audio and played none of it, about 1 in 100 starts at 59.94): restart the
+        // whole output, at most once per output start (Robbie, 2026-11-11; docs/CARD_CLOCK_FINDINGS.md §10.25). The bridge calls this on
+        // its audio thread; the work is done here, on the queue, in order with every other start and stop.
+        let generation = self.startGeneration
+        self.bridge.outputRestart = recovery
+        self.bridge.silentStart = { [weak self] what, restart in
+            self?.queue.async { self?.recoverSilentStart(generation: generation, what: what, restart: restart) }
+        }
         let result = self.bridge.startScheduledPlayback(withDeviceIndex: deviceIndex, fill: fill,
                                                         initialSignal: Self.bridgeSignal(startSignal),
                                                         outputWidth: mode.width, outputHeight: mode.height,
@@ -1118,6 +1131,29 @@ final class DeckLinkService: ObservableObject {
                 self.applyAudioRouting()       // D4b-3: a FAILED start must not leave the Mac muted
             }
         }
+    }
+
+    /// A silent start, on the queue: one line, counted for Export Diagnostics, and (when `restart`) the whole output stopped and started
+    /// again as a mode change does, with no black frame between. Nothing if the output has since stopped or been re-established.
+    private func recoverSilentStart(generation: Int, what: String, restart: Bool) {
+        let line = "[SDI-AUDIO] !! output start: the card's sound \(what); "
+        guard generation == startGeneration, let start = activeStart else {
+            print(line + "not restarted: the output has stopped or restarted since")
+            return
+        }
+        guard restart else {
+            let full = line + "NOT restarted (" + (bridge.outputRestart ? "this start is already the recovery's output restart"
+                                                                        : "recovery switched off") + ")"
+            SDIStartRecoveryStats.note(restarted: false, line: full)
+            print(full)
+            return
+        }
+        let full = line + "restarting the whole output (once per output start)"
+        SDIStartRecoveryStats.note(restarted: true, line: full)
+        print(full)
+        bridge.stopScheduledPlayback()
+        renderer?.stopDeckLinkOutput()
+        startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: true)
     }
 
     /// Stop scheduled playback cleanly + disarm the renderer's push convert (D3 race-safe stop). Audio
@@ -1689,3 +1725,24 @@ final class FrameDump: @unchecked Sendable {
     }
 }
 #endif
+
+/// Silent SDI starts since launch, for Export Diagnostics' Picture Recovery section (docs/CARD_CLOCK_FINDINGS.md §10.25): each is a start
+/// whose sound the card never began playing; `restarted` ones had the whole output restarted. The log keeps each one's line.
+enum SDIStartRecoveryStats {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var restarts = 0
+    nonisolated(unsafe) private static var notRestarted = 0
+    nonisolated(unsafe) private static var last: String?
+
+    static func note(restarted: Bool, line: String) {
+        lock.lock(); if restarted { restarts += 1 } else { notRestarted += 1 }; last = line; lock.unlock()
+    }
+
+    /// One line for the diagnostics report.
+    static var summary: String {
+        lock.lock(); defer { lock.unlock() }
+        let n = restarts + notRestarted
+        return "\(n) silent start\(n == 1 ? "" : "s") (\(restarts) recovered by an output restart, \(notRestarted) not restarted) since launch"
+    }
+    static var lastSilentStart: String? { lock.lock(); defer { lock.unlock() }; return last }
+}

@@ -420,7 +420,7 @@ enum LogPartitioner {
         "ABOUT", "ARBITER", "BUILD", "CAPTIONS", "CLAP", "CSPROBE", "DIAG", "EDR",
         "EXPORT", "LICENSE", "LIVE-ROUTE",
         "LIVECLOCK", "NDI", "NDI-AUDIO", "OPEN", "Play", "RASTER", "RENDER-PERF",
-        "SCAN", "SCRUB", "SCRUB-GEOM", "SETTLE",
+        "SCAN", "SCRUB", "SCRUB-GEOM", "SDI-AUDIO", "SETTLE",
         "SRT", "SRT-AU", "SRT-AUDIO", "SRT-BACKLOG", "SRT-DECODE",
         "SRT-FLOW", "SRT-JITTER", "SRT-LIB", "SRT-UNDERRUN", "STREAM", "STREAMS", "SWEEP",
         "PLAYBACK", "RENDERER-NEARMISS", "RENDERER-RECOVER", "SWEEP-SUMMARY", "SYNTH-PERF", "ScopeSeek", "SyntheticLive", "UPDATE",
@@ -912,6 +912,9 @@ enum DiagnosticsReport {
         // flushed and re-armed. Each recovery and near-miss also has its own line in the captured log below.
         out += "Pacing renderer  : \(RendererRecoveryStats.summary)\n"
         if let last = RendererRecoveryStats.lastRecovery { out += "Last recovery    : \(last)\n" }
+        // SDI output starts whose sound the card never began playing, and the output restarts that recovered them (§10.25).
+        out += "SDI output start : \(SDIStartRecoveryStats.summary)\n"
+        if let last = SDIStartRecoveryStats.lastSilentStart { out += "Last silent start: \(last)\n" }
 
         section("ACTIVE ERROR STATE")
         var errors: [String] = []

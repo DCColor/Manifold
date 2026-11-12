@@ -325,6 +325,10 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     /// other transport. Called every window even when windows are not reported — the cross-check's
     /// WARNING must reach a Release log — with no steering line printed then.
     private let windowCompanion: (@Sendable (WindowFacts) -> [String])?
+    /// Where every log line, window line and companion call runs: one serial queue per steering, so windows reach the companion
+    /// (WHEP's sender-report fit, `FrameEngine`) in the order they closed, and lines print in that order. Until 2026-11-11 each went
+    /// to the concurrent global utility queue, so two windows closed close together could arrive out of order (§10.24 item 6, §10.25).
+    private let emitQueue = DispatchQueue(label: "manifold.liveaudio.steering.emit", qos: .utility)
 
     private let lock = UnfairLockBox()
     /// Serialises every TIMEBASE WRITE decision with its write: the anchor, the per-buffer
@@ -1695,16 +1699,16 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     private func emit(_ line: @escaping () -> String) {
         guard let log else { return }
         let box = UncheckedLine(make: line)
-        DispatchQueue.global(qos: .utility).async { log(box.make()) }
+        emitQueue.async { log(box.make()) }
     }
 
     /// A window line, then its companion's, in one block so nothing interleaves between them. The
-    /// companion is read on the utility queue, never on the enqueue thread that closed the window.
+    /// companion is read on the serial emit queue, in window order, never on the enqueue thread that closed the window.
     private func emitWindow(_ window: @escaping () -> (line: String?, facts: WindowFacts)) {
         guard let log else { return }
         let box = UncheckedWindow(make: window)
         let companion = windowCompanion
-        DispatchQueue.global(qos: .utility).async {
+        emitQueue.async {
             let w = box.make()
             if let line = w.line { log(line) }
             companion?(w.facts).forEach(log)
@@ -1712,7 +1716,7 @@ public final class LiveAudioResampleSteering: @unchecked Sendable {
     }
 }
 
-/// The window closure captures only value snapshots; these let it cross to the utility queue.
+/// The window closure captures only value snapshots; these let it cross to the emit queue.
 private struct UncheckedLine: @unchecked Sendable { let make: () -> String }
 private struct UncheckedWindow: @unchecked Sendable {
     let make: () -> (line: String?, facts: LiveAudioResampleSteering.WindowFacts)

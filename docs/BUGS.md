@@ -3862,6 +3862,14 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 
 `CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`.
 
+**Follow-up 3, same day (§10.25; chain15/16; uncommitted):**
+- **Silent start: RECOVERED** (cause still UNKNOWN; asked of Blackmagic, `docs/BLACKMAGIC_SILENT_START.md`). When nothing is consumed 12,000 samples after Start, the service restarts the whole output once per output start and logs one `!! output start … restarting the whole output` line. Counted in Export Diagnostics' PICTURE RECOVERY (`SDI output start`). Verified: 26 of 26 injected silent starts and 1 of 1 natural one (rs15-5994-pv) recovered, each with sound on the wire. The cost is a visible picture restart about 0.3 s into the session.
+- **Preroll depth: 200 ms stays.** Prerolling only the video preroll's audio left silent starts unchanged (1 of 102) and held the first picture frame 1–6 extra slots at 69 of 100 starts.
+- **Late latch at loop wraps and seeks: fixed.** The latch is now provisional on the first frame that moves. 0 late edges at 59.94 (chain14: 3). A seek's landing frame stamped with the seek's time and then held, or paused on before Play, still lost its frame's sound (in chain14 too). Fixed in fu5: chain16 starts every seek, wrap and Play after a seek on its landing frame at both rates.
+- **One-frame holds at 59.94: also gate off** (1 in 50 restarts; gate on 3–5 in 100). Cause UNKNOWN.
+- **Live steering window order: serial queue** (`LiveAudioResampleSteering.swift:331`).
+- **NEW: output restart during play can lose up to 387 ms of SDI sound** (f15-tr-2398: 18,582 samples; f16-tr-2398: 7,248; at 59.94 the sound starts 3 frames after the restarted picture, chain14 too). The run's first read lost a race with the tap's refill, which evicted past its 4 s cap. Open.
+
 **Follow-up 2, same day (§10.24; chain14; uncommitted). Status of each item below:**
 - **Silent start: NOT fixed, and in shipped builds.** 1 of 101 restarts at 59.94 gate on, 1 of 51 gate off on the old start sequence (today's path), 0 of 102 at 23.976. The bridge now detects it (`checkStart`) and logs `!! output start`, but flushing and rescheduling does not revive the card (its queue stayed at 5,999 through 3 restarts); only a full output stop and start has. Recovery method: Robbie's decision (§10.24).
 - **Offset start: not seen in 254 starts** (every start gap −2 to +4 samples) after three start-sequence fixes against the SDK manual: EndAudioPreroll after the audio preroll completes, StartScheduledPlayback serialised with RenderAudioSamples, the stop waiting for ScheduledPlaybackHasStopped.

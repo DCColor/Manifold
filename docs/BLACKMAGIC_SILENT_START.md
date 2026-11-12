@@ -1,0 +1,93 @@
+# Scheduled playback: embedded audio sometimes never starts (DeckLink 8K Pro, 1080p59.94)
+
+For Blackmagic Design developer support. Written 2026-11-11 by Graviton (Manifold, a macOS playback app). Measurements are ours, taken
+on an SDI loop with a capture tool built on the same SDK. Internal reference: `CARD_CLOCK_FINDINGS.md` §10.23–§10.25.
+
+## System
+
+| | |
+|---|---|
+| Card | DeckLink 8K Pro, output on sub-device "DeckLink 8K Pro (1)" (the card enumerates 4 sub-devices) |
+| Profile | 4 sub-devices. Profile name: **to confirm in Desktop Video Setup before sending** |
+| Driver | Desktop Video 16.4.0 (`DeckLinkAPI.framework` 16.4) |
+| SDK compiled against | Desktop Video SDK 16.0 (`BLACKMAGIC_DECKLINK_API_VERSION` 0x10000000), `DeckLinkAPIDispatch.cpp` from the same SDK |
+| Host | Mac Studio (Mac16,9), Apple silicon, macOS 26.7.1 (25G241) |
+| Mode | 1080p59.94 (`bmdModeHD1080p5994`), v210, 2 channels 48 kHz 32-bit integer embedded audio |
+
+## Our start sequence, call by call
+
+Each output start gets the device again and runs, on one thread:
+
+1. `DoesSupportVideoMode(bmdVideoConnectionUnspecified, bmdModeHD1080p5994, bmdFormat10BitYUV, bmdNoVideoOutputConversion, bmdSupportedVideoModeDefault, …)` returns supported.
+2. `EnableVideoOutput(bmdModeHD1080p5994, bmdVideoOutputFlagDefault)`.
+3. `EnableAudioOutput(bmdAudioSampleRate48kHz, bmdAudioSampleType32bitInteger, 2, bmdAudioOutputStreamTimestamped)`.
+4. `CreateVideoFrame(1920, 1080, 5120, bmdFormat10BitYUV, bmdFrameFlagDefault)` ×4.
+5. `SetScheduledFrameCompletionCallback(cb)`.
+6. `SetAudioCallback(cb)`, then `BeginAudioPreroll()`. In `RenderAudioSamples(preroll = true)` we call
+   `ScheduleAudioSamples(buffer, n, streamTime, 48000, &written)`. `streamTime` is the running count of sample frames already scheduled,
+   starting at 0. We repeat until `GetBufferedAudioSampleFrameCount` reaches 9,600 (200 ms), then call `EndAudioPreroll()` from
+   inside the callback, as the FilePlayback sample does.
+7. `ScheduleVideoFrame(frame[i], i × 1001, 1001, 60000)` for i = 0…3.
+8. We wait (at most 500 ms) for the audio preroll to complete, and call `EndAudioPreroll()` ourselves if the callback has not. In
+   every start measured it was already complete: 2 audio callbacks, 9,600 samples queued.
+9. `StartScheduledPlayback(0, 60000, 1.0)`. A mutex keeps `RenderAudioSamples` from running during this call: the callback
+   try-locks and skips that one call.
+10. Running: `ScheduledFrameCompleted` refills and reschedules each frame at the next index. `RenderAudioSamples` keeps the audio queue
+    80–200 ms deep, always passing a non-NULL `sampleFramesWritten`.
+
+Stop: `StopScheduledPlayback(0, &actual, 60000)`, then we wait for `ScheduledPlaybackHasStopped` (it arrives 0.6–0.8 ms later). Then
+`SetScheduledFrameCompletionCallback(NULL)`, `SetAudioCallback(NULL)`, `FlushBufferedAudioSamples()`, `DisableAudioOutput()`,
+`DisableVideoOutput()`, and the frames and the output interface are released. The restarts below are a stop followed by a full start
+about 3 s later, with video playing throughout on the host.
+
+## The symptom
+
+About 1 start in 100 at 1080p59.94, the card accepts the audio but never plays any of it:
+
+- `StartScheduledPlayback` returns `S_OK`, and the picture plays normally: every frame completes, with no late and no dropped frames.
+- `RenderAudioSamples` keeps being called at its normal rate (about 600 calls in the 12 s session).
+- `GetBufferedAudioSampleFrameCount` stays at the preroll's 9,600 for the whole session: nothing is consumed.
+- `GetScheduledStreamTime(48000, …)` advances normally, a second and more past the end of the queued audio.
+- On the wire the embedded audio is silent for the whole session (measured by capture).
+- The next stop and start of the output is normal.
+
+In a normal start, the card's audio consumption point (`streamTime of the queue's end − GetBufferedAudioSampleFrameCount`) is 2–4
+samples from `GetScheduledStreamTime(48000)` 10 ms after Start, and stays there.
+
+| Rate | Starts | Silent |
+|---|---|---|
+| 1080p59.94, our earlier start sequence | 100 | 5 |
+| 1080p59.94, the sequence above | 101 | 1 |
+| 1080p59.94, earlier sequence, a second configuration | 51 | 1 |
+| 1080p59.94, the sequence above, second configuration | 52 | 0 |
+| 1080p59.94, the sequence above, 3,203-sample preroll | 102 | 1 |
+| 1080p23.976 | 102 (and 100 earlier) | 0 |
+
+The silent starts are not tied to where in the card's frame Start was called. A related, rarer variant has been seen twice in first
+sessions: the audio started, but at a consumption point 386 and 989 samples off the video stream time, and stayed there for the
+session. Neither has recurred in 408 starts since the sequence changes below.
+
+## What we tried
+
+- **Following the manual's start and stop order.** We now wait for the audio preroll to complete before `EndAudioPreroll`, keep
+  `RenderAudioSamples` out of `StartScheduledPlayback`, and wait for `ScheduledPlaybackHasStopped` before tearing down. The rate went
+  from 5 in 100 to 1 in 101. That is too few starts to credit the change.
+- **Flushing and rescheduling during the session.** `FlushBufferedAudioSamples()`, then scheduling again from 20 ms past
+  `GetScheduledStreamTime`. The flush left 5,999 samples queued, and the count then stayed at 5,999 through three such attempts.
+  No audio played.
+- **A full stop and start of the output.** This has revived the audio every time. It is our recovery now, at the cost of a
+  visible restart of the picture. In all 8 silent starts we have logged, the next full start played audio
+  normally. That includes the one natural silent start since we made the restart automatic.
+- **A shallower audio preroll.** We tried prerolling only the audio covering the 4 prerolled video frames (3,203 samples) instead of
+  200 ms. Over 102 starts: 1 silent start, the same rate. The card consumed 1 sample and then nothing, and the output restart revived it. The first video frame was also shown 2–7 times before the picture moved at 69 of 100 starts, against 0 at 200 ms. We went back to 200 ms.
+
+## Questions
+
+1. Is this a known issue with `bmdAudioOutputStreamTimestamped` output on the DeckLink 8K Pro (or with Desktop Video 16.x), where
+   the audio queue is accepted at Start but never consumed?
+2. Is our sequence correct as written, in particular the audio preroll depth (200 ms against 4 video frames), and calling
+   `EndAudioPreroll` from inside `RenderAudioSamples`?
+3. Is there a supported way to restart the audio stream during scheduled playback without stopping the video (for example
+   `DisableAudioOutput` / `EnableAudioOutput` while playback runs)?
+4. Is there a state we can read after Start that tells us the audio has engaged, short of watching the buffered count?
+5. Would building against the 16.4 SDK headers, rather than 16.0, change anything here?

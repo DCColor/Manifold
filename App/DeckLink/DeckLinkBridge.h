@@ -99,6 +99,11 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// (`GetFrameCompletionReferenceTimestamp`). Runs on the SDK callback thread, once per frame: it must be cheap. The card as master
 /// clock reads this (docs/CARD_CLOCK_FINDINGS.md §10.1).
 typedef void (^DeckLinkCardFrameBlock)(int64_t slot, double completedHostSeconds);
+/// A silent start (docs/CARD_CLOCK_FINDINGS.md §10.24–§10.25): the card accepted the start's audio but consumed none of it by 250 ms
+/// after the start. Called once per output start, on the SDK's audio callback thread, with the bridge's measurement. `restart`: this
+/// start may be recovered (it is not itself a recovery's start, and recovery is not switched off). The handler logs it and, when
+/// `restart`, restarts the whole output on its own queue; it must only hand the work off.
+typedef void (^DeckLinkSilentStartBlock)(NSString *what, BOOL restart);
 
 typedef double (^DeckLinkAudioSourceTimeBlock)(void);
 
@@ -211,6 +216,10 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 
 /// Set before a start; the started output keeps it until it stops.
 @property (nonatomic, copy, nullable) DeckLinkCardFrameBlock cardFrame;
+/// Set before a start; nil: a silent start is only logged by the bridge.
+@property (nonatomic, copy, nullable) DeckLinkSilentStartBlock silentStart;
+/// Set before a start: YES for the start a silent-start recovery makes, which is not recovered again.
+@property (nonatomic) BOOL outputRestart;
 /// The running output's frame duration in seconds, exactly as the mode states it (1001/60000 at 59.94). 0 when stopped.
 @property (nonatomic, readonly) double activeFrameSeconds;
 
