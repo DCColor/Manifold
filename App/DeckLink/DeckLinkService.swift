@@ -100,6 +100,20 @@ final class DeckLinkService: ObservableObject {
         get { cardFrameLock.lock(); defer { cardFrameLock.unlock() }; return cardFrameSinkLocked }
         set { cardFrameLock.lock(); cardFrameSinkLocked = newValue; cardFrameLock.unlock() }
     }
+    /// Stage 2 (docs/CARD_CLOCK_FINDINGS.md §10.27): the owning engine's picture line. Read on the SDK audio thread, under the same lock.
+    private var pictureLineSinkLocked: ((UInt64, Double, Int64, Int64, Bool) -> Void)?
+    var pictureLineSink: ((UInt64, Double, Int64, Int64, Bool) -> Void)? {
+        get { cardFrameLock.lock(); defer { cardFrameLock.unlock() }; return pictureLineSinkLocked }
+        set { cardFrameLock.lock(); pictureLineSinkLocked = newValue; cardFrameLock.unlock() }
+    }
+    #if DEBUG
+    /// MEASUREMENT ONLY (Stage 2's attended check, §10.27 method A; pre-ship removal). `MANIFOLD_SDI_AUDIO_BOTH=1`: at destination
+    /// Computer the SDI gate stays open, so the card carries the sound the Mac plays. The Mac side is unchanged (it follows the
+    /// destination as always). Read once.
+    static let sdiAudioBoth = ProcessInfo.processInfo.environment["MANIFOLD_SDI_AUDIO_BOTH"] == "1"
+    #else
+    static let sdiAudioBoth = false
+    #endif
     /// SDI_OUTPUT_TIMING.md §3, Stage 0 (Robbie, 2026-10-26): while output runs, neither the displays nor the Mac may
     /// idle-sleep and App Nap may not throttle Manifold, because every SDI frame is still made by a window render. ONE
     /// owner: `isOutputting`'s observer. Every start and every end of output moves that flag on main (Start, a failed
@@ -1092,6 +1106,8 @@ final class DeckLinkService: ObservableObject {
         let startSignal = self.heldSignal ?? self.renderer?.deckLinkStartSignal() ?? .sdr709
         print("DeckLink: output start — signal until the first picture: \(startSignal.logLine)")
         self.bridge.cardFrame = { [weak self] slot, host in self?.cardFrameSink?(slot, host) }
+        self.bridge.pictureLine = { [weak self] serial, phi, first, last, matched in self?.pictureLineSink?(serial, phi, first, last, matched) }
+        if Self.sdiAudioBoth { print("[SDI-AUDIO] test: MANIFOLD_SDI_AUDIO_BOTH=1, the SDI gate stays open at destination Computer") }
         // A silent start (the card accepted the start's audio and played none of it, about 1 in 100 starts at 59.94): restart the
         // whole output, at most once per output start (Robbie, 2026-11-11; docs/CARD_CLOCK_FINDINGS.md §10.25). The bridge calls this on
         // its audio thread; the work is done here, on the queue, in order with every other start and stop.
@@ -1260,10 +1276,10 @@ final class DeckLinkService: ObservableObject {
                 // scheduleSilence() path the pause/shuttle gate already uses: the card's audio output
                 // stays ENABLED and fed with zeros, so a destination flip never starves it, never
                 // re-prerolls, and never touches the video.
-                if !self.sdiIsAudioDestination() { return true }
+                if !self.sdiIsAudioDestination() && !Self.sdiAudioBoth { return true }
                 return self.isCardAudioSilentProvider?() ?? true
             },
-            isDestinationSilent: { [weak self] in self?.sdiIsAudioDestination() == false },
+            isDestinationSilent: { [weak self] in self?.sdiIsAudioDestination() == false && !Self.sdiAudioBoth },
             read: { startTime, frameCount, dst in
                 Int32(tap.read(framesStartingAt: startTime, frameCount: Int(frameCount), into: dst))
             })

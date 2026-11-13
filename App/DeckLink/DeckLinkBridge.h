@@ -99,6 +99,11 @@ typedef BOOL (^DeckLinkFillBlock)(int64_t frameIndex, uint8_t *buffer, int32_t r
 /// (`GetFrameCompletionReferenceTimestamp`). Runs on the SDK callback thread, once per frame: it must be cheap. The card as master
 /// clock reads this (docs/CARD_CLOCK_FINDINGS.md §10.1).
 typedef void (^DeckLinkCardFrameBlock)(int64_t slot, double completedHostSeconds);
+/// Stage 2 (docs/CARD_CLOCK_FINDINGS.md §10.27): the SDI picture's line, φ = pts − slot × card frame (content seconds at card time 0),
+/// from the timed slots that moved, at either destination (a run latches only with the gate open; this does not need one). Published
+/// once two moved slots in a row agree to half a sample, then on every moved slot with `lastSlot` advanced. `matched` NO: a rate
+/// mismatch, which has no line (C6); φ is then the newest first showing's. On the SDK's audio callback thread: it must be cheap.
+typedef void (^DeckLinkPictureLineBlock)(uint64_t serial, double phi, int64_t firstSlot, int64_t lastSlot, BOOL matched);
 /// A silent start (docs/CARD_CLOCK_FINDINGS.md §10.24–§10.25): the card accepted the start's audio but consumed none of it by 250 ms
 /// after the start. Called once per output start, on the SDK's audio callback thread, with the bridge's measurement. `restart`: this
 /// start may be recovered (it is not itself a recovery's start, and recovery is not switched off). The handler logs it and, when
@@ -216,6 +221,8 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 
 /// Set before a start; the started output keeps it until it stops.
 @property (nonatomic, copy, nullable) DeckLinkCardFrameBlock cardFrame;
+/// Set before a start (Stage 2, §10.27); the started output keeps it until it stops.
+@property (nonatomic, copy, nullable) DeckLinkPictureLineBlock pictureLine;
 /// Set before a start; nil: a silent start is only logged by the bridge.
 @property (nonatomic, copy, nullable) DeckLinkSilentStartBlock silentStart;
 /// Set before a start: YES for the start a silent-start recovery makes, which is not recovered again.

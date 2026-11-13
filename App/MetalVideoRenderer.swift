@@ -497,6 +497,16 @@ final class MetalVideoRenderer {
     /// [CADENCE] every front swap: its host time and source pts, so a frame that was in front between two pulls and
     /// never pulled can be told from one that never reached the front.
     static let cadenceLog = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] == "1"
+    /// Test switch (Stage 2, docs/CARD_CLOCK_FINDINGS.md §10.29): `MANIFOLD_DECKLINK_SLIP_AT="120:-1,240:+1"` moves the timed pull's
+    /// target by that many card frames once the source clock passes each time, for the rest of the session, which is what a slip of
+    /// the card against the picture clock does: −1 hands one frame twice, +1 skips one. Under `deckLinkLock`.
+    private var deckLinkSlipPending: [(at: Double, frames: Double)] = {
+        (ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_SLIP_AT"] ?? "").split(separator: ",").compactMap { item in
+            let p = item.split(separator: ":"); guard p.count == 2, let at = Double(p[0]), let f = Double(p[1]) else { return nil }
+            return (at, f)
+        }
+    }()
+    private var deckLinkSlipShift = 0.0
     #endif
     private var deckLinkConverting = false             // one-in-flight gate (push path)
     private var deckLinkActive = false                 // only convert while DeckLink output is running
@@ -5557,6 +5567,20 @@ final class MetalVideoRenderer {
         return deckLinkSlotSignal[slot]
     }
 
+    /// The test switch's shift of the timed pull's target (`deckLinkSlipPending`); 0 outside DEBUG. Called with `deckLinkLock` held.
+    private func deckLinkSlipShiftLocked(clock: Double, index: Int64) -> Double {
+        #if DEBUG
+        if let k = deckLinkSlipPending.firstIndex(where: { clock >= $0.at }) {
+            let slip = deckLinkSlipPending.remove(at: k)
+            deckLinkSlipShift += slip.frames * deckLinkCardFrame
+            print(String(format: "[SLIP-TEST] pull target moved %+.0f card frame(s) at clock %.6f (slot %lld)", slip.frames, clock, index))
+        }
+        return deckLinkSlipShift
+        #else
+        return 0
+        #endif
+    }
+
     /// The ring slot to hand over for scheduled frame `index`. Called with `deckLinkLock` held.
     private func deckLinkPullSlotLocked(index: Int64, host: Double, clock: Double?) -> Int {
         deckLinkPullTimedNow = false   // Stage 1c: true only on the timed branch below
@@ -5602,7 +5626,7 @@ final class MetalVideoRenderer {
         guard dc > 0, dc <= dh + 0.002 else { return newest }
         deckLinkLastPullTimed = true
         deckLinkPullTimedNow = true
-        let target = clock - (host - slotHost) - deckLinkPullMarginLocked
+        let target = clock - (host - slotHost) - deckLinkPullMarginLocked + deckLinkSlipShiftLocked(clock: clock, index: index)
         let hysteresis = 0.002
         deckLinkPullDueNow = target + hysteresis   // C6: a frame one past the one handed last is taken up to here
         // Never an older frame than the one handed last, unless that frame is ahead of the clock: a loop's wrap or a

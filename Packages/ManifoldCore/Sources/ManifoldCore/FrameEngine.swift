@@ -16,6 +16,7 @@ import FileScan        // InterlacedChroma — per-field 4:2:0 (I3)
 import PictureGeometry // the file's orientation (docs/BUGS.md, iPhone clips, 2026-10-29)
 // The file audio reader's output layout, and the size check a source's own layout must pass first.
 import AudioOutputLayout
+import CoreAudio
 
 /// Frame-level playback engine (Step 4c-3c, concurrency-hardened): video + audio
 /// via AVSampleBufferRenderSynchronizer. The frame pumps run on background queues
@@ -746,6 +747,50 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// A renderer move is in flight. `removeRenderer` finishes later, and adding to a second synchronizer before it has is an exception.
     private var cardAudioMoving = false
 
+    // ── STAGE 2 (docs/CARD_CLOCK_FINDINGS.md §10.27) ─────────────────────────────────────────────
+    // Output on, a file with sound (AVFoundation arm), either destination: the renderer is on `audioSynchronizer` as at 1b, its sound goes
+    // through `cardResample` (after the tap), and `stage2Tick` steers ρ so the content heard is the content on the SDI wire, `w`, from the
+    // bridge's picture line and the card's stamps. A Play starts the sound when the wire's first moving frame does (`stage2Pending`); a
+    // destination flip is a mute flip and nothing else. With `CardClockStage2.enabled` false, or output off, none of this acts.
+    nonisolated private let pictureLine = CardPictureLineBox()
+    /// The current AVFoundation arm's resampler. Nil with Stage 2 off and on the libav path.
+    private var cardResample: CardAudioResample?
+    /// The renderer is on (or moving to) its own clock, so a new arm's resampler starts active.
+    private var cardResampleWanted = false
+    private var cardAudioSteering = CardAudioSteering()
+    private var stage2Timer: DispatchSourceTimer?
+    private var stage2FrameSeconds = 0.0
+    /// A Play waiting for the SDI picture to move: the newest completed slot at the Play (a line must start after it) and its host time.
+    private var stage2Pending: (slot: Int64, host: Double)?
+    /// Host time the sound's clock was told to start at; no steering until it has run a little.
+    private var stage2StartsAt = 0.0
+    private var stage2LastStep: Double?
+    private var stage2DeviceUID: String?
+    private var stage2Counts = (starts: 0, lateStarts: 0, timeouts: 0, coarse: 0, integratorResets: 0, slips: 0)
+    /// The picture line the steering last acted on. A different one while steering is a slip (`CardClockStage2.slipBound`). Set by a
+    /// start, nil after a start without a line.
+    private var stage2SteerSerial: UInt64?
+    /// A Pause's delayed stop of the sound's clock. Cancelled by every transport write and renderer move (`cancelStage2Stop`), so it
+    /// fires only if nothing came since. Off main: main is busy for ~30 ms after a Pause, and a main-queue timer, strict or not, fired
+    /// 28–33 ms late at every Pause of chain 22 (§10.29).
+    private var stage2StopTimer: DispatchSourceTimer?
+    private var stage2StopTicket: Stage2StopTicket?
+    private static let stage2StopQueue = DispatchQueue(label: "manifold.stage2.stop", qos: .userInteractive)
+
+    private func cancelStage2Stop() {
+        stage2StopTicket?.cancel(); stage2StopTicket = nil
+        stage2StopTimer?.cancel(); stage2StopTimer = nil
+    }
+    /// K (§10.27): the one constant between the synchronizer's "heard" and the card's stamp. 0 until the attended check decides it.
+    #if MANIFOLD_CARDCLOCK
+    private static let stage2K: Double = (Double(ProcessInfo.processInfo.environment["MANIFOLD_STAGE2_K_MS"] ?? "") ?? 0) / 1000
+    #else
+    private static let stage2K = 0.0
+    #endif
+
+    /// Stage 2 is steering this arm's sound.
+    private var stage2Active: Bool { CardClockStage2.enabled && audioSynchronizer != nil && cardResample?.isActive == true }
+
     /// How often the steering writes the clock. 1 Hz everywhere but the measurement build, where `MANIFOLD_CARDLOCK_STEER_HZ` (1–60) can
     /// raise it to stress the write for the freeze (docs/CARD_CLOCK_FINDINGS.md §10.14; pre-ship removal of the variable).
     #if MANIFOLD_CARDCLOCK
@@ -762,11 +807,23 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// SDK callback thread, once per frame.
     public nonisolated func noteCardFrame(slot: Int64, host: Double) { cardSamples.append(slot: slot, host: host) }
 
+    /// SDK audio thread, on each moved timed slot (Stage 2, §10.27). A new line wakes a waiting Play at once.
+    public nonisolated func notePictureLine(serial: UInt64, phi: Double, firstSlot: Int64, lastSlot: Int64, matched: Bool) {
+        let fresh = pictureLine.store(CardPictureLine(serial: serial, phi: phi, firstSlot: firstSlot, lastSlot: lastSlot, matched: matched))
+        guard fresh else { return }
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.stage2ResolvePending() } }
+    }
+
     /// Each output start, a mode change's included: its slots start again from 0.
     public func cardOutputBegan(frameSeconds: Double) {
         releaseCardClock(reason: "output restarted")
         cardSamples.reset()
+        pictureLine.reset()
+        stage2Pending = nil
+        stage2SteerSerial = nil
+        stage2FrameSeconds = frameSeconds
         cardSteering = CardClockSteering(frameSeconds: frameSeconds)
+        startStage2Timer()
         updateCardAudioRoute()
         guard cardTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -782,6 +839,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     public func cardOutputEnded() {
         cardTimer?.cancel(); cardTimer = nil
+        stage2Timer?.cancel(); stage2Timer = nil
+        stage2Pending = nil
+        pictureLine.reset()
         releaseCardClock(reason: "output stopped")
         cardSteering = nil
         cardSamples.reset()
@@ -805,8 +865,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// and steers inside a run, because the picture can slip. The same switch as `cardLockApplies`, read for the bridge at output start.
     public nonisolated static var sdiSoundOnCardTimeline: Bool { CardClockAudio.stage1b }
 
+    /// Stage 2 (§10.27) drops "while the card owns the sound": a file with sound is on the card's clock at either destination. Only on
+    /// the AVFoundation arm, whose 32-bit integer PCM the resampler takes; the libav arm (float) keeps 1c's rule.
     private var cardLockApplies: Bool {
-        hasMedia && mediaKind == .video && (audioPresence == .absent || (CardClockAudio.stage1b && deckLinkOwnsAudio && hasAudioToRoute))
+        hasMedia && mediaKind == .video && (audioPresence == .absent || (CardClockAudio.stage1b
+            && (deckLinkOwnsAudio || (CardClockStage2.enabled && !useLibav)) && hasAudioToRoute))
     }
 
     /// Bring the renderer to where the state says it belongs. Safe from anywhere on main, as often as liked: it only acts on a difference.
@@ -818,6 +881,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     private func moveAudioToOwnClock() {
         cardAudioMoving = true
+        // Stage 2: the move flushes the renderer, so its sound is resampled from here on with nothing heard across the switch.
+        cardResampleWanted = true
+        if let box = cardResample { box.activate(); cardAudioSteering.carry(onto: box) }
         #if MANIFOLD_CARDCLOCK
         print(String(format: "[PUMPWATCH] 1b move to own clock begins at host %.6f, picture clock %.6f rate %.0f", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate))
         #endif
@@ -830,9 +896,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                     guard let self else { return }
                     own.addRenderer(self.audioRenderer)
                     // Moves made during the removal reached only the picture's clock, so this reads them from it.
-                    own.setRate(self.synchronizer.rate, time: self.synchronizer.currentTime())
+                    // Stage 2, playing: parked at the picture's time and started with the SDI picture (`stage2ResolvePending`).
+                    let playing = self.synchronizer.rate == 1 && self.cardResample?.isActive == true && CardClockStage2.enabled
+                    own.setRate(playing ? 0 : self.synchronizer.rate, time: self.synchronizer.currentTime())
                     self.audioSynchronizer = own
+                    // Not moving before the pending start is resolved: `stage2ResolvePending` drops a start asked for mid-move, and
+                    // that left the sound parked after every output start made while playing (W6, §10.29).
                     self.cardAudioMoving = false
+                    if playing { self.stage2Pending = (slot: -1, host: CACurrentMediaTime()); self.stage2ResolvePending() }
                     print(String(format: "[CARDLOCK] audio renderer on its own clock after %.1f ms, picture clock %.6f at rate %.0f",
                                  (CACurrentMediaTime() - began) * 1e3, CMTimeGetSeconds(self.synchronizer.currentTime()), self.synchronizer.rate))
                     self.updateCardAudioRoute()
@@ -845,6 +916,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func moveAudioToPictureClock() {
         guard let own = audioSynchronizer else { return }
         cardAudioMoving = true
+        cardResampleWanted = false
+        stage2Pending = nil
+        stage2SteerSerial = nil
+        cancelStage2Stop()
+        cardResample?.deactivate()
         #if MANIFOLD_CARDCLOCK
         print(String(format: "[PUMPWATCH] 1b move to picture clock begins at host %.6f, picture clock %.6f rate %.0f", CACurrentMediaTime(), CMTimeGetSeconds(synchronizer.currentTime()), synchronizer.rate))
         #endif
@@ -895,8 +971,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             let audioToken = audioSession.next()
             source.arm(fromSeconds: time.seconds, isCurrent: { audioSession.isCurrent(audioToken) })
         } else {
-            Task { await beginAudioReading(from: time) }
+            let offset = stage2ArmOffset(from: time.seconds)
+            Task { await beginAudioReading(from: time, axisOffset: offset) }
         }
+    }
+
+    /// Stage 2: a re-read that keeps the clock lands its sound where the current arm's output axis has that content (`CardAudioResample`,
+    /// "an axis offset"). 0 when Stage 2 is not steering.
+    private func stage2ArmOffset(from content: Double) -> Double {
+        guard stage2Active, let box = cardResample else { return 0 }
+        let offset = box.outputTime(atContentTime: content) - content
+        return offset.isFinite ? offset : 0
     }
 
     /// AVFoundation flushed the audio renderer by itself (`AVSampleBufferAudioRendererWasFlushedAutomatically`): the output device or
@@ -914,7 +999,20 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// move is in flight (the move re-reads at its end when it should). One line per occurrence, ungated.
     private func audioRendererFlushedAutomatically(flushTime: CMTime?, arm: Int) {
         let clock = synchronizer.currentTime()
-        let from = flushTime.flatMap { $0.isNumeric ? $0 : nil } ?? clock
+        var from = flushTime.flatMap { $0.isNumeric ? $0 : nil } ?? clock
+        // Stage 2: the flush time is on the renderer's timeline, the resampler's output axis; the reader wants content. A new default
+        // output has its own rate against the card, so the integrator starts again.
+        if stage2Active, let box = cardResample, let own = audioSynchronizer {
+            let out = flushTime.flatMap { $0.isNumeric ? $0.seconds : nil } ?? own.currentTime().seconds
+            from = CMTime(seconds: box.contentTime(atOutputTime: out), preferredTimescale: 1_000_000_000)
+            let uid = Self.outputDeviceUID(audioRenderer)
+            if uid != stage2DeviceUID {
+                print("[CARDLOCK] Stage 2: output device \(stage2DeviceUID ?? "nil") → \(uid ?? "nil"): integrator reset")
+                stage2DeviceUID = uid
+                cardAudioSteering.resetIntegrator(resample: box)
+                stage2Counts.integratorResets += 1
+            }
+        }
         let fileArm = hasMedia && (useLibav ? libavAudioSource != nil : audioReader != nil)
         let skip: String? = !fileArm ? "no file audio arm" : !audioSessionToken.isCurrent(arm) ? "already re-armed since"
             : cardAudioMoving ? "a renderer move is in flight" : nil
@@ -928,20 +1026,202 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// Every file transport rate, so the sound's own clock takes the same move. Live sources write `synchronizer` directly: the renderer is never moved for them.
     private func setTransportRate(_ rate: Float) {
+        let pictureAt = synchronizer.currentTime().seconds
         synchronizer.rate = rate
-        audioSynchronizer?.rate = rate
+        cancelStage2Stop()
+        guard let own = audioSynchronizer else { return }
+        // Stage 2: Play from a stop waits for the SDI picture to move, and starts the sound with it (§10.27 item 4).
+        if rate == 1, own.rate == 0, stage2Active, !cardAudioMoving {
+            stage2Pending = (slot: cardSamples.snapshot().last?.slot ?? -1, host: CACurrentMediaTime())
+            stage2ResolvePending()
+            return
+        }
+        stage2Pending = nil
+        // Stage 2: a Pause stops the window's picture at once, but the frames already handed to the card keep the SDI picture moving
+        // for the wire's lag (about 100 ms). The sound follows the SDI picture, so it stops when the wire reaches the paused frame. Stopped
+        // at once, it would stop that much content short of the SDI picture, and the next Play would have to skip it to rejoin the wire.
+        if rate == 0, own.rate == 1, stage2Active, !cardAudioMoving, let stop = stage2WireHost(content: pictureAt) {
+            let now = CACurrentMediaTime()
+            if stop > now + 0.002 {
+                // A strict timer: `asyncAfter` on main fired 39.5 ms late at the smoke (sm22-5994, due 85.3 ms).
+                let ticket = Stage2StopTicket(own)
+                let timer = DispatchSource.makeTimerSource(flags: .strict, queue: Self.stage2StopQueue)
+                timer.schedule(deadline: .now() + (stop - now), leeway: .microseconds(500))
+                timer.setEventHandler { @Sendable in   // not main's: it runs on the stop queue
+                    timer.cancel()
+                    guard ticket.fire() else { return }
+                    let at = CACurrentMediaTime()
+                    print(String(format: "[CARDLOCK] Stage 2: Mac sound stopped with the SDI picture, %.1f ms after the Pause (due %.1f ms)",
+                                 (at - now) * 1e3, (stop - now) * 1e3))
+                }
+                cancelStage2Stop()
+                stage2StopTicket = ticket
+                stage2StopTimer = timer
+                timer.resume()
+                return
+            }
+        }
+        own.rate = rate
+    }
+
+    /// Stage 2: the host time the SDI wire carries `content` (plus K), from the current picture line and the card's line. Nil without a
+    /// current matched line.
+    private func stage2WireHost(content: Double) -> Double? {
+        guard let line = pictureLine.read(), line.matched,
+              let fit = CardClockLine.fit(cardSamples.snapshot(), frameSeconds: stage2FrameSeconds), line.lastSlot > fit.newestSlot else { return nil }
+        return fit.host(atCardTime: content - Self.stage2K - line.phi)
     }
 
     /// Stop the transport at `time`, as `setTransportRate` does for a rate.
     private func parkTransport(at time: CMTime) {
+        stage2Pending = nil
+        cancelStage2Stop()
         synchronizer.setRate(0, time: time)
         audioSynchronizer?.setRate(0, time: time)
+    }
+
+    // MARK: Stage 2: the Mac's sound on the SDI picture (docs/CARD_CLOCK_FINDINGS.md §10.27)
+
+    private func startStage2Timer() {
+        #if !MANIFOLD_CARDCLOCK
+        guard CardClockStage2.enabled else { return }   // the measurement build ticks with Stage 2 off too, for W1's [W2] lines
+        #endif
+        guard stage2Timer == nil else { return }
+        stage2DeviceUID = Self.outputDeviceUID(audioRenderer)
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 0.1, repeating: 1 / CardClockStage2.tickHz, leeway: .milliseconds(5))
+        t.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.stage2Tick() } }
+        t.resume()
+        stage2Timer = t
+        print(String(format: "[CARDLOCK] Stage 2 %@, K %.3f ms, device %@", CardClockStage2.enabled ? "on" : "OFF (1c)", Self.stage2K * 1e3, stage2DeviceUID ?? "nil"))
+    }
+
+    /// The renderer's device: its own UID when set, else the system default output's.
+    private static func outputDeviceUID(_ renderer: AVSampleBufferAudioRenderer) -> String? {
+        if let uid = renderer.audioOutputDeviceUniqueID { return uid }
+        var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal,
+                                           mElement: kAudioObjectPropertyElementMain)
+        var id = AudioObjectID(0); var n = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &n, &id) == noErr else { return nil }
+        a.mSelector = kAudioDevicePropertyDeviceUID
+        var uid: Unmanaged<CFString>?; n = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(id, &a, 0, nil, &n, &uid) == noErr, let s = uid?.takeRetainedValue() else { return nil }
+        return s as String
+    }
+
+    /// A Play (or a move made while playing) waits here for the SDI picture's new line: the sound's clock, parked, is started at the host
+    /// time its content reaches the wire. Called when a line arrives, from the tick, and at once.
+    private func stage2ResolvePending() {
+        guard let p = stage2Pending else { return }
+        guard let own = audioSynchronizer, let box = cardResample, box.isActive, !cardAudioMoving else { stage2Pending = nil; return }
+        let now = CACurrentMediaTime()
+        guard let line = pictureLine.read(), line.matched, line.firstSlot > p.slot,
+              stage2WireHost(content: 0) != nil else {
+            if now - p.host > CardClockStage2.startTimeout {
+                stage2Pending = nil
+                own.rate = 1
+                stage2StartsAt = now
+                stage2Counts.timeouts += 1
+                stage2SteerSerial = nil
+                cardAudioSteering.coarseEvent()
+                print(String(format: "[CARDLOCK] Stage 2: no SDI picture line %.0f ms after Play; the Mac's sound started with the picture clock", (now - p.host) * 1e3))
+            }
+            return
+        }
+        stage2Pending = nil
+        let out0 = own.currentTime().seconds
+        let m0 = box.contentTime(atOutputTime: out0)
+        guard let start = stage2WireHost(content: m0) else { return }   // the same line and fit as the guard above
+        cardAudioSteering.coarseEvent()
+        stage2LastStep = nil
+        stage2SteerSerial = line.serial
+        stage2Counts.starts += 1
+        if start > now + 0.001 {
+            own.setRate(1, time: CMTime(seconds: out0, preferredTimescale: 1_000_000_000),
+                        atHostTime: CMTime(seconds: start, preferredTimescale: 1_000_000_000))
+            stage2StartsAt = start
+            print(String(format: "[CARDLOCK] Stage 2: Mac sound starts with the SDI picture: content %.6f at host %.6f, %.1f ms after Play, %.1f ms from now (line #%llu)",
+                         m0, start, (start - p.host) * 1e3, (start - now) * 1e3, line.serial))
+        } else {
+            let at = now + 0.002, late = at - start
+            own.setRate(1, time: CMTime(seconds: out0 + late, preferredTimescale: 1_000_000_000),
+                        atHostTime: CMTime(seconds: at, preferredTimescale: 1_000_000_000))
+            stage2StartsAt = at
+            stage2Counts.lateStarts += 1
+            print(String(format: "[CARDLOCK] Stage 2: Mac sound starts %.1f ms into the SDI picture's run (its content was on the wire already; line #%llu)",
+                         late * 1e3, line.serial))
+        }
+    }
+
+    /// 10 Hz on main: one paired read, the error against the SDI picture, one controller step. In the measurement build, one [W2] line
+    /// per tick, with Stage 2 off too (W1's baseline, `m` then the renderer's clock as it is).
+    private func stage2Tick() {
+        stage2ResolvePending()
+        let sync = audioSynchronizer ?? synchronizer
+        let active = stage2Active && !cardAudioMoving
+        let t0 = CACurrentMediaTime()
+        let out = sync.currentTime().seconds
+        let pic = synchronizer.currentTime().seconds
+        let t1 = CACurrentMediaTime()
+        guard t1 - t0 < CardClockAudio.pairedReadLimit else { return }
+        let h = (t0 + t1) / 2
+        let m = active ? (cardResample?.contentTime(atOutputTime: out) ?? out) : out
+        let line = pictureLine.read()
+        let fit = CardClockLine.fit(cardSamples.snapshot(), frameSeconds: stage2FrameSeconds)
+        var w = Double.nan
+        if let line, line.matched, let fit, line.lastSlot > fit.newestSlot { w = line.phi + fit.cardTime(atHost: h) }
+        let e = m - (w + Self.stage2K)
+        let running = isPlaying && shuttleRate == 1 && sync.rate == 1 && stage2Pending == nil && h > stage2StartsAt + 0.2
+        let slip = stage2SteerSerial != nil && line != nil && line?.serial != stage2SteerSerial
+        let state: String
+        if !active {
+            state = CardClockStage2.enabled ? (audioSynchronizer == nil ? "off: renderer on the picture clock" : "off: not resampled") : "1c"
+            stage2LastStep = nil
+        } else if stage2Pending != nil {
+            state = "held: waiting for the picture"; stage2LastStep = nil
+        } else if !running {
+            state = "held: transport"; stage2LastStep = nil
+        } else if !w.isFinite {
+            state = line?.matched == false ? "held: rate mismatch" : "held: no line"; stage2LastStep = nil
+        } else if abs(e) > (slip ? CardClockStage2.slipBound : CardClockStage2.coarseBound), let own = audioSynchronizer, let box = cardResample {
+            let target = box.outputTime(atContentTime: w + Self.stage2K)
+            let past = 0.005
+            own.setRate(1, time: CMTime(seconds: target - past, preferredTimescale: 1_000_000_000),
+                        atHostTime: CMTime(seconds: h - past, preferredTimescale: 1_000_000_000))
+            cardAudioSteering.coarseEvent()
+            stage2LastStep = nil
+            stage2StartsAt = h
+            if slip {
+                stage2Counts.slips += 1
+                state = "slip"
+                print(String(format: "[CARDLOCK] Mac sound re-anchored to the SDI picture at its new line #%llu (a slip): it was %+.2f ms off at content %.3f (%d so far)",
+                             line?.serial ?? 0, e * 1e3, w, stage2Counts.slips))
+            } else {
+                stage2Counts.coarse += 1
+                state = "coarse"
+                print(String(format: "[CARDLOCK] Mac sound re-anchored to the SDI picture: it was %+.2f ms off at content %.3f (%d so far)", e * 1e3, w, stage2Counts.coarse))
+            }
+            stage2SteerSerial = line?.serial
+        } else if let box = cardResample {
+            let dt = stage2LastStep.map { h - $0 } ?? 1 / CardClockStage2.tickHz
+            cardAudioSteering.step(error: e, dt: dt, resample: box)
+            stage2LastStep = h
+            stage2SteerSerial = line?.serial
+            state = "steer"
+        } else {
+            state = "held"
+        }
+        #if MANIFOLD_CARDCLOCK
+        let st = cardAudioSteering.state
+        print(String(format: "[W2] h %.6f m %.6f w %.6f e %+.4f ms rho %.9f i %+.3e ef %+.4f ms pic %.6f out %.6f line %llu %@",
+                     h, m, w, e * 1e3, cardResample?.rho ?? 1, st.integral, st.filteredError * 1e3, pic, out, line?.serial ?? 0, state))
+        #endif
     }
 
     /// Stage 1b: nobody hears this clock, it only paces the pump and with it the tap. Put back on the picture when it has parted too far.
     /// Returns how far apart it was. Picture untouched: this writes only the sound's clock, and only while muted (§10.7).
     private func holdCardAudioNearPicture() -> Double? {
-        guard let own = audioSynchronizer, audioRenderer.isMuted else { return nil }
+        guard let own = audioSynchronizer, audioRenderer.isMuted, !stage2Active else { return nil }   // Stage 2 steers it (§10.27 item 5)
         let t0 = CACurrentMediaTime()
         let audio = CMTimeGetSeconds(own.currentTime())
         let picture = CMTimeGetSeconds(synchronizer.currentTime())
@@ -2073,7 +2353,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // audio session (which drops the old track's PCM from the ring) and starts the new one
         // against the clock that is still running.
         let at = CMTime(seconds: currentTime, preferredTimescale: 600)
-        Task { await beginAudioReading(from: at) }
+        let offset = stage2ArmOffset(from: at.seconds)
+        Task { await beginAudioReading(from: at, axisOffset: offset) }
     }
 
     /// The libav half of `selectAudioTrack`: bind the decoder to a different `AVStream` of the same
@@ -4966,6 +5247,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// so it cannot overlap an `copyNextSampleBuffer()` already running there.
     private func teardownAudioReading() {
         _ = audioSessionToken.next()
+        cardResample?.retire()
+        cardResample = nil
         audioRenderer.stopRequestingMediaData()
         let toCancel = audioReader
         audioReader = nil
@@ -4987,7 +5270,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// carry their own source pts and the synchronizer places them against the clock that is already
     /// running — including discarding the few milliseconds that are already past by the time the
     /// reader spins up (MEASURED at 3–4 ms warm), which is why the splice is inaudible.
-    private func beginAudioReading(from start: CMTime) async {
+    private func beginAudioReading(from start: CMTime, axisOffset: Double = 0) async {
         teardownAudioReading()
 
         // A STOPPED ENGINE NEVER BUILDS A READER. `stop()` clears `hasMedia`; a track switch or a seek queued
@@ -5057,11 +5340,30 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // renderer has taken, so SDI never waits on the renderer's refill timer. One per arm —
         // this closure's — so a seek / switch drops it with the token. See `TapLookaheadPump`.
         let lookahead = TapLookaheadPump<CMSampleBuffer>(duration: TapLookahead.duration(of:))
+        // Stage 2 (§10.27): the resampler sits after the tap, so the tap and SDI keep the original samples.
+        var resample: CardAudioResample?
+        if CardClockStage2.enabled {
+            #if MANIFOLD_CARDCLOCK
+            let windows = true
+            #else
+            let windows = false
+            #endif
+            let box = CardAudioResample(axisOffset: axisOffset, reportsWindows: windows, log: { print($0) })
+            if cardResampleWanted { box.activate(); cardAudioSteering.carry(onto: box) }
+            if axisOffset != 0 { print(String(format: "[CARDLOCK] Stage 2: new arm at %.6f on the old output axis, offset %+.3f ms", start.seconds, axisOffset * 1e3)) }
+            resample = box
+        }
+        cardResample = resample
         #if MANIFOLD_CARDCLOCK
         let aw = audioWatch; aw.armed()
-        let enqueueAudio: (CMSampleBuffer) -> Void = { aRenderer.enqueue($0); aw.enqueued(CMSampleBufferGetPresentationTimeStamp($0).seconds) }
+        let enqueueAudio: (CMSampleBuffer) -> Void = { sb in
+            aw.enqueued(CMSampleBufferGetPresentationTimeStamp(sb).seconds)
+            if let resample { for o in resample.process(sb) { aRenderer.enqueue(o) } } else { aRenderer.enqueue(sb) }
+        }
         #else
-        let enqueueAudio: (CMSampleBuffer) -> Void = { aRenderer.enqueue($0) }
+        let enqueueAudio: (CMSampleBuffer) -> Void = { sb in
+            if let resample { for o in resample.process(sb) { aRenderer.enqueue(o) } } else { aRenderer.enqueue(sb) }
+        }
         #endif
         aRenderer.requestMediaDataWhenReady(on: audioPumpQueue) { [weak self] in
             guard self != nil, session.isCurrent(token) else {
@@ -5352,5 +5654,23 @@ private final class SessionToken: @unchecked Sendable {
     func peek() -> Int {
         lock.lock(); defer { lock.unlock() }
         return value
+    }
+}
+
+/// Stage 2's delayed stop (§10.29): the sound's clock is stopped on the timer's own queue, under a lock that a cancel takes too, so a
+/// transport write on main that cancels it can never be followed by this stop.
+private final class Stage2StopTicket: @unchecked Sendable {
+    private let lock = NSLock()
+    private var live = true
+    private let own: AVSampleBufferRenderSynchronizer
+    init(_ own: AVSampleBufferRenderSynchronizer) { self.own = own }
+    func cancel() { lock.lock(); live = false; lock.unlock() }
+    /// Stops the clock if not cancelled; true if it did.
+    func fire() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard live else { return false }
+        live = false
+        own.rate = 0
+        return true
     }
 }

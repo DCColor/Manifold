@@ -17,6 +17,13 @@
 # CAP_MID_OPEN s after each start the bridge logs (its `audio preroll:` line) and closed CAP_MID_CLOSE s after it, before the script's next
 # stop (restarts: 12 s apart). Each open writes <label>.mid/cNNN.{raw,marks}; <label>.drv lists every start, open and close with the log's
 # byte offset then (the app's lines carry no clock).
+# Stage 2 (§10.27–§10.28): W1C_DEST=computer launches at destination Computer (default sdi; a launch argument, nothing written).
+# W1C_DEVCLOCK=<uid>[|<uid>…] (a UID can hold a comma) runs `devclock` on each output device for the whole launch (<label>.<n>.devclock). W1C_SWITCHES=
+# "<s>:<name part>,…" makes that output device the system default <s> seconds after the first Play (`defout set`); the default is read
+# first, must be the Scarlett, and is set back to it at the end whatever happens. Environment such as MANIFOLD_CARDLOCK_STAGE2 and
+# MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID reaches the build unchanged.
+#   w1c-run.py flips <fixture.mov> <on|off> <label> <n>   Play, then n pairs of destination flips while playing (to SDI, 15 s, to
+#       Computer, 15 s), Pause.
 # W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
 # `capture` moves the card's output clock while it is open (§5); A/V offset and continuity are read on the same wire, so that is acceptable.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID through manifold-proc.sh. AX menu clicks on named items only,
@@ -49,13 +56,19 @@ def run(fixture, gate, label, steps, budget):
     guard()
     if resolve_running(): say("Resolve is running: stopping"); sys.exit(4)
     os.makedirs(OUT, exist_ok=True); log = f"{OUT}/{label}.log"; title = os.path.basename(fixture)
+    switches = [(float(a), b) for a, b in (x.split(":", 1) for x in os.environ.get("W1C_SWITCHES", "").split(",") if x)]
+    if switches:
+        before = sh(f"{DEV}/defout", "get").stdout.strip(); say(f"default output before: {before}")
+        if "Scarlett 18i20" not in before: say("the default output is not the Scarlett: stopping, nothing changed"); sys.exit(4)
     defp = subprocess.Popen([f"{DEV}/defout", "100000", f"{OUT}/{label}.defout"])
+    devc = [subprocess.Popen([f"{DEV}/devclock", u, "99999", f"{OUT}/{label}.{k}.devclock"]) for k, u in enumerate(x for x in os.environ.get("W1C_DEVCLOCK", "").split("|") if x)]
     env = dict(os.environ, MANIFOLD_CARDCLOCK_LOG="1", MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1",
                MANIFOLD_AUDIO_CORR_LOG="1", MANIFOLD_DEBUG_TRANSPORT=steps)
     for k in ("MANIFOLD_CARDLOCK_1B", "MANIFOLD_RENDERER_RECOVER", "MANIFOLD_RENDERER_SELFTEST", "MANIFOLD_PUMPWATCH_SELFTEST"): env.pop(k, None)
     if gate: env["MANIFOLD_CARDLOCK_1B"] = "1"
     mode_args = ["-manifold.decklink.manualOutputMode", os.environ["W1C_MODE"]] if os.environ.get("W1C_MODE") else []
-    p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"] + mode_args, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
+    dest = os.environ.get("W1C_DEST", "sdi"); assert dest in ("sdi", "computer")
+    p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", dest] + mode_args, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     pid = p.pid; say(f"{label}: pid {pid}, gate {'on' if gate else 'off'}, {title}")
     cap = None; mid = {"cap": None, "n": 0, "open_at": None, "close_at": None, "off": 0, "drv": None}
     def mid_close(why):
@@ -63,7 +76,14 @@ def run(fixture, gate, label, steps, budget):
         if c and c.poll() is None: c.send_signal(signal.SIGINT); c.wait()
         if c: mid["drv"].write(f"close c{mid['n']:03d} mono {time.monotonic():.3f} logoff {os.path.getsize(log)} {why} rc {c.returncode}\n"); mid["drv"].flush()
         mid["cap"] = None; mid["close_at"] = None
+    def restore_output():
+        if not switches: return
+        r = sh(f"{DEV}/defout", "set", "Scarlett 18i20"); after = sh(f"{DEV}/defout", "get").stdout.strip()
+        with open(log, "a") as f: f.write(f"[DRV] default output restored: {after}\n")
+        if "Scarlett 18i20" not in after: say(f"!! default output NOT restored: {after}")
     def quit_build():
+        restore_output()
+        for d in devc: d.terminate(); d.wait()
         if cap and cap.poll() is None: cap.send_signal(signal.SIGINT); cap.wait()
         if MID and mid["cap"]: mid_close("quit")
         r = sh(PROC, "quit", str(pid), "--timeout", "60")
@@ -87,11 +107,19 @@ def run(fixture, gate, label, steps, budget):
         cap = subprocess.Popen([f"{DEV}/capture", "--device", "0", "--seconds", "99999", "--label", label, "--marks", f"{OUT}/{label}.marks",
                                 "--audio", f"{OUT}/{label}.raw"] + (["--luma"] if os.environ.get("W1C_LUMA") == "1" else []), stdout=open(f"{OUT}/{label}.cap", "w"), stderr=subprocess.STDOUT)
         with open(log, "a") as f: f.write(f"[DRV] CAP-OPEN mono {time.monotonic():.3f}\n")
-    last = time.monotonic()
+    last = time.monotonic(); play_at = None; sw_next = 0
     while True:
+        if switches and sw_next < len(switches):
+            if play_at is None and "[TRANSPORT] play" in open(log, errors="replace").read(): play_at = time.monotonic()
+            if play_at is not None and time.monotonic() - play_at >= switches[sw_next][0]:
+                r = sh(f"{DEV}/defout", "set", switches[sw_next][1])
+                with open(log, "a") as f: f.write(f"[DRV] defout set {switches[sw_next][1]} mono {time.monotonic():.3f}: {r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr.strip()}\n")
+                say(f"default output → {switches[sw_next][1]} (exit {r.returncode})"); sw_next += 1
         if p.poll() is not None:
             say(f"pid {pid} EXITED by itself, code {p.returncode}")
             if cap: cap.send_signal(signal.SIGINT); cap.wait()
+            restore_output()
+            for d in devc: d.terminate()
             defp.terminate(); sys.exit(4)
         if cap and cap.poll() is not None: say("capture ended by itself"); break
         if MID:   # the log read incrementally: a start schedules the next open; a stop line closes early
@@ -117,7 +145,7 @@ def run(fixture, gate, label, steps, budget):
         elif "[TRANSPORT] done" in open(log, errors="replace").read(): break
         if time.monotonic() - t0 > budget: say("transport did not finish in the budget"); break
         if time.monotonic() - last > 30: last = time.monotonic(); deny_licence_prompt()
-        time.sleep(0.25 if MID else 2)
+        time.sleep(0.25 if MID or switches else 2)
     if MID and mid["cap"]: mid_close("end")
     time.sleep(3)
     if cap: cap.send_signal(signal.SIGINT); cap.wait()
@@ -139,5 +167,8 @@ if __name__ == "__main__":
         steps = ("wait 16;seek 0;wait 3;play;wait 10;output stop;wait 3;output start;wait 5;play;wait 12;"
                  + "".join("output stop;wait 3;output start;wait 12;" for _ in range(n)) + "pause;wait 3")
         budget = n * 15 + 170
-    else: sys.exit("mode: cont | plays | transport | restarts")
+    elif mode == "flips":   # Stage 2 W4 (§10.28): n pairs of destination flips while playing
+        steps = "wait 16;seek 0;wait 3;play;wait 30;" + "".join("dest sdi;wait 15;dest computer;wait 15;" for _ in range(n)) + "pause;wait 3"
+        budget = n * 30 + 170
+    else: sys.exit("mode: cont | plays | transport | restarts | flips")
     run(fixture, g == "on", label, steps, budget)

@@ -1515,6 +1515,7 @@ final class DeckRegistry {
         DeckLinkService.shared.isCardAudioSilentProvider = nil
         DeckLinkService.shared.systemAudioRouting = nil
         DeckLinkService.shared.cardFrameSink = nil
+        DeckLinkService.shared.pictureLineSink = nil
         DeckLinkService.shared.cardOutputChanged = nil
         deck.engine?.cardOutputEnded()
         deck.engine?.audioTap.onFormatChange = nil
@@ -1572,6 +1573,9 @@ final class DeckRegistry {
         // The card as master clock (docs/CARD_CLOCK_FINDINGS.md §10): the owning engine gets the card's frames, and is told
         // of an output already running, for the same reason as the line above.
         DeckLinkService.shared.cardFrameSink = { [weak engine] slot, host in engine?.noteCardFrame(slot: slot, host: host) }
+        DeckLinkService.shared.pictureLineSink = { [weak engine] serial, phi, first, last, matched in
+            engine?.notePictureLine(serial: serial, phi: phi, firstSlot: first, lastSlot: last, matched: matched)
+        }
         DeckLinkService.shared.cardOutputChanged = { [weak engine] frameSeconds in
             if let frameSeconds { engine?.cardOutputBegan(frameSeconds: frameSeconds) } else { engine?.cardOutputEnded() }
         }

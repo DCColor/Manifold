@@ -69,6 +69,42 @@ Open questions:
 Depends on: Stage 1c (0.9.3).
 Size guess: ?
 
+## DeckLink 8K Pro: a sub-device mapping for output plus capture
+Status: idea (Robbie, 2026-11-12)
+Version: after 0.9.3
+
+What: switch Robbie's DeckLink 8K Pro G2 to the "SDI 1 In or Out" connector mapping (4 sub-devices):
+- SDI 1 = device (1), input from the M3 Ultra, for Omniscope;
+- SDI 3 = device (2), output: Manifold to the FSI XMP551, input 2;
+- SDI 4 = device (4), output for tests, looped to SDI 2 = device (3), input, for capture.
+
+Then 100 output restarts while playing at 59.94 with an input open on a different sub-device (device (3)), to confirm the
+silent start does not occur. If confirmed, recommend that mapping in the release notes to 8K Pro owners who also capture.
+
+Why: the silent start at output start (no SDI sound for the session, recovered by a full output restart) has so far needed
+the card's input open on the output's own sub-device at Start: 0 in 408 starts closed, 7 in 303 open (CARD_CLOCK_FINDINGS.md
+§10.26, follow-ups 5 and 6). Classified as a test-rig condition; the recovery stays as the safety net.
+
+Depends on: nothing in Manifold. The output-device menu item below makes the mapping easier to use.
+Size guess: an afternoon (the mapping change, a guarded 30 min run).
+
+## DeckLink output-device menu: grey out sub-devices the mapping makes inactive
+Status: idea (Robbie, 2026-11-12)
+Version: after 0.9.3
+
+What: the DeckLink output-device menu lists all four sub-devices of an 8K Pro even when the card's connector mapping makes
+some of them inactive (input-only, or not mapped to a connector). Grey out or hide the inactive ones, with a short note why
+(for example "Inactive in this card's connector mapping: change it in Desktop Video Setup").
+
+Why: with a mapping such as "SDI 1 In or Out" (item above), picking a sub-device that cannot output gives no picture and no
+clue why.
+
+Open questions: which DeckLink attribute or status reports a sub-device inactive under the current mapping (the profile's
+duplex mode, `BMDDeckLinkDuplex`, or the device's video output connections), and whether the menu should follow a mapping
+changed while Manifold runs (the profile-change callback).
+
+Size guess: ?
+
 ## HEVC over WHEP
 Status: idea (2026-10-07)
 Version: ?

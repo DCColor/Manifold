@@ -697,6 +697,7 @@ public:
 
     // Stats (read after stop for the run summary).
     void setCardFrame(DeckLinkCardFrameBlock block) { m_cardFrame = block; }   // before the start, so no callback races it
+    void setPictureLine(DeckLinkPictureLineBlock block) { m_pictureLine = block; }   // the same
     void setSilentStart(DeckLinkSilentStartBlock block, bool outputRestart) { m_silentStart = block; m_outputRestart = outputRestart; }
     int64_t  framesScheduled() const { return m_nextIndex.load(); }
     uint64_t completedCount()  const { return m_completed.load(); }
@@ -1774,8 +1775,37 @@ private:
                     latchRun(sl, fromPrev ? sl.idx - 1 : sl.idx, fromPrev, silent, "first slot that moved, provisional");
                 }
             }
+            if (live && hasPts && sl.timed && moved) publishPictureLine(sl);
             m_prevSlotPts = hasPts ? sl.pts : NAN; m_prevSlotIdx = sl.idx;
         }
+    }
+
+    // Stage 2 (§10.27): the picture's line for the Mac's sound, from every timed slot that moved, whether or not the gate is open. A new
+    // line is published once two moved slots in a row agree to half a sample (a seek's first frame can carry the seek's time, §10.22);
+    // after that every moved slot on it advances `lastSlot`. Off it by more than half a sample: a candidate for the next line.
+    void publishPictureLine(const Slot &sl) {
+        if (!m_pictureLine) return;
+        const double phi = sl.pts - (double)sl.idx * cardFrameSeconds();
+        const double half = 0.5 / (double)m_audio.sampleRate;
+        if (mismatched(sl.srcFrame)) {   // C6: a staircase, not a line; Stage 2 holds
+            m_pictureLine(m_plSerial, phi, sl.idx, sl.idx, NO);
+            m_plPhi = NAN; m_plCandidate = NAN;
+            return;
+        }
+        if (std::isfinite(m_plPhi) && std::fabs(phi - m_plPhi) <= half) {
+            m_pictureLine(m_plSerial, m_plPhi, m_plFirst, sl.idx, YES);
+            return;
+        }
+        if (std::isfinite(m_plCandidate) && std::fabs(phi - m_plCandidate) <= half) {
+            m_plPhi = phi; m_plFirst = m_plCandidateSlot; m_plSerial++;
+            m_plCandidate = NAN;
+            fprintf(stdout, "[SDI-AUDIO] picture line #%llu: φ %.6f s from slot %lld (pts %.6f at slot %lld)\n",
+                    (unsigned long long)m_plSerial, m_plPhi, (long long)m_plFirst, sl.pts, (long long)sl.idx);
+            fflush(stdout);
+            m_pictureLine(m_plSerial, m_plPhi, m_plFirst, sl.idx, YES);
+            return;
+        }
+        m_plCandidate = phi; m_plCandidateSlot = sl.idx;
     }
 
     // Copy the current run's sound from the tap into the prefetch ring, up to kPrefetchFrames past the queue: at 23.976 the picture
@@ -2016,6 +2046,10 @@ private:
     BMDTimeScale m_timeScale;
     FrameFillFn m_fill;
     DeckLinkCardFrameBlock m_cardFrame = nil;
+    // Stage 2's picture line (§10.27): the candidate φ from the last moved timed slot, and the published line.
+    DeckLinkPictureLineBlock m_pictureLine = nil;
+    double m_plCandidate = NAN; int64_t m_plCandidateSlot = -1;
+    double m_plPhi = NAN; int64_t m_plFirst = -1; uint64_t m_plSerial = 0;
     DeckLinkSilentStartBlock m_silentStart = nil;   // §10.25: a silent start goes up to the service, which restarts the output
     bool m_outputRestart = false;                   // this start is a silent-start recovery's: it is not recovered again
     std::vector<IDeckLinkMutableVideoFrame *> m_pool;
@@ -2691,6 +2725,7 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
     DeckLinkScheduledPlayer *player =
         new DeckLinkScheduledPlayer(output, wantMode, width, height, rowBytes, frameDuration, timeScale, fill, initialSignal);
     player->setCardFrame(self.cardFrame);
+    player->setPictureLine(self.pictureLine);
     player->setSilentStart(self.silentStart, self.outputRestart);   // before enableAudio, which reads the start's test switches
     output->Release();
     [log addObject:[NSString stringWithFormat:@"tag: until the first picture — colorspace %@ · EOTF %d%@",
