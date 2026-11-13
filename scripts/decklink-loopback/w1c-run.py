@@ -13,6 +13,10 @@
 # written), for a fixture whose rate differs from the output's (Stage 1c follow-up C6, §10.23).
 # W1C_NOCAP=1 runs the same script with `capture` never opened (§10.26): device 0's input stays closed for the whole launch, so its output
 # clock is not moved. Nothing on the wire is recorded; read the bridge's own lines (the start check's consumption point, silent starts).
+# W1C_CAP_MID=1 (follow-up 5, §10.26): every output start with the input closed, as W1C_NOCAP, then `capture --audio --marks` opened
+# CAP_MID_OPEN s after each start the bridge logs (its `audio preroll:` line) and closed CAP_MID_CLOSE s after it, before the script's next
+# stop (restarts: 12 s apart). Each open writes <label>.mid/cNNN.{raw,marks}; <label>.drv lists every start, open and close with the log's
+# byte offset then (the app's lines carry no clock).
 # W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
 # `capture` moves the card's output clock while it is open (§5); A/V offset and continuity are read on the same wire, so that is acceptable.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID through manifold-proc.sh. AX menu clicks on named items only,
@@ -20,7 +24,9 @@
 import os, signal, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(os.path.dirname(HERE))
 PROC = f"{REPO}/scripts/manifold-proc.sh"; AXT = f"{REPO}/build/linkpace/linkpace-ax"; DEV = f"{REPO}/build/decklink-loopback"
-NOCAP = os.environ.get("W1C_NOCAP") == "1"   # no `capture` at all: the card's input stays closed (its output clock unmoved); nothing on the wire is kept
+MID = os.environ.get("W1C_CAP_MID") == "1"   # capture opened mid-session only, never across a start
+CAP_MID_OPEN, CAP_MID_CLOSE = 4.0, 10.0
+NOCAP = os.environ.get("W1C_NOCAP") == "1" or MID   # no `capture` at all: the card's input stays closed (its output clock unmoved); nothing on the wire is kept
 APP = os.environ.get("W1C_APP") or f"{REPO}/.build-cc/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold"   # W1C_APP: another build of this tree
 OUT = os.environ.get("W1C_OUT", os.path.expanduser("~/Code/_scratch/manifold-1c-wire/runs"))
 
@@ -51,9 +57,15 @@ def run(fixture, gate, label, steps, budget):
     mode_args = ["-manifold.decklink.manualOutputMode", os.environ["W1C_MODE"]] if os.environ.get("W1C_MODE") else []
     p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"] + mode_args, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     pid = p.pid; say(f"{label}: pid {pid}, gate {'on' if gate else 'off'}, {title}")
-    cap = None
+    cap = None; mid = {"cap": None, "n": 0, "open_at": None, "close_at": None, "off": 0, "drv": None}
+    def mid_close(why):
+        c = mid["cap"]
+        if c and c.poll() is None: c.send_signal(signal.SIGINT); c.wait()
+        if c: mid["drv"].write(f"close c{mid['n']:03d} mono {time.monotonic():.3f} logoff {os.path.getsize(log)} {why} rc {c.returncode}\n"); mid["drv"].flush()
+        mid["cap"] = None; mid["close_at"] = None
     def quit_build():
         if cap and cap.poll() is None: cap.send_signal(signal.SIGINT); cap.wait()
+        if MID and mid["cap"]: mid_close("quit")
         r = sh(PROC, "quit", str(pid), "--timeout", "60")
         if r.returncode: say(f"pid {pid} did not quit ({r.returncode}: {r.stderr.strip()}); left running, stopping"); defp.terminate(); sys.exit(5)
         p.wait(); defp.terminate(); defp.wait(); guard()
@@ -66,7 +78,10 @@ def run(fixture, gate, label, steps, budget):
     if "CARDCLOCK-REF] start" not in open(log, errors="replace").read(): say("output did not start"); quit_build(); sys.exit(4)
     if os.environ.get("W1C_MODE") and f"restored manual output mode {os.environ['W1C_MODE']}" not in open(log, errors="replace").read():
         say(f"the output mode {os.environ['W1C_MODE']} was not applied"); quit_build(); sys.exit(4)
-    if NOCAP:
+    if MID:
+        os.makedirs(f"{OUT}/{label}.mid", exist_ok=True); mid["drv"] = open(f"{OUT}/{label}.drv", "w")
+        mid["drv"].write(f"# {label}: capture opened {CAP_MID_OPEN} s after each start's preroll line, closed at {CAP_MID_CLOSE} s\n")
+    elif NOCAP:
         with open(log, "a") as f: f.write(f"[DRV] CAPTURE CLOSED for the whole run (W1C_NOCAP=1) mono {time.monotonic():.3f}\n")
     else:
         cap = subprocess.Popen([f"{DEV}/capture", "--device", "0", "--seconds", "99999", "--label", label, "--marks", f"{OUT}/{label}.marks",
@@ -79,10 +94,31 @@ def run(fixture, gate, label, steps, budget):
             if cap: cap.send_signal(signal.SIGINT); cap.wait()
             defp.terminate(); sys.exit(4)
         if cap and cap.poll() is not None: say("capture ended by itself"); break
-        if "[TRANSPORT] done" in open(log, errors="replace").read(): break
+        if MID:   # the log read incrementally: a start schedules the next open; a stop line closes early
+            with open(log, "rb") as f: f.seek(mid["off"]); chunk = f.read()
+            nl = chunk.rfind(b"\n"); done = False
+            if nl >= 0:
+                text = chunk[:nl + 1].decode(errors="replace"); mid["off"] += nl + 1; now = time.monotonic()
+                if "[SDI-AUDIO] stopped" in text and mid["cap"]: mid_close("stop seen")
+                if "[SDI-AUDIO] audio preroll:" in text:
+                    if mid["cap"]: mid_close("start seen")
+                    mid["open_at"] = now + CAP_MID_OPEN; mid["close_at"] = None
+                    mid["drv"].write(f"start seen mono {now:.3f} logoff {mid['off']}\n"); mid["drv"].flush()
+                done = "[TRANSPORT] done" in text
+            if done: break
+            now = time.monotonic()
+            if mid["open_at"] and now >= mid["open_at"]:
+                mid["n"] += 1; b = f"{OUT}/{label}.mid/c{mid['n']:03d}"
+                mid["cap"] = subprocess.Popen([f"{DEV}/capture", "--device", "0", "--seconds", "99999", "--label", f"{label}-c{mid['n']:03d}",
+                                               "--marks", f"{b}.marks", "--audio", f"{b}.raw"], stdout=open(f"{OUT}/{label}.cap", "a"), stderr=subprocess.STDOUT)
+                mid["drv"].write(f"open c{mid['n']:03d} mono {now:.3f} logoff {os.path.getsize(log)}\n"); mid["drv"].flush()
+                mid["open_at"] = None; mid["close_at"] = now + (CAP_MID_CLOSE - CAP_MID_OPEN)
+            if mid["close_at"] and now >= mid["close_at"]: mid_close("timed")
+        elif "[TRANSPORT] done" in open(log, errors="replace").read(): break
         if time.monotonic() - t0 > budget: say("transport did not finish in the budget"); break
         if time.monotonic() - last > 30: last = time.monotonic(); deny_licence_prompt()
-        time.sleep(2)
+        time.sleep(0.25 if MID else 2)
+    if MID and mid["cap"]: mid_close("end")
     time.sleep(3)
     if cap: cap.send_signal(signal.SIGINT); cap.wait()
     menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)

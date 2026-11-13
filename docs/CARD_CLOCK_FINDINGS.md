@@ -1706,13 +1706,45 @@ It guards, records the card (`probe`) and the Mac (`sw_vers`, model), then runs 
 - **Output restart while playing:** the sound starts with the first timed moving frame, as at Play, with nothing lost, at 59.94 and 23.976, through natural and injected silent starts (`rs20-*`). Fixed by the preroll depth and the 8 s tap; Play after a restart made while paused, by the parked re-read.
 - **Silent-start recovery:** now waits 500 ms between its stop and start (back to back it could leave the sound up to a second late, mostly at 23.976). 2 of 10 recovered sessions at 23.976 still sat 0.60 ms early: open.
 - **SDK:** 16.0 is current; struck as a suspect.
-- **Silent starts, capture closed:** 0 of 102 against 7 of 303 open. Not settled; the other system's run and a second closed run would.
+- **Silent starts, capture closed:** 0 of 102 against 7 of 303 open. Not settled; the other system's run and a second closed run would. (Follow-up 5, below: 0 of 408 closed; 3 of 52 open on the same build.)
 - **Stage 2:** planned, §10.27. Nothing built.
 - Next (Robbie): Desktop Video 16.5, then 100 restarts at 59.94 for a driver before/after.
 
+#### Follow-up 5: decisions and silent starts with capture closed, 2026-11-12 (evening)
+
+**Decisions (Robbie, 2026-11-12):**
+- **The 500 ms wait between stop and start in the silent-start recovery is accepted.**
+- **Recorded as low-priority open findings, not pursued now:** the two recovered sessions at 23.976 that sat 0.60 ms early (`rs20-stall-2398`, sessions 11–12), and the non-zero samples in one output-stop gap (`rs14-2398`, `rs20-2398`, 584.0 s).
+- **No hardware loopback:** the 2026-09-30 rule stands. Stage 2's verification uses no cable; §10.27's verification is revised (software timestamps plus one attended Audio Hijack check). Stage 2 waits for Robbie's go on the revised plan.
+
+**`chain21`** (build `fu6e`, HEAD `062e305`, Desktop Video 16.4, gate on, 59.94; each launch gated on Resolve closed and 10 min HID idle, guarded before and after, launched by absolute path, quit by PID; 19:24–21:09). Three capture-closed launches of 100 restarts while playing (`W1C_NOCAP=1`; the 1,920 s fixture holds 100), then one launch with capture opened mid-session only (`W1C_CAP_MID=1`, new in `w1c-run.py`: the input closed at every start, opened 4 s after each start's preroll line and closed 6 s later, 2 s before the next stop; each open's wire in `mid21-5994.mid/`, every start, open and close in `mid21-5994.drv`).
+
+| Run | Input | Starts | Silent | Start gaps (samples) |
+|---|---|---|---|---|
+| `nc21a-5994` | closed | 102 | 0 | 0–3 (+2/+3 in 99) |
+| `nc21b-5994` | closed | 102 | 0 | 1–6 (+2/+3 in 95) |
+| `nc21c-5994` | closed | 102 | 0 | 1–4 (+2/+3 in 99) |
+| `nc17-5994` (follow-up 4, `fu6b`) | closed | 102 | 0 | 1–4 |
+| `mid21-5994` | opened mid-session, closed at every start | 102 | 0 | 0–4 (+2/+3 in 96) |
+| `rs20-5994` (follow-up 4, **`fu6e`, the same build**) | open | 52 | **3** | — |
+
+**Capture closed: 0 in 306 here, 0 in 408 with `nc17`, against 7 in 303 with capture open.** The odds each way:
+- **If closed had open's rate** (2.3 %), 0 in 306 happens 0.08 % of the time (0 in 408: 0.007 %). Fisher exact, one-sided: 7/303 against 0/306, p = 0.007.
+- **The build is not the difference.** The 7/303 came from older start sequences (200 ms and 3,203-sample prerolls). On the same build, `fu6e`, `rs20-5994` (capture open) had 3 natural silent starts in 52, against 0 in 306 closed: p = 0.003. With `nc17` (`fu6b`, the same start code): 0 in 408, p = 0.0014. Over all 59.94 runs, open 10 in 355 against closed 0 in 408: p = 0.0004.
+- **The other way:** the closed rate is not shown to be 0. Its 95 % upper bound is 0.97 % (306 starts) or 0.73 % (408). At a true 1 % closed, 0 in 306 happens 4.6 % of the time; at 0.5 %, 22 %. Open's 7/303 has a 95 % lower bound of 0.94 %. So the closed rate is at least ~3× below open's, and could be anywhere from 0 to ~0.7 %.
+
+**Opening capture during a session triggered nothing.**
+- Of the 102 opens, 100 were made while playing. The other two, `c001` (closed before the first Play) and `c002` (opened 0.76 s before its Play, sound from sample 36,062, which is that Play), are expected.
+- **All 100 carried sound from the first received sample, with no zero run of 1 ms or more**, so the embedded audio already playing was not interrupted by the input opening or closing.
+- **The bridge saw no stall:** 0 `holding over 1 s`. Its runs, latches and off-the-line ends were at the closed runs' counts.
+- Every start after such a session was normal: 0 in 102. At open's 2.3 %, 0 in 102 happens 9 % of the time, so a smaller after-effect of an earlier open is not ruled out.
+- `mid21` had 7 `DeckLink D3: !! Dropped at frame 4` lines against 3–4 in each closed run (`nc17`: 9). All 7 are in a start sequence, after that session's capture had closed, which is the known start-time drop of frame 4, scheduled before the picture moves (§6 here; `DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9), not the opens.
+
+**Reading.** On this card, profile `1dfd` (full duplex), driver 16.4, the silent start has so far needed **the same sub-device's input open at the moment the output starts**. Whether it is the open input itself or the clock movement an open input causes (§5) is UNKNOWN; the two cannot be separated with this rig. Manifold never opens a DeckLink input (no `IDeckLinkInput` use in `App/` or `Packages/`), but a user's other application (Resolve, Media Express, a capture tool) could. `BLACKMAGIC_SILENT_START.md` is rewritten around this question. The recovery stays: it costs nothing when no start is silent. Desktop Video 16.5 and the other system's run (capture closed by design) are still to come; a 16.5 before/after now needs capture open to have anything to compare.
+
 ### 10.27 Stage 2, the plan: destination Computer with output on, the card as master, 2026-11-12
 
-**Plan only: nothing here is built.** Asked by Robbie, 2026-11-12 (follow-up 4, item 4). It replaces §10.2's target and §10.5's T8–T12 where they differ; everything else in §10.1–§10.7 stands. Line numbers are this working tree (HEAD `1ee7b5a` plus §10.26's uncommitted changes).
+**Plan only: nothing here is built.** Asked by Robbie, 2026-11-12 (follow-up 4, item 4); its verification revised in follow-up 5 (no cable). Waits for Robbie's go. It replaces §10.2's target and §10.5's T8–T12 where they differ; everything else in §10.1–§10.7 stands. Line numbers are this working tree (HEAD `1ee7b5a` plus §10.26's uncommitted changes).
 
 **Aim.** Output on, destination Computer, a file playing: the card is the master clock (as at destination SDI today), the Mac's sound is resampled to follow the card (§10.2 option A), and it lines up with **the SDI picture**, not the window (§10.7 decision 2). A flip between SDI and Computer is a mute flip: no renderer move, no rate write, no hold.
 
@@ -1745,7 +1777,7 @@ It guards, records the card (`probe`) and the Mac (`sw_vers`, model), then runs 
 | Seek, step, loop wrap, scrub release | `beginReading`, lock re-latches | Re-anchored to the new run as at Play, once the bridge latches the landing frame | New stage with the arm; integrator held (no re-acquisition); filter reset (`coarseEvent`) |
 | Shuttle ≠ 1×, scrub drag, reverse | As today | Same rate, muted as today | Held |
 | Track switch | Untouched | One position write: the new stage's axis starts on content time | New stage, integrator held |
-| Output start while playing | Renderer moves off (clock loses ~48 ms, §10.1); **at destination Computer that is an audible gap, measured below** | Created | Built at the first run |
+| Output start while playing | Renderer moves off (clock loses ~48 ms, §10.1); **at destination Computer that is an audible gap; method S sees it only as a step in the log, so its audibility is judged by ear (W6)** | Created | Built at the first run |
 | Output stop while playing | Renderer moves back (~65 ms) | Released | Destroyed; the Mac sound is on its device again, as today |
 | SDI → Computer | Nothing | Nothing | Nothing: **unmute only**. The bridge's run ends after 8 silent slots (§10.22) |
 | Computer → SDI | Nothing | Nothing | Nothing: mute; the bridge latches a new run on the next moving frame |
@@ -1753,37 +1785,69 @@ It guards, records the card (`probe`) and the Mac (`sw_vers`, model), then runs 
 
 **The output-change stall fix (§10.19) and Stage 2.** The fix re-reads from the flush time with the clock running. Under Stage 2 that clock is `audioSynchronizer`, which the flush does not stop, so the new stage's first sample lands on the aligned axis; what changes is the device's rate (the integrator above) and possibly `K` (if `K` is per device). The re-read empties the tap; at destination SDI §10.19 measured 0 or one 19–21 ms callback of SDI silence per change. Not changed here.
 
-#### Verifying the Mac's sound against the SDI picture
+#### Verifying the Mac's sound against the SDI picture (revised, follow-up 5, 2026-11-12)
 
-Nothing today measures the Mac's sound against the SDI picture on one timebase. The Audio Hijack + OBS route (`AV_SYNC_FINDINGS.md` §1.2) records each on its own clock and cannot be set against `capture`'s host stamps. **Proposed: Robbie's cable, recorded with host timestamps beside the SDI capture.**
+**No cable.** Robbie, 2026-11-12: the 2026-09-30 rule stands (`AV_SYNC_FINDINGS.md` §1.2, `CLAUDE.md` Test environment): no Scarlett loopback, and Stage 2's verification must not use a cable. Follow-up 4's proposal (Line Output 3 into Input 8, `devrec`, `capture --host`, `w2-mac.py`) is withdrawn. Two methods replace it. The SDI loop already on device 0 is the existing rig, not a new cable, and neither method below needs it.
 
-⚠️ **This is a hardware loop on the Scarlett, which `AV_SYNC_FINDINGS.md` §1.2 and `CLAUDE.md` (Test environment) rule out (Robbie, 2026-09-30).** Robbie proposed it in follow-up 4 (2026-11-12). It needs his explicit yes, and those two rules amended to allow this one cable for Stage 2, before anything is plugged in. If not: the fallback is §10.5's T12 (attended, Audio Hijack + OBS, slope only, no absolute offset and no per-event figures).
+**Method S: software timestamps, unattended, 30 min per run.** Everything is on the host clock, from the same build (`-DMANIFOLD_CARDCLOCK`):
+- **The SDI picture:** `w(h) = Φ + cardTime(h)`, the content on the wire at host time `h`, from the bridge's run record and the completion-stamp line, plus the card's constant from stamp to wire. 1c checked this leg against the wire (`cont` D1, `rs20-*`, §10.22–§10.26), so it is the trusted side.
+- **The Mac's sound:** `m(h)`, the content `audioSynchronizer` says is playing at `h`, through the stage's output→input map. The `[W2]` line, new, is one paired read every 100 ms (`h`, `m`, `w`, `ρ`, the integrator, the run serial), discarded over 200 µs.
+- **The output device, measured independently:** `devclock` (exists), an IOProc on the same device that writes nothing, logs `mSampleTime` against `mHostTime` every cycle. It gains a log of the reported output latency (device, stream, safety offset, buffer size) at the start and on every change (new, small), and of every gap in `mSampleTime` and every overload.
+- **Analysis, `w2-soft.py`, new:** the series `m(h) − w(h)` and, separately, the device's rate against the card's (from `devclock` and the stamps, neither of which the steering reads), set against `ρ`.
 
-**What to plug in (one cable):**
-- A balanced 1/4" TRS to 1/4" TRS cable from **Scarlett 18i20 Line Output 3** (rear) to **Scarlett Input 8** (front combo jack, TRS). Input 8: gain at minimum, PAD on, INST and AIR off, 48 V off.
-- In Focusrite Control, route **Playback 1** to Line Output 3 (and nothing else to it). Write down the routing before, put it back after; it is the interface's state, not the Mac's.
-- Keep device 0's SDI output looped to its input, as today.
-- Optional, for T9 (the built-in device): a 3.5 mm TRS to 1/4" TRS cable from the Mac Studio's headphone jack to Scarlett Input 7, same settings.
-- Audio Hijack and the OBS recorder closed for these runs.
+What S **can** prove, to the timestamps' precision (tens of µs):
+- **Drift, steps and spread:** the slope of `m − w` over 30 min, every step over 0.05 ms with its host time, and the p1–p99 spread after the first 2 min.
+- **That `ρ` follows the real rate difference:** the device-against-card rate measured by `devclock` and the stamps, not the steering's own error.
+- **0 position writes** between Play and Pause (from the log), and **no device dropouts** (`mSampleTime` gaps, overloads).
 
-**Tools (new, not shipped, `scripts/decklink-loopback/`):**
-- `devrec.swift`: a Core Audio IOProc on the Scarlett that writes Input 8 (and 7) to a raw file, and for every IO cycle the input `AudioTimeStamp` (`mSampleTime`, `mHostTime`) and the device's reported input and output latency, safety offset and buffer size. A gap in `mSampleTime` is logged as a drop (ffmpeg's avfoundation input compresses drops silently, `AV_SYNC_FINDINGS.md` §1.2, so this checks every cycle). `--ping`: a click out of Line Output 3 by its own output IOProc, recorded on Input 8: the round trip against the reported output + input latency.
-- `capture --host`: each marks line also carries the received frame's hardware reference timestamp on the host clock.
-- `w2-mac.py`: locates the Scarlett recording in the seeded-noise fixture by cross-correlation over 100 ms windows (analog, so not bit-exact; sub-sample by parabolic peak), giving the Mac's content time at each host time; `w1c-wire.py` already gives the SDI picture's. Their difference, per window, is **the Mac's sound against the SDI picture**, both at their inputs. `K` is then that difference less the Scarlett's input latency (validated by `--ping`) and the SDI loop's input delay (the output's completion stamp against `capture`'s arrival stamp for the same frame, both on the card's clock).
-- Analysis states its own uncertainty: the `--ping` residual (round trip measured − reported) bounds the split between output and input latency.
+What S **cannot** prove:
+- **The absolute offset at the connectors.** That needs whether `audioSynchronizer` time already includes the output latency (UNKNOWN), whether the Scarlett reports its latency truly (USB interfaces can leave converter and driver delay out), and the DAC.
+- **Anything inside the renderer that its timeline does not show.** If `AVSampleBufferAudioRenderer` dropped or repeated samples while its timeline ran on, S would not see it.
+- **That the error is truly zero.** `m` and `w` are the same quantities the steering reads, so a flat `m − w` shows the loop holds its own error at zero, not that the sound is right. The independent legs are the `devclock` rate and the attended check below.
 
-#### Predictions and pass criteria, written 2026-11-12 before any code
+**Method A: one attended Audio Hijack check, for the absolute offset.** Audio Hijack records sound only, so the SDI picture reaches it through the SDI embedded audio, whose place against its picture 1c measured on the wire: **−0.567 ms at 59.94** (`ctl20-5994`, sample-exact). The check needs one DEBUG launch switch, `MANIFOLD_SDI_AUDIO_BOTH=1` (new; built with Stage 2; DEBUG builds only): at destination Computer the bridge's gate stays open, so the card carries the same sound the Mac plays. Audio Hijack then records two things on its one clock:
+- left: Manifold's output (its Application source, the sound Manifold hands to Core Audio);
+- right: the SDI loop's embedded audio (the Input Device source "DeckLink 8K Pro (1)", channel 1).
+
+The fixture is the seeded-noise file (`w1c-5994-1920s.mov`), so cross-correlation over 100 ms windows locates one channel against the other sample-exact.
+
+What A **can** prove:
+- **The absolute offset at Audio Hijack's two taps:** the Mac's sound as Manifold renders it, against the SDI picture (the right channel's offset plus 0.567 ms).
+- **Whether `audioSynchronizer` time includes the output latency.** A's figure set against S's constant from the same launch differs by about the Scarlett's reported output latency if it does not, and by about 0 if it does. That decides `K`.
+
+What A **cannot** prove:
+- **The offset at the Scarlett's connector.** Audio Hijack taps the application before the device, so the Scarlett's output latency is added from its reported value, not measured.
+- **The DeckLink input path's own delay.** How long Core Audio takes to deliver the SDI audio to Audio Hijack is taken from the input's reported latency (UNKNOWN until read). Both reported latencies are stated as the result's uncertainty.
+- **Rate.** The open input moves the card's output clock (§5).
+- **Transport events.** Audio Hijack loses 35–59 ms around a timebase pause (§1.2).
+- **More than one session, one device and one rate.**
+
+**Method A, the steps (attended; Robbie at the Mac, Claude driving Manifold):**
+1. **Claude, before you sit down:** check that Resolve is closed and that no `/Applications/Manifold.app` is running, and run `manifold-proc.sh guard`. Claude tells you before the launch, then launches the Stage 2 measurement build by its absolute path with destination Computer, 1080p59.94 and `MANIFOLD_SDI_AUDIO_BOTH=1` (launch arguments, nothing written to defaults). Claude opens the noise fixture, starts the DeckLink output and checks the log for output started and the bridge's gate open. The card's input is opened only after this point (it is mid-session, see `BLACKMAGIC_SILENT_START.md`).
+2. **You:** only now launch Audio Hijack (started before Manifold has connected, it can quit or relaunch Manifold). Make a **new** session, "Stage 2 offset"; do not change an existing one:
+   - Application source → Manifold → Channels block set to **Left only** (source channel 1 to Left).
+   - Input Device source → **DeckLink 8K Pro (1)** → Channels block set to **Right only** (channel 1 to Right).
+   - Both into one Recorder: WAV, 48 kHz, 24-bit, stereo, no effects, no volume block.
+   - In Manifold, volume at full and not muted. In macOS Sound, the output stays the Scarlett.
+3. **You, a 5 s preflight:** Record, wait 5 s, Stop, and tell Claude the file's name. Claude reads each channel's level (`volumedetect` per channel). Both must carry noise; −91 dB on either channel means a dead source. If so, re-pick the source and repeat. Do not go on with a silent channel.
+4. **Claude:** seeks to 0 and presses Play through accessibility.
+5. **You:** wait 10 s, then Record. Do not touch the Mac for 3 min: no transport, no device change.
+6. **You:** Stop, and give Claude the file's name.
+7. **Claude:** pauses, stops the output, quits the build by its PID and guards. Quit Audio Hijack whenever you like after that. The run's numbers come from `w2-ah.py` (new): the window-by-window offset, its median and spread, then the conversion to the connector with the two reported latencies stated.
+
+#### Predictions and pass criteria, revised 2026-11-12 (follow-up 5) before any code
 
 | # | Run | Prediction | Pass |
 |---|---|---|---|
-| W0 | `devrec --ping`, 20 clicks, no Manifold | Round trip = reported output + input latency within 0.2 ms; no `mSampleTime` gap in 10 min | Residual stated; 0 gaps |
-| W1 | **Today's build (1c)**, destination Computer, output on, 59.94, 30 min Play | Card lock off at Computer, so the SDI picture slips one frame about every 16 min (card − Scarlett ≈ 17.6 ppm, §10.5). Mac − SDI picture: a ramp of ~1.06 ms/min with a 16.7 ms step back at each slip. The constant: the Mac **ahead** of the SDI picture by about 100 ms (§10.7, by reading) | Baseline only: records the constant and the ramp |
-| W2 | Stage 2, same, 59.94 and 23.976, 30 min each | Mac − SDI picture constant: **spread ≤ 0.2 ms after the first 2 min, 0 steps**. `ρ − 1` settles at card − Scarlett, about −17.6 ppm, within 0.5. 0 position writes on `audioSynchronizer` between Play and Pause | Spread ≤ 0.2 ms, 0 steps, 0 writes; after `K`, \|Mac − SDI picture\| ≤ 1 ms with the stated uncertainty |
-| W3 | Stage 2, the transport loop (`w1c-run.py transport`), destination Computer | Each run's offset within ±0.5 ms of W2's constant within 2 s of its start; the first sound with the landing frame ±1 ms | All runs |
-| W4 | 10 SDI ↔ Computer flips while playing | No renderer move, no rate write (log). On each unmute the first located window within ±0.5 ms of W2; SDI's run ends and re-latches as today | 10 of 10 |
-| W5 | §10.19 interaction: 5 default-output switches to the built-in and back, Computer | One `[AUDIO-FLUSH]` re-read per change; back on the Scarlett, the offset within ±1 ms of W2 within 2 s; integrator reset logged per UID change | 10 of 10 |
-| W6 | Output stop and start while playing, Computer, 20 times | An audible gap at each renderer move: 48–65 ms (§10.1), on the Scarlett recording. After the start, the offset back at W2's within 2 s of the first run | Gap measured and reported; offset as W2 |
-| W7 | T9: the built-in, through the headphone jack (optional cable) | As W2 with `ρ` at the built-in's own difference; `K` differs from the Scarlett's by the devices' latency difference | Spread ≤ 0.2 ms; `K` per device decided from this |
+| S0 | `devclock` on the Scarlett, 30 min, no Manifold | Its rate against the card's stamps about −17.6 ppm (§10.5); no `mSampleTime` gap; latencies as reported, unchanged | 0 gaps; rate stated |
+| W1 | **Today's build (1c)**, destination Computer, output on, 59.94, 30 min Play, method S | Card lock off at Computer, so `m − w` ramps about 1.06 ms/min, with a 16.7 ms step back each time the picture slips (about every 16 min). The constant: the Mac **ahead** of the SDI picture by about 100 ms (§10.7, by reading) | Baseline only: the constant and the ramp |
+| W2 | Stage 2, same, 59.94 and 23.976, 30 min each, method S | `m − w` constant: **spread ≤ 0.2 ms after the first 2 min, 0 steps over 0.05 ms, drift under 0.01 ms over 30 min**. `ρ − 1` within 0.5 ppm of S0's independent rate. 0 position writes between Play and Pause, 0 device gaps | All of these |
+| A1 | Method A, 59.94, 3 min, attended | At the taps, offset = S's constant for the same launch, plus 0 or the Scarlett's reported output latency (deciding `K`) | Offset stated with its two reported latencies; `K` decided; Robbie's go on the figure |
+| W3 | Stage 2, the transport loop (`w1c-run.py transport`), destination Computer, method S | Each run's `m − w` within ±0.5 ms of W2's constant within 2 s of its start | All runs |
+| W4 | 10 SDI ↔ Computer flips while playing, method S | No renderer move, no rate write (log); `m − w` unchanged across each flip (the synchronizer never stops); the SDI run ends and re-latches as today | 10 of 10 |
+| W5 | §10.19 interaction: 5 default-output switches to the built-in and back, Computer, method S plus `devclock` on each device | One `[AUDIO-FLUSH]` re-read per change; back on the Scarlett, `m − w` within ±1 ms of W2 within 2 s; integrator reset logged per UID change | 10 of 10 |
+| W6 | Output stop and start while playing, Computer, 20 times, method S | The renderer moves (48–65 ms, §10.1) show as a step in `m − w` from the log, **not as an audible gap: S cannot hear a gap**. After the start, `m − w` back at W2's within 2 s of the first run | Offset as W2. The gap's audibility goes to Robbie by ear, or to an Audio Hijack pass, which loses 35–59 ms around a pause and so can only bound it |
+| W7 | T9: the built-in output, method S with `devclock` on the built-in | As W2, with `ρ` at the built-in's own rate difference. `K` per device decided by A1 and the reported latencies | Spread ≤ 0.2 ms |
 | — | T15 (output off) and T16 (live control) | Unchanged | As §10.5 |
 
-**Unknown going in.** Whether `audioSynchronizer.currentTime()` already includes the device's output latency (if not, `K` is per device and Stage 2 reads the latency from Core Audio). How soon an unmute is heard (§4.5 measured that a muted renderer keeps advancing, not how unmuting lands). Whether the 48 / 65 ms move at output start or stop can be made inaudible at destination Computer; accepted for the picture (§10.7 decision 3), not yet decided for sound.
+**Unknown going in.** Whether `audioSynchronizer.currentTime()` already includes the device's output latency (if not, `K` is per device and Stage 2 reads the latency from Core Audio; A1 decides it). Whether the reported output and DeckLink input latencies are true: no method here can check them without a cable, so they stay stated uncertainties. How soon an unmute is heard (§4.5 measured that a muted renderer keeps advancing, not how unmuting lands). Whether the 48 / 65 ms move at output start or stop can be made inaudible at destination Computer; accepted for the picture (§10.7 decision 3), not yet decided for sound.
