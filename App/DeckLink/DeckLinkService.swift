@@ -1,4 +1,5 @@
 import Foundation
+import AppKit   // B5: the audio-only card is drawn with AppKit text into a bitmap (`AudioCardRaster`)
 import Combine
 import ManifoldCore
 import ColorimetryModel   // OutputSignal — what each frame is tagged with (colour S7)
@@ -690,6 +691,10 @@ final class DeckLinkService: ObservableObject {
     /// neutral fill would keep a previous PQ tag on black.
     private struct HeldPicture {
         let signal: OutputSignal
+        /// B5: the audio-only file's card, drawn instead of black; nil for black.
+        var card: HeldAudioCard?
+        /// B5: the picture runs on the renderer's virtual frame timeline, so the file's sound reaches the card on its clock.
+        var timeline = false
         /// Empty until the serial queue has built it; the fill writes the same black directly until then.
         var bytes: [UInt8] = []
         var rowBytes = 0
@@ -705,6 +710,13 @@ final class DeckLinkService: ObservableObject {
         heldLock.lock(); defer { heldLock.unlock() }
         return heldPicture?.signal
     }
+    /// B5: a held picture that carries a file's sound (an audio-only file on the card's clock). Its format matters to the output.
+    private var heldCarriesSound: Bool {
+        heldLock.lock(); defer { heldLock.unlock() }
+        return heldPicture?.timeline == true
+    }
+    private var heldCard: HeldAudioCard?
+    private var heldTimeline = false
 
     /// Hold the output on black tagged Rec.709 SDR, saying `reason` in the menu, or release it with nil. The mode does
     /// not change, so a recorder or monitor does not re-lock.
@@ -712,16 +724,30 @@ final class DeckLinkService: ObservableObject {
     /// ⚠️ BOTH EDGES DROP THE RENDERER'S STAGED FRAMES. Holding, because the frames describe a source that has gone;
     /// releasing, because a convert in flight at the hold can have staged one since, and the next file's first frame has
     /// not arrived: the wire would show the old file for a beat.
-    func setHeldBlack(reason: String?) {
+    func setHeldBlack(reason: String?) { setHeldPicture(reason: reason, card: nil, timeline: false) }
+
+    /// B5 (0.9.3): hold the output for an audio-only file: its `card` (or black with nil) and, with `timeline`, the virtual frame
+    /// timeline that puts its sound on the card's clock. A change of the card alone (the file's facts arriving after the commit)
+    /// redraws it and keeps everything else, so the sound does not restart.
+    func setHeldPicture(reason: String?, card: HeldAudioCard?, timeline: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard reason != heldReason else { return }
+        if reason == heldReason, timeline == heldTimeline, reason != nil, card != heldCard {
+            heldCard = card
+            heldLock.lock(); heldPicture?.card = card; heldLock.unlock()
+            queue.async { if let mode = self.activeStart?.1 { self.buildHeldPicture(for: mode) } }
+            return
+        }
+        guard reason != heldReason || timeline != heldTimeline || card != heldCard else { return }
         heldReason = reason
+        heldCard = card
+        heldTimeline = timeline
         heldLock.lock()
-        heldPicture = reason == nil ? nil : HeldPicture(signal: .sdr709)
+        heldPicture = reason == nil ? nil : HeldPicture(signal: .sdr709, card: card, timeline: timeline)
         heldLock.unlock()
+        renderer?.setDeckLinkVirtualTimeline(reason != nil && timeline)
         renderer?.dropDeckLinkFrames()
         followSourceUnavailableReason = reason
-        print("DeckLink: held picture \(reason == nil ? "released" : "on — black, Rec. 709 SDR, silent")")
+        print("DeckLink: held picture \(reason == nil ? "released" : timeline ? "on — \(card == nil ? "black" : "the audio-only card"), Rec. 709 SDR, with the file's sound on the card's clock" : "on — black, Rec. 709 SDR, silent")")
         if reason != nil {
             queue.async {
                 if let mode = self.activeStart?.1 { self.buildHeldPicture(for: mode) }
@@ -733,10 +759,12 @@ final class DeckLinkService: ObservableObject {
     /// On the serial queue, never the card's callback.
     private func buildHeldPicture(for mode: OutputMode) {
         let rowBytes = MetalVideoRenderer.v210RowBytes(width: mode.width)
-        let bytes = [UInt8](unsafeUninitializedCapacity: rowBytes * mode.height) { buffer, count in
-            Self.fillNeutralV210(buffer.baseAddress!, rowBytes: rowBytes, width: mode.width, height: mode.height)
-            count = rowBytes * mode.height
-        }
+        heldLock.lock(); let card = heldPicture?.card; heldLock.unlock()
+        let bytes = card.flatMap { AudioCardRaster.v210(card: $0, width: mode.width, height: mode.height, rowBytes: rowBytes) }
+            ?? [UInt8](unsafeUninitializedCapacity: rowBytes * mode.height) { buffer, count in
+                Self.fillNeutralV210(buffer.baseAddress!, rowBytes: rowBytes, width: mode.width, height: mode.height)
+                count = rowBytes * mode.height
+            }
         heldLock.lock()
         if heldPicture != nil {
             heldPicture?.bytes = bytes
@@ -746,10 +774,13 @@ final class DeckLinkService: ObservableObject {
         heldLock.unlock()
     }
 
-    /// The fill block's first question: the held signal, with the frame written, or nil when nothing is held.
-    private func copyHeldPicture(into buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int) -> OutputSignal? {
+    /// The fill block's first question: the held signal, with the frame written, or nil when nothing is held. `timeline` says
+    /// whether the held picture runs on the virtual frame timeline (B5).
+    private func copyHeldPicture(into buffer: UnsafeMutablePointer<UInt8>, rowBytes: Int, width: Int, height: Int,
+                                 timeline: inout Bool) -> OutputSignal? {
         heldLock.lock(); defer { heldLock.unlock() }
         guard let held = heldPicture else { return nil }
+        timeline = held.timeline
         if held.rowBytes == rowBytes, held.height == height {
             held.bytes.withUnsafeBytes { memcpy(buffer, $0.baseAddress!, rowBytes * height) }
         } else {
@@ -1059,8 +1090,19 @@ final class DeckLinkService: ObservableObject {
         let dump = FrameDump.directory.map { FrameDump(directory: $0, mode: mode.label) }
         #endif
         let fill: DeckLinkFillBlock = { [weak self] index, buffer, rowBytes, width, height, signal in
-            if let held = self?.copyHeldPicture(into: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height)) {
+            var timeline = false
+            if let held = self?.copyHeldPicture(into: buffer, rowBytes: Int(rowBytes), width: Int(width), height: Int(height),
+                                                timeline: &timeline) {
                 signal.pointee = Self.bridgeSignal(held)
+                if timeline, let r = self?.renderer {   // B5: the slot's frame on the virtual timeline, for the bridge's handed read
+                    r.noteDeckLinkVirtualPull(index: index)
+                    #if DEBUG
+                    if Self.cadenceLog {
+                        print(String(format: "[CADENCE] #%lld host %.6f pts %.6f swapAgo 0.000 clock %.6f (virtual)", index,
+                                     CACurrentMediaTime(), r.currentDeckLinkSourcePts(), r.clock?() ?? .nan))
+                    }
+                    #endif
+                }
                 probe.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height))
                 #if DEBUG
                 trace?.note(index: index, picture: true, buffer: buffer, rowBytes: Int(rowBytes), height: Int(height), signal: held)
@@ -1308,9 +1350,11 @@ final class DeckLinkService: ObservableObject {
             // `activeStart` is the queue's own record of the live output, so no main-actor state is
             // touched from the decode thread this call arrives on.
             guard self.isOutputting, let start = self.activeStart else { return }
+            // B5: unless the held picture carries the file's sound (an audio-only file on the card's clock): then its format is
+            // the output's, as a video file's.
             // A held output sends silence, so the file's format is no reason to stop it: a 44.1 kHz WAV would re-lock the
             // monitor for nothing. The next source's first buffer brings this back through here.
-            guard self.heldSignal == nil else { return }
+            guard self.heldSignal == nil || self.heldCarriesSound else { return }
             let wanted = Self.isSupportedForSDI(format) ? format : nil
             // Only the wire-visible parts matter; the decode path (AVF vs libav) does not.
             let same = (wanted?.sampleRate == self.enabledAudioFormat?.sampleRate)
@@ -1780,4 +1824,80 @@ enum SDIStartRecoveryStats {
         return "\(n) silent start\(n == 1 ? "" : "s") (\(restarts) recovered by an output restart, \(notRestarted) not restarted) since launch"
     }
     static var lastSilentStart: String? { lock.lock(); defer { lock.unlock() }; return last }
+}
+
+/// B5 (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.3, 0.9.3): what the window's audio-only card says, for the output. The lines come from
+/// `AudioOnlyFacts` and `AudioCardText`, the window card's own words, so the two cannot describe a file differently.
+struct HeldAudioCard: Equatable, Sendable {
+    var name: String
+    var lines: [String]
+}
+
+/// B5: the audio-only card drawn for SDI and HDMI at the output's size: white and grey text on black, as the window card
+/// (`AudioOnlyCard`), in BT.709 legal-range v210. Greyscale only, so the chroma is neutral (512) everywhere and the luma is the
+/// drawn grey: Y' = 64 + 876 × V'. Built on the output's serial queue, never on the card's callback.
+enum AudioCardRaster {
+    static func v210(card: HeldAudioCard, width w: Int, height h: Int, rowBytes: Int) -> [UInt8]? {
+        guard w > 0, h > 0, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        else { return nil }
+        ctx.setFillColor(gray: 0, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        let unit = CGFloat(h) / 1080   // the window card's proportions at 1080, scaled
+        let nameFont = NSFont.systemFont(ofSize: 46 * unit, weight: .semibold)
+        let lineFont = NSFont.monospacedSystemFont(ofSize: 30 * unit, weight: .regular)
+        let center = NSMutableParagraphStyle(); center.alignment = .center; center.lineBreakMode = .byTruncatingMiddle
+        let name = NSAttributedString(string: card.name, attributes: [.font: nameFont, .foregroundColor: NSColor(white: 1, alpha: 0.95),
+                                                                      .paragraphStyle: center])
+        let lines = card.lines.map { NSAttributedString(string: $0, attributes: [.font: lineFont, .foregroundColor: NSColor(white: 1, alpha: 0.7),
+                                                                                 .paragraphStyle: center]) }
+        let icon = NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 72 * unit, weight: .regular)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor(white: 1, alpha: 0.45)])))
+        let safe = CGFloat(w) * 0.8   // inside title-safe
+        let gap = 14 * unit, lineGap = 6 * unit
+        let iconSize = icon?.size ?? .zero
+        let nameH = ceil(nameFont.ascender - nameFont.descender + nameFont.leading)
+        let lineH = ceil(lineFont.ascender - lineFont.descender + lineFont.leading)
+        let total = iconSize.height + gap + nameH + gap + CGFloat(lines.count) * lineH + CGFloat(max(lines.count - 1, 0)) * lineGap
+        let gc = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = gc
+        var y = (CGFloat(h) + total) / 2   // top of the block; AppKit's y runs up
+        if let icon {
+            y -= iconSize.height
+            icon.draw(in: CGRect(x: (CGFloat(w) - iconSize.width) / 2, y: y, width: iconSize.width, height: iconSize.height))
+            y -= gap
+        }
+        y -= nameH
+        name.draw(with: CGRect(x: (CGFloat(w) - safe) / 2, y: y, width: safe, height: nameH),
+                  options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+        y -= gap
+        for line in lines {
+            y -= lineH
+            line.draw(with: CGRect(x: (CGFloat(w) - safe) / 2, y: y, width: safe, height: lineH), options: [.usesLineFragmentOrigin])
+            y -= lineGap
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        guard let gray = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        // The bitmap's first row is the top of the picture (CGContext memory is top-down), as v210's.
+        var out = [UInt8](repeating: 0, count: rowBytes * h)
+        out.withUnsafeMutableBytes { raw in
+            let words = raw.bindMemory(to: UInt32.self)
+            let groups = rowBytes / 16
+            for row in 0..<h {
+                let src = gray + row * w
+                func yv(_ x: Int) -> UInt32 { x < w ? 64 + (UInt32(src[x]) * 876 + 127) / 255 : 64 }
+                var p = row * (rowBytes / 4), x = 0
+                for _ in 0..<groups {
+                    let c: UInt32 = 512
+                    words[p] = c | yv(x) << 10 | c << 20
+                    words[p + 1] = yv(x + 1) | c << 10 | yv(x + 2) << 20
+                    words[p + 2] = c | yv(x + 3) << 10 | c << 20
+                    words[p + 3] = yv(x + 4) | c << 10 | yv(x + 5) << 20
+                    p += 4; x += 6
+                }
+            }
+        }
+        return out
+    }
 }

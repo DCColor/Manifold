@@ -481,6 +481,15 @@ final class MetalVideoRenderer {
     /// target plus its hysteresis band). The picture's line: a frame is first shown at the first slot whose due time reaches its pts.
     private var deckLinkPullDueNow: Double = .nan
     private var deckLinkHandedDue: Double = .nan
+    /// B5 (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.3, 0.9.3): an audio-only file on the card's clock. The output carries a held
+    /// picture (the file's card, or black), and each fill asks `noteDeckLinkVirtualPull` for the frame a matched-rate file would
+    /// show at that slot: a card-frame grid on the content clock, one frame per slot while playing. The bridge's runs, Stage 2's
+    /// picture line and the card lock read it as any file's frames (`currentDeckLinkHanded`).
+    private var deckLinkVirtual = false
+    /// The content time the virtual frames are counted from: the clock wherever the timeline last restarted (a park, a seek, a step,
+    /// a loop's wrap). A grid counted from content 0 put the first frame after a park off the grid (1905.000 s at 23.976) before the
+    /// play position, where the reader has no sound: the first 0.6–21 ms of the run were silent (chain 28, §10.31).
+    private var deckLinkVirtualAnchor: Double = 0
     /// Recent display-tick intervals while output runs; their median sets the pull margin.
     private var deckLinkTickIntervals: [Double] = []
     private var deckLinkLastTick: Double = 0
@@ -5129,6 +5138,59 @@ final class MetalVideoRenderer {
         deckLinkLock.lock(); deckLinkSourceInterlaced = interlaced; deckLinkLock.unlock()
     }
 
+    /// B5: the held picture runs on a virtual frame timeline (see `deckLinkVirtual`), or not. Each edge starts a fresh pull history.
+    func setDeckLinkVirtualTimeline(_ on: Bool) {
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        guard on != deckLinkVirtual else { return }
+        deckLinkVirtual = on
+        resetDeckLinkRingLocked()
+    }
+
+    /// B5, SDK thread, after the fill copied the held picture for slot `index`: the frame a matched-rate file would hand there. The
+    /// same slot timeline as the pull (`deckLinkPullSlotLocked`): the minimum of the paced pulls' offsets. While the clock runs at
+    /// 1×, one card frame per slot, from the frame handed last, unless the target has moved more than half a frame from it (a real
+    /// drift, or the first pull of a Play); paused, a seek or a shuttle, the grid frame at the clock, untimed. No margin: nothing is
+    /// rendered, so the content at the pull's slot time is the content to show.
+    func noteDeckLinkVirtualPull(index: Int64) {
+        let clockNow = clock?()
+        let host = CACurrentMediaTime()
+        deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        guard deckLinkVirtual else { return }
+        let f = deckLinkCardFrame
+        guard f > 0, let clock = clockNow, clock.isFinite else {
+            deckLinkHandedPts = .nan; deckLinkHandedTimed = false; deckLinkHandSeq &+= 1; deckLinkLastPull = nil
+            return
+        }
+        let anchor = deckLinkVirtualAnchor
+        func grid(_ t: Double) -> Double { anchor + ((t - anchor) / f + 1e-6).rounded(.down) * f }
+        let slotBase = Double(index) * f
+        let paced = deckLinkLastPull.map { host - $0.host > f / 2 } ?? false
+        if paced {
+            deckLinkSlotOffsets.append(host - slotBase)
+            if deckLinkSlotOffsets.count > 64 { deckLinkSlotOffsets.removeFirst() }
+        }
+        let slotHost = slotBase + (deckLinkSlotOffsets.min() ?? (host - slotBase))
+        let last = deckLinkLastPull
+        deckLinkLastPull = (host, clock)
+        var pts = clock   // not timed: the frame IS the clock's time, and the grid restarts there
+        var timed = false
+        if let last {
+            let dc = clock - last.clock, dh = host - last.host
+            if dc > 1e-4, dc <= dh + 0.002 {   // the clock runs, no faster than real time: Play (the pull's own test)
+                let target = clock - (host - slotHost)
+                let handed = deckLinkHandedPts
+                let next = handed.isFinite ? anchor + ((handed + f - anchor) / f).rounded() * f : .nan
+                pts = next.isFinite && abs(target - next) <= f / 2 ? next : grid(target)
+                timed = true
+            }
+        }
+        if !timed { deckLinkVirtualAnchor = pts }
+        deckLinkHandedPts = pts
+        deckLinkHandedTimed = timed
+        deckLinkHandedDue = .nan
+        deckLinkHandSeq &+= 1
+    }
+
     /// True for a file: the pull hands the card the frame due at its slot (see `deckLinkRingCount`). False for a live
     /// source, which keeps the newest-frame pull. Written on main by DeckLinkService with each source format.
     func setDeckLinkPullByTime(_ byTime: Bool) {
@@ -5505,6 +5567,15 @@ final class MetalVideoRenderer {
                                byTime: UnsafeMutablePointer<ObjCBool>, handSeq: UnsafeMutablePointer<UInt64>,
                                due: UnsafeMutablePointer<Double>, sourceFrame: UnsafeMutablePointer<Double>) {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        if deckLinkVirtual {   // B5: the virtual frame timeline, a matched-rate file's
+            pts.pointee = deckLinkHandedPts
+            timed.pointee = ObjCBool(deckLinkHandedTimed)
+            byTime.pointee = true
+            handSeq.pointee = deckLinkHandSeq
+            due.pointee = .nan
+            sourceFrame.pointee = deckLinkCardFrame
+            return
+        }
         pts.pointee = deckLinkFrameReady ? deckLinkHandedPts : .nan
         timed.pointee = ObjCBool(deckLinkHandedTimed)
         byTime.pointee = ObjCBool(deckLinkPullByTime)
@@ -5515,6 +5586,7 @@ final class MetalVideoRenderer {
 
     func currentDeckLinkSourcePts() -> Double {
         deckLinkLock.lock(); defer { deckLinkLock.unlock() }
+        if deckLinkVirtual { return deckLinkHandedPts }   // B5
         guard deckLinkFrameReady else { return .nan }
         // The frame last handed to the card is the one on the wire (since 2026-10-26 it can be older than the front).
         return deckLinkHandedPts.isFinite ? deckLinkHandedPts : deckLinkFrontPts
@@ -5629,6 +5701,14 @@ final class MetalVideoRenderer {
         let target = clock - (host - slotHost) - deckLinkPullMarginLocked + deckLinkSlipShiftLocked(clock: clock, index: index)
         let hysteresis = 0.002
         deckLinkPullDueNow = target + hysteresis   // C6: a frame one past the one handed last is taken up to here
+        // The band of the one-new-frame-per-pull rule below. At a rate mismatch (C6), the 2 ms above: frames repeat by design there, and
+        // the bridge's line is built on that due time. At a MATCHED rate, half a card frame: a matched file advances exactly one frame
+        // per slot, so only a real drift of the clock against the card of more than half a frame may move the choice. With 2 ms, a
+        // session whose phase put the next frame's due time near the band's edge (the margin, a display tick + 10 ms, is ~1.65 ms over
+        // a 59.94 frame at 120 Hz) held one frame whenever a pull wobbled past it: 6 of 101 restarts at 59.94, gate on and off
+        // (docs/CARD_CLOCK_FINDINGS.md §10.30).
+        let matched = deckLinkSourceFrame > 0 && abs(deckLinkSourceFrame - deckLinkCardFrame) < deckLinkCardFrame * 1e-4
+        let band = matched ? deckLinkCardFrame / 2 : hysteresis
         // Never an older frame than the one handed last, unless that frame is ahead of the clock: a loop's wrap or a
         // seek back started a new timeline, and its frames are all "older".
         let floor = handed.isFinite && handed <= clock + deckLinkCardFrame ? handed : -Double.infinity
@@ -5647,8 +5727,8 @@ final class MetalVideoRenderer {
             }
             if let next {
                 if due.map({ pts[$0] <= floor }) ?? true {
-                    if pts[next] <= target + hysteresis { due = next }          // would repeat
-                } else if let d = due, pts[d] > pts[next], pts[d] > target - hysteresis {
+                    if pts[next] <= target + band { due = next }                // would repeat
+                } else if let d = due, pts[d] > pts[next], pts[d] > target - band {
                     due = next                                                  // would skip
                 }
             }

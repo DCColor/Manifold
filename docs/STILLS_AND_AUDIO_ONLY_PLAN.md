@@ -402,7 +402,7 @@ sample-buffer surfaces stay behind it, black.
 
 ### 5.3 SDI/HDMI picture and clock
 
-This section and §5.4 are **0.9.3 (B5)**.
+This section and §5.4 are **0.9.3 (B5)**. **Built 2026-11-14 on the card-clock path instead of the clock branch below** (Robbie): the held picture carries the card, a virtual frame timeline puts the sound on the card's clock as a video file's, and 44.1 kHz is C7's tap resampler, not the reader. As built and verified: `CARD_CLOCK_FINDINGS.md` §10.31. The setting "Audio-only files on SDI: Show card / Black" was not built (the card always shows; black only with the card lock off).
 
 **Revisit in B5:** in 0.9.2 an audio-only file plays on the Mac even when the audio destination is SDI, because the card is silent
 (`applyAudioMute`, the `deckLinkOwnsAudio && mediaKind != .audioOnly` term). Once the SDI card carries the sound, that exception

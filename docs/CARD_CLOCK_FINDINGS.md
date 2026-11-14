@@ -2026,3 +2026,257 @@ Analysis: `w2-ah.py <wav> --sdi-offset-ms -0.69 --mac-latency-frames 28 --sdi-in
 (Stage 2 off and on). The latencies are as reported, not measured: Scarlett output device 14 + safety 14; DeckLink (1) input
 device 0 + stream 0 + safety 4,000, buffer 512 not counted. Whether Audio Hijack compensates any of them is UNKNOWN, so the at-taps
 figure is the primary result.
+
+#### Method A, first attended run (`ah2-5994`), 2026-11-13 23:55–00:11: no SDI channel; listening check clean
+
+Build `fu9`, Robbie at Audio Hijack. Recording `~/Code/_scratch/manifold-1c-wire/ah/20261113 2356 Recording.wav`, 867.7 s, 2 ch,
+24-bit, 48 kHz.
+- **Left (Mac):** −37.0 dBFS rms, 247 s of sound: the 10 s preflight, the 180 s run and 57 s of the check.
+- **Right (SDI):** all 41,649,664 samples are zero, and the left has no delayed copy of the SDI sound mixed in (autocorrelation), so no
+  K yet.
+- **Manifold's side:** the SDI sound did go out. The first session latched 2 runs, missing 0, and the gate was open (`MANIFOLD_SDI_AUDIO_BOTH=1`).
+  The loss is on the recording side; Audio Hijack's routing is UNKNOWN until checked.
+- **By ear (W6's audibility):** at each of the four output restarts Robbie heard the noise, a pause, then the noise again, with no other glitch.
+  Stage 2's lines put the pause at 83.5–94.7 ms after each move, each start with the SDI picture.
+- **Silent starts:** with Audio Hijack holding the DeckLink input open, every output start after the first was a silent start (§10.26).
+  The recovery restarted 3 times, then gave up for that session (the SDI sound off its picture or silent). This is follow-up 6's rig
+  condition (input open at output start). It does not touch the Mac's sound at Computer, but it means method A's run must stay
+  within the first output session.
+
+#### Method A, second attended run (`ah3-5994`), 2026-11-14 00:17–00:24: the DeckLink CoreAudio input is silent
+
+Same build and set-up. `W1C_AH_RESTARTS=0` (new): one output session, no restarts. 2 min setup window.
+Recording `ah/20261114 0019 Recording.wav`, 188 s.
+- **Left (Mac):** the preflight and the 3 min run, as before.
+- **Right:** zero except 2.7 s at 153.8–156.5 s (−64.7 dBFS peak, near-constant ~290-count values: not the fixture's noise, which
+  is −37 dBFS rms). The DeckLink input block's own meter in Audio Hijack was **flat** throughout (Robbie).
+- **Manifold:** in a run with the gate open, 2 latches, 0 missing: the sound was on the wire.
+
+The physical rig is the one every wire test of the past week used, and those read the embedded sound through the DeckLink SDK
+(`capture`, last at d24, 03:00). This is the first time anything has read that input through the card's **CoreAudio** device. Why it
+delivers silence is UNKNOWN. Candidates, unchecked:
+- Desktop Video Setup's input format or audio source for 8K Pro (1);
+- which SDI input the CoreAudio device "(1)" follows (the sub-device mapping, `ROADMAP_IDEAS.md`).
+
+Method A is stopped until that input delivers sound, so K is still undecided. Two quick checks to try first: a read-only look at
+Desktop Video Setup, and a recording of the CoreAudio input by a small tool of ours instead of Audio Hijack.
+
+**The loop through the SDK, straight after** (`d25-tr-5994`, `fu9`, D as d24, 00:26–00:29, Robbie's request).
+- **The loop works:** 7 sound segments, every one 25–27 samples into its frame at −0.53…−0.56 ms, 0 late edges, 968 missing after
+  the output restart (as in every D run).
+- **Placement is back to 1c's** (f15–f20: 25–27 samples). The 32–34 of the night before has gone, with the same rig and the same
+  build: the D placement moves between sessions by ~8 samples.
+- **Card:** −21…−24 ppm against the host with capture open (other sessions: −104 to +94).
+
+So the embedded sound is on the wire and the SDK reads it. Only the CoreAudio input "Blackmagic DeckLink 8K Pro (1)" returned
+silence. Desktop Video Setup's input connection for it is SDI (Robbie); its other input settings are unchecked.
+
+**The CoreAudio input without Audio Hijack** (`carec-5994`, `fu9`, 00:32–00:33). A read-only recorder of ours
+(`~/Code/_scratch/manifold-1c-wire/inlat/carec`: an IOProc on the device, nothing set) opened "Blackmagic DeckLink 8K Pro (1)" after
+Manifold connected (destination Computer, `MANIFOLD_SDI_AUDIO_BOTH=1`) and recorded 60 s across a 40 s Play. The Mac's sound started
+with the SDI picture and the SDI run latched, 0 missing.
+- **Device:** 16 channels, 32-bit float, 48 kHz, delivering frames at the full rate (48,128–50,688 a second).
+- **Signal:** **every sample of all 16 channels is zero.**
+
+Audio Hijack is ruled out. The card's CoreAudio input delivers silence on this rig while the SDK reads the same input's embedded
+sound (d25, minutes before). Cause UNKNOWN; not a Manifold question. Method A needs either that input working, or a variant that takes
+the SDI side from the SDK (`capture`). Taking it from `capture` gives up the single clock: the SDK's timestamps are on the card's
+clock, Audio Hijack's on its device's.
+
+**Again with the DeckLink as the system's default input** (`carec2-5994`, 00:35–00:36; Robbie set Sound › Input to the DeckLink, output
+left on the Scarlett). Same result: Manifold's run latched, and every sample of all 16 channels was zero. The default-input setting is
+not the cause.
+
+#### K set from reported latencies (Robbie, 2026-11-14), build `fu10`
+
+Method A could not run (above). Robbie's decision: **set K from the reported latencies, record the uncertainty, and put an independent
+check of the absolute offset on the post-release list** (`BUGS.md`, *verify the Mac's sound against the SDI picture, absolute*).
+
+**As built** (`FrameEngine.updateStage2K`, `outputLatency`):
+- **K per output device:** device latency + stream latency + safety offset, output scope, at its nominal rate, read from Core Audio
+  at each output start and at each output-device change. Logged `[CARDLOCK] Stage 2: K … ms for <uid> (device … + stream … + safety …)`.
+  Scarlett 14 + 0 + 14 = 28 frames = **0.583 ms**; built-in 60 + 169 + 48 = 277 frames = **5.771 ms** (S0's readings). The I/O buffer
+  (512 frames) is not counted.
+- **Device change:** the next steering tick puts the sound on the new K with one position write (logged `re-anchored … for the output
+  device's latency`), rather than slewing up to 5.2 ms. `MANIFOLD_STAGE2_K_MS` (measurement build) still overrides.
+
+**Uncertainty, stated:**
+1. **Whether the synchronizer's time already includes the device's output latency.** If it does, the Mac's sound is late against
+   the SDI picture by K: 0.58 ms on the Scarlett, 5.77 ms on the built-in. If it does not, and the reports are true, it is on time.
+2. **Whether the devices report their latency truly.** USB interfaces may leave converter and driver delay out; the built-in's report
+   includes its DSP. Unmeasured.
+3. **The card's completion stamp against its SDI connector**, taken as 0. Unmeasured. The stamp could plausibly mark the end rather
+   than the start of the frame's time on air, which would be a frame (16.7 ms at 59.94).
+4. **Measured, by contrast:** the steering holds `m − (w + K)` to a p1–p99 spread of 0.04–0.09 ms with drift under 0.001 ms (W2, W7).
+   Only the absolute constant is unverified.
+
+### 10.30 The 59.94 one-frame holds, and the card lock on by default, 2026-11-14
+
+Go: Robbie, 2026-11-14 (queued after chain 26, overnight, no attended steps). Build **`fu11`** = `fu10` + both changes below.
+
+#### The holds: cause, from the logs
+
+The holds of §10.24–§10.25 (6 of 101 restarts gate on, 1 of 50 gate off, all at 59.94, none at 23.976) were reconstructed from the
+`[CADENCE]` pull lines of `rs14-5994`, `rs15-5994-pv` and `rs15-5994-off`: for each, the pulls around it, the clock, the handed pts, and
+the paced-offset minimum the slot timeline uses (`deckLinkPullSlotLocked`). **Every hold has the same signature:**
+- **Before the hold:** the handed frame trails the clock by 16.43–16.55 ms, steadily, for the whole session up to the hold.
+- **The hold:** the pull hands the same frame again.
+- **After it:** the frame trails by 33.07–33.25 ms, one frame more.
+- **Not the cause:** the pull's own offset against the slot minimum is 0.000–0.05 ms at the hold. Neither pull jitter nor a new
+  minimum moves the target.
+
+**Mechanism.** The pull's target is `clock − (host − slotHost) − margin`, with margin = the median display tick + 10 ms, which is
+18.33 ms with the window's link at 120 Hz. At 59.94 that is **1.65 ms more than a frame**. So a frame trailing the clock by 16.5 ms sits
+about 1.8–1.9 ms *past* the target, and it was taken only because the one-new-frame-per-pull rule accepts the frame after the one
+handed last up to `target + 2 ms`. With the gate on, the clock is held to the card, so that phase is constant for the session. A
+session that starts with it near 2 ms runs on the band's edge, and the first pull that lands a little late re-hands a frame. Gate off,
+the phase drifts and crosses the edge the same way. At 23.976 (41.7 ms frames) the margin is far from a frame boundary. The frame's
+sound followed the picture each time (a −800-sample step, §10.24), so it was a picture hold on the wire, not an A/V error.
+
+**Fix (`MetalVideoRenderer.deckLinkPullSlotLocked`).** At a **matched rate** (the file's frame equals the card's), the band of the
+one-new-frame rule is half a card frame. A matched file advances exactly one frame per slot, so only a real drift of the clock against
+the card of more than half a frame may move the choice. At a **rate mismatch** (C6) the band stays 2 ms, and so does the due time the
+bridge's C6 line is built on (`deckLinkPullDueNow`), so C6 is unchanged by construction. The bridge reads `due` only for C6 runs
+(`lineFrom`, `latchCad`).
+
+#### The card lock on by default
+
+`CardClockAudio.stage1bEnabled` is now `MANIFOLD_CARDLOCK_1B != "0"`: with DeckLink output on, file playback uses 1b, 1c's card
+timeline and Stage 2 with no variable set, and `MANIFOLD_CARDLOCK_1B=0` turns all three off as a diagnostic switch. Live sources are
+unchanged (`cardLockApplies` is a file's only). `CardClockSteeringTests` asserts the new parse. The scripts that meant "gate off" by
+removing the variable now set `=0` (`w1c-run.py`, `w1c-defout.py`, `cardlock-hunt.py`). `w1c-run.py` gains gate `default`, which sets
+nothing.
+
+#### Verification (chain 27, `fu11`, 2026-11-14 01:27–02:13)
+
+`fu11` = `fu10` + both changes + B5 (§10.31, which acts only while an audio-only file is held). Package tests pass.
+
+| Run | Result | Verdict |
+|---|---|---|
+| **Holds:** `h27-5994`, 100 output restarts while playing at 59.94, gate on, capture open (as `rs14`/`rs15`) | **0 mid-session holds, 0 mid-session picture events** in 107 output starts (`an/holds.py`). 90 sound segments, every one 25–27 samples into its frame. 16 silent starts, all recovered (0 gave up): capture open at output start, follow-up 6's rig condition | **Pass** (before: 6 in 101 gate on, 1 in 50 gate off) |
+| **C6:** `c27-tr-25`, 25p file on 1080p59.94, one transport cycle | **Fail, and not the band.** 2.6 M samples missing on the wire, sound in pieces (86 segments). Cause: Stage 2 at a rate mismatch, below. Fixed in `fu12`; re-run `c29-tr-25` (chain 29) | **Fail** → fixed |
+| **Default, no variable:** `dflt-sdi-5994`, `dflt-sdi-2398` (wire, capture open), `dflt-cmp-5994`, `dflt-cmp-2398` (Computer) | Every log: 0 mentions of `MANIFOLD_CARDLOCK_1B`, `Stage 2 on`, 2 renderer moves to its own clock, 7 card latches. Wire: 0 late edges; every segment 25–27 samples into its frame at 59.94 (−0.53…−0.56 ms), 9 at 23.976; missing only after the output restart (574 and 68 samples). Computer: 7 starts with the SDI picture and 3 stops per rate, 0 position writes, 0 timeouts | **Pass** |
+
+`dflt-sdi-5994` shows 6 segments, not 7. At the first Pause the run-end edge was **appended by the card** (`!! edge (untimed pull) … APPENDED`). The card kept ~58 ms of queued sound past the Pause, so the analyser lost the source and read the 4 s of silence (digital zero on the wire, checked) as a jump. f20 (1c, before Stage 2) had the same appended untimed-pull edge once. This is the known appended-edge case (§10.24 decision 5, open), not a regression.
+
+#### C6 under Stage 2: the regression and its fix (`fu12`)
+
+**The regression.** At a rate mismatch the SDI picture has no line, so Stage 2 holds. A Play then waited for a line that never comes, and after the 1 s timeout the sound's clock started from where it had been parked: in `c27-tr-25`, content 0.19 against a picture clock at 1.32. Nothing corrected it: Stage 2 holds at a mismatch, and 1b's 20 ms re-anchor is off while Stage 2 is active. So the audio pump, paced by that clock, ran a second behind the picture, the tap's look-ahead no longer reached the picture's time, and SDI went short of samples. **Stage 2 had never been run at a rate mismatch** (W1–W7 and D are matched); `c614b-tr-25` (1c) was clean.
+
+**Fix** (`stage2ResolvePending`, `stage2Tick`):
+- At a rate mismatch, a Play starts the sound **with the picture clock** at once (logged `rate mismatch … started with the picture clock`).
+- The tick steers ρ to the picture clock, `e = m − pic`, with the same controller and one position write over 20 ms. This is 1c's place for the sound at a mismatch, about the wire's lag ahead of the SDI picture.
+- A start that times out with no line also aligns to the picture clock now, instead of starting from where the clock was parked.
+
+`fu12` (chain 28's build) carries it.
+
+**Re-run (chain 29, `fu12`, 02:59–03:06): pass.**
+- `c29-tr-25` (wire): 7 segments, 0 steps, 0 jumps, 0 late edges, 0 missing samples in play and 1,806 after the output restart (`c614b`:
+  0 and 968). Each Play logged `rate mismatch … the Mac's sound started with the picture clock`.
+- First showings: p1 −0.38…−0.51 ms (`c614b`: −0.37…−0.53). One −11.25 ms minimum, the known last frame before a Pause, shown paused
+  with no sound under it (§10.24).
+- `c29cmp-25` (Computer): 865 ticks `mismatch: on the picture clock`, `m − pic` median +0.050 ms (p1 −0.031, p99 +0.174), 0 position writes.
+
+### 10.31 B5: audio-only files to SDI on the card's clock, built 2026-11-14
+
+Go: Robbie, 2026-11-14, after chain 27: B5 (`STILLS_AND_AUDIO_ONLY_PLAN.md` §5.3) for 0.9.3 on the card-clock path, the window's info card
+on the output (his follow-up), 44.1 kHz resampled once, channel declarations as for video, the 0.9.2 Mac-at-SDI exception gone,
+destination Computer as Stage 2. The code went in before `fu11` was built (it acts only while an audio-only file is held), so chain 27's
+build carries it, and chain 28 verifies it on the same tree.
+
+#### What was built
+
+- **Picture** (`DeckLinkService.setHeldPicture`, `AudioCardRaster`): the held picture of 0.9.2 (Rec.709 SDR, mode unchanged) carries the
+  window card's words for an audio-only file: name, format, channels, sample rate, duration (`AudioOnlyFacts`, `AudioCardText`, the
+  window card's own sources). It is drawn with AppKit text in grey on black at the output's size, on the output's serial queue, and
+  encoded as legal-range v210, luma only (chroma 512). It is redrawn when the file's facts arrive (the engine's `objectWillChange`).
+  There is no running clock, so nothing redraws per second. Black if the card lock is off.
+- **The card's clock** (`MetalVideoRenderer.noteDeckLinkVirtualPull`): each fill of the held picture asks the renderer for the frame a
+  matched-rate file would show at that slot. That is a card-frame grid on the engine's clock, from the pull's own slot timeline, one
+  frame per slot while the clock runs at 1× (half-frame band, §10.30), and untimed when paused, after a seek or while shuttling. There is
+  no margin, because nothing is rendered. The bridge reads it through `currentDeckLinkHanded` as any matched file's frames, with the
+  source frame the card's own. So 1c's runs, Stage 2's picture line and the card lock (`cardLockApplies` now admits an audio-only file)
+  are unchanged code.
+- **Sound:** the 0.9.2 exception in `applyAudioMute` goes. With the card lock on, the destination rules for an audio-only file as for a
+  video file, and the card is no longer forced silent. With `MANIFOLD_CARDLOCK_1B=0` both 0.9.2 rules return, and the output is black
+  and silent. A format change of the tap now re-establishes the output while an audio-only file is held, because the file's format is
+  the output's. 44.1 kHz is C7's tap resampler, unchanged (`AudioTapBuffer.swift`). Channels are the video path's (`D-real: audio:
+  enabled`).
+- **Menu row:** "Audio-only file: SDI and HDMI show its card, with its sound."
+
+#### Predictions, written before any B5 run (chain 28: `fu12`, the card lock by default, 1080p59.94 unless stated)
+
+Analysis `w1c-audioonly.py` (new). It locates each sound segment in the file's reference (exactly; by correlation for MP3 and AAC),
+counts discontinuities, and takes the **grid residue**: the content sample at every wire frame's first sample, less the nearest
+card-frame grid point. Validated on `d25-tr-5994` (video): 7 segments, 0 discontinuities in both modes, residue −27.6…−25.4 samples
+(median −26.2), the card's constant.
+
+| Run | Prediction |
+|---|---|
+| `ctl28-5994` (video control) | 0 discontinuities; residue spread ≤ 2.2 samples; its median is this session's card constant |
+| WAV 48 kHz, BWF | `held picture on — the audio-only card …`; 7 segments as the video cycle (Play, Play mid-file, seek 600, seek 300, Play after steps, Play from 0 after the loop's wrap); **0 discontinuities, exact**; residue median within ±1 sample of the control's, spread ≤ 2.2; 0 late edges; missing samples only after the output restart (as every D run) |
+| WAV 44.1 kHz | as 48 kHz, exact against C7's offline reference (onset ≤ 64 samples at a run from the file's first sample); one `resampled to 48000` line |
+| 5.1 WAV | as 48 kHz on L/R; `D-real: audio: enabled — 48000 Hz · 32-bit int · 8 ch on the wire (source 6 ch …)` |
+| MP3, AAC | lag constant in every segment (0 changes); residue as WAV ±1 (Apple's decoder trims priming as `afconvert` does: both decode to exactly 1920.000 s) |
+| WAV 48 at 1080p23.98 | as at 59.94, at 23.976's constant |
+| WAV 48 at destination Computer (`aocmp-5994`) | as W3: 7 starts with the SDI picture, 0 position writes, 0 timeouts, `e` within ±0.5 ms at +2 s |
+
+**Not covered unattended:** whether the card reads well on the monitor (by eye on the FSI, attended), the output started before the file
+was opened (the runs open the file first), and 2160p.
+
+**K verified (chain 26, `fu10`, 01:11–01:26).** `m − w` settles at the reported K on each device, and a device change takes the new K in
+one write. It is the absolute offset that stays unverified (above):
+- `k-5994` (Scarlett, 3 min): K 0.583 ms; `m − w` median +0.599 ms (p1 +0.568, p99 +0.756); `e` median +0.016 ms.
+- `k7-5994` (built-in, 3 min): K 5.771 ms; `m − w` median +5.791 ms (p1 +5.716, p99 +5.944); `e` median +0.020 ms.
+- `k5-5994` (10 default-output changes): 10 of 10 flushes and integrator resets, and 10 of 10 `re-anchored … for the output device's
+  latency` writes (`e` −5.05…−5.13 and +5.31…+5.33 ms at the write, the 5.19 ms between the two K plus the run's +0.1 ms bias). `e`
+  within ±0.07 ms at +2 s after every one; 0 coarse writes, 0 slips.
+
+#### Round 1 (chain 28, `fu12`, 2026-11-14 02:14–02:59)
+
+Every run had the card lock by default (no variable), and the held-picture line read `on — the audio-only card, Rec. 709 SDR, with the
+file's sound on the card's clock`.
+
+| Run | Discontinuities | Grid residue (median, spread) | Other |
+|---|---|---|---|
+| `ctl28-5994` (video) | 0 | −26.8, 1.6 | the session's constant |
+| WAV 48 | 0, exact | −26.8, 1.6 | 0 late edges |
+| WAV 44.1 | 0, exact against C7's reference | −26.8, 1.8 | one `resampled to 48000` line; one silent start, recovered (capture open) |
+| BWF | 0, exact | −25.8, 1.6 | |
+| 5.1 | 1: 434 samples at the first Pause's run end, an **appended edge** (§10.24 decision 5) | −25.6, 1.8 | `8 ch on the wire (source 6 ch, 2 padded silent)` |
+| MP3 | 0 (lag constant) | −26.0, 1.6 | 1 re-latch |
+| AAC | 0 (the 20 counted were the seek 600 → 300, merged into one segment: no silence between, below) | −25.8, 1.6 | |
+| WAV 48 at 23.976 | 1: 407 samples at the loop's start, an **appended edge** | −8.0, 0.0 | |
+| WAV 48, destination Computer | — | — | 5 starts with the SDI picture and 2 late starts (5.8 and 2.3 ms, under a frame), 3 stops, 0 position writes, 0 timeouts; `e` within ±0.02 ms at +2 s |
+
+**Seeks while playing** run straight from the old run's sound into the new one's, with no silence between. Video has 33–50 ms of
+silence there. Checked sample-exact at 23.976 with the analyser's new relocator: the old run is exact to 615.031 s, the new one exact
+from 300.008 s, starting 8 samples into its frame (the constant), 0 samples off between.
+
+**A defect: some runs started mid-frame.** After a Play following frame steps, and after the loop's seek to 1905, the run's first sample
+was 40–677 samples (59.94) and 900–1,024 samples (23.976) into its frame, against the constant everywhere else. The cause is in
+`noteDeckLinkVirtualPull`: the virtual frames were counted from content 0, so a park off that grid (1905.000 s is not a whole number of
+23.976 frames) showed the grid frame *before* the park point, whose first milliseconds the reader never read. Up to one frame of sound
+was lost at those starts. **Fixed in `fu13`:** the grid is anchored at the clock wherever the timeline restarts (any untimed pull),
+so the first frame is the play position itself, as a video file's seek frame is. The analyser now checks the residue for constancy
+within each run, and the first sample against the card's constant. Re-run: chain 30.
+
+#### Round 2 (chain 30, `fu13`, 2026-11-14 03:08–03:41): pass
+
+`fu13` = `fu12` + the anchored virtual grid. Card lock by default; 1080p59.94 unless stated; capture open.
+
+| Run | Discontinuities | Spread of the residue within a run | First sample into its frame, every segment |
+|---|---|---|---|
+| `ctl30-5994` (video control) | 0 | 0.8 | 27, 27, 27, 27, 27, 28, 28 (this session's constant) |
+| WAV 48 | 0, exact | 0.8 | 26–28 (one silent start, recovered) |
+| WAV 44.1 | 0, exact against C7's reference | 0.8 | 26–29 (one silent start, recovered); one `resampled to 48000` line |
+| BWF | 0, exact | 0.8 | 26–27 |
+| 5.1 | 0, exact | 0.8 | 25–26; `8 ch on the wire (source 6 ch, 2 padded silent)` |
+| MP3 | 0 (lag constant) | 0.8 | 25–27 |
+| AAC | 0 (lag constant) | 0.8 | 25–27 |
+| WAV 48 at 23.976 | 0, exact; the seek 35 → 600 s with no silence, a clean jump starting 9 samples into its frame | 0.0 | 9 every segment (video at 23.976: 9) |
+| WAV 48, destination Computer | — | — | 7 of 7 starts with the SDI picture, 0 late, 3 stops, 0 position writes, 0 timeouts; Play to sound 57.5–70.3 ms |
+
+Three runs logged one appended edge each, none of which left a discontinuity on the wire. **Every prediction of the table above holds
+on `fu13`.** The mid-frame starts are gone: every run, after a park, steps, a seek or the loop's wrap, starts at the card's constant.
+Not covered unattended: the card's look on a monitor (by eye on the FSI), the output started before the file was opened, and 2160p.

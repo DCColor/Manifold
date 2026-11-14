@@ -24,7 +24,7 @@
 # MANIFOLD_CARDCLOCK_AUDIO_DEVICE_UID reaches the build unchanged.
 #   w1c-run.py flips <fixture.mov> <on|off> <label> <n>   Play, then n pairs of destination flips while playing (to SDI, 15 s, to
 #       Computer, 15 s), Pause.
-# W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / unset). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
+# W1C_LUMA=1 adds capture's --luma, for a sync clip (w1c-syncclip.py). on/off is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=1 / =0; on by default since 0.9.3). MANIFOLD_AUDIO_CORR_LOG=1 logs every PCM callback's correction.
 # `capture` moves the card's output clock while it is open (§5); A/V offset and continuity are read on the same wire, so that is acceptable.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID through manifold-proc.sh. AX menu clicks on named items only,
 # no keystrokes, no screenshots. The destination is a launch argument (argument domain): nothing is written to defaults.
@@ -65,11 +65,11 @@ def run(fixture, gate, label, steps, budget):
     env = dict(os.environ, MANIFOLD_CARDCLOCK_LOG="1", MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1",
                MANIFOLD_AUDIO_CORR_LOG="1", MANIFOLD_DEBUG_TRANSPORT=steps)
     for k in ("MANIFOLD_CARDLOCK_1B", "MANIFOLD_RENDERER_RECOVER", "MANIFOLD_RENDERER_SELFTEST", "MANIFOLD_PUMPWATCH_SELFTEST"): env.pop(k, None)
-    if gate: env["MANIFOLD_CARDLOCK_1B"] = "1"
+    if gate is not None: env["MANIFOLD_CARDLOCK_1B"] = "1" if gate else "0"   # on by default since 0.9.3 (§10.30): off must be said; default sets nothing
     mode_args = ["-manifold.decklink.manualOutputMode", os.environ["W1C_MODE"]] if os.environ.get("W1C_MODE") else []
     dest = os.environ.get("W1C_DEST", "sdi"); assert dest in ("sdi", "computer")
     p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", dest] + mode_args, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
-    pid = p.pid; say(f"{label}: pid {pid}, gate {'on' if gate else 'off'}, {title}")
+    pid = p.pid; say(f"{label}: pid {pid}, gate {'default (no variable)' if gate is None else 'on' if gate else 'off'}, {title}")
     cap = None; mid = {"cap": None, "n": 0, "open_at": None, "close_at": None, "off": 0, "drv": None}
     def mid_close(why):
         c = mid["cap"]
@@ -155,7 +155,7 @@ def run(fixture, gate, label, steps, budget):
 
 if __name__ == "__main__":
     mode, fixture, g, label, n = sys.argv[1], os.path.abspath(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5])
-    assert g in ("on", "off") and os.path.exists(fixture)
+    assert g in ("on", "off", "default") and os.path.exists(fixture)
     if mode == "cont": steps = f"wait 16;play;wait {n};pause;wait 2"; budget = n + 120
     elif mode == "plays":
         steps = "wait 16;" + ";".join("seek 0;wait 3;play;wait 60;pause;wait 3;play;wait 60;pause;wait 3" for _ in range(n)); budget = n * 135 + 120
@@ -170,5 +170,13 @@ if __name__ == "__main__":
     elif mode == "flips":   # Stage 2 W4 (§10.28): n pairs of destination flips while playing
         steps = "wait 16;seek 0;wait 3;play;wait 30;" + "".join("dest sdi;wait 15;dest computer;wait 15;" for _ in range(n)) + "pause;wait 3"
         budget = n * 30 + 170
-    else: sys.exit("mode: cont | plays | transport | restarts | flips")
-    run(fixture, g == "on", label, steps, budget)
+    elif mode == "ah":   # Stage 2 method A, attended (§10.29): n s for Robbie to set up Audio Hijack after the build connects, a 10 s
+        # preflight play, 3 min from 0, then output restarts while playing for the listening check (the first one pauses: Play again)
+        # W1C_AH_RESTARTS=0: no output restarts (with the input held open by Audio Hijack, every start after the first is silent, §10.29)
+        rs = int(os.environ.get("W1C_AH_RESTARTS", "3"))
+        steps = (f"wait 16;wait {n};seek 0;wait 3;play;wait 10;pause;wait 20;seek 0;wait 3;play;wait 180;"
+                 + ("output stop;wait 3;output start;wait 5;play;wait 12;" + "".join("output stop;wait 3;output start;wait 12;" for _ in range(rs)) if rs else "")
+                 + "pause;wait 5")
+        budget = n + 420
+    else: sys.exit("mode: cont | plays | transport | restarts | flips | ah")
+    run(fixture, None if g == "default" else g == "on", label, steps, budget)

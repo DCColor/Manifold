@@ -108,7 +108,7 @@ def launch_once(label, n, gate, steps, deadline, state):
     defp = subprocess.Popen([f"{DEV}/defout", "100000", defout])
     env = dict(os.environ, MANIFOLD_CARDCLOCK_LOG="1", MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1", MANIFOLD_DEBUG_TRANSPORT=steps)
     env.pop("MANIFOLD_CARDLOCK_1B", None)
-    if gate: env["MANIFOLD_CARDLOCK_1B"] = "1"
+    env["MANIFOLD_CARDLOCK_1B"] = "1" if gate else "0"   # on by default since 0.9.3 (§10.30): off must be said
     out = open(log, "w")
     p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"], stdout=out, stderr=subprocess.STDOUT, env=env)
     pid = p.pid; say(f"{label} launch {n}: pid {pid}, gate {'on' if gate else 'off'}")

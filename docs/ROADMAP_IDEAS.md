@@ -89,21 +89,49 @@ Depends on: nothing in Manifold. The output-device menu item below makes the map
 Size guess: an afternoon (the mapping change, a guarded 30 min run).
 
 ## DeckLink output-device menu: grey out sub-devices the mapping makes inactive
-Status: idea (Robbie, 2026-11-12)
+Status: decided (Robbie, 2026-11-14; idea 2026-11-12)
 Version: after 0.9.3
 
 What: the DeckLink output-device menu lists all four sub-devices of an 8K Pro even when the card's connector mapping makes
-some of them inactive (input-only, or not mapped to a connector). Grey out or hide the inactive ones, with a short note why
-(for example "Inactive in this card's connector mapping: change it in Desktop Video Setup").
+some of them inactive (input-only, or not mapped to a connector). **Decided:** grey them out, using the SDK's duplex / active
+attribute for each sub-device, with a short note why (for example "Inactive in this card's connector mapping: change it in
+Desktop Video Setup"). The menu **updates live** on the SDK's profile-change notification, so a mapping changed in Desktop Video
+Setup while Manifold runs shows at once.
 
 Why: with a mapping such as "SDI 1 In or Out" (item above), picking a sub-device that cannot output gives no picture and no
 clue why.
 
-Open questions: which DeckLink attribute or status reports a sub-device inactive under the current mapping (the profile's
-duplex mode, `BMDDeckLinkDuplex`, or the device's video output connections), and whether the menu should follow a mapping
-changed while Manifold runs (the profile-change callback).
+Open question: the exact attribute (the profile's duplex mode, `BMDDeckLinkDuplex`, or the device's active/inactive status
+under the current profile), to be confirmed against the SDK headers and on the 8K Pro in two mappings.
 
+Depends on: the "Open Desktop Video Setup" button (below) for the note's way out.
 Size guess: ?
+
+## Settings ▸ DeckLink: an "Open Desktop Video Setup" button
+Status: decided (Robbie, 2026-11-14)
+Version: after 0.9.3
+
+What: a button in Settings ▸ DeckLink Output that opens Blackmagic's Desktop Video Setup, **shown only if Desktop Video is
+installed**. Opened by its bundle ID through Launch Services (`NSWorkspace` URL for the bundle ID), never by a hard-coded path;
+hidden when the bundle ID does not resolve.
+
+Why: the connector mapping, the input connection and the card's other settings live there, and the menu note above, the silent
+start advice and the guide (below) all send the user to it.
+
+Size guess: small.
+
+## Sync and Color Guide: "Setting up your DeckLink"
+Status: decided (Robbie, 2026-11-14)
+Version: after 0.9.3
+
+What: a new section of the built-in Help ▸ Sync and Color Guide:
+- **Connector mapping for cards that also capture:** use a mapping that gives output and capture separate sub-devices (on the
+  8K Pro, for example "SDI 1 In or Out"), with why (the silent start, CARD_CLOCK_FINDINGS.md §10.26).
+- **Which sub-device Manifold uses:** the one chosen in the DeckLink output-device menu; inactive ones are greyed (item above).
+- **The 8K Pro's connector-to-device table** for its mappings, from Blackmagic's documentation, checked on the card.
+
+Depends on: the sub-device mapping test (item above) for the recommendation; the menu item for the greyed entries.
+Size guess: a session.
 
 ## HEVC over WHEP
 Status: idea (2026-10-07)
@@ -162,7 +190,7 @@ Depends on: unsure
 Size guess: large
 
 ## Load Audio Files Only
-Status: shipped in the window in 0.9.2; SDI (B5) remains for 0.9.3. Plan: docs/STILLS_AND_AUDIO_ONLY_PLAN.md
+Status: shipped in the window in 0.9.2; SDI (B5) built 2026-11-14 for 0.9.3, on the card-clock path with the window's card (uncommitted; CARD_CLOCK_FINDINGS.md §10.31). Plan: docs/STILLS_AND_AUDIO_ONLY_PLAN.md
 Version: 0.9.2 in the window (B4); 0.9.3 on SDI (B5)
 
 What: Ability to load audio files with no video - stereo, mono, 5.1 etc

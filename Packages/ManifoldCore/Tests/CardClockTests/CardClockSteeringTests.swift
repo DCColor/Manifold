@@ -151,9 +151,10 @@ final class CardClockSteeringTests: XCTestCase {
     }
 
     func testStage1bIsOffUnlessTheSwitchIsExactlyOne() {
-        XCTAssertFalse(CardClockAudio.stage1bEnabled(environment: [:]))
+        // On by default since 0.9.3; only "0" turns it off (§10.30).
+        XCTAssertTrue(CardClockAudio.stage1bEnabled(environment: [:]))
         XCTAssertFalse(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": "0"]))
-        XCTAssertFalse(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": ""]))
+        XCTAssertTrue(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": ""]))
         XCTAssertTrue(CardClockAudio.stage1bEnabled(environment: ["MANIFOLD_CARDLOCK_1B": "1"]))
     }
 

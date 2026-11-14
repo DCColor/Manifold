@@ -2,7 +2,7 @@
 # Stage 1b, §10.11: every run, short checks first. Stops at the first failure; a tripped guard stops everything.
 #   cardlock-1b-plan.sh short | long
 set -u
-export MANIFOLD_CARDLOCK_1B=1   # Stage 1b is off without it
+export MANIFOLD_CARDLOCK_1B=1   # on by default since 0.9.3; kept explicit
 HERE=${0:A:h}; REPO=${HERE:h:h}; B=$REPO/build/cardclock; C=$HERE/cardclock.sh; K=$HERE/cardlock.sh
 # FROM=<label>: skip every run before the one with that label, to resume a stopped plan.
 run() {

@@ -76,6 +76,7 @@ import ManifoldCore
 import StreamBookmarkModel
 import ColorimetryModel   // SourceChroma — the file's chroma to the renderer (Stage 3b S2)
 import ShortcutRegistry   // ShortcutID — the window's shortcut handlers (docs/SHORTCUTS_AUDIT.md §4.4)
+import AudioFileInfo   // AudioCardText — the audio-only card's words for the output (B5)
 import FileScan   // SourceScan, FieldView — the window's field view (interlaced I4)
 
 // MARK: - Exclusive devices
@@ -1133,6 +1134,14 @@ final class DeckRegistry {
             self?.updateHeldPicture()
             self?.setNeedsArbitration()
         }
+        // B5: an audio-only file's facts arrive after its commit; the output's card says them once they do.
+        // Any change of the engine's published state; the setter ignores a card that has not changed, so this costs a compare.
+        engine.objectWillChange
+            .sink { [weak self, weak engine] _ in
+                guard engine?.mediaKind == .audioOnly else { return }
+                DispatchQueue.main.async { self?.updateHeldPicture() }   // objectWillChange sends before the value is stored
+            }
+            .store(in: &cancellables)
         // A paused window's display link has stopped, and the one-shot wipe runs on its next tick.
         engine.onClearPicture = { [weak renderer] in renderer?.clearToBlack(); renderer?.wakeDisplayLink() }
         engine.onStillScopeFrame = { [weak renderer] in renderer?.setStillScopeFrame($0) }
@@ -1265,14 +1274,27 @@ final class DeckRegistry {
     /// The output's picture follows the deck driving it: while that deck has a still or an audio-only file the output
     /// holds black (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §3.4), and a video or live source commit releases it, because either
     /// changes `mediaKind` (a stream's takeover through `stop()`). Another window's file is not this output's business.
+    /// B5 (0.9.3): an audio-only file is sent to SDI and HDMI on the card's clock, with its card as the picture (the window card's
+    /// words). With the card lock off (`MANIFOLD_CARDLOCK_1B=0`, a diagnostic switch) the card has no clock for it: black, silent.
     private func updateHeldPicture() {
-        let reason: String?
-        switch hostDeck?.engine?.mediaKind {
-        case .audioOnly: reason = "Audio-only files aren’t sent to SDI or HDMI yet. Output is black."
-        case .still: reason = "Still images aren’t sent to SDI or HDMI. Output is black."
-        default: reason = nil
+        let engine = hostDeck?.engine
+        switch engine?.mediaKind {
+        case .audioOnly:
+            guard FrameEngine.sdiSoundOnCardTimeline, let engine else {
+                DeckLinkService.shared.setHeldBlack(reason: "Audio-only files aren’t sent to SDI or HDMI with the card lock off. Output is black.")
+                return
+            }
+            var lines: [String] = []
+            if let facts = AudioOnlyFacts(engine: engine) { lines = [facts.format, facts.channels, facts.sampleRate] }
+            lines.append(AudioCardText.duration(engine.duration))
+            DeckLinkService.shared.setHeldPicture(reason: "Audio-only file: SDI and HDMI show its card, with its sound.",
+                                                  card: HeldAudioCard(name: engine.currentURL?.lastPathComponent ?? "", lines: lines),
+                                                  timeline: true)
+        case .still:
+            DeckLinkService.shared.setHeldBlack(reason: "Still images aren’t sent to SDI or HDMI. Output is black.")
+        default:
+            DeckLinkService.shared.setHeldBlack(reason: nil)
         }
-        DeckLinkService.shared.setHeldBlack(reason: reason)
     }
 
     private func applyArbitration(_ trigger: String) {

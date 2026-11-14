@@ -721,8 +721,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     // MARK: - The card as master clock (docs/CARD_CLOCK_FINDINGS.md §10)
 
-    // A file with no audio track (Stage 1a), or a file with sound while the card owns it, destination SDI (Stage 1b, off unless
-    // `CardClockAudio.stage1b`: with it off, sound is exactly as at Stage 1a). While output runs,
+    // A file with no audio track (Stage 1a), or a file with sound at either destination (Stage 1b and Stage 2; on by default since
+    // 0.9.3, `CardClockAudio.stage1b`, `MANIFOLD_CARDLOCK_1B=0` turns it off and sound is then exactly as at Stage 1a). While output runs,
     // once a second, the synchronizer is written onto the card's line, so the pull (`deckLinkPullSlotLocked`) sees a clock that advances
     // one card frame per slot and a frame can no longer slip. Every reader of the clock is unchanged. With output off none of this acts:
     // no timer exists, and no second synchronizer.
@@ -781,12 +781,66 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         stage2StopTicket?.cancel(); stage2StopTicket = nil
         stage2StopTimer?.cancel(); stage2StopTimer = nil
     }
-    /// K (§10.27): the one constant between the synchronizer's "heard" and the card's stamp. 0 until the attended check decides it.
+    /// K (§10.27, set in §10.29): `e = m − (w + K)`. **From reported latencies, not measured** (Robbie, 2026-11-14): the output device's
+    /// presentation latency as Core Audio reports it (device + stream + safety offset), on the assumption that the synchronizer's time is
+    /// the sample handed to the device, not the one at its connector; the card's completion stamp is taken as the moment its frame is on
+    /// the SDI connector (0). Both are UNKNOWN; the absolute offset is on the post-release list for an independent check. Per device,
+    /// read again whenever the output device changes (`updateStage2K`).
+    private var stage2K = 0.0
+    /// The output device changed while steering: the first steering tick takes the new K by one position write, as a slip.
+    private var stage2KChanged = false
     #if MANIFOLD_CARDCLOCK
-    private static let stage2K: Double = (Double(ProcessInfo.processInfo.environment["MANIFOLD_STAGE2_K_MS"] ?? "") ?? 0) / 1000
+    /// Measurement build only: a fixed K in place of the reported one.
+    private static let stage2KOverride: Double? = Double(ProcessInfo.processInfo.environment["MANIFOLD_STAGE2_K_MS"] ?? "").map { $0 / 1000 }
     #else
-    private static let stage2K = 0.0
+    private static let stage2KOverride: Double? = nil
     #endif
+
+    private func updateStage2K() {
+        let old = stage2K
+        if let k = Self.stage2KOverride {
+            stage2K = k
+            print(String(format: "[CARDLOCK] Stage 2: K %.3f ms (MANIFOLD_STAGE2_K_MS)", k * 1e3))
+        } else if let uid = stage2DeviceUID, let lat = Self.outputLatency(uid: uid) {
+            stage2K = lat.seconds
+            print(String(format: "[CARDLOCK] Stage 2: K %.3f ms for %@ (device %u + stream %u + safety %u frames at %.0f Hz, as reported; card stamp to wire taken as 0)",
+                         lat.seconds * 1e3, uid, lat.device, lat.stream, lat.safety, lat.rate))
+        } else {
+            stage2K = 0
+            print("[CARDLOCK] Stage 2: K 0 (the output device's latency could not be read)")
+        }
+        if stage2K != old { stage2KChanged = true }
+    }
+
+    /// The output presentation latency Core Audio reports for the device with this UID.
+    private static func outputLatency(uid: String) -> (seconds: Double, device: UInt32, stream: UInt32, safety: UInt32, rate: Double)? {
+        var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice, mScope: kAudioObjectPropertyScopeGlobal,
+                                           mElement: kAudioObjectPropertyElementMain)
+        var cf = uid as CFString
+        var id = AudioObjectID(0); var n = UInt32(MemoryLayout<AudioObjectID>.size)
+        let st = withUnsafePointer(to: &cf) { q in
+            AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, UInt32(MemoryLayout<CFString>.size), q, &n, &id)
+        }
+        guard st == noErr, id != 0 else { return nil }
+        func u32(_ obj: AudioObjectID, _ sel: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope) -> UInt32 {
+            var p = AudioObjectPropertyAddress(mSelector: sel, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+            var v: UInt32 = 0; var sz = UInt32(MemoryLayout<UInt32>.size)
+            return AudioObjectGetPropertyData(obj, &p, 0, nil, &sz, &v) == noErr ? v : 0
+        }
+        let device = u32(id, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput)
+        let safety = u32(id, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput)
+        var p = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioObjectPropertyScopeOutput,
+                                           mElement: kAudioObjectPropertyElementMain)
+        var sz: UInt32 = 0; AudioObjectGetPropertyDataSize(id, &p, 0, nil, &sz)
+        var streams = [AudioObjectID](repeating: 0, count: Int(sz) / MemoryLayout<AudioObjectID>.size)
+        if !streams.isEmpty { AudioObjectGetPropertyData(id, &p, 0, nil, &sz, &streams) }
+        let stream = streams.first.map { u32($0, kAudioStreamPropertyLatency, kAudioObjectPropertyScopeGlobal) } ?? 0
+        var rate = 0.0; p = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate, mScope: kAudioObjectPropertyScopeGlobal,
+                                                       mElement: kAudioObjectPropertyElementMain)
+        sz = UInt32(MemoryLayout<Double>.size)
+        guard AudioObjectGetPropertyData(id, &p, 0, nil, &sz, &rate) == noErr, rate > 0 else { return nil }
+        return (Double(device + stream + safety) / rate, device, stream, safety, rate)
+    }
 
     /// Stage 2 is steering this arm's sound.
     private var stage2Active: Bool { CardClockStage2.enabled && audioSynchronizer != nil && cardResample?.isActive == true }
@@ -867,8 +921,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     /// Stage 2 (§10.27) drops "while the card owns the sound": a file with sound is on the card's clock at either destination. Only on
     /// the AVFoundation arm, whose 32-bit integer PCM the resampler takes; the libav arm (float) keeps 1c's rule.
+    /// B5 (0.9.3): an audio-only file too. Its picture on the card is a held card or black (`DeckLinkService.setHeldPicture`) with a
+    /// virtual frame timeline (`MetalVideoRenderer.noteDeckLinkVirtualPull`), so the clock, the sound's runs and Stage 2 are a video
+    /// file's. Only with the gate on: with `MANIFOLD_CARDLOCK_1B=0` the card has no clock for it and 0.9.2's rule holds (the Mac plays it).
     private var cardLockApplies: Bool {
-        hasMedia && mediaKind == .video && (audioPresence == .absent || (CardClockAudio.stage1b
+        guard hasMedia else { return false }
+        if mediaKind == .audioOnly {
+            return CardClockAudio.stage1b && (deckLinkOwnsAudio || (CardClockStage2.enabled && !useLibav)) && hasAudioToRoute
+        }
+        return mediaKind == .video && (audioPresence == .absent || (CardClockAudio.stage1b
             && (deckLinkOwnsAudio || (CardClockStage2.enabled && !useLibav)) && hasAudioToRoute))
     }
 
@@ -1009,6 +1070,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             if uid != stage2DeviceUID {
                 print("[CARDLOCK] Stage 2: output device \(stage2DeviceUID ?? "nil") → \(uid ?? "nil"): integrator reset")
                 stage2DeviceUID = uid
+                updateStage2K()
                 cardAudioSteering.resetIntegrator(resample: box)
                 stage2Counts.integratorResets += 1
             }
@@ -1069,7 +1131,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func stage2WireHost(content: Double) -> Double? {
         guard let line = pictureLine.read(), line.matched,
               let fit = CardClockLine.fit(cardSamples.snapshot(), frameSeconds: stage2FrameSeconds), line.lastSlot > fit.newestSlot else { return nil }
-        return fit.host(atCardTime: content - Self.stage2K - line.phi)
+        return fit.host(atCardTime: content - stage2K - line.phi)
     }
 
     /// Stop the transport at `time`, as `setTransportRate` does for a rate.
@@ -1088,12 +1150,14 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #endif
         guard stage2Timer == nil else { return }
         stage2DeviceUID = Self.outputDeviceUID(audioRenderer)
+        updateStage2K()
+        stage2KChanged = false
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 0.1, repeating: 1 / CardClockStage2.tickHz, leeway: .milliseconds(5))
         t.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.stage2Tick() } }
         t.resume()
         stage2Timer = t
-        print(String(format: "[CARDLOCK] Stage 2 %@, K %.3f ms, device %@", CardClockStage2.enabled ? "on" : "OFF (1c)", Self.stage2K * 1e3, stage2DeviceUID ?? "nil"))
+        print(String(format: "[CARDLOCK] Stage 2 %@, K %.3f ms, device %@", CardClockStage2.enabled ? "on" : "OFF (1c)", stage2K * 1e3, stage2DeviceUID ?? "nil"))
     }
 
     /// The renderer's device: its own UID when set, else the system default output's.
@@ -1115,16 +1179,29 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         guard let p = stage2Pending else { return }
         guard let own = audioSynchronizer, let box = cardResample, box.isActive, !cardAudioMoving else { stage2Pending = nil; return }
         let now = CACurrentMediaTime()
+        // The sound's clock started where the picture clock is: a rate mismatch (C6) has no line to start on, and a start with no line
+        // must not start from where the clock was parked, which can be a second behind (the pump then trails the picture, and SDI's
+        // tap look-ahead with it: 2.6 M samples missing on the wire in c27-tr-25, §10.31).
+        func startWithPicture(_ why: String) {
+            stage2Pending = nil
+            let pic = synchronizer.currentTime().seconds
+            own.setRate(1, time: CMTime(seconds: box.outputTime(atContentTime: pic), preferredTimescale: 1_000_000_000),
+                        atHostTime: CMTime(seconds: now, preferredTimescale: 1_000_000_000))
+            stage2StartsAt = now
+            stage2SteerSerial = nil
+            stage2LastStep = nil
+            cardAudioSteering.coarseEvent()
+            print(String(format: "[CARDLOCK] Stage 2: %@ %.0f ms after Play; the Mac's sound started with the picture clock, at %.3f", why, (now - p.host) * 1e3, pic))
+        }
+        if let line = pictureLine.read(), !line.matched, line.firstSlot > p.slot {
+            startWithPicture("rate mismatch (the SDI picture has no line)")
+            return
+        }
         guard let line = pictureLine.read(), line.matched, line.firstSlot > p.slot,
               stage2WireHost(content: 0) != nil else {
             if now - p.host > CardClockStage2.startTimeout {
-                stage2Pending = nil
-                own.rate = 1
-                stage2StartsAt = now
                 stage2Counts.timeouts += 1
-                stage2SteerSerial = nil
-                cardAudioSteering.coarseEvent()
-                print(String(format: "[CARDLOCK] Stage 2: no SDI picture line %.0f ms after Play; the Mac's sound started with the picture clock", (now - p.host) * 1e3))
+                startWithPicture("no SDI picture line")
             }
             return
         }
@@ -1170,9 +1247,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let fit = CardClockLine.fit(cardSamples.snapshot(), frameSeconds: stage2FrameSeconds)
         var w = Double.nan
         if let line, line.matched, let fit, line.lastSlot > fit.newestSlot { w = line.phi + fit.cardTime(atHost: h) }
-        let e = m - (w + Self.stage2K)
+        let e = m - (w + stage2K)
         let running = isPlaying && shuttleRate == 1 && sync.rate == 1 && stage2Pending == nil && h > stage2StartsAt + 0.2
-        let slip = stage2SteerSerial != nil && line != nil && line?.serial != stage2SteerSerial
+        let slip = (stage2SteerSerial != nil && line != nil && line?.serial != stage2SteerSerial) || stage2KChanged
         let state: String
         if !active {
             state = CardClockStage2.enabled ? (audioSynchronizer == nil ? "off: renderer on the picture clock" : "off: not resampled") : "1c"
@@ -1181,17 +1258,39 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             state = "held: waiting for the picture"; stage2LastStep = nil
         } else if !running {
             state = "held: transport"; stage2LastStep = nil
+        } else if !w.isFinite, line?.matched == false, let own = audioSynchronizer, let box = cardResample {
+            // A rate mismatch (C6): the SDI picture is a staircase, not a line, so the sound follows the picture clock instead, as at 1c
+            // (about the wire's lag ahead of the SDI picture). Held instead, it would drift at the device's rate against the card, and
+            // the pump with it.
+            let ep = m - pic
+            if abs(ep) > CardClockStage2.coarseBound {
+                let past = 0.005
+                own.setRate(1, time: CMTime(seconds: box.outputTime(atContentTime: pic) - past, preferredTimescale: 1_000_000_000),
+                            atHostTime: CMTime(seconds: h - past, preferredTimescale: 1_000_000_000))
+                cardAudioSteering.coarseEvent(); stage2LastStep = nil; stage2StartsAt = h
+                state = "mismatch: re-anchored to the picture clock"
+                print(String(format: "[CARDLOCK] Stage 2: rate mismatch: the Mac's sound re-anchored to the picture clock, %+.2f ms off at %.3f", ep * 1e3, pic))
+            } else {
+                let dt = stage2LastStep.map { h - $0 } ?? 1 / CardClockStage2.tickHz
+                cardAudioSteering.step(error: ep, dt: dt, resample: box)
+                stage2LastStep = h
+                state = "mismatch: on the picture clock"
+            }
         } else if !w.isFinite {
-            state = line?.matched == false ? "held: rate mismatch" : "held: no line"; stage2LastStep = nil
+            state = "held: no line"; stage2LastStep = nil
         } else if abs(e) > (slip ? CardClockStage2.slipBound : CardClockStage2.coarseBound), let own = audioSynchronizer, let box = cardResample {
-            let target = box.outputTime(atContentTime: w + Self.stage2K)
+            let target = box.outputTime(atContentTime: w + stage2K)
             let past = 0.005
             own.setRate(1, time: CMTime(seconds: target - past, preferredTimescale: 1_000_000_000),
                         atHostTime: CMTime(seconds: h - past, preferredTimescale: 1_000_000_000))
             cardAudioSteering.coarseEvent()
             stage2LastStep = nil
             stage2StartsAt = h
-            if slip {
+            if slip && stage2KChanged {
+                state = "new K"
+                print(String(format: "[CARDLOCK] Mac sound re-anchored to the SDI picture for the output device's latency (K %.3f ms): it was %+.2f ms off at content %.3f",
+                             stage2K * 1e3, e * 1e3, w))
+            } else if slip {
                 stage2Counts.slips += 1
                 state = "slip"
                 print(String(format: "[CARDLOCK] Mac sound re-anchored to the SDI picture at its new line #%llu (a slip): it was %+.2f ms off at content %.3f (%d so far)",
@@ -1202,11 +1301,13 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 print(String(format: "[CARDLOCK] Mac sound re-anchored to the SDI picture: it was %+.2f ms off at content %.3f (%d so far)", e * 1e3, w, stage2Counts.coarse))
             }
             stage2SteerSerial = line?.serial
+            stage2KChanged = false
         } else if let box = cardResample {
             let dt = stage2LastStep.map { h - $0 } ?? 1 / CardClockStage2.tickHz
             cardAudioSteering.step(error: e, dt: dt, resample: box)
             stage2LastStep = h
             stage2SteerSerial = line?.serial
+            stage2KChanged = false
             state = "steer"
         } else {
             state = "held"
@@ -1861,9 +1962,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// restore the user's choice when returning to 1× — standard NLE behavior.
     private func applyAudioMute() {
         let offSpeed = shuttleRate != 0 && shuttleRate != 1
-        // An audio-only file is not sent to the card in 0.9.2 (`setCardAudioSilent` below), so the card does not own it:
-        // with the Mac muted too, it would play with its meters moving and be heard nowhere.
-        let effectiveMute = isMuted || offSpeed || (deckLinkOwnsAudio && mediaKind != .audioOnly)
+        // An audio-only file reaches the card since 0.9.3 (B5) on the card's clock, so the destination rules for it as for a video
+        // file. With the gate off (`MANIFOLD_CARDLOCK_1B=0`) the card has no clock for it, and 0.9.2's exception stands: the Mac plays
+        // it, or it would be heard nowhere.
+        let audioOnlyOffCard = mediaKind == .audioOnly && !CardClockAudio.stage1b
+        let effectiveMute = isMuted || offSpeed || (deckLinkOwnsAudio && !audioOnlyOffCard)
         audioRenderer.isMuted = effectiveMute
         // The SAME decision, handed to any transport that plays through its own output rather than
         // through `audioRenderer`. All three terms reach it because all three are already combined
@@ -1899,8 +2002,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         //
         // Net: real PCM at exactly 1× forward for a file, whenever unmuted for a live source.
         //
-        // An audio-only file: always silence, until B5 gives the card a clock (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.3).
-        setCardAudioSilent(isMuted || mediaKind == .audioOnly || (hasMedia && shuttleRate != 1))
+        // An audio-only file: on the card's clock since B5 (0.9.3), as a video file; silence only with the gate off.
+        setCardAudioSilent(isMuted || audioOnlyOffCard || (hasMedia && shuttleRate != 1))
         updateCardAudioRoute()   // every input to who owns the sound comes through here
     }
 

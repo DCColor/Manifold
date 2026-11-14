@@ -2085,6 +2085,23 @@ items.
 - **Risks:** about twice the GPU work at 4K while the window is visible; paused priming and seek renders; live clocks on
   the card's thread; the scopes must keep reading the window's ring; the shared frame queue.
 
+## ☐ POST-RELEASE: verify the Mac's sound against the SDI picture, absolute, by an independent method
+
+**Decided (Robbie, 2026-11-14).** Stage 2 (`CARD_CLOCK_FINDINGS.md` §10.27–§10.29) holds the Mac's sound to the SDI picture to
+within ±0.1 ms, by the build's own timestamps. What it holds it **to** is `K`: in 1.0, `K` is set from reported latencies, not measured.
+- **The Mac half:** the output device's reported presentation latency (device + stream + safety offset; Scarlett 0.583 ms, built-in
+  5.771 ms). This assumes `AVSampleBufferRenderSynchronizer` time is the sample handed to the device, not the one at its connector.
+  If it already includes the latency, the Mac is late by that much. The figure itself is the device's own report (USB interfaces can
+  leave converter and driver delay out).
+- **The card half:** the completion stamp is taken as the moment its frame is on the SDI connector (0). UNKNOWN.
+- **Why not measured for 1.0:** method A (Audio Hijack, both sides on one clock) needed the SDI loop's sound through the card's
+  CoreAudio input. That input delivered silence on this rig, through Audio Hijack and through a recorder of ours, with the DeckLink
+  as the system input too, while the SDK read the same embedded sound (§10.29, 2026-11-14).
+- **What it would take:** an independent method on both connectors. Candidates: method A once the CoreAudio input carries sound; an
+  SDI analyser or a reference monitor's audio/video delay readout; a sync clip (flash and click) seen through a camera and a
+  microphone, or through the reference monitor and the Scarlett's output on one recorder. Then set `K` (per device if it differs) from
+  the measurement and remove this caveat.
+
 ## ☐ POST-RELEASE: `CVDisplayLink` → `CADisplayLink`, as its own project with a full re-measure
 
 **Added 2026-10-06**, from the build-warnings triage (warnings #18–21).
@@ -3859,6 +3876,15 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 **Never committed.** `CARD_CLOCK_FINDINGS.md` §10.12, Fault 1. A renderer move loses the renderer's queue, the pump refills from further on, and two moves pushed the frames at the cursor out of the tap's 4 s ring. `rereadSoundAfterMove` reads the sound again from the clock when a move ends parked. 1b before: 6 of 10 sessions. After: 0 of 14 that ran through (one further session froze, entry above).
 
 ## ☐ OPEN 2026-11-11 — 1c (UNCOMMITTED) — SDI audio faults found in the 1c follow-up (chain13)
+
+**2026-11-14 (`CARD_CLOCK_FINDINGS.md` §10.30), uncommitted:**
+- **Decision 4, the 59.94 one-frame holds: FIXED.** The pull's 2 ms one-new-frame band sat at its edge in some sessions (the margin is
+  1.65 ms over a 59.94 frame); at a matched rate the band is now half a card frame. 0 holds in 107 output starts (`h27-5994`), against
+  6 in 101.
+- **Stage 2 at a rate mismatch (C6): a regression found and fixed.** The sound's clock started where it was parked, about 1.1 s behind
+  the picture, and SDI ran short (2.6 M samples in `c27-tr-25`). It now follows the picture clock at a mismatch; `c29-tr-25` is clean.
+- **The card lock is the default** (`MANIFOLD_CARDLOCK_1B=0` turns it off); verified with no variable at both destinations and rates.
+- Decision 5 (appended edges) is still open: one at a Pause's run end in `dflt-sdi-5994` and `ao51-5994`, as in f20.
 
 `CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`.
 

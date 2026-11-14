@@ -10,10 +10,11 @@
 import Foundation
 
 public enum CardClockAudio {
-    /// Everything Stage 1b does (the renderer's move, the sound's own clock, the lock with sound) is off unless the launch environment
-    /// has `MANIFOLD_CARDLOCK_1B=1`, until the picture freeze is understood (docs/CARD_CLOCK_FINDINGS.md §10.13). Read once, at first use.
+    /// Everything Stage 1b does (the renderer's move, the sound's own clock, the lock with sound), and with it 1c's card timeline and
+    /// Stage 2, is ON by default since 0.9.3 (Robbie, 2026-11-14; docs/CARD_CLOCK_FINDINGS.md §10.30). `MANIFOLD_CARDLOCK_1B=0` in the
+    /// launch environment turns it off, as a diagnostic switch. Read once, at first use.
     public static let stage1b = stage1bEnabled(environment: ProcessInfo.processInfo.environment)
-    static func stage1bEnabled(environment: [String: String]) -> Bool { environment["MANIFOLD_CARDLOCK_1B"] == "1" }
+    static func stage1bEnabled(environment: [String: String]) -> Bool { environment["MANIFOLD_CARDLOCK_1B"] != "0" }
 
     /// A tenth of the tap's 250 ms look-ahead, from which the 232 ms measured lead comes (§10.7). Not from any device's or card's rate.
     public static let partBound = 0.020

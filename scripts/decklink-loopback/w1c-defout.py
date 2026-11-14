@@ -6,7 +6,7 @@
 # stall, `sample <pid> 10`.
 #   w1c-defout.py <fixture.mov> <label> [stall|fix] [off|on]
 # `fix` (the automatic-flush fix, §10.19): the same five switches and restores in one Play with NO transport at all (no Pause and Play,
-# no seek), so each recovery is the fix's own. off/on is the Stage 1b gate (MANIFOLD_CARDLOCK_1B unset / =1). Default: stall, off.
+# no seek), so each recovery is the fix's own. off/on is the Stage 1b gate (MANIFOLD_CARDLOCK_1B=0 / =1; on by default since 0.9.3). Default: stall, off.
 # The default output is read before anything changes, must be the Scarlett, and is set back to it in a `finally` and read back, whatever happens.
 # Guarded before and after; launched by absolute path, held by PID, quit by PID. AX menu clicks on named items only, no keystrokes, no screenshots.
 import os, re, subprocess, sys, time
@@ -59,7 +59,7 @@ def main(fixture, label, mode="stall", gate=False):
     env = dict(os.environ, MANIFOLD_CARDCLOCK_LOG="1", MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1", MANIFOLD_AUDIO_CORR_LOG="1",
                MANIFOLD_DEBUG_TRANSPORT=";".join(steps))
     for k in ("MANIFOLD_CARDLOCK_1B", "MANIFOLD_RENDERER_RECOVER", "MANIFOLD_RENDERER_SELFTEST", "MANIFOLD_PUMPWATCH_SELFTEST"): env.pop(k, None)
-    if gate: env["MANIFOLD_CARDLOCK_1B"] = "1"
+    env["MANIFOLD_CARDLOCK_1B"] = "1" if gate else "0"   # on by default since 0.9.3 (§10.30): off must be said
     p = subprocess.Popen([APP, "-manifold.decklink.audioDestination", "sdi"], stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     pid = p.pid; say(f"{label}: pid {pid}, gate {'on' if gate else 'off'}, mode {mode}, {title}")
     try:
