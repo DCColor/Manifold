@@ -2102,6 +2102,19 @@ within ±0.1 ms, by the build's own timestamps. What it holds it **to** is `K`: 
   microphone, or through the reference monitor and the Scarlett's output on one recorder. Then set `K` (per device if it differs) from
   the measurement and remove this caveat.
 
+## ☐ POST-RELEASE: appended run-end edges — the card plays up to ~58 ms past a Pause
+
+**Decided (Robbie, 2026-11-14): logged only for 0.9.3.** Closes `CARD_CLOCK_FINDINGS.md` §10.24 decision 5 (§10.31, *Decisions and
+attended checks*). Occasionally, when a run ends (a Pause, or a fill at the end of the file), the card **appends** the bridge's rewrite
+after its queue's end instead of adding it over the queued sound, so the sound runs on by the rewrite's length (61–474 samples seen, up
+to ~58 ms of queued sound at a Pause), then its exact inverse. The bridge detects it from the buffered count and logs
+`[SDI-AUDIO] !! edge (…) APPENDED by the card, not added`, counted in the `[SDI-AUDIO] stopped` line ("edges appended by the card").
+Seen: 5 fill edges at the end of the file (chain14), 1 at a Pause in f20, `dflt-sdi-5994` (chain 27), `ao51-5994` and `ao48-2398`
+(chain 28), and one in each of three chain 30 runs, none of which left a discontinuity on the wire. Why the card appends: UNKNOWN.
+
+**What it would take:** a correction rule (for example, schedule the inverse over the appended stretch, or end a run with a fade rather
+than a rewrite), with 100 Pauses on the wire at 59.94 and 23.976 before and after, gate on.
+
 ## ☐ POST-RELEASE: `CVDisplayLink` → `CADisplayLink`, as its own project with a full re-measure
 
 **Added 2026-10-06**, from the build-warnings triage (warnings #18–21).
@@ -3884,7 +3897,7 @@ Gate off, the card dropped 3 frames at one switch, before the flush notice and s
 - **Stage 2 at a rate mismatch (C6): a regression found and fixed.** The sound's clock started where it was parked, about 1.1 s behind
   the picture, and SDI ran short (2.6 M samples in `c27-tr-25`). It now follows the picture clock at a mismatch; `c29-tr-25` is clean.
 - **The card lock is the default** (`MANIFOLD_CARDLOCK_1B=0` turns it off); verified with no variable at both destinations and rates.
-- Decision 5 (appended edges) is still open: one at a Pause's run end in `dflt-sdi-5994` and `ao51-5994`, as in f20.
+- Decision 5 (appended edges): **closed, logged only for 0.9.3** (Robbie, 2026-11-14): one at a Pause's run end in `dflt-sdi-5994` and `ao51-5994`, as in f20. On the post-release list (*Appended run-end edges*).
 
 `CARD_CLOCK_FINDINGS.md` §10.23. Gate on, `.build-cc`.
 

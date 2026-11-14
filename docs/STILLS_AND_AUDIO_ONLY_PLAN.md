@@ -404,6 +404,13 @@ sample-buffer surfaces stay behind it, black.
 
 This section and §5.4 are **0.9.3 (B5)**. **Built 2026-11-14 on the card-clock path instead of the clock branch below** (Robbie): the held picture carries the card, a virtual frame timeline puts the sound on the card's clock as a video file's, and 44.1 kHz is C7's tap resampler, not the reader. As built and verified: `CARD_CLOCK_FINDINGS.md` §10.31. The setting "Audio-only files on SDI: Show card / Black" was not built (the card always shows; black only with the card lock off).
 
+**Release prep (Robbie, 2026-11-14):** the card was checked by eye by Robbie over HDMI to his ATEM, at 2160p23.98 (the ATEM
+down-converting) and 1080p: correct. Output restart with the file open: correct. A by-eye check through a switcher, not a reference
+judgement. Still not covered: the output started before the file was opened, and interlaced modes. Appended edges at a Pause are
+logged only for 0.9.3 (`docs/BUGS.md`, post-release). The audio-only fixtures (`~/Code/_scratch/manifold-1c-wire/fixtures/ao*`) are
+kept until 0.9.3 ships, then deleted. After 0.9.3 (`docs/ROADMAP_IDEAS.md`): the disabled menu item worded "Follow source — no video in
+this file", and the last output mode chosen for audio-only files remembered, if it is not already.
+
 **Revisit in B5:** in 0.9.2 an audio-only file plays on the Mac even when the audio destination is SDI, because the card is silent
 (`applyAudioMute`, the `deckLinkOwnsAudio && mediaKind != .audioOnly` term). Once the SDI card carries the sound, that exception
 must be reconsidered, or the same program plays from the Mac and the card at once. Likely it goes, and the destination rules again.

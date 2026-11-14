@@ -120,6 +120,15 @@ the pins, but reproducing them takes real time.
         (§10.9: 0 skips, file clock on the card to 0.00 ppm) (Robbie, 2026-11-09). These ran on measurement
         builds (`-DMANIFOLD_CARDCLOCK`), not on the build 25 binary. 5.75 h of the 13.2 h had Stage 1b on
         (`MANIFOLD_CARDLOCK_1B=1`), which build 25 ships off. With the gate off as shipped: 7.46 h, 1 recovery.
+      - **0.9.3 release gate (Robbie, 2026-11-14): 0 freezes, 0 unrecovered events, 0 holds or skips beyond the expected
+        cadence, over at least 6 h.** Candidate: a plain Profile build of `537a351` (no `-DMANIFOLD_CARDCLOCK`), `.build-rc`,
+        unsigned. Card lock on by default, no behaviour variable, capture closed. Only the scripted transport and two logging
+        variables are set (`MANIFOLD_DEBUG_TRANSPORT`, `MANIFOLD_DECKLINK_CADENCE_LOG`, `MANIFOLD_PLAYBACK_STATS`): seeks
+        are key-only and an unattended run sends no keystrokes, and holds are read from the pull lines. Six one-hour blocks of
+        play cycles with seeks and loop wraps, one launch each, alternating: a 59.94 file with sound to SDI (1080p59.94); a
+        23.976 file with sound to Computer (1080p23.98); an audio-only 48 kHz WAV to SDI (1080p59.94); a file without sound
+        (1080p59.94); then the first two again. Tools: `scripts/decklink-loopback/rc-soak.py`, `rc-soak-report.py`; chain
+        and logs in `~/Code/_scratch/manifold-rc-soak/`. Queued for 2026-11-14 23:00. **Result: pending.**
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---

@@ -2153,7 +2153,7 @@ nothing.
 
 | Run | Result | Verdict |
 |---|---|---|
-| **Holds:** `h27-5994`, 100 output restarts while playing at 59.94, gate on, capture open (as `rs14`/`rs15`) | **0 mid-session holds, 0 mid-session picture events** in 107 output starts (`an/holds.py`). 90 sound segments, every one 25–27 samples into its frame. 16 silent starts, all recovered (0 gave up): capture open at output start, follow-up 6's rig condition | **Pass** (before: 6 in 101 gate on, 1 in 50 gate off) |
+| **Holds:** `h27-5994`, 100 output restarts while playing at 59.94, gate on, capture open (as `rs14`/`rs15`) | **0 mid-session holds, 0 mid-session picture events** in 107 output starts (`an/holds.py`). 90 sound segments, every one 25–27 samples into its frame. 16 `!! output start` lines, **corrected 2026-11-14: 6 of 7 silent starts recovered, not all 16** (`rc-soak-report.py` on this log). The 16 lines are 7 silent starts: each started off its picture, its flush restart did not revive the card, and the whole-output restart followed (7 lines each kind); 6 of those restarts started with sound. The 7th recovery's own start (log line 225139) was silent again (lines 225170, 225230) and, as designed (once per output start), was `NOT restarted`: SDI silent about 12 s, to the script's next output stop (226674). Capture was open for the whole run (one `capture` process, input enabled at 01:28:12 and never disabled, receiving until 01:53:57; chain 27 runs `h27` without `W1C_NOCAP`), so this is the known input-open case, follow-up 6's rig condition, and not a new fault. with the input closed, 0 in 408 starts (§10.26, follow-up 6) | **Pass** (before: 6 in 101 gate on, 1 in 50 gate off) |
 | **C6:** `c27-tr-25`, 25p file on 1080p59.94, one transport cycle | **Fail, and not the band.** 2.6 M samples missing on the wire, sound in pieces (86 segments). Cause: Stage 2 at a rate mismatch, below. Fixed in `fu12`; re-run `c29-tr-25` (chain 29) | **Fail** → fixed |
 | **Default, no variable:** `dflt-sdi-5994`, `dflt-sdi-2398` (wire, capture open), `dflt-cmp-5994`, `dflt-cmp-2398` (Computer) | Every log: 0 mentions of `MANIFOLD_CARDLOCK_1B`, `Stage 2 on`, 2 renderer moves to its own clock, 7 card latches. Wire: 0 late edges; every segment 25–27 samples into its frame at 59.94 (−0.53…−0.56 ms), 9 at 23.976; missing only after the output restart (574 and 68 samples). Computer: 7 starts with the SDI picture and 3 stops per rate, 0 position writes, 0 timeouts | **Pass** |
 
@@ -2280,3 +2280,16 @@ within each run, and the first sample against the card's constant. Re-run: chain
 Three runs logged one appended edge each, none of which left a discontinuity on the wire. **Every prediction of the table above holds
 on `fu13`.** The mid-frame starts are gone: every run, after a park, steps, a seek or the loop's wrap, starts at the card's constant.
 Not covered unattended: the card's look on a monitor (by eye on the FSI), the output started before the file was opened, and 2160p.
+
+#### Decisions and attended checks (Robbie, 2026-11-14, release prep)
+
+- **Appended edges: logged only for 0.9.3; on the post-release list** (`docs/BUGS.md`, *Appended run-end edges*). The card occasionally
+  plays up to ~58 ms of queued sound past a Pause (`!! edge (…) APPENDED by the card`; chain 27 `dflt-sdi-5994`, chain 28 `ao51-5994`
+  and `ao48-2398`, three in chain 30, f20 before). No correction rule in 0.9.3. **§10.24 decision 5 is closed this way.**
+- **The audio-only card, by eye (Robbie), over HDMI to his ATEM:** at 2160p23.98 (the ATEM down-converting) and at 1080p: correct.
+  **Output restart with the file open:** correct. This is a by-eye check on the HDMI path through a switcher, not a reference
+  judgement and not the FSI over SDI. Still not covered: the output started *before* the file was opened (UNKNOWN), and interlaced
+  modes.
+- **Fixtures:** the audio-only fixtures (`~/Code/_scratch/manifold-1c-wire/fixtures/ao*`) are kept until 0.9.3 ships, then deleted.
+- **Roadmap, after 0.9.3** (`docs/ROADMAP_IDEAS.md`, *Audio-only files: output-mode menu wording and memory*): word the disabled item
+  "Follow source — no video in this file", and remember the last output mode chosen for audio-only files if it does not already.

@@ -210,6 +210,22 @@ Open questions:
 Depends on: unsure
 Size guess: medium
 
+## Audio-only files: output-mode menu wording and memory
+Status: decided (Robbie, 2026-11-14)
+Version: after 0.9.3
+
+What: two small changes to the DeckLink output-mode menu while an audio-only file is open (B5,
+CARD_CLOCK_FINDINGS.md §10.31):
+- word the disabled item "Follow source — no video in this file", so it says why Follow source cannot apply;
+- remember the last output mode chosen for audio-only files, if it does not already. Whether it does today is UNKNOWN: check
+  first (D4a's manual pick, `DeckLinkService.swift`, and how an audio-only file resolves the mode).
+
+Why: an audio-only file has no source rate to follow, so the item is disabled with no reason given, and the mode for its card is
+picked again by hand.
+
+Depends on: nothing.
+Size guess: small.
+
 ## Load Still Images
 Status: shipped in 0.9.2. Plan: docs/STILLS_AND_AUDIO_ONLY_PLAN.md
 Version: 0.9.2. No Manifold color management: shown as macOS shows it. Not sent to SDI or HDMI in v1. DPX out for v1
