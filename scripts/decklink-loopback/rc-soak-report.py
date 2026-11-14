@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+# Release soak report (rc-soak.py). For each block's log, and in total:
+#   freezes            the pulled picture still for 2 s while playing (2 s after a Play), from [CADENCE]
+#   holds / skips      while playing at a matched rate, each pull should hand the frame Δslot frames on from the last (Δslot = the
+#                      difference of the pull's slot number #N; 1 in steady state). Fewer is a hold, more a skip. Not counted: pulls
+#                      within EXCL s after a Play, a seek or a loop toggle (the transport's own jump), the loop's wrap at the end of the
+#                      file, and the first STARTX s of the launch.
+#   renderer           [RENDERER-RECOVER] attempts, recovered ("picture moving again"), rebuilds, GAVE UP; [RENDERER-NEARMISS]
+#   silent starts      "[SDI-AUDIO] !! output start" lines other than "started off its picture" (the §10.24 flush restart, counted on
+#                      its own); recovered when the whole-output restart's start then logs "started with its picture". A "NOT restarted"
+#                      line, or a restart that never starts with sound, is unrecovered. The frames held around the loop's wrap (a seek)
+#                      are counted on their own and not as holds.
+#   SDI (bridge)       every "[SDI-AUDIO] !!" line by kind, and the "[SDI-AUDIO] stopped" totals (late edges, missing samples, re-latches,
+#                      edges appended by the card)
+#   late / dropped     the card's "DeckLink D3: !!" lines; the window's [PLAYBACK-STATS] sums
+#   rc-soak-report.py <dir> <label>...     (labels without .log)
+import collections, json, re, sys
+EXCL, STARTX, WRAP = 1.0, 20.0, 30
+FRAME = {"1080p59.94": 1001 / 60000, "1080p23.98": 1001 / 24000, "2160p59.94": 1001 / 60000, "2160p23.98": 1001 / 24000}
+
+def analyse(path, mode, length):
+    f = FRAME[mode]; r = collections.Counter(); kinds = collections.Counter(); ev = []; holds = []; stopped = []
+    playing = False; play_host = None; events = []; prev = None; first_host = None; host = 0.0; played = 0.0
+    pending_recover = 0; silent = []; last_wrap = -1e9
+    for l in open(path, errors="replace"):
+        m = re.match(r"\[CADENCE\] #(\d+) host (\S+) pts (\S+)", l)
+        if m:
+            n, host, pts = int(m[1]), float(m[2]), m[3]
+            if first_host is None: first_host = host
+            if pts == "nan": prev = None; continue
+            pts = float(pts); cur = (n, host, pts)
+            if playing and prev and host - first_host > STARTX and not any(0 <= host - e <= EXCL for e in events[-4:]):
+                dslot = n - prev[0]; dn = round((pts - prev[2]) / f)
+                if dslot > 0 and dn != dslot:
+                    wrap = dn < -WRAP and prev[2] > length - 5
+                    if wrap: r["wraps"] += 1; last_wrap = host
+                    elif prev[2] > length - 0.5 or host - last_wrap <= EXCL:   # the loop's wrap is a seek: its frames held around it
+                        r["holds at the loop's wrap (a seek, not counted)" if dn < dslot else "skips at the loop's wrap (a seek, not counted)"] += 1
+                    elif dn < dslot: holds.append(("hold", host, prev[2], pts, dslot, dn))
+                    else: holds.append(("skip", host, prev[2], pts, dslot, dn))
+                if dslot > 1: r["missed slots"] += dslot - 1
+                if dslot > 0: r["pulls while playing"] += 1
+            prev = cur; continue
+        if l.startswith("[TRANSPORT] "):
+            m = re.search(r" host (\S+)", l); h = float(m[1]) if m else host
+            w = l.split()[1]
+            if w == "play": playing = True; play_host = h; events.append(h); r["plays"] += 1
+            elif w == "pause":
+                if playing and play_host: played += h - play_host
+                playing = False; events.append(h)
+            elif w in ("seek", "loop", "step", "shuttle"): events.append(h); r[w + "s"] += 1
+            elif w == "output":   # an output stop pauses through the arbiter, with no pause line: the run ends here
+                if playing and play_host: played += h - play_host
+                playing = False; events.append(h); r["output steps"] += 1
+            continue
+        if l.startswith("[RENDERER-RECOVER] attempt"): r["renderer recovery attempts"] += 1
+        elif l.startswith("[RENDERER-RECOVER] picture moving again"): r["renderer recoveries"] += 1
+        elif l.startswith("[RENDERER-RECOVER] REBUILD"): r["renderer rebuilds"] += 1
+        elif l.startswith("[RENDERER-RECOVER] GAVE UP"): r["renderer GAVE UP"] += 1
+        elif l.startswith("[RENDERER-NEARMISS]"): r["renderer near-misses"] += 1
+        elif l.startswith("DeckLink: output start —"): r["output starts"] += 1
+        elif l.startswith("[SDI-AUDIO] output start: the card's sound started with its picture"):
+            r["starts with sound"] += 1
+            if pending_recover: pending_recover -= 1; silent[-1]["recovered"] = True
+        elif l.startswith("[SDI-AUDIO] !! output start") and "started off its picture" in l:
+            r["starts off the picture, flushed and restarted (§10.24)"] += 1   # not a silent start; one may follow
+        elif l.startswith("[SDI-AUDIO] !! output start"):
+            s = dict(line=l.strip()[:200], recovered=False); silent.append(s)
+            if "restarting the whole output" in l: pending_recover += 1
+        elif l.startswith("[SDI-AUDIO] the silent-start recovery's start dropped"): r["silent-start recovery dropped"] += 1
+        if l.startswith("[SDI-AUDIO] !!"):
+            k = "edge APPENDED by the card" if "APPENDED" in l else "output start" if "!! output start" in l else re.sub(r"[-+]?\d[\d.]*", "N", l[15:60]).strip()
+            kinds[k] += 1
+        elif l.startswith("[SDI-AUDIO] stopped"):
+            g = lambda pat: int(re.search(pat, l)[1]) if re.search(pat, l) else 0
+            stopped.append(dict(late_edges=g(r"late edges (\d+)"), missing=g(r"missing (-?\d+) samples"), relatches=g(r"re-latches (\d+)"),
+                                appended=g(r"edges appended by the card (\d+)")))
+        elif l.startswith("DeckLink D3: !! DisplayedLate"): r["card late"] += 1
+        elif l.startswith("DeckLink D3: !! Dropped"): r["card dropped"] += 1
+        else:
+            m = re.match(r"\[PLAYBACK-STATS\] t=\S+ presented=(\d+) dropped=(\d+) late=(\d+)", l)
+            if m: r["window presented"] += int(m[1]); r["window dropped"] += int(m[2]); r["window late"] += int(m[3])
+    # freezes, offline: the same rule as the live detector
+    fz = []; playing = False; ph = 0.0; moved = 0.0; last = None; open_fz = None
+    for l in open(path, errors="replace"):
+        m = re.match(r"\[CADENCE\] #\d+ host (\S+) pts (\S+)", l)
+        if m:
+            h = float(m[1])
+            if m[2] != last: last = m[2]; moved = h
+            if open_fz and moved > open_fz["host"]: open_fz["recovered_after_s"] = round(moved - open_fz["host"] + 2.0, 2); open_fz = None
+            if playing and not open_fz and h - max(moved, ph + 2.0) >= 2.0: open_fz = dict(host=h, pts=last, recovered_after_s=None); fz.append(open_fz)
+        elif l.startswith("[TRANSPORT] play"): playing = True; ph = float(re.search(r" host (\S+)", l)[1]); open_fz = None
+        elif l.startswith("[TRANSPORT] pause") or l.startswith("[TRANSPORT] output"): playing = False; open_fz = None
+    tot = {k: sum(s[k] for s in stopped) for k in ("late_edges", "missing", "relatches", "appended")}
+    return dict(counts=dict(r), played_h=round(played / 3600, 3), freezes=fz, holds=holds, sdi_lines=dict(kinds), sdi_stopped=tot, silent=silent)
+
+def main(d, labels):
+    total = collections.Counter(); allh = 0.0; gate = []
+    for lab in labels:
+        try: meta = json.load(open(f"{d}/{lab}.json")); open(f"{d}/{lab}.log").close()
+        except OSError: print(f"== {lab}: no record (the block stopped before its launch)"); continue
+        a = analyse(f"{d}/{lab}.log", meta["mode"], meta["length"])
+        c = a["counts"]; allh += a["played_h"]
+        nh = sum(1 for h in a["holds"] if h[0] == "hold"); ns = sum(1 for h in a["holds"] if h[0] == "skip")
+        unrec_fz = sum(1 for z in a["freezes"] if z["recovered_after_s"] is None)
+        unrec_ss = sum(1 for s in a["silent"] if not s["recovered"])
+        print(f"== {lab}: {meta['fixture'].split('/')[-1]}, {meta['mode']}, destination {meta['dest']}, ended {meta.get('ended')}, "
+              f"{meta.get('began')} → {meta.get('finished')}")
+        print(f"   played {a['played_h']:.2f} h, Plays {c.get('plays', 0)}, seeks {c.get('seeks', 0)}, loop wraps {c.get('wraps', 0)}, "
+              f"pulls while playing {c.get('pulls while playing', 0)}, missed slots {c.get('missed slots', 0)}")
+        print(f"   freezes {len(a['freezes'])} (unrecovered {unrec_fz}); holds {nh}, skips {ns}")
+        for h in a["holds"][:20]: print(f"     {h[0]} at host {h[1]:.3f}: pts {h[2]:.6f} → {h[3]:.6f}, slots +{h[4]}, frames {h[5]:+d}")
+        for z in a["freezes"]: print(f"     freeze at host {z['host']:.3f}, pts {z['pts']}, recovered after {z['recovered_after_s']} s")
+        print(f"   renderer: attempts {c.get('renderer recovery attempts', 0)}, recovered {c.get('renderer recoveries', 0)}, rebuilds "
+              f"{c.get('renderer rebuilds', 0)}, GAVE UP {c.get('renderer GAVE UP', 0)}, near-misses {c.get('renderer near-misses', 0)}")
+        print(f"   output starts {c.get('output starts', 0)}, starts with sound {c.get('starts with sound', 0)}, silent starts {len(a['silent'])} "
+              f"(recovered {sum(s['recovered'] for s in a['silent'])}, unrecovered {unrec_ss})")
+        print(f"   SDI bridge: !! lines {a['sdi_lines'] or 'none'}; stopped totals {a['sdi_stopped']}")
+        print(f"   late/dropped: card late {c.get('card late', 0)}, card dropped {c.get('card dropped', 0)}; window late {c.get('window late', 0)}, "
+              f"dropped {c.get('window dropped', 0)} of {c.get('window presented', 0)} presented")
+        for k, v in c.items(): total[k] += v
+        total["freezes"] += len(a["freezes"]); total["unrecovered freezes"] += unrec_fz; total["holds"] += nh; total["skips"] += ns
+        total["silent starts"] += len(a["silent"]); total["unrecovered silent starts"] += unrec_ss
+        for k, v in a["sdi_stopped"].items(): total["sdi " + k] += v
+        for k, v in a["sdi_lines"].items(): total["sdi !! " + k] += v
+    print(f"== TOTAL: {allh:.2f} h played over {len(labels)} blocks")
+    for k in sorted(total): print(f"   {k}: {total[k]}")
+    unrec = total["unrecovered freezes"] + total["unrecovered silent starts"] + total["renderer GAVE UP"] + total["silent-start recovery dropped"]
+    ok = total["freezes"] == 0 and unrec == 0 and total["holds"] + total["skips"] == 0
+    print(f"== GATE (0 freezes, 0 unrecovered events, 0 holds/skips beyond expected cadence): {'PASS' if ok else 'FAIL'} — "
+          f"freezes {total['freezes']}, unrecovered {unrec}, holds {total['holds']}, skips {total['skips']}")
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3: sys.exit("rc-soak-report.py <dir> <label>...")
+    main(sys.argv[1], sys.argv[2:])
