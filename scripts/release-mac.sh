@@ -305,7 +305,8 @@ ok "gitignored build inputs present (DeckLink SDK, NDI headers, 3 vendored lib t
 # missing from the exported app. So ffmpeg is a build tool here.
 command -v ffmpeg >/dev/null 2>&1 \
     || die "ffmpeg not on PATH — step 3b generates the bundled sync clips with it
-       (scripts/syncclips/generate.sh; Homebrew's ffmpeg with libx264)."
+       (scripts/syncclips/generate.sh; the Martin Riedl static FFmpeg 8.1.1 build, martin-riedl.de, with libx264
+       and drawtext)."
 [[ -f "${SYNCCLIPS_FONT:-/System/Library/Fonts/Menlo.ttc}" ]] \
     || die "the sync clips' label font is missing: ${SYNCCLIPS_FONT:-/System/Library/Fonts/Menlo.ttc}"
 SYNCCLIP_LABELS=()

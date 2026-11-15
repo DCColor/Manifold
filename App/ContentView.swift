@@ -22,6 +22,9 @@ enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 /// frame is being drawn and a paused file draws nothing at all. See AudioMeterScope.swift.
 enum ScopeKind: String, CaseIterable, Identifiable {
     case waveform, parade, vectorscope, cie, meters
+    /// The window's markers on its file (docs/MARKERS_PLAN.md §4.1). Not a scope and not render-coupled: it samples
+    /// nothing, so `updateScopeSampling` has nothing to start for it.
+    case markers
     var id: String { rawValue }
     var displayName: String {
         switch self {
@@ -30,6 +33,7 @@ enum ScopeKind: String, CaseIterable, Identifiable {
         case .vectorscope: return "Vectorscope"
         case .cie:         return "CIE"
         case .meters:      return "Audio Meters"
+        case .markers:     return "Markers"
         }
     }
 }
@@ -959,6 +963,8 @@ struct ContentView: View {
         // Calibration mode (docs/AUDIO_RESAMPLER_DESIGN.md §19.10), opened from the A/V menu. A host
         // view with its own sheet, so this body does not grow (it is at the type-checker's limit).
         .background(CalibrationSheetHost(model: deck.calibration, offset: deck.audioOffset))
+        // The marker editor (docs/MARKERS_PLAN.md §3.3), hosted the same way for the same reason.
+        .background(MarkerEditorHost(model: deck.markers))
         // Help ▸ Export Diagnostics…. Hosted here because the menu command lives in the App
         // scene, which has no window to present on; the exporter singleton is the seam between them.
         .sheet(isPresented: $diagnostics.isPresenting) {
@@ -1523,6 +1529,7 @@ struct ContentView: View {
         case .vectorscope: VectorscopeScopeView(model: vectorscopeModel, slotSelection: selection)
         case .cie:         CIEScopeView(model: cieModel, slotSelection: selection)
         case .meters:      AudioMeterScopeView(model: meterModel, slotSelection: selection)
+        case .markers:     MarkersScopeView(model: deck.markers, engine: engine, slotSelection: selection)
         }
     }
 
@@ -1733,6 +1740,28 @@ struct ContentView: View {
             .goToStartAlternate: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: false) },
             .goToEndAlternate: DeckShortcut(enabled: { playhead() && engine.hasMedia }) { transportKeys.goToEdge(end: true) },
             .loop: DeckShortcut(enabled: { engine.hasMedia && position() }) { engine.toggleLoop() },
+            // Mark: markers on this window's file (docs/MARKERS_PLAN.md §3). Adding and marking do not move the playhead,
+            // so they are not position-gated; going to a marker is (`MarkerModel.go`).
+            .addMarker: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.addMarker(edit: false) },
+            .addMarkerAndEdit: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.addMarker(edit: true) },
+            .deleteMarker: DeckShortcut(enabled: { deck.markers.isActive && deck.markers.markerAtPlayhead != nil }) {
+                deck.markers.deleteAtPlayhead()
+            },
+            .previousMarker: DeckShortcut(enabled: { playhead() && deck.markers.isActive }) {
+                deck.markers.goToNeighbour(forward: false)
+            },
+            .nextMarker: DeckShortcut(enabled: { playhead() && deck.markers.isActive }) {
+                deck.markers.goToNeighbour(forward: true)
+            },
+            .markIn: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.markIn() },
+            .markOut: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.markOut() },
+            .clearInOut: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.clearInOut() },
+            .importMarkers: DeckShortcut(enabled: { deck.markers.isActive }) {
+                MarkerFileIO.importEDL(into: deck.markers, window: deck.window)
+            },
+            .exportMarkers: DeckShortcut(enabled: { deck.markers.isActive && !deck.markers.markers.isEmpty }) {
+                MarkerFileIO.export(from: deck.markers, window: deck.window)
+            },
             // View
             .inspector: DeckShortcut { showInspector.toggle() },
             .fileName: DeckShortcut { showFileNameOverlay.toggle() },
@@ -2941,7 +2970,8 @@ struct ContentView: View {
             // as a Ball or a Line (Settings ▸ Playback). Same contract as the Slider it
             // replaced — the value, the per-move setter, the editing bracket below are unchanged —
             // and the Ball is that Slider's knob, byte for byte. See TransportScrubber.
-            TransportScrubber(
+            MarkedTransportScrubber(
+                markers: deck.markers,
                 value: isScrubbing ? scrubValue : engine.currentTime,
                 range: 0...max(engine.duration, 0.1),
                 onChange: { newValue in

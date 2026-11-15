@@ -1,4 +1,5 @@
 import Foundation
+import SMPTETimecode
 
 /// Reads start timecode from a MOV/MP4 by walking the atom tree to the `tmcd`
 /// (timecode) track — the approach proven in Flip. Reads the start frame count
@@ -28,7 +29,7 @@ public enum TimecodeReader {
     /// The 0.066666 is 2/30 — the ratio the SMPTE rule fixes — so multiplying by the rate and
     /// rounding generalizes it to the 59.94 case without a table.
     public static func droppedFramesPerMinute(fps: Double) -> Int {
-        Int((fps * 0.066666).rounded())
+        SMPTETimecode.droppedFramesPerMinute(fps: fps)   // moved to the leaf target, 2026-11-15 (markers)
     }
 
     /// Parse a formatted SMPTE timecode string ("HH:MM:SS:FF", or ";FF" for
@@ -38,25 +39,12 @@ public enum TimecodeReader {
     /// reproduces the string (drop-frame gaps accounted for). Returns nil if the
     /// string isn't a valid timecode.
     public static func parse(timecode: String, fps: Double) -> Result? {
-        guard fps > 0 else { return nil }
-        let dropFrame = timecode.contains(";")
-        let parts = timecode.split(whereSeparator: { $0 == ":" || $0 == ";" })
-        guard parts.count == 4,
-              let hh = Int(parts[0]), let mm = Int(parts[1]),
-              let ss = Int(parts[2]), let ff = Int(parts[3]) else { return nil }
-        let nfr = Int(fps.rounded())
-        guard nfr > 0 else { return nil }
-        var startFrame = (hh * 3600 + mm * 60 + ss) * nfr + ff
-        if dropFrame {
-            // Inverse of format()'s drop-frame adjustment: real continuous frame count.
-            let dropFrames = droppedFramesPerMinute(fps: fps)
-            let totalMinutes = 60 * hh + mm
-            startFrame -= dropFrames * (totalMinutes - totalMinutes / 10)
-        }
+        // The arithmetic is `SMPTETimecode.lenientFrameCount` (moved there 2026-11-15, unchanged).
+        guard let r = SMPTETimecode.lenientFrameCount(timecode: timecode, fps: fps) else { return nil }
         // Canonicalize via format() (validates + normalizes ';' notation).
-        let canonical = format(frameCount: startFrame, nfr: nfr, fps: fps, dropFrame: dropFrame)
-        return Result(timecode: canonical, dropFrame: dropFrame,
-                      startFrame: startFrame, nfr: nfr, fps: fps)
+        let canonical = format(frameCount: r.frameCount, nfr: r.nfr, fps: fps, dropFrame: r.dropFrame)
+        return Result(timecode: canonical, dropFrame: r.dropFrame,
+                      startFrame: r.frameCount, nfr: r.nfr, fps: fps)
     }
 
     public static func readStartTimecode(url: URL) -> Result? {
@@ -204,32 +192,8 @@ public enum TimecodeReader {
 
     // MARK: - Formatting (Flip's proven math, correct SMPTE ; notation)
 
+    /// `SMPTETimecode.format`, which since 2026-11-15 wraps at 24 hours (docs/MARKERS_PLAN.md D17). Unchanged below that.
     public static func format(frameCount: Int, nfr: Int, fps: Double, dropFrame: Bool) -> String {
-        guard nfr > 0 else { return "—" }
-        let nfrI = Int(nfr)
-        var fc = frameCount
-        let hh: Int, mm: Int, ss: Int, ff: Int
-
-        if dropFrame {
-            let dropFrames = droppedFramesPerMinute(fps: fps)
-            let framesPer10Min = 10 * 60 * nfrI - 9 * dropFrames
-            let framesPerMin = 60 * nfrI - dropFrames
-            let d = fc / framesPer10Min
-            var m = fc % framesPer10Min
-            if m < dropFrames { m = dropFrames }
-            let adjusted = fc + dropFrames * 9 * d + dropFrames * ((m - dropFrames) / framesPerMin)
-            fc = adjusted
-        }
-
-        ff = fc % nfrI
-        let totalSecs = fc / nfrI
-        ss = totalSecs % 60
-        let totalMins = totalSecs / 60
-        mm = totalMins % 60
-        hh = totalMins / 60
-
-        // Correct SMPTE: ";" before frames denotes drop-frame; ":" non-drop.
-        let sep = dropFrame ? ";" : ":"
-        return String(format: "%02d:%02d:%02d%@%02d", hh, mm, ss, sep, ff)
+        SMPTETimecode.format(frameCount: frameCount, nfr: nfr, fps: fps, dropFrame: dropFrame)
     }
 }

@@ -377,6 +377,14 @@ final class TransportKeyMonitor: ObservableObject {
         engine.exactSeek(to: min(max((Double(frame) + 0.25) / ctx.rate, 0), engine.duration))
     }
 
+    /// A marker's frame (docs/MARKERS_PLAN.md §4.2), by the same quarter-frame landing `commit` uses, clamped to the file.
+    /// The caller checks `canMovePlayhead`.
+    func seek(toFrame frame: Int) {
+        guard let engine, let ctx = TimecodeContext(engine: engine) else { return }
+        let f = min(max(frame, 0), ctx.lastFrame)
+        engine.exactSeek(to: min(max((Double(f) + 0.25) / ctx.rate, 0), engine.duration))
+    }
+
     // MARK: State transitions
 
     /// Open entry. False — and no state change — when this deck has nothing to seek in, or when the

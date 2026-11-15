@@ -138,3 +138,7 @@ docs/mxf-fixtures/op1a/
 # Licence test harnesses and test keys (Graviton adoption rule 4). Output can contain keys.
 .harness/
 __pycache__/
+
+# Frame.io's original .fiojson holds signed asset URLs, an HLS token and account IDs: never committed (docs/MARKERS_PLAN.md D14).
+# The .reduced.fiojson beside it (frame and text only) is committed.
+docs/markers/frameio-reference/Offset_Ep066_Sofrware_Copying_FCPX.fiojson

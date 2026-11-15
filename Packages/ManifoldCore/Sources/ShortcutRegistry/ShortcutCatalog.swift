@@ -30,6 +30,17 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case goToStartAlternate = "transport.goToStartAlternate"
     case goToEndAlternate = "transport.goToEndAlternate"
     case loop = "transport.loop"
+    // Mark (markers on files, docs/MARKERS_PLAN.md §3.1)
+    case addMarker = "mark.addMarker"
+    case addMarkerAndEdit = "mark.addMarkerAndEdit"
+    case deleteMarker = "mark.deleteMarker"
+    case previousMarker = "mark.previousMarker"
+    case nextMarker = "mark.nextMarker"
+    case markIn = "mark.in"
+    case markOut = "mark.out"
+    case clearInOut = "mark.clearInOut"
+    case importMarkers = "file.importMarkers"
+    case exportMarkers = "file.exportMarkers"
     // Timecode entry
     case timecodeOpen = "timecode.open"
     case timecodeCommit = "timecode.commit"
@@ -95,6 +106,7 @@ public enum ShortcutID: String, CaseIterable, Sendable {
 
 public enum ShortcutCategory: String, CaseIterable, Sendable {
     case transport = "Transport"
+    case mark = "Mark"
     case timecode = "Timecode Entry"
     case view = "View"
     case scopes = "Scopes"
@@ -213,6 +225,9 @@ public enum ShortcutCatalog {
         // symbolic hotkeys and the Services' key equivalents on the build Mac (none uses E). The menu reads "Share Frame
         // (SDR)…" while the key window's picture is PQ or HLG (`ShareLabel`); this is the title for an SDR picture.
         .init(.shareFrame, "Share Frame…", .file, .window, .menu, .char("e", shiftCmd)),
+        // Markers to and from a file (docs/MARKERS_PLAN.md §6). No default keys.
+        .init(.importMarkers, "Import Markers…", .file, .fileTransport, .menu, nil),
+        .init(.exportMarkers, "Export Markers…", .file, .fileTransport, .menu, nil),
 
         // ── Sources and output: device claims (Robbie, 2026-10-24: keys after all, with ⌘; §8) ─────────────
         .init(.disconnectLive, "Disconnect Live Source", .sources, .window, .menu, .code(KeyCode.delete, optCmd)),
@@ -244,6 +259,22 @@ public enum ShortcutCatalog {
         .init(.goToEndAlternate, "Go to End (no Fn needed)", .transport, .fileTransport, .key,
               .code(KeyCode.right, [.option])),
         .init(.loop, "Loop Playback", .transport, .fileTransport, .menu, .char("l", cmd)),
+
+        // ── Mark: markers on files (docs/MARKERS_PLAN.md §3.1, D1, Robbie 2026-11-15) ─────────────────
+        // M, I, O and ⇧↑/⇧↓ were reserved for this by the audit (docs/SHORTCUTS_AUDIT.md:323-324); M, I and O are what
+        // Resolve, Premiere and Final Cut use. ⌘M is Minimize, so only bare M. Bare M, I and O are menu keys like N: typed
+        // into a text field they are letters (`KeyDispatcher.textFieldTakes`). ⇧↑/⇧↓ are `.key`: ⇧ + an arrow cannot be a
+        // menu key (audit C7). Delete Marker has no default: bare ⌫ is timecode entry's, whose scope meets every scope.
+        .init(.addMarker, "Add Marker", .mark, .fileTransport, .menu, .char("m"),
+              note: "On the frame on screen, even while playing"),
+        .init(.addMarkerAndEdit, "Add Marker and Edit…", .mark, .fileTransport, .menu, .char("m", [.option])),
+        .init(.deleteMarker, "Delete Marker", .mark, .fileTransport, .menu, nil,
+              note: "The marker at the playhead"),
+        .init(.previousMarker, "Previous Marker", .mark, .fileTransport, .key, .code(KeyCode.up, [.shift]), repeats: true),
+        .init(.nextMarker, "Next Marker", .mark, .fileTransport, .key, .code(KeyCode.down, [.shift]), repeats: true),
+        .init(.markIn, "Mark In", .mark, .fileTransport, .menu, .char("i")),
+        .init(.markOut, "Mark Out", .mark, .fileTransport, .menu, .char("o")),
+        .init(.clearInOut, "Clear In and Out", .mark, .fileTransport, .menu, .char("x", [.option])),
 
         // ── Timecode entry (fixed: typing a timecode is not a shortcut) ────────────────────────
         .init(.timecodeOpen, "Type a Timecode (+ or − for relative)", .timecode, .window, .fixed, nil,

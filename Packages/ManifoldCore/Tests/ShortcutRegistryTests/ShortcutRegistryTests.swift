@@ -141,7 +141,8 @@ final class ShortcutRegistryTests: XCTestCase {
     /// The keys the scheme took away are held by nothing outside the debug tiers.
     func testRemovedKeysAreFree() {
         let r = registry(debug: false)
-        let removed: [KeyChord] = [.char("i"), .code(KeyCode.tab), .char("t", [.control, .option]),
+        // Not I: freed from the inspector for Mark In, which holds it since 2026-11-15 (docs/MARKERS_PLAN.md D1).
+        let removed: [KeyChord] = [.code(KeyCode.tab), .char("t", [.control, .option]),
                                    .char("e", [.control, .option]), .char("x", [.control, .option]),
                                    .char("g", [.control, .option]), .char("b", [.control, .option]),
                                    .char("1", [.control, .option]), .char("2", [.control, .option]),
@@ -280,6 +281,9 @@ final class ShortcutRegistryTests: XCTestCase {
         let r = registry()
         guard case .refused = r.propose(.code(KeyCode.up, [.shift]), for: .inspector) else { return XCTFail() }
         guard case .refused = r.propose(.code(KeyCode.up), for: .mute) else { return XCTFail("mute is a menu item") }
+        // ⇧↑ on a `.key` action is accepted. It is Previous Marker's key since 2026-11-15, so it conflicts until freed.
+        guard case .conflict = r.propose(.code(KeyCode.up, [.shift]), for: .cieSpace) else { return XCTFail("Previous Marker") }
+        XCTAssertTrue(r.assign(nil, to: .previousMarker))
         guard case .accepted = r.propose(.code(KeyCode.up, [.shift]), for: .cieSpace) else { return XCTFail() }
         guard case .refused = r.propose(.char("c", [.command, .option]), for: .holdCompare) else { return XCTFail() }
     }

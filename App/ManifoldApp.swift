@@ -325,6 +325,10 @@ struct ManifoldApp: App {
                 // The same frame as an SDR JPEG through the share sheet (Robbie, 2026-11-15; FrameShare.swift). ⇧⌘E. Reads
                 // "Share Frame (SDR)…" while the key window's picture is PQ or HLG.
                 ShareFrameMenuItem(registry: shortcuts)
+                // Markers to and from the key window's file (docs/MARKERS_PLAN.md §6): Resolve EDL, CSV, text.
+                Divider()
+                ShortcutMenuItem(id: .importMarkers, registry: shortcuts)
+                ShortcutMenuItem(id: .exportMarkers, registry: shortcuts)
                 // The measurement set (.rgba16f, .v210, .v210.json beside the PNG) is Help ▸ Export Frame for Support…
                 // since 2026-10-24, a public item; it was a debug item here that morning.
                 Divider()
@@ -347,6 +351,8 @@ struct ManifoldApp: App {
             // ⚠️ NOT `#if DEBUG`. This ships. It is the user-facing half of the colour-management
             // work, not a dev affordance — the gated Debug menu below is a different thing.
             DisplayTransformCommands()
+            // The Mark menu: markers and In/Out on the key window's file (docs/MARKERS_PLAN.md §3.1).
+            MarkCommands()
             #if DEBUG
             // ── ⚠️ GATED: A MENU BAR ITEM IS A CATEGORICALLY MORE EXPOSED AFFORDANCE ────────────
             //

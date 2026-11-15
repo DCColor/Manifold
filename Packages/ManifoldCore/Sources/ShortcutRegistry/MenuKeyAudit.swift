@@ -80,6 +80,9 @@ public enum MenuKeyAudit {
     /// a home, and nothing else does.
     public static let menuHomes: [ShortcutID: String] = [
         .fileOpen: "File", .exportFrame: "File", .shareFrame: "File", .disconnectLive: "File", .toggleDeckLink: "File",
+        .importMarkers: "File", .exportMarkers: "File",
+        .addMarker: "Mark", .addMarkerAndEdit: "Mark", .deleteMarker: "Mark", .markIn: "Mark", .markOut: "Mark",
+        .clearInOut: "Mark",
         .loop: "View", .raster100: "View", .raster75: "View", .raster50: "View", .raster25: "View", .rasterFit: "View",
         .inspector: "View", .fileName: "View", .alwaysShowControls: "View", .scopesTray: "View",
         .volumeUp: "View", .volumeDown: "View", .mute: "View",

@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE xmeml>
+<xmeml version="4">
+  <sequence id="sequence" TL.SQAudioVisibleBase="0" TL.SQVideoVisibleBase="0" TL.SQVisibleBaseTime="0" TL.SQAVDividerPosition="0.5" TL.SQHideShyTracks="0" TL.SQHeaderWidth="292" Monitor.ProgramZoomOut="0" Monitor.ProgramZoomIn="0" TL.SQTimePerPixel="0.19999999999999998" MZ.EditLine="0" MZ.Sequence.PreviewFrameSizeHeight="1080" MZ.Sequence.PreviewFrameSizeWidth="1920" MZ.Sequence.AudioTimeDisplayFormat="200" MZ.Sequence.PreviewRenderingClassID="1061109567" MZ.Sequence.PreviewRenderingPresetCodec="1634755439" MZ.Sequence.PreviewRenderingPresetPath="EncoderPresets/SequencePreview/795454d9-d3c2-429d-9474-923ab13b7018/QuickTime.epr" MZ.Sequence.PreviewUseMaxRenderQuality="false" MZ.Sequence.PreviewUseMaxBitDepth="false" MZ.Sequence.EditingModeGUID="795454d9-d3c2-429d-9474-923ab13b7018" MZ.Sequence.VideoTimeDisplayFormat="101" MZ.WorkOutPoint="4612930560000" MZ.WorkInPoint="0" explodedTracks="true">
+    <uuid>9fd30a41-dcaf-4b7f-bdbd-153fea20b17a</uuid>
+    <duration>87904</duration>
+    <rate>
+      <timebase>24</timebase>
+      <ntsc>FALSE</ntsc>
+    </rate>
+    <name>Offset_Ep066_Sofrware_Copying.mp4 2026-11-15 19-54-54</name>
+    <media>
+      <video>
+        <format>
+          <samplecharacteristics>
+            <rate>
+              <timebase>24</timebase>
+              <ntsc>FALSE</ntsc>
+            </rate>
+            <codec>
+              <name>Apple ProRes 422</name>
+              <appspecificdata>
+                <appname>Final Cut Pro</appname>
+                <appmanufacturer>Apple Inc.</appmanufacturer>
+                <appversion>7.0</appversion>
+                <data>
+                  <qtcodec>
+                    <codecname>Apple ProRes 422</codecname>
+                    <codectypename>Apple ProRes 422</codectypename>
+                    <codecname>Apple ProRes 422</codecname>
+                    <codectypecode>apcn</codectypecode>
+                    <codecvendorcode>appl</codecvendorcode>
+                    <spatialquality>1024</spatialquality>
+                    <temporalquality>0</temporalquality>
+                    <keyframerate>0</keyframerate>
+                    <datarate>0</datarate>
+                  </qtcodec>
+                </data>
+              </appspecificdata>
+            </codec>
+            <width>1920</width>
+            <height>1080</height>
+            <anamorphic>FALSE</anamorphic>
+            <pixelaspectratio>square</pixelaspectratio>
+            <fielddominance>none</fielddominance>
+            <colordepth>24</colordepth>
+          </samplecharacteristics>
+        </format>
+        <track TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="0">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <generatoritem id="clipitem-1">
+            <name>Marker Color Matte (2026-11-15 19-54-54)</name>
+            <enabled>TRUE</enabled>
+            <duration>87904</duration>
+            <rate>
+              <timebase>24</timebase>
+              <ntsc>FALSE</ntsc>
+            </rate>
+            <start>0</start>
+            <end>87904</end>
+            <in>0</in>
+            <out>87904</out>
+            <alphatype>none</alphatype>
+            <effect>
+              <name>Color</name>
+              <effectid>Color</effectid>
+              <effectcategory>Matte</effectcategory>
+              <effecttype>generator</effecttype>
+              <mediatype>video</mediatype>
+              <parameter authoringApp="PremierePro">
+                <parameterid>fillcolor</parameterid>
+                <name>Color</name>
+                <value>
+                  <alpha>0</alpha>
+                  <red>0</red>
+                  <green>0</green>
+                  <blue>0</blue>
+                </value>
+              </parameter>
+            </effect>
+            <filter>
+              <effect>
+                <name>Opacity</name>
+                <effectid>opacity</effectid>
+                <effectcategory>motion</effectcategory>
+                <effecttype>motion</effecttype>
+                <mediatype>video</mediatype>
+                <pproBypass>false</pproBypass>
+                <parameter authoringApp="PremierePro">
+                  <parameterid>opacity</parameterid>
+                  <name>opacity</name>
+                  <valuemin>0</valuemin>
+                  <valuemax>100</valuemax>
+                  <value>0</value>
+                </parameter>
+              </effect>
+            </filter>
+              <marker>
+    <comment>Need to update title - should be: Reverse Engineering In The Age Of A.I.</comment>
+    <name>Robbie Carman</name>
+    <in>286</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - Intro</comment>
+    <name>Robbie Carman</name>
+    <in>970</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - Background</comment>
+    <name>Robbie Carman</name>
+    <in>11466</in>
+    <out>11466</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>something weird goign on here with audio - not sure if it can be fixed</comment>
+    <name>Robbie Carman</name>
+    <in>17030</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - How is reverse engineering done?</comment>
+    <name>Robbie Carman</name>
+    <in>19926</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Break - Support for this episode comes from Conform.Tools</comment>
+    <name>Robbie Carman</name>
+    <in>26634</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>is this jump just the background loop jumping? Or something else?</comment>
+    <name>Robbie Carman</name>
+    <in>43018</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - the legal & ethical ramifications of reverse engineering</comment>
+    <name>Robbie Carman</name>
+    <in>44338</in>
+    <out>44338</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - End user impact</comment>
+    <name>Robbie Carman</name>
+    <in>58750</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Break - Support for this episode comes from Flanders Scientific</comment>
+    <name>Robbie Carman</name>
+    <in>67452</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - Conclusion</comment>
+    <name>Robbie Carman</name>
+    <in>84449</in>
+    <out>84449</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+
+          </generatoritem>
+        </track>
+      </video>
+      <audio>
+        <numOutputChannels>2</numOutputChannels>
+        <format>
+          <samplecharacteristics>
+            <depth>16</depth>
+            <samplerate>48000</samplerate>
+          </samplecharacteristics>
+        </format>
+        <outputs>
+          <groups>
+            <index>1</index>
+            <numchannels>1</numchannels>
+            <downmix>0</downmix>
+            <channel>
+              <index>1</index>
+            </channel>
+          </groups>
+          <groups>
+            <index>2</index>
+            <numchannels>1</numchannels>
+            <downmix>0</downmix>
+            <channel>
+              <index>2</index>
+            </channel>
+          </groups>
+        </outputs>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="0" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>1</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="1" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>2</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="0" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>1</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="1" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>2</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="0" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>1</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="1" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>2</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="0" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>1</outputchannelindex>
+        </track>
+        <track TL.SQTrackAudioKeyframeStyle="0" TL.SQTrackShy="0" TL.SQTrackExpandedHeight="25" TL.SQTrackExpanded="0" MZ.TrackTargeted="1" PannerCurrentValue="0.5" PannerIsInverted="true" PannerStartKeyframe="-91445760000000000,0.5,0,0,0,0,0,0" PannerName="Balance" currentExplodedTrackIndex="1" totalExplodedTrackCount="2" premiereTrackType="Stereo">
+          <enabled>TRUE</enabled>
+          <locked>FALSE</locked>
+          <outputchannelindex>2</outputchannelindex>
+        </track>
+      </audio>
+    </media>
+    <timecode>
+      <rate>
+        <timebase>24</timebase>
+        <ntsc>FALSE</ntsc>
+      </rate>
+      <string>00:00:00:00</string>
+      <frame>0</frame>
+      <displayformat>NDF</displayformat>
+    </timecode>
+    <labels>
+      <label2>Iris</label2>
+    </labels>
+    <logginginfo>
+      <description/>
+      <scene/>
+      <shottake/>
+      <lognote/>
+      <good/>
+      <originalvideofilename/>
+      <originalaudiofilename/>
+    </logginginfo>
+      <marker>
+    <comment>Need to update title - should be: Reverse Engineering In The Age Of A.I.</comment>
+    <name>Robbie Carman</name>
+    <in>286</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - Intro</comment>
+    <name>Robbie Carman</name>
+    <in>970</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - Background</comment>
+    <name>Robbie Carman</name>
+    <in>11466</in>
+    <out>11466</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>something weird goign on here with audio - not sure if it can be fixed</comment>
+    <name>Robbie Carman</name>
+    <in>17030</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - How is reverse engineering done?</comment>
+    <name>Robbie Carman</name>
+    <in>19926</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Break - Support for this episode comes from Conform.Tools</comment>
+    <name>Robbie Carman</name>
+    <in>26634</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>is this jump just the background loop jumping? Or something else?</comment>
+    <name>Robbie Carman</name>
+    <in>43018</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - the legal & ethical ramifications of reverse engineering</comment>
+    <name>Robbie Carman</name>
+    <in>44338</in>
+    <out>44338</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - End user impact</comment>
+    <name>Robbie Carman</name>
+    <in>58750</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Break - Support for this episode comes from Flanders Scientific</comment>
+    <name>Robbie Carman</name>
+    <in>67452</in>
+    <out>-1</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+  <marker>
+    <comment>Chapter - Conclusion</comment>
+    <name>Robbie Carman</name>
+    <in>84449</in>
+    <out>84449</out>
+    <pproColor>4294741314</pproColor>
+  </marker>
+
+  </sequence>
+</xmeml>

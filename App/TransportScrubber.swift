@@ -19,6 +19,9 @@ struct TransportScrubber: NSViewRepresentable {
     var range: ClosedRange<Double>
     var onChange: (Double) -> Void
     var onEditingChanged: (Bool) -> Void
+    /// Markers drawn above the bar, and a click on one's flag (docs/MARKERS_PLAN.md §4.3). None: drawn as before.
+    var markers: [TrackMarker] = []
+    var onMarkerClicked: ((Int) -> Void)? = nil
 
     // Same keys and defaults as the Settings pickers; both read `PlayheadStyle`'s constants so the two
     // declarations cannot drift. The colour is the highlight's unless the playhead has its own: optional, because
@@ -45,6 +48,8 @@ struct TransportScrubber: NSViewRepresentable {
         // `.disabled(!position)` at the call site arrives as the environment, as it did for Slider.
         scrubber.isEnabled = context.environment.isEnabled
         scrubber.set(value: value, range: range)
+        scrubber.onMarkerClicked = onMarkerClicked
+        scrubber.markers = markers
     }
 
     /// As wide as offered, as tall as the slider: the Slider's own sizing. The height is load-bearing —

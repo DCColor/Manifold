@@ -1,0 +1,458 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<!DOCTYPE Avid:StreamItems SYSTEM "AvidSettingsFile.dtd">
+<Avid:StreamItems xmlns:Avid="http://www.avid.com">
+<Avid:XMLFileData>
+<AvProp name="DomainMagic" type="string">Domain</AvProp>
+<AvProp name="DomainKey" type="char4">58424a44</AvProp>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793639615</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 17:13] Need to update title - should be: Reverse Engineering In The Age Of A.I.</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">286</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793644016</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:26] Chapter - Intro</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">970</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793644255</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:30] Chapter - Background</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">11466</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793644413</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:33] something weird goign on here with audio - not sure if it can be fixed</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">17030</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793644538</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:35] Chapter - How is reverse engineering done?</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">19926</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793644721</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:38] Break - Support for this episode comes from Conform.Tools</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">26634</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793645097</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:44] is this jump just the background loop jumping? Or something else?</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">43018</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793645176</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:46] Chapter - the legal &amp; ethical ramifications of reverse engineering</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">44338</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793645529</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:52] Chapter - End user impact</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">58750</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793645738</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 18:55] Break - Support for this episode comes from Flanders Scientific</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">67452</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+<AvClass id="ATTR">
+  <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">7</AvProp>
+  <List id="OMFI:ATTR:AttrRefs">
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1793646128</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Blue</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Robbie Carman</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">[Robbie Carman Nov 02, 2026 &#183; 19:02] Chapter - Conclusion</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">84449</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+    </ListElem>
+    <ListElem>
+      <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+      <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+    </ListElem>
+    <ListElem/>
+  </List>
+</AvClass>
+</Avid:XMLFileData></Avid:StreamItems>

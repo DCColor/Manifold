@@ -209,7 +209,8 @@ final class KeyDispatchTests: XCTestCase {
 
     func testOldKeysReachNothingAndPassThrough() {
         let old: [(UInt16, String, NSEvent.ModifierFlags)] = [
-            (kI, "i", []), (KeyCode.tab, "\t", []), (kT, "t", [.control, .option]), (kE, "e", [.control, .option]),
+            // I is no longer here: it was freed for Mark In and is Mark In since 2026-11-15 (docs/MARKERS_PLAN.md D1).
+            (KeyCode.tab, "\t", []), (kT, "t", [.control, .option]), (kE, "e", [.control, .option]),
             (kX, "x", [.control, .option]), (kG, "g", [.control, .option]), (kB, "b", [.control, .option]),
             (18, "1", [.control, .option]), (19, "2", [.control, .option]), (20, "3", [.control, .option]),
             (kO, "o", [.control, .option]), (kO, "O", [.control, .option, .shift]), (kN, "n", [.control, .option]),
@@ -466,8 +467,9 @@ final class KeyDispatchTests: XCTestCase {
         XCTAssertTrue(dispatcher.registry.assign(.char("y"), to: .fileName))
         XCTAssertEqual(press(16, "y").0, .fileName)
         XCTAssertNil(press(kN, "n").0)
-        XCTAssertTrue(dispatcher.registry.assign(.char("i"), to: .inspector))   // a menu action on a bare key
-        XCTAssertEqual(press(kI, "i").0, .inspector)
+        // A menu action on a bare key. U, a free letter: I was used here until it became Mark In (2026-11-15).
+        XCTAssertTrue(dispatcher.registry.assign(.char("u"), to: .inspector))
+        XCTAssertEqual(press(32, "u").0, .inspector)
     }
 
     /// A Cyrillic layout types "с" on the C key: the ANSI letter stands in, as macOS does for ⌘ keys.
@@ -483,7 +485,8 @@ final class KeyDispatchTests: XCTestCase {
     /// for that action and no other. ⌥⌘S is the Show/Hide Scopes case.
     func testEveryMenuActionKeyReachesItsMenuItem() {
         let us: [String: UInt16] = ["a": 0, "s": 1, "d": 2, "b": 11, "e": 14, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21,
-                                    "0": 29, "o": 31, "i": 34, "l": 37, "n": 45]
+                                    "0": 29, "o": 31, "i": 34, "l": 37, "n": 45,
+                                    "m": 46, "x": 7]
         func flags(_ m: KeyModifiers) -> NSEvent.ModifierFlags {
             var f: NSEvent.ModifierFlags = []
             if m.contains(.command) { f.insert(.command) }; if m.contains(.option) { f.insert(.option) }
@@ -512,7 +515,8 @@ final class KeyDispatchTests: XCTestCase {
             }
             checked += 1
         }
-        XCTAssertEqual(checked, 22, "every keyed, non-debug menu action (24, less the 2 with no key; Share Frame… keyed 2026-11-15)")
+        XCTAssertEqual(checked, 27, "every keyed, non-debug menu action (32, less the 5 with no key; Share Frame… keyed 2026-11-15; "
+                       + "Add Marker, Add Marker and Edit…, Mark In, Mark Out and Clear In and Out added 2026-11-15)")
         XCTAssertEqual(registry.chord(for: .scopesTray), .char("s", [.command, .option]))
     }
 }

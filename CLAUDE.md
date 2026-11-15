@@ -88,6 +88,10 @@ client has none.
 
 ## Rules
 
+- Never install, upgrade or uninstall anything system-wide: no brew, no global pip/npm, no changes to /usr/local,
+  /opt/homebrew or PATH. Never modify another project's files or binaries (GradeShare, Flip, Index, _deps). Tools
+  already present may be run, read-only; if a needed tool is missing, stop and ask.
+
 - `Profile` is the default build configuration and it has `DEBUG=1` — dev affordances are
   reachable by keystroke. Every build cut to date has been Profile. The configuration in
   the DMG filename is currently the only thing distinguishing a tester build from a public

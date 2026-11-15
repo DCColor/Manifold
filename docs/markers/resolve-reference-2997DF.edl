@@ -1,0 +1,12 @@
+TITLE: resolve-reference-2997DF
+FCM: DROP FRAME
+
+001  001      V     C        01:00:03:07 01:00:03:08 01:00:03:07 01:00:03:08  
+ |C:ResolveColorBlue |M:Marker 1 |D:1
+
+002  001      V     C        01:00:04:20 01:00:04:21 01:00:04:20 01:00:04:21  
+ |C:ResolveColorRed |M:Love this |D:60
+
+003  001      V     C        01:00:08:10 01:00:08:11 01:00:08:10 01:00:08:11  
+this blur is really really bad, I' think we should unblur it and try to make it less blury |C:ResolveColorBlue |M:fix blur |D:1
+

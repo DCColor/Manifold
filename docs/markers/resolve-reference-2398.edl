@@ -1,0 +1,18 @@
+TITLE: resolve-reference-2398
+FCM: NON-DROP FRAME
+
+001  001      V     C        01:00:01:16 01:00:01:17 01:00:01:16 01:00:01:17  
+There is to much higlight on her frace |C:ResolveColorBlue |M:Face |D:1
+
+002  001      V     C        01:00:02:14 01:00:02:15 01:00:02:14 01:00:02:15  
+The shot gets weird and posterized |C:ResolveColorRed |M:As she turns here |D:24
+
+003  001      V     C        01:00:04:13 01:00:04:14 01:00:04:13 01:00:04:14  
+Looking at this again, I'm not srue that the focus is right, maybe we ''pull' it out of focus even more? I think that will give it a little more gravitas' |C:ResolveColorBlue |M:Focus correct |D:1
+
+004  001      V     C        01:00:05:21 01:00:05:22 01:00:05:21 01:00:05:22  
+ |C:ResolveColorLemon |M:good |D:1
+
+005  001      V     C        01:00:07:20 01:00:07:21 01:00:07:20 01:00:07:21  
+ |C:ResolveColorBlue |M:Marker 5 |D:1
+

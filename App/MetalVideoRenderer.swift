@@ -851,6 +851,14 @@ final class MetalVideoRenderer {
     /// SOURCE PTS of `lastPixelBuffer`, so a paused re-render (shader-flag change) carries the same
     /// source time forward instead of losing it. Render thread only, like lastPixelBuffer.
     private var lastPixelBufferPts: Double = .nan
+    /// The source time of the frame on screen: the last one drawn, for markers (docs/MARKERS_PLAN.md §3.2, D2). Written on
+    /// the render thread, read on main, so behind its own lock. Nil after a clear.
+    private let presentedLock = NSLock()
+    private var presentedPtsStorage: Double = .nan
+    var presentedPTS: Double? {
+        presentedLock.lock(); defer { presentedLock.unlock() }
+        return presentedPtsStorage.isNaN ? nil : presentedPtsStorage
+    }
     private let refreshLock = NSLock()
     private var pendingRefresh = false
 
@@ -3575,6 +3583,7 @@ final class MetalVideoRenderer {
         if doClear {
             lastPixelBuffer = nil
             lastPixelBufferPts = .nan
+            presentedLock.lock(); presentedPtsStorage = .nan; presentedLock.unlock()
             deferredPresent = nil   // a held-back frame of the old source must not land after the wipe
             presentBlackFrame()
             return
@@ -3920,6 +3929,7 @@ final class MetalVideoRenderer {
     private func renderPixelBuffer(_ pixelBuffer: CVPixelBuffer, pts: Double) {
         lastPixelBuffer = pixelBuffer   // retained for paused refresh (render thread only)
         lastPixelBufferPts = pts
+        presentedLock.lock(); presentedPtsStorage = pts; presentedLock.unlock()
         let width  = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 

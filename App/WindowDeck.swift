@@ -300,6 +300,9 @@ final class WindowDeck: ObservableObject {
     /// file opens. Every file colour tag reaches the renderer through it (`FileColorOverride.swift`).
     private(set) lazy var fileColor = FileColorOverrideModel(deck: self)
 
+    /// This window's markers on its file (docs/MARKERS_PLAN.md): stored per file by content, edited per window.
+    private(set) lazy var markers = MarkerModel(deck: self)
+
     /// This window's Interpretation LUT (colour S6, §6.11): one slot per window, kept across source changes,
     /// gone at quit (decision 5). `InterpretationLUT.swift`.
     private(set) lazy var lut = InterpretationLUTModel(deck: self)
@@ -1221,6 +1224,8 @@ final class DeckRegistry {
         engine.onSourceCommitted = { [weak deck] url in
             deck?.fileColor.fileCommitted(url)
         }
+        // Markers follow this deck's file: loaded by content fingerprint on every file change, cleared on unload.
+        deck.markers.observe(engine)
         // A CONTAINER / BITSTREAM COLOUR DISAGREEMENT (colour S3), on the same edges as the colour tags:
         // a readout line only, never a change to the codes above.
         engine.onSourceColorNote = { [weak renderer] note in

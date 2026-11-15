@@ -56,6 +56,10 @@ let package = Package(
         // Linked by the APP target directly (project.yml): what a refused DeckLink output start says (docs/BUGS.md).
         .library(name: "DeckLinkRefusal", targets: ["DeckLinkRefusal"]),
         .library(name: "FrameShareFormat", targets: ["FrameShareFormat"]),
+        // SMPTE frame-count ↔ label arithmetic (TimecodeReader's, moved 2026-11-15) and markers on files
+        // (docs/MARKERS_PLAN.md). Leaf targets so `swift test` reaches them; Markers is linked by the APP target.
+        .library(name: "SMPTETimecode", targets: ["SMPTETimecode"]),
+        .library(name: "Markers", targets: ["Markers"]),
         // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
         // key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4).
         .library(name: "ShortcutRegistry", targets: ["ShortcutRegistry"]),
@@ -547,6 +551,42 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // SMPTE timecode arithmetic, drop-frame and the 24-hour wrap (docs/MARKERS_PLAN.md D17). Foundation only. Moved out of
+        // ManifoldCore's TimecodeReader, which forwards here, so the arithmetic has tests.
+        .target(
+            name: "SMPTETimecode",
+            path: "Sources/SMPTETimecode",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "SMPTETimecodeTests",
+            dependencies: ["SMPTETimecode"],
+            path: "Tests/SMPTETimecodeTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // Markers on files (docs/MARKERS_PLAN.md): the model, Resolve's 16 colours, the Resolve marker EDL, CSV and text,
+        // the content fingerprint and the store. Foundation and CryptoKit only.
+        .target(
+            name: "Markers",
+            dependencies: ["SMPTETimecode"],
+            path: "Sources/Markers",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "MarkersTests",
+            dependencies: ["Markers", "SMPTETimecode"],
+            path: "Tests/MarkersTests",
+            resources: [.copy("Fixtures")],
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The shortcut registry (docs/SHORTCUTS_AUDIT.md §4.4): the catalog of every shortcut, the overrides stored in
         // one defaults key, the conflict / reserved / warning rules, and the key dispatcher the app's one NSEvent monitor
         // feeds. AppKit and SwiftUI only for the NSEvent adapter and the menu key; the tests drive the dispatcher with
@@ -735,7 +775,7 @@ let package = Package(
             dependencies: ["CFFmpeg", "ScopeCompute", "AudioResample", "LiveAudioResample", "CardClock", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
-                           "AudioFileInfo", "StillImageInfo"],
+                           "AudioFileInfo", "StillImageInfo", "SMPTETimecode"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

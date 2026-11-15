@@ -164,6 +164,11 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   waveform cache, and no WebKit. **Settings backups (0.9.2):** the last 10 shortcut backups, in
   `~/Library/Application Support/com.graviton.manifold/Settings Backups/`, written only when the user imports. Shortcut
   bindings only.
+- **Markers (2026-11-15, docs/MARKERS_PLAN.md §5):** `~/Library/Application Support/com.graviton.manifold/Markers/`,
+  one JSON file per media file, named by a SHA-256 of the file's size and first and last 4 MB (`FileFingerprint`). Holds
+  the markers (names, notes, keywords: the user's content), the per-file start timecode override, and the media file's
+  last path and a bookmark to it. Never in UserDefaults, never in Settings Transfer, never next to or inside the media.
+  Removed when a file's last marker is deleted. Stays after uninstall until deleted.
 - **`~/Library/Caches/com.graviton.manifold/Cache.db` (+ `-wal`, `-shm`, `fsCachedData`)** was the
   `URLSession.shared` disk cache.
   - At the audit it held:
@@ -216,6 +221,9 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   All of these go through `PrivacyRedaction.LogRedaction`.
 - **P2:** the stream-secrets migration logs counts, and a kept entry by its position in the list
   ("entry 3 of 7: … left in the preferences plist"), never its URL, host or name.
+- **Markers (2026-11-15):** logged only through `MarkerLog` (Packages/ManifoldCore/Sources/Markers), whose functions
+  take numbers: counts, durations and fixed words. No marker name, note, keyword, file name or path reaches the log, so
+  none reaches a diagnostics export (`MarkerFilesTests.testLogLinesHoldNoUserText`).
 - **Still logged in full (not in P1's list):**
   - the SRT host and port (`SRTClient.swift:490`, `SRTSession.m:580`);
   - the WHEP endpoint host (path withheld);

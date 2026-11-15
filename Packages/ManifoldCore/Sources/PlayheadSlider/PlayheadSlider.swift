@@ -273,6 +273,15 @@ public enum PlayheadLineMetrics {
 public final class PlayheadScrubber: NSView {
     public let slider = TrackingSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let lineView = PlayheadLineView()
+    private let markerView = MarkerTrackView()
+
+    /// Markers drawn above the bar (docs/MARKERS_PLAN.md §4.3), in the slider's value units. Empty draws nothing, so
+    /// a file without markers paints exactly as before.
+    public var markers: [TrackMarker] = [] {
+        didSet { if markers != oldValue { markerView.markersChanged() } }
+    }
+    /// A click on a marker's flag: its index in `markers`. Clicks anywhere else are the slider's, as before.
+    public var onMarkerClicked: ((Int) -> Void)?
 
     /// Every value the user's gesture produces, from click to release.
     public var onValueChanged: ((Double) -> Void)?
@@ -308,8 +317,10 @@ public final class PlayheadScrubber: NSView {
         slider.target = self
         slider.action = #selector(sliderMoved(_:))
         lineView.scrubber = self
+        markerView.scrubber = self
         addSubview(slider)
         addSubview(lineView)
+        addSubview(markerView)
         applyStyle()
     }
 
@@ -350,7 +361,20 @@ public final class PlayheadScrubber: NSView {
         super.layout()
         slider.frame = NSRect(x: 0, y: 0, width: bounds.width.rounded(.down), height: bounds.height)
         lineView.frame = slider.frame
+        markerView.frame = slider.frame
+        markerView.markersChanged()
     }
+
+    /// The x a value is drawn at: the mapping `lineCentreX` uses, for any value.
+    public func centreX(for value: Double) -> CGFloat {
+        let bar = barRect, knobWidth = knobRect.width
+        let span = slider.maxValue - slider.minValue
+        let f = span > 0 ? min(max((value - slider.minValue) / span, 0), 1) : 0
+        return bar.minX + knobWidth / 2 + CGFloat(f) * (bar.width - knobWidth)
+    }
+
+    /// The bar, for the marker layer.
+    var markerBarRect: NSRect { barRect }
 
     /// Ball: the slider takes its own clicks, and the floored-off remainder (under a point, at the
     /// trailing end) is its too. Line: the slider is hidden, so every click in the scrubber is the
@@ -511,5 +535,107 @@ final class PlayheadLineView: NSView {
         line.setFill()
         PlayheadLineMetrics.lineRect(centreX: x, knobRect: knob).fill()
         PlayheadLineMetrics.tabPath(centreX: x, knobRect: knob, flipped: true).fill()
+    }
+}
+
+// MARK: - Markers on the track (docs/MARKERS_PLAN.md §4.3)
+
+/// One marker as the track draws it.
+public struct TrackMarker: Equatable {
+    /// Value (seconds) of its first frame, and of the end of its last frame.
+    public var start: Double
+    public var end: Double
+    public var color: NSColor
+    /// The tooltip: timecode and name.
+    public var label: String
+
+    public init(start: Double, end: Double, color: NSColor, label: String) {
+        self.start = start; self.end = end; self.color = color; self.label = label
+    }
+}
+
+/// Draws each marker as a small flag in its colour just above the bar, and a translucent band over the bar's top edge
+/// from its first frame to its last when it is longer than a frame. Takes a click only within `hitSlop` of a flag;
+/// every other click passes to the slider, so scrubbing is unchanged.
+final class MarkerTrackView: NSView, NSViewToolTipOwner {
+    weak var scrubber: PlayheadScrubber?
+    static let flagWidth: CGFloat = 7
+    static let flagHeight: CGFloat = 6
+    static let hitSlop: CGFloat = 4
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    private var flagXs: [CGFloat] = []
+
+    func markersChanged() {
+        removeAllToolTips()
+        guard let s = scrubber else { flagXs = []; return }
+        flagXs = s.markers.map { s.centreX(for: $0.start) }
+        let top = flagTop
+        for (i, x) in flagXs.enumerated() {
+            addToolTip(NSRect(x: x - Self.flagWidth / 2 - 1, y: top, width: Self.flagWidth + 2, height: Self.flagHeight + 2),
+                       owner: self, userData: UnsafeMutableRawPointer(bitPattern: i + 1))
+        }
+        needsDisplay = true
+    }
+
+    private var flagTop: CGFloat {
+        guard let s = scrubber else { return 0 }
+        return max(0, s.markerBarRect.minY - Self.flagHeight - 1)
+    }
+
+    func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+                       userData data: UnsafeMutableRawPointer?) -> String {
+        guard let s = scrubber, let data else { return "" }
+        let i = Int(bitPattern: data) - 1
+        return s.markers.indices.contains(i) ? s.markers[i].label : ""
+    }
+
+    /// The flag under `x`, nearest first.
+    func flagIndex(at point: NSPoint) -> Int? {
+        let top = flagTop
+        guard point.y >= top - 1, point.y <= top + Self.flagHeight + 1 else { return nil }
+        let near = flagXs.enumerated().filter { abs($0.element - point.x) <= Self.flagWidth / 2 + Self.hitSlop }
+        return near.min { abs($0.element - point.x) < abs($1.element - point.x) }?.offset
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let local = superview.map({ convert(point, from: $0) }), flagIndex(at: local) != nil else { return nil }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let i = flagIndex(at: p) { scrubber?.onMarkerClicked?(i) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let s = scrubber, !s.markers.isEmpty else { return }
+        let bar = s.markerBarRect
+        let top = flagTop
+        for (m, x) in zip(s.markers, flagXs) {
+            if m.end > m.start {
+                let x1 = s.centreX(for: m.end)
+                if x1 - x >= 1 {
+                    m.color.withAlphaComponent(0.55).setFill()
+                    NSRect(x: x, y: bar.minY - 1, width: x1 - x, height: 2).fill()
+                }
+            }
+            // A flag pointing down at its frame.
+            let path = NSBezierPath()
+            let w = Self.flagWidth, h = Self.flagHeight
+            path.move(to: NSPoint(x: x - w / 2, y: top))
+            path.line(to: NSPoint(x: x + w / 2, y: top))
+            path.line(to: NSPoint(x: x + w / 2, y: top + h * 0.55))
+            path.line(to: NSPoint(x: x, y: top + h))
+            path.line(to: NSPoint(x: x - w / 2, y: top + h * 0.55))
+            path.close()
+            m.color.setFill()
+            path.fill()
+            NSColor.black.withAlphaComponent(0.5).setStroke()
+            path.lineWidth = 0.5
+            path.stroke()
+        }
     }
 }
