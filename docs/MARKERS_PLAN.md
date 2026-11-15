@@ -364,8 +364,31 @@ A small picture of each marker's frame: always in the Markers window (96 pt wide
   renderer, so a thumbnail shows the file's own picture. Pixel aspect and clean aperture are not applied.
 - **Never blocks playback:** one frame at a time, utility priority, and nothing new starts while the file plays; the queue
   resumes at the next pause. Made only while a view shows thumbnails.
-- **Cache:** in memory, and on disk only in `~/Library/Caches/com.graviton.manifold/MarkerThumbnails/<fingerprint>/<frame>.jpg`
-  (`MarkerThumbnailCache`). A deleted marker's thumbnail is removed; the folder goes with the file's last marker.
+- **Cache:** in memory, and on disk only in
+  `~/Library/Caches/com.graviton.manifold/MarkerThumbnails/v<version>/<fingerprint>/<frame>.jpg` (`MarkerThumbnailCache`).
+  A deleted marker's thumbnail is removed; the folder goes with the file's last marker. **Versioned (D23):** the cache
+  version is in the path (now 2; the unversioned first build was 1), and every other folder under MarkerThumbnails is
+  purged once per launch, so an older build's thumbnails are never shown. Bump `MarkerThumbnailCache.version` whenever
+  the picture changes. Not used at all while Remember markers between sessions is off (§5.2).
+- **Regenerate (D23):** "Regenerate Thumbnails" in the slot's gear and the Markers window's toolbar (every marker of the
+  file), "Regenerate Thumbnail" in a row's context menu (that marker, or the selection). Drops them from memory and disk
+  and makes them again through the same queue: off the main thread, never while playing.
+- The blank early-frame thumbnails seen in the first test cleared with Clear All; most likely the first build's cache
+  (Robbie, 2026-11-15). Not investigated further unless it recurs.
+
+### 4.5 View ▸ Show Markers (D25, built 2026-11-15)
+
+App-wide and remembered (`manifold.markers.show`, default on), ⇧⌥⌘M. Off hides the timeline flags and the Markers slot's
+and window's contents (each says "Markers are hidden. View ▸ Show Markers (⇧⌥⌘M) shows them again."); nothing is
+deleted, and M, ⌥M, the menus and an import still work. Adding a marker (or importing) while hidden turns it back on.
+Key checks (2026-11-15): not in the catalog or `reserved` (⌥⌘M is Minimize All); no symbolic hotkey on M; a Service key
+is ⌘ or ⇧⌘ only (⇧⌘M is Terminal's), so none can hold ⇧⌥⌘M.
+
+### 4.6 Wording (D26)
+
+The Markers window's toolbar uses text buttons, "Import…", "Export…" and "Regenerate Thumbnails" (the first build's
+icons read as Download and as Share Frame's Share symbol); the filter stays an icon, tooltip "Filter by Colour". The
+slot's gear says "Import Markers…" and "Export Markers…", as the File menu does.
 
 ---
 
@@ -422,6 +445,18 @@ Names, notes and keywords are user content.
 - **Not synced.** App Support is local; nothing goes to iCloud.
 - `docs/PRIVACY_AUDIT.md` gains a row in §1 "Files and caches" (`:161-185`), a line in §2 Logging, and §9 After
   uninstall: the Markers folder remains until deleted.
+
+### 5.2 Remember markers between sessions (D24, built 2026-11-15)
+
+Settings ▸ Files ▸ Markers, default ON (`manifold.markers.remember`).
+
+- **Off:** a file opened while it is off starts with no markers and reads nothing from Markers/; its markers live in
+  memory while it is open, and nothing is written to Markers/ or the thumbnail cache (thumbnails are memory-only).
+- **Turning it off** deletes nothing stored, and stops writes at once, also for files already open.
+- **Turning it on** applies to files opened afterwards. A file already open while it was off keeps its session markers
+  unsaved: its stored markers were never read, and saving the session's over them would lose them.
+- **Delete All Stored Markers…** beside it, with a confirmation: removes Markers/ and the whole thumbnail cache, and clears
+  the markers in open windows (they are the same markers). No undo. Exported files are not touched.
 
 ---
 
@@ -712,6 +747,10 @@ All as recommended, with the choices named below.
 | D19 | One marker per frame (2026-11-15) | No two markers start on one frame: M, ⌥M and an In→Out span open the marker already there; the editor refuses a Time on another marker's frame; an import skips a different marker on an occupied frame and counts it (an identical one merges) |
 | D20 | Thumbnails (2026-11-15) | In the Markers window always; in the slot, a gear toggle, on by default (§4.4) |
 | D21 | Timecode fields (2026-11-15) | Time and Duration follow timecode entry's rules and reformat to full SMPTE on commit (§3.3) |
+| D23 | Thumbnail cache version and Regenerate (2026-11-15) | The cache version in the path, older versions purged at launch; Regenerate Thumbnails (gear, toolbar) and Regenerate Thumbnail (row menu) (§4.4) |
+| D24 | Remember markers between sessions (2026-11-15) | Settings, default on; off reads and writes nothing; Delete All Stored Markers… with a confirmation (§5.2) |
+| D25 | View ▸ Show Markers (2026-11-15) | Global, remembered, ⇧⌥⌘M; hides, deletes nothing; adding a marker turns it on (§4.5) |
+| D26 | Toolbar wording (2026-11-15) | Text buttons Import…, Export…; filter icon "Filter by Colour"; gear "Import Markers…", "Export Markers…" (§4.6) |
 | D22 | Edit Marker (2026-11-15) | Mark ▸ Edit Marker…, ⇧M: the marker starting at the playhead, else the nearest one starting before it. Show Marker List ⌃⌘M (⇧⌘M is a Terminal Service on the build Mac) |
 
 ---
@@ -811,4 +850,29 @@ list (they hold the duplicates the old build made; the new build does not merge 
 6. **Clicks.** In the slot and the window: click a row, the playhead jumps; click it again after moving the playhead, it
    jumps again; ⌘-click two more, no jump, three selected; ⇧-click a range; ⌫ deletes them (⌘Z restores); double-click
    opens the editor.
+
+## 13. Follow-ups (Robbie, 2026-11-15)
+
+Built: D23–D26 above. Unit tests added (`MarkerFollowUpTests`, 4): the cache path holds the version and an older build's
+folders (unversioned, and `v1`) are never read and are purged; Regenerate removes only the chosen frames and Delete All
+removes everything; `MarkerStore.deleteAll` counts and removes; both preferences default on. `ShortcutRegistryTests`:
+Show Markers counted (30 keyed menu actions). Whole package: 1059 test cases, 0 failures. Profile build: succeeded, no new
+warnings. Not launched.
+
+Attended steps (guarded launch as §8.2; on `mk-2398-tc.mov` with a few markers):
+
+1. **Regenerate.** Slot gear ▸ Regenerate Thumbnails: the slot's thumbnails go grey and come back. Window toolbar ▸
+   Regenerate Thumbnails: the same. Right-click one row ▸ Regenerate Thumbnail: only that one. Press Play first and
+   regenerate: nothing is remade until you pause. `ls ~/Library/Caches/com.graviton.manifold/MarkerThumbnails/`: only
+   `v2/`.
+2. **Remember off.** Settings ▸ Files ▸ Markers: turn Remember off. Open `mk-25-notc.mp4`, add two markers: no new file in
+   `~/Library/Application Support/com.graviton.manifold/Markers/`, nothing new under `MarkerThumbnails/v2/`. Close and
+   reopen it: no markers. Reopen `mk-2398-tc.mov`: it starts empty (stored ones not read). Turn Remember on, reopen
+   `mk-2398-tc.mov`: its stored markers are back.
+3. **Delete All Stored Markers…** Cancel first: nothing changes. Then confirm: Markers/ and MarkerThumbnails/ are gone, and
+   the open windows' lists are empty.
+4. **Show Markers.** View ▸ Show Markers (⇧⌥⌘M) off: flags gone, slot and window say "Markers are hidden…". Quit by PID
+   and relaunch: still off. Press M: a marker is added and Show Markers is on again (check the View menu tick).
+5. **Wording.** Window toolbar: a filter icon with the tooltip "Filter by Colour", then "Regenerate Thumbnails",
+   "Import…", "Export…" as text. Slot gear: "Import Markers…", "Export Markers…".
 

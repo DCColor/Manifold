@@ -108,3 +108,63 @@ final class MarkerEditingRulesTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(fp).path))
     }
 }
+
+/// Follow-ups (Robbie, 2026-11-15): the cache version, regenerate, delete all, the two preferences.
+final class MarkerFollowUpTests: XCTestCase {
+    func tempDir() -> URL {
+        let u = FileManager.default.temporaryDirectory.appendingPathComponent("mk-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: u) }
+        return u
+    }
+
+    func testThumbnailCacheIsVersionedAndOldVersionsArePurged() throws {
+        let dir = tempDir()
+        let cache = MarkerThumbnailCache(directory: dir)
+        let fp = String(repeating: "ab", count: 32)
+        // What the unversioned first build left: MarkerThumbnails/<fingerprint>/10.jpg.
+        let old = dir.appendingPathComponent(fp)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        try Data([9]).write(to: old.appendingPathComponent("10.jpg"))
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("v1"), withIntermediateDirectories: true)
+        XCTAssertNil(cache.read(fingerprint: fp, frame: 10))          // never read from an older build
+        XCTAssertTrue(cache.url(fingerprint: fp, frame: 10)!.path.contains("/v\(MarkerThumbnailCache.version)/"))
+        cache.write(Data([1]), fingerprint: fp, frame: 10)
+        cache.purgeOtherVersions()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("v1").path))
+        XCTAssertEqual(cache.read(fingerprint: fp, frame: 10), Data([1]))
+    }
+
+    func testRegenerateRemovesOnlyTheChosenFramesAndDeleteAllRemovesEverything() {
+        let cache = MarkerThumbnailCache(directory: tempDir())
+        let fp = String(repeating: "cd", count: 32)
+        for f in [1, 2, 3] { cache.write(Data([UInt8(f)]), fingerprint: fp, frame: f) }
+        cache.remove([2], fingerprint: fp)
+        XCTAssertNotNil(cache.read(fingerprint: fp, frame: 1))
+        XCTAssertNil(cache.read(fingerprint: fp, frame: 2))
+        cache.deleteAll()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cache.directory.path))
+    }
+
+    func testStoreDeleteAll() throws {
+        let store = MarkerStore(directory: tempDir())
+        for fp in ["aa", "bb"].map({ String(repeating: $0, count: 32) }) {
+            try store.save(MarkerDocument(fingerprint: fp, markers: [Marker(frame: 1)]))
+        }
+        XCTAssertEqual(store.deleteAll(), 2)
+        XCTAssertNil(try store.load(fingerprint: String(repeating: "aa", count: 32)))
+        XCTAssertEqual(store.deleteAll(), 0)
+    }
+
+    func testPreferencesDefaultOn() throws {
+        let suite = "markers-prefs-\(UUID().uuidString)"
+        let d = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { d.removePersistentDomain(forName: suite) }
+        XCTAssertTrue(MarkerSettings.remember(d))
+        XCTAssertTrue(MarkerSettings.show(d))
+        d.set(false, forKey: MarkerSettings.rememberKey)
+        d.set(false, forKey: MarkerSettings.showKey)
+        XCTAssertFalse(MarkerSettings.remember(d))
+        XCTAssertFalse(MarkerSettings.show(d))
+    }
+}

@@ -224,6 +224,8 @@ struct MarkerEditorHost: View {
 /// flags follow every change; everything else is `TransportScrubber`'s, unchanged.
 struct MarkedTransportScrubber: View {
     @ObservedObject var markers: MarkerModel
+    /// View ▸ Show Markers: off hides the flags, deletes nothing.
+    @AppStorage(MarkerSettings.showKey) private var showMarkers = true
     var value: Double
     var range: ClosedRange<Double>
     var onChange: (Double) -> Void
@@ -232,13 +234,13 @@ struct MarkedTransportScrubber: View {
     var body: some View {
         TransportScrubber(value: value, range: range, onChange: onChange, onEditingChanged: onEditingChanged,
                           markers: trackMarkers, onMarkerClicked: { i in
-                              let shown = markers.isActive ? markers.markers : []
+                              let shown = showMarkers && markers.isActive ? markers.markers : []
                               if shown.indices.contains(i) { markers.go(to: shown[i]) }
                           })
     }
 
     private var trackMarkers: [TrackMarker] {
-        guard markers.isActive, let b = markers.basis, b.rate > 0 else { return [] }
+        guard showMarkers, markers.isActive, let b = markers.basis, b.rate > 0 else { return [] }
         return markers.markers.map { m in
             TrackMarker(start: Double(m.frame) / b.rate, end: Double(m.lastFrame + 1) / b.rate, color: m.color.nsColor,
                         label: m.name.isEmpty ? b.label(m.frame) : "\(b.label(m.frame))  \(m.name)")

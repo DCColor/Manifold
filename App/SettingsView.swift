@@ -15,6 +15,7 @@
 //
 
 import SwiftUI
+import Markers
 import AppKit
 import PlayheadSlider
 import ColorimetryModel
@@ -379,6 +380,9 @@ private struct FilesSettingsPane: View {
     @AppStorage("exportFolderBookmark") private var exportFolderBookmark = Data()
     /// Item 7 (Robbie, 2026-11-15): the same key as `Preferences.exportFramesPerClipFolder`. Default off.
     @AppStorage("exportFramesPerClipFolder") private var exportFramesPerClipFolder = false
+    /// Markers (docs/MARKERS_PLAN.md §5.2): default ON.
+    @AppStorage(MarkerSettings.rememberKey) private var rememberMarkers = true
+    @State private var confirmDeleteMarkers = false
 
     var body: some View {
         Form {
@@ -440,6 +444,21 @@ private struct FilesSettingsPane: View {
                      + "Share Frame is not affected.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            // Markers (docs/MARKERS_PLAN.md §5.2, Robbie 2026-11-15).
+            Section("Markers") {
+                Toggle("Remember markers between sessions", isOn: $rememberMarkers)
+                    .onChange(of: rememberMarkers) { _, on in NSLog("%@", MarkerLog.remember(on)) }
+                SettingsCaption("Off: a file's markers last only while it is open, and nothing is saved, not even thumbnails. "
+                                + "Turning this off deletes nothing already saved; turning it back on applies to files opened afterwards.")
+                Button("Delete All Stored Markers…") { confirmDeleteMarkers = true }
+                    .confirmationDialog("Delete all stored markers?", isPresented: $confirmDeleteMarkers) {
+                        Button("Delete All Stored Markers", role: .destructive) { MarkerModel.deleteAllStored() }
+                    } message: {
+                        Text("Every file's saved markers and their thumbnails are deleted, and the markers in open windows are cleared. "
+                             + "This cannot be undone. Exported EDL, CSV and text files are not touched.")
+                    }
             }
         }
     }

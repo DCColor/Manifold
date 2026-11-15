@@ -9,11 +9,16 @@
 
 import SwiftUI
 import ShortcutRegistry
+import Markers
 
 struct MarkCommands: Commands {
     @ObservedObject private var shortcuts = ShortcutCenter.shared.registry
 
     var body: some Commands {
+        // View ▸ Show Markers (⇧⌥⌘M): in the existing View menu (`.toolbar`, as RasterSizeCommands explains).
+        CommandGroup(after: .toolbar) {
+            ShowMarkersToggle(registry: shortcuts)
+        }
         CommandMenu("Mark") {
             ShortcutMenuItem(id: .addMarker, registry: shortcuts)
             ShortcutMenuItem(id: .addMarkerAndEdit, registry: shortcuts)
@@ -29,5 +34,17 @@ struct MarkCommands: Commands {
             Divider()
             ShowMarkerListMenuItem(registry: shortcuts)
         }
+    }
+}
+
+/// View ▸ Show Markers: app-wide and remembered (`MarkerSettings.showKey`). Off hides the timeline flags and the Markers
+/// slot's and window's contents; nothing is deleted, and adding a marker turns it back on (`MarkerModel.revealMarkers`).
+private struct ShowMarkersToggle: View {
+    @ObservedObject var registry: ShortcutRegistry
+    @AppStorage(MarkerSettings.showKey) private var showMarkers = true
+
+    var body: some View {
+        Toggle(registry.definition(.showMarkers).title, isOn: $showMarkers)
+            .registryShortcut(.showMarkers, registry)
     }
 }

@@ -41,4 +41,10 @@ public enum MarkerLog {
     }
 
     public static func importFailed() -> String { "[MARKERS] import edl: not a marker EDL" }
+
+    public static func regenerate(thumbnails: Int) -> String { "[MARKERS] regenerate thumbnails n=\(thumbnails)" }
+
+    public static func deletedAllStored(documents: Int) -> String { "[MARKERS] deleted all stored markers: documents=\(documents)" }
+
+    public static func remember(_ on: Bool) -> String { "[MARKERS] remember between sessions: \(on ? "on" : "off")" }
 }

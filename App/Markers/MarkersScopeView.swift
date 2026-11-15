@@ -74,7 +74,13 @@ struct MarkersScopeView: View {
     private var gearContent: some View {
         ScopeGearSectionHeader("Show", isFirst: true)
         Toggle("Thumbnails", isOn: $showThumbnails)
+        Button("Regenerate Thumbnails") { model.regenerateThumbnails() }
+            .disabled(!model.isActive || model.markers.isEmpty)
+            .help("Make this file's marker thumbnails again (not while playing)")
         MarkerColorFilter(model: model)
+        ScopeGearSectionHeader("Markers")
+        Button("Import Markers…") { model.presentImport() }.disabled(!model.isActive)
+        Button("Export Markers…") { model.presentExport() }.disabled(!model.isActive || model.markers.isEmpty)
         if let b = model.basis, !b.hasTimecode {
             ScopeGearSectionHeader("Start timecode")
             StartOverrideField(model: model, current: b.label(0))
@@ -137,6 +143,8 @@ struct MarkerListBody: View {
 
     @State private var selection: Set<UUID> = []
     @State private var anchor: UUID?
+    /// View ▸ Show Markers: off, the list says so and shows nothing; nothing is deleted.
+    @AppStorage(MarkerSettings.showKey) private var showMarkers = true
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -146,6 +154,7 @@ struct MarkerListBody: View {
         case .unavailable(let why): empty(why)
         case .ready:
             if !model.isActive { empty("Markers are for video files.") }
+            else if !showMarkers { empty(hiddenHint) }
             else if model.markers.isEmpty { empty(addHint) }
             else if model.visibleMarkers.isEmpty { empty("No markers in the colours chosen.") }
             else { list }
@@ -155,6 +164,11 @@ struct MarkerListBody: View {
     private var addHint: String {
         let key = ShortcutCenter.shared.registry.label(for: .addMarker) ?? "Mark ▸ Add Marker"
         return "No markers. Press \(key) to mark the frame on screen."
+    }
+
+    private var hiddenHint: String {
+        let key = ShortcutCenter.shared.registry.label(for: .showMarkers).map { " (\($0))" } ?? ""
+        return "Markers are hidden. View ▸ Show Markers\(key) shows them again."
     }
 
     private func empty(_ s: String) -> some View {
@@ -237,6 +251,9 @@ struct MarkerListBody: View {
         }
         Menu("Color") {
             ForEach(MarkerColor.allCases) { c in Button(c.name) { model.setColor(c, for: ids) } }
+        }
+        Button(ids.count == 1 ? "Regenerate Thumbnail" : "Regenerate \(ids.count) Thumbnails") {
+            model.regenerateThumbnails(ids)
         }
         Divider()
         Button(ids.count == 1 ? "Delete Marker" : "Delete \(ids.count) Markers") {

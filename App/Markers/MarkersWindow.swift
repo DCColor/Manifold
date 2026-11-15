@@ -74,29 +74,32 @@ private struct MarkersWindowContent: View {
         }
         .navigationTitle(model.fileName.isEmpty ? "Markers" : "Markers — \(model.fileName)")
         .toolbar {
+            // Text buttons, not icons (Robbie, 2026-11-15): the download and share glyphs read as Download and as Share
+            // Frame. The filter stays an icon.
             ToolbarItem {
                 Button { filterOpen.toggle() } label: {
-                    Label("Colours", systemImage: model.colorFilter.isEmpty
+                    Label("Filter by Colour", systemImage: model.colorFilter.isEmpty
                           ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
                 }
-                .help("Show only some colours")
+                .help("Filter by Colour")
                 .popover(isPresented: $filterOpen, arrowEdge: .bottom) {
                     MarkerColorFilter(model: model).padding(12)
                 }
             }
             ToolbarItem {
-                Button { MarkerFileIO.importEDL(into: model, window: deck.window) } label: {
-                    Label("Import", systemImage: "square.and.arrow.down")
-                }
-                .help("Import Markers… (a Resolve marker EDL) into this file")
-                .disabled(!model.isActive)
+                Button("Regenerate Thumbnails") { model.regenerateThumbnails() }
+                    .help("Make this file's marker thumbnails again (not while playing)")
+                    .disabled(!model.isActive || model.markers.isEmpty)
             }
             ToolbarItem {
-                Button { MarkerFileIO.export(from: model, window: deck.window) } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
-                }
-                .help("Export Markers… (Resolve EDL, CSV or text)")
-                .disabled(!model.isActive || model.markers.isEmpty)
+                Button("Import…") { model.presentImport() }
+                    .help("Import Markers… (a Resolve marker EDL) into this file")
+                    .disabled(!model.isActive)
+            }
+            ToolbarItem {
+                Button("Export…") { model.presentExport() }
+                    .help("Export Markers… (Resolve EDL, CSV or text)")
+                    .disabled(!model.isActive || model.markers.isEmpty)
             }
         }
     }

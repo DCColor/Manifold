@@ -85,7 +85,7 @@ public enum MenuKeyAudit {
         .markIn: "Mark", .markOut: "Mark",
         .clearInOut: "Mark",
         .loop: "View", .raster100: "View", .raster75: "View", .raster50: "View", .raster25: "View", .rasterFit: "View",
-        .inspector: "View", .fileName: "View", .alwaysShowControls: "View", .scopesTray: "View",
+        .inspector: "View", .fileName: "View", .alwaysShowControls: "View", .scopesTray: "View", .showMarkers: "View",
         .volumeUp: "View", .volumeDown: "View", .mute: "View",
         .displayOS: "Color", .displayReference: "Color", .displayBypass: "Color", .transformChain: "Color",
         .cycleInterpretation: "Color", .resetInterpretation: "Color",

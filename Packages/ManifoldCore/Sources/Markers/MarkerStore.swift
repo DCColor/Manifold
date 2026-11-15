@@ -43,6 +43,15 @@ public struct MarkerStore: Sendable {
         return try decoder.decode(MarkerDocument.self, from: data)
     }
 
+    /// Settings ▸ Delete All Stored Markers…: every stored document. Returns how many there were.
+    @discardableResult
+    public func deleteAll() -> Int {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        let n = names.filter { $0.hasSuffix(".json") }.count
+        try? FileManager.default.removeItem(at: directory)
+        return n
+    }
+
     public func save(_ doc: MarkerDocument) throws {
         let u = try url(for: doc.fingerprint)
         if doc.markers.isEmpty && doc.startOverride == nil {

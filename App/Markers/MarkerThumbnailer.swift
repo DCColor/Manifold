@@ -11,7 +11,10 @@
 //  NEVER BLOCKS PLAYBACK. One frame at a time, at utility priority, and nothing new is started while the file plays:
 //  the queue waits for a pause. The JPEG is made off the main thread.
 //
-//  CACHED in memory and in Caches (`MarkerThumbnailCache`, by fingerprint and frame), cleared with the markers.
+//  CACHED in memory and in Caches (`MarkerThumbnailCache`, by cache version, fingerprint and frame), cleared with the
+//  markers; older versions' folders are purged once per launch. With Remember markers between sessions OFF, memory only:
+//  nothing is read from or written to the disk cache. Regenerate (gear, toolbar, row menu) drops the chosen thumbnails
+//  from both and makes them again through the same queue, so never while playing.
 //  ⚠️ Pictures from the user's media: never logged.
 //
 
@@ -39,12 +42,22 @@ final class MarkerThumbnailer: ObservableObject {
     private var demand = 0
     private var token = UUID()
     private var playing: AnyCancellable?
+    /// The disk cache is used: the file's markers are remembered (`MarkerModel.persisting`), and the preference is still on.
+    private var persistDisk = false
+    private var usesDisk: Bool { persistDisk && MarkerSettings.remember() }
+    private static var purged = false
     private let cache = MarkerThumbnailCache.standard()
     private static let work = DispatchQueue(label: "manifold.markers.thumbnails", qos: .utility)
     nonisolated private static let context = CIContext(options: [.cacheIntermediates: false])
 
     /// A new file (or none): everything about the previous one is dropped and its decoder closed.
-    func reset(engine: FrameEngine?, fingerprint: String?) {
+    func reset(engine: FrameEngine?, fingerprint: String?, persist: Bool = false) {
+        if !Self.purged {
+            Self.purged = true
+            let c = cache
+            Self.work.async { c.purgeOtherVersions() }
+        }
+        persistDisk = persist
         token = UUID()
         producer?.close()
         producer = nil
@@ -64,8 +77,24 @@ final class MarkerThumbnailer: ObservableObject {
         wanted = frames
         images = images.filter { frames.contains($0.key) }
         failed.formIntersection(frames)
-        if let fp = fingerprint { let c = cache; Self.work.async { c.keepOnly(frames, fingerprint: fp) } }
+        if usesDisk, let fp = fingerprint { let c = cache; Self.work.async { c.keepOnly(frames, fingerprint: fp) } }
         pump()
+    }
+
+    /// Regenerate Thumbnail(s): drop these frames' thumbnails (all of this file's when nil) from memory and disk, and make
+    /// them again, off the main thread and never while playing (`pump`). Returns how many will be made.
+    @discardableResult
+    func regenerate(_ frames: Set<Int>? = nil) -> Int {
+        let chosen = (frames ?? wanted).intersection(wanted)
+        for f in chosen { images[f] = nil }
+        failed.subtract(chosen)
+        if let f = inFlight, chosen.contains(f) { token = UUID(); inFlight = nil }   // its result would be the old one
+        if let fp = fingerprint {
+            let c = cache
+            Self.work.async { c.remove(chosen, fingerprint: fp) }
+        }
+        pump()
+        return chosen.count
     }
 
     /// A view showing thumbnails appeared (true) or went (false). Nothing is made while nobody shows them.
@@ -79,9 +108,10 @@ final class MarkerThumbnailer: ObservableObject {
               let frame = wanted.subtracting(images.keys).subtracting(failed).min() else { return }
         inFlight = frame
         let t = token, c = cache
+        let disk = usesDisk
         Self.work.async { [weak self] in
             guard self != nil else { return }
-            let data = c.read(fingerprint: fp, frame: frame)
+            let data = disk ? c.read(fingerprint: fp, frame: frame) : nil
             let image = data.flatMap { NSImage(data: $0) }
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
@@ -102,7 +132,7 @@ final class MarkerThumbnailer: ObservableObject {
             producer.onReadyChanged = { [weak self] in MainActor.assumeIsolated { self?.pump() } }
             return
         }
-        let t = token, fp = fingerprint, c = cache
+        let t = token, fp = usesDisk ? fingerprint : nil, c = cache
         // The quarter-frame landing every typed seek uses (TransportKeyMonitor.commit).
         producer.decode(at: (Double(frame) + 0.25) / rate) { [weak self] scrub in
             MainActor.assumeIsolated {

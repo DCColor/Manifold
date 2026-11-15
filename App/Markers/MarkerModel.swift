@@ -60,7 +60,19 @@ final class MarkerModel: ObservableObject {
     private let store = MarkerStore.standard()
     private var noticeTask: Task<Void, Never>?
 
-    init(deck: WindowDeck) { self.deck = deck }
+    /// This file's markers are read from and written to the store: Remember markers between sessions was on when the
+    /// file opened (§5.2). Off, they live in memory for as long as the file is open. Saving also asks the preference
+    /// again, so turning it off stops writes at once; turning it on applies to files opened afterwards (an open file's
+    /// stored markers were never read, and saving its session markers over them would lose them).
+    private(set) var persisting = false
+
+    /// Every window's model, for Delete All Stored Markers….
+    private static let all = NSHashTable<MarkerModel>.weakObjects()
+
+    init(deck: WindowDeck) {
+        self.deck = deck
+        Self.all.add(self)
+    }
 
     // MARK: Wiring
 
@@ -97,11 +109,14 @@ final class MarkerModel: ObservableObject {
         state = .loading
         let token = loadToken
         let store = self.store
+        let remember = MarkerSettings.remember()
+        persisting = remember
         Task.detached(priority: .userInitiated) {
             let t0 = Date()
             let fp = FileFingerprint.compute(url: url)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            let result: Result<MarkerDocument?, Error>? = fp.map { fp in Result { try store.load(fingerprint: fp) } }
+            // Not remembering: nothing is read either; the session starts with no markers (§5.2).
+            let result: Result<MarkerDocument?, Error>? = fp.map { fp in remember ? Result { try store.load(fingerprint: fp) } : .success(nil) }
             await MainActor.run { [weak self] in
                 self?.finishLoad(token: token, url: url, fingerprint: fp, result: result, ms: ms)
             }
@@ -121,13 +136,15 @@ final class MarkerModel: ObservableObject {
             NSLog("%@", MarkerLog.unavailable(reason: .storeUnreadable))
         case .success(let stored):
             var d = stored ?? MarkerDocument(fingerprint: fingerprint)
-            d.lastPath = url.path
-            d.bookmark = try? url.bookmarkData()
+            if persisting {
+                d.lastPath = url.path
+                d.bookmark = try? url.bookmarkData()
+            }
             doc = d
             markers = d.sorted
             startOverride = d.startOverride
             state = .ready
-            thumbnails.reset(engine: engine, fingerprint: fingerprint)
+            thumbnails.reset(engine: engine, fingerprint: fingerprint, persist: persisting)
             syncThumbnails()
             NSLog("%@", MarkerLog.loaded(count: markers.count, fingerprintMs: ms))
             if let seen = d.startTimecodeSeen, let basis, basis.hasTimecode, seen != basis.label(0), !markers.isEmpty {
@@ -205,12 +222,19 @@ final class MarkerModel: ObservableObject {
             inPoint = nil
             outPoint = nil
         }
+        revealMarkers()
         if edit {
             editorIsNew = true
             editorMarker = draft
         } else {
             apply(markers + [draft], action: "Add Marker", log: .add)
         }
+    }
+
+    /// Adding a marker while View ▸ Show Markers is off turns it back on (Robbie, 2026-11-15): a marker you just made is
+    /// never invisible.
+    private func revealMarkers() {
+        if !MarkerSettings.show() { UserDefaults.standard.set(true, forKey: MarkerSettings.showKey) }
     }
 
     /// Mark ▸ Edit Marker… (⇧M): the marker starting at the playhead, else the nearest one starting before it.
@@ -334,8 +358,42 @@ final class MarkerModel: ObservableObject {
 
     func importMarkers(_ incoming: [Marker]) -> ResolveEDL.MergeResult {
         let r = ResolveEDL.merge(incoming, into: markers)
-        if !r.added.isEmpty { apply(markers + r.added, action: "Import Markers", log: .add) }
+        if !r.added.isEmpty {
+            revealMarkers()
+            apply(markers + r.added, action: "Import Markers", log: .add)
+        }
         return r
+    }
+
+    // MARK: Thumbnails, panels, delete all
+
+    /// Regenerate Thumbnails (gear, toolbar: nil = every marker) or Regenerate Thumbnail (row menu).
+    func regenerateThumbnails(_ ids: Set<UUID>? = nil) {
+        let frames = ids.map { ids in Set(markers.filter { ids.contains($0.id) }.map(\.frame)) }
+        let n = thumbnails.regenerate(frames)
+        NSLog("%@", MarkerLog.regenerate(thumbnails: n))
+    }
+
+    func presentImport() { MarkerFileIO.importEDL(into: self, window: deck?.window) }
+    func presentExport() { MarkerFileIO.export(from: self, window: deck?.window) }
+
+    /// Settings ▸ Delete All Stored Markers…: every stored document and every cached thumbnail, and the markers on screen
+    /// in every window, which are the same markers. No undo (the confirmation says so).
+    static func deleteAllStored() {
+        let n = MarkerStore.standard().deleteAll()
+        MarkerThumbnailCache.standard().deleteAll()
+        for model in all.allObjects { model.clearAfterDeleteAll() }
+        NSLog("%@", MarkerLog.deletedAllStored(documents: n))
+    }
+
+    private func clearAfterDeleteAll() {
+        if let um = deck?.window?.undoManager { um.removeAllActions(withTarget: self) }
+        markers = []
+        startOverride = nil
+        doc?.markers = []
+        doc?.startOverride = nil
+        editorMarker = nil
+        syncThumbnails()
     }
 
     // MARK: Changes, undo and save
@@ -361,6 +419,8 @@ final class MarkerModel: ObservableObject {
 
     private func save() {
         guard state == .ready, var d = doc else { return }
+        // Remember markers between sessions (§5.2): off when the file opened, or turned off since — nothing is written.
+        guard persisting, MarkerSettings.remember() else { doc?.markers = markers; doc?.startOverride = startOverride; return }
         d.markers = markers
         d.startOverride = startOverride
         if let b = basis, b.hasTimecode { d.startTimecodeSeen = b.label(0) }
