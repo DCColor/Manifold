@@ -168,3 +168,22 @@ final class MarkerFollowUpTests: XCTestCase {
         XCTAssertFalse(MarkerSettings.show(d))
     }
 }
+
+final class ThumbnailAttemptsTests: XCTestCase {
+    /// A failed decode is retried once, then shows "no preview"; Regenerate starts it again; frames are exact.
+    func testOneRetryThenNoPreview() {
+        var a = ThumbnailAttempts()
+        XCTAssertFalse(a.recordFailure(751))      // first failure: retried
+        XCTAssertFalse(a.gaveUp(751))
+        XCTAssertFalse(a.gaveUp(750))             // the frame beside it is its own
+        XCTAssertTrue(a.recordFailure(751))       // second: no preview
+        XCTAssertEqual(a.givenUp, [751])
+        a.reset([751])
+        XCTAssertFalse(a.gaveUp(751))
+        a.recordFailure(1); a.recordFailure(1); a.recordFailure(2); a.recordFailure(2)
+        a.keep([2])
+        XCTAssertEqual(a.givenUp, [2])
+        a.reset()
+        XCTAssertTrue(a.givenUp.isEmpty)
+    }
+}

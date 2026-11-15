@@ -60,6 +60,8 @@ let package = Package(
         // (docs/MARKERS_PLAN.md). Leaf targets so `swift test` reaches them; Markers is linked by the APP target.
         .library(name: "SMPTETimecode", targets: ["SMPTETimecode"]),
         .library(name: "Markers", targets: ["Markers"]),
+        // One exact frame of an AVFoundation file, for marker thumbnails (docs/MARKERS_PLAN.md §4.4). Linked by the APP target.
+        .library(name: "FrameGrab", targets: ["FrameGrab"]),
         // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
         // key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4).
         .library(name: "ShortcutRegistry", targets: ["ShortcutRegistry"]),
@@ -564,6 +566,24 @@ let package = Package(
             name: "SMPTETimecodeTests",
             dependencies: ["SMPTETimecode"],
             path: "Tests/SMPTETimecodeTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // The picture at one exact frame (AVAssetReader, never a toleranced seek): marker thumbnails, where the scrub
+        // producer's infinite-tolerance seek gave keyframes and blanks on long-GOP (docs/MARKERS_PLAN.md §4.4). AVFoundation
+        // only, so `swift test` can prove it on a long-GOP file the test writes.
+        .target(
+            name: "FrameGrab",
+            path: "Sources/FrameGrab",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FrameGrabTests",
+            dependencies: ["FrameGrab"],
+            path: "Tests/FrameGrabTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

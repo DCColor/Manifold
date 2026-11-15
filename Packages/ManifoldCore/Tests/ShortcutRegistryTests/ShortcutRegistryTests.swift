@@ -139,6 +139,21 @@ final class ShortcutRegistryTests: XCTestCase {
     }
 
     /// The keys the scheme took away are held by nothing outside the debug tiers.
+    /// View ▸ Show Markers ships with NO key (Robbie, 2026-11-15, replacing ⇧⌥⌘M the same day), stays assignable, and
+    /// the key it briefly had is free again.
+    func testShowMarkersHasNoDefaultKeyAndIsAssignable() {
+        let r = registry(debug: false)
+        let def = r.definition(.showMarkers)
+        XCTAssertNil(def.defaultChord)
+        XCTAssertNil(r.chord(for: .showMarkers))
+        XCTAssertTrue(def.rebindable)
+        let old = KeyChord.char("m", [.shift, .option, .command])
+        XCTAssertEqual(r.conflicts(for: old, scope: .app), [])
+        guard case .accepted = r.propose(old, for: .showMarkers) else { return XCTFail("assignable") }
+        XCTAssertTrue(r.assign(old, to: .showMarkers))
+        XCTAssertEqual(r.chord(for: .showMarkers), old)
+    }
+
     func testRemovedKeysAreFree() {
         let r = registry(debug: false)
         // Not I: freed from the inspector for Mark In, which holds it since 2026-11-15 (docs/MARKERS_PLAN.md D1).

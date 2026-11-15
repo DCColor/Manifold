@@ -212,6 +212,9 @@ targets:
       # The typed-timecode rules the marker editor shares with timecode entry (docs/MARKERS_PLAN.md §3.3).
       - package: ManifoldCore
         product: SMPTETimecode
+      # One exact frame of an AVFoundation file, for marker thumbnails (docs/MARKERS_PLAN.md §4.4).
+      - package: ManifoldCore
+        product: FrameGrab
       # Every shortcut's default, the user's overrides and the one key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4) — a leaf
       # target so `swift test` can drive the dispatcher with synthesized NSEvents. Used by App/Shortcuts and the menus.
       - package: ManifoldCore

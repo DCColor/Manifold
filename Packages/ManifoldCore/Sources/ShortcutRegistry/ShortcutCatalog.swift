@@ -309,10 +309,9 @@ public enum ShortcutCatalog {
               note: "Typed into a text field, N is a letter"),
         .init(.alwaysShowControls, "Always Show Controls", .view, .window, .menu, .char("t", optCmd)),
         // View ▸ Show Markers (Robbie, 2026-11-15): app-wide and remembered; hides the timeline flags and the marker lists'
-        // contents, deletes nothing. ⇧⌥⌘M, checked free that day: not in this catalog or `reserved` (⌥⌘M is Minimize All,
-        // ⌘M Minimize), no symbolic hotkey on the M key, and no Service can hold it (a Service key is ⌘ or ⇧⌘ only; ⇧⌘M
-        // is Terminal's). M for markers, as the other marker keys.
-        .init(.showMarkers, "Show Markers", .view, .app, .menu, .char("m", [.shift, .option, .command])),
+        // contents, deletes nothing. NO DEFAULT KEY (Robbie, 2026-11-15, replacing ⇧⌥⌘M the same day); assignable in the
+        // Keyboard Shortcuts window.
+        .init(.showMarkers, "Show Markers", .view, .app, .menu, nil),
         // ⌃⌘F rides along as a fixed alias: the system item reads fn-F now and no longer answers ⌃⌘F (§8, item 3).
         .init(.fullScreen, "Enter or Exit Full Screen", .view, .window, .key, .char("f", cmd),
               fixedChords: [.char("f", [.control, .command])],

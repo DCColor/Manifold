@@ -355,9 +355,11 @@ jump?), and the byte-identical Ball test would no longer hold.
 A small picture of each marker's frame: always in the Markers window (96 pt wide), and in the slot behind a gear toggle,
 "Thumbnails", on by default (32 pt high, so a tray still shows several rows).
 
-- **Source:** the file at the marker's frame, decoded by a decoder of its own (`FrameEngine.makeFrameProducer`, the same
-  route, pixel format and ProRes options as scrub, a separate instance, so its seeks never touch scrub or playback),
-  landing a quarter-frame in, as typed seeks do.
+- **Source: exactly the marker's frame** (fixed 2026-11-15, §14). An AVFoundation file is read by `ExactFrameGrabber`
+  (an AVAssetReader over that one frame, in the playback pixel format, taking the frame whose time is within a quarter
+  frame of the target); a libav file (MXF) by its own scrub-style producer (`FrameEngine.makeFrameProducer`). Either way
+  the delivered frame is checked against the frame asked for; a mismatch is a failure, never a picture. Never the scrub
+  or playback decoder. A failed decode is retried once, then the thumbnail reads "no preview" until Regenerate.
 - **Picture:** Core Image draws the frame from its own colour tags, HDR tone-mapped to SDR, into sRGB, 108 px high, JPEG.
   Not the display transform. **Not byte-for-byte Export Frame:** Export Frame reads the renderer's offscreen picture,
   which carries a tag override or an interpretation LUT; no off-main path renders an arbitrary frame through the
@@ -367,7 +369,7 @@ A small picture of each marker's frame: always in the Markers window (96 pt wide
 - **Cache:** in memory, and on disk only in
   `~/Library/Caches/com.graviton.manifold/MarkerThumbnails/v<version>/<fingerprint>/<frame>.jpg` (`MarkerThumbnailCache`).
   A deleted marker's thumbnail is removed; the folder goes with the file's last marker. **Versioned (D23):** the cache
-  version is in the path (now 2; the unversioned first build was 1), and every other folder under MarkerThumbnails is
+  version is in the path (now 3: 1 was the unversioned first build, 2 the next; both hold keyframe pictures on long-GOP), and every other folder under MarkerThumbnails is
   purged once per launch, so an older build's thumbnails are never shown. Bump `MarkerThumbnailCache.version` whenever
   the picture changes. Not used at all while Remember markers between sessions is off (§5.2).
 - **Regenerate (D23):** "Regenerate Thumbnails" in the slot's gear and the Markers window's toolbar (every marker of the
@@ -378,11 +380,11 @@ A small picture of each marker's frame: always in the Markers window (96 pt wide
 
 ### 4.5 View ▸ Show Markers (D25, built 2026-11-15)
 
-App-wide and remembered (`manifold.markers.show`, default on), ⇧⌥⌘M. Off hides the timeline flags and the Markers slot's
-and window's contents (each says "Markers are hidden. View ▸ Show Markers (⇧⌥⌘M) shows them again."); nothing is
+App-wide and remembered (`manifold.markers.show`, default on). **No default key** (Robbie, 2026-11-15, replacing ⇧⌥⌘M
+the same day); assignable in the Keyboard Shortcuts window. Off hides the timeline flags and the Markers slot's
+and window's contents (each says "Markers are hidden. View ▸ Show Markers shows them again.", with the key if one is assigned); nothing is
 deleted, and M, ⌥M, the menus and an import still work. Adding a marker (or importing) while hidden turns it back on.
-Key checks (2026-11-15): not in the catalog or `reserved` (⌥⌘M is Minimize All); no symbolic hotkey on M; a Service key
-is ⌘ or ⇧⌘ only (⇧⌘M is Terminal's), so none can hold ⇧⌥⌘M.
+(⇧⌥⌘M had passed the usual checks; it was removed by decision, not for a clash.)
 
 ### 4.6 Wording (D26)
 
@@ -749,7 +751,7 @@ All as recommended, with the choices named below.
 | D21 | Timecode fields (2026-11-15) | Time and Duration follow timecode entry's rules and reformat to full SMPTE on commit (§3.3) |
 | D23 | Thumbnail cache version and Regenerate (2026-11-15) | The cache version in the path, older versions purged at launch; Regenerate Thumbnails (gear, toolbar) and Regenerate Thumbnail (row menu) (§4.4) |
 | D24 | Remember markers between sessions (2026-11-15) | Settings, default on; off reads and writes nothing; Delete All Stored Markers… with a confirmation (§5.2) |
-| D25 | View ▸ Show Markers (2026-11-15) | Global, remembered, ⇧⌥⌘M; hides, deletes nothing; adding a marker turns it on (§4.5) |
+| D25 | View ▸ Show Markers (2026-11-15) | Global, remembered, **no default key** (assignable; ⇧⌥⌘M removed the same day); hides, deletes nothing; adding a marker turns it on (§4.5) |
 | D26 | Toolbar wording (2026-11-15) | Text buttons Import…, Export…; filter icon "Filter by Colour"; gear "Import Markers…", "Export Markers…" (§4.6) |
 | D22 | Edit Marker (2026-11-15) | Mark ▸ Edit Marker…, ⇧M: the marker starting at the playhead, else the nearest one starting before it. Show Marker List ⌃⌘M (⇧⌘M is a Terminal Service on the build Mac) |
 
@@ -871,8 +873,68 @@ Attended steps (guarded launch as §8.2; on `mk-2398-tc.mov` with a few markers)
    `mk-2398-tc.mov`: its stored markers are back.
 3. **Delete All Stored Markers…** Cancel first: nothing changes. Then confirm: Markers/ and MarkerThumbnails/ are gone, and
    the open windows' lists are empty.
-4. **Show Markers.** View ▸ Show Markers (⇧⌥⌘M) off: flags gone, slot and window say "Markers are hidden…". Quit by PID
+4. **Show Markers.** View ▸ Show Markers off (no default key since §14): flags gone, slot and window say "Markers are hidden…". Quit by PID
    and relaunch: still off. Press M: a marker is added and Show Markers is on again (check the View menu tick).
 5. **Wording.** Window toolbar: a filter icon with the tooltip "Filter by Colour", then "Regenerate Thumbnails",
    "Import…", "Export…" as text. Slot gear: "Import Markers…", "Export Markers…".
+
+## 14. Attended results and the adjacent-frame thumbnail bug (Robbie, 2026-11-15)
+
+### 14.1 Results
+
+| Step | Result |
+|---|---|
+| M1 / M4 (Resolve round trip) | **Passed** on 23.976 and 29.97 DF, multi-line notes and unusual characters intact |
+| M2 (CSV, text) | **Passed**: the CSV opens correctly in Excel and Numbers; the plain text is correct |
+| M5 (drop-frame) | **Passed**: 01:01:00;00 is refused and corrected to ;02 on the DF `.mov` and the MXF |
+| M6 (no timecode) | Markers count from 00:00:00:00 on the no-timecode file |
+| M7 (storage) | Moving the file keeps its markers |
+| M9 (timeline strip) | Flags show with the Ball playhead |
+| Thumbnails | Blank early-frame thumbnails cleared after Clear All: most likely the first build's cache. Not pursued unless it recurs. **Bug**, below |
+
+### 14.2 The bug: a marker one frame after another stayed blank
+
+On `mk-25-notc.mp4` (H.264, 25 fps), markers at 00:00:06:08, 00:00:30:00, 00:00:30:01 and 00:00:52:21: only
+00:00:30:01 stayed blank, and Regenerate did not fix it.
+
+**Cause: the decoder, not the cache.** The cache, the de-duplication and the queue are all keyed by the exact frame. The
+thumbnails were decoded by a copy of the SCRUB producer, `AVPlayerScrubProducer`, which seeks with infinite tolerance on
+purpose (scrub speed) and so lands on the nearest SYNC SAMPLE on long-GOP. The fixture's keyframes are at 0, 250, 500,
+750, 1000 and 1250 (read from the bitstream). 00:00:30:00 is frame 750, a keyframe: right picture. 00:00:30:01 is frame
+751: the seek snapped back to 750, which that producer had just delivered, so it answered nil ("already on screen"); the
+thumbnailer marked the frame failed and never tried again, and Regenerate repeated the same seek. **Worse, and silent:**
+00:00:06:08 (frame 158) and 00:00:52:21 (frame 1321) showed the pictures of keyframes near them, because nothing checked
+which frame came back. On all-intra files (ProRes, DNx) every frame is a sync sample, which is why the other fixtures
+looked right.
+
+**Fix:**
+- `ExactFrameGrabber` (new leaf target `FrameGrab`): an AVAssetReader over the one frame. A second trap turned up while
+  testing it: a time-ranged reader also vends the previous frame with its time clipped to the range's start (at 25 fps,
+  frame 4 came back stamped 0.18 s, which rounds to frame 5), so the grabber takes the frame closest to the target, within
+  a quarter frame, and fails otherwise.
+- MXF keeps its libav producer, now checked for the frame it delivers.
+- One retry, then "no preview" (`ThumbnailAttempts`); Regenerate resets it.
+- Cache version 3, so no keyframe picture cached by versions 1 or 2 is ever shown.
+- Checked on the real fixture with the grabber: frames 750, 751, 158 and 1321 each show their own burned-in number.
+
+**Tests:** `ExactFrameGrabberTests` writes a long-GOP H.264 file (keyframe interval 50, B-frames allowed, fewer than one
+frame in eight a keyframe) at 25 and at 23.976, each frame's index drawn as ten bars, and grabs two consecutive
+non-keyframes mid-GOP, a keyframe and the frame after it, the frame before a keyframe, and both ends: every picture is
+the frame asked for. `ThumbnailAttemptsTests`: one retry, then no preview; adjacent frames are separate; Regenerate
+resets. Whole package: 1063 test cases, 0 failures.
+
+### 14.3 Show Markers
+
+No default key (§4.5). `testShowMarkersHasNoDefaultKeyAndIsAssignable`: no chord, rebindable, ⇧⌥⌘M free and assignable.
+
+### 14.4 Attended steps
+
+1. **Adjacent frames.** Open `mk-25-notc.mp4` with its four markers (00:00:06:08, 00:00:30:00, 00:00:30:01, 00:00:52:21)
+   in the Markers window: each thumbnail shows its own burned-in "F n" (158, 750, 751, 1321). Add markers on 00:00:12:00
+   and 00:00:12:01 (two non-keyframes): both show their own numbers. Same on `mk-2398-notc.mp4` (23.976 H.264).
+2. **Old cache.** `ls ~/Library/Caches/com.graviton.manifold/MarkerThumbnails/`: only `v3/`.
+3. **No preview.** Not reachable by hand on a good file; if any thumbnail ever reads "no preview", Regenerate Thumbnail
+   on that row and note whether it comes back.
+4. **MXF.** `mk-2997df-tc.mxf`: two markers one frame apart; each thumbnail shows its own number.
+5. **Show Markers.** View ▸ Show Markers shows no key; it still toggles. Assign one in Keyboard Shortcuts: it works.
 

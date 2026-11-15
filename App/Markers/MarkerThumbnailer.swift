@@ -1,9 +1,16 @@
 //
 //  MarkerThumbnailer.swift — a small picture of each marker's frame (docs/MARKERS_PLAN.md §4.4, Robbie 2026-11-15).
 //
-//  WHERE THE PICTURE COMES FROM. The file, at the marker's frame, decoded by a decoder of its OWN
-//  (`FrameEngine.makeFrameProducer`: the same route and pixel format as scrub, a separate instance, so its seeks never
-//  disturb scrub or playback). The frame is drawn by Core Image from its own colour tags, HDR tone-mapped to SDR, into
+//  WHERE THE PICTURE COMES FROM. The file, at EXACTLY the marker's frame, decoded by a decoder of its own, never the
+//  scrub's or playback's. An AVFoundation file is read by `ExactFrameGrabber` (an AVAssetReader over that one frame, in
+//  the playback pixel format); a libav file (MXF) by `FrameEngine.makeFrameProducer`. Either way the frame delivered is
+//  checked against the frame asked for, and a mismatch is a failure, never a picture.
+//
+//  ⚠️ THE FIRST BUILD USED THE SCRUB PRODUCER FOR EVERYTHING, and its infinite-tolerance seek lands on the nearest
+//  keyframe on long-GOP: on `mk-25-notc.mp4` (H.264, keyframes every 250 frames) the marker at frame 751 stayed blank (the
+//  seek snapped to 750, which that producer had just delivered, so it answered nil), and the markers at 158 and 1321
+//  showed keyframes' pictures (Robbie, 2026-11-15; docs/MARKERS_PLAN.md §14). A failed frame was never tried again.
+//  Now: one retry, then "no preview" (`ThumbnailAttempts`). The frame is drawn by Core Image from its own colour tags, HDR tone-mapped to SDR, into
 //  sRGB: the picture, not the display transform. ⚠️ NOT BYTE-FOR-BYTE EXPORT FRAME: Export Frame reads the renderer's
 //  offscreen picture, which carries a tag override or interpretation LUT; a thumbnail does not (no off-main path renders
 //  an arbitrary frame through the renderer). Pixel aspect and clean aperture are not applied either. It is a thumbnail.
@@ -23,11 +30,14 @@ import Combine
 import CoreImage
 import ManifoldCore
 import Markers
+import FrameGrab
 
 @MainActor
 final class MarkerThumbnailer: ObservableObject {
     /// Frame → thumbnail.
     @Published private(set) var images: [Int: NSImage] = [:]
+    /// Frames whose decode failed twice: they show "no preview" until Regenerate.
+    @Published private(set) var noPreview: Set<Int> = []
 
     /// Pixel height of a thumbnail (2× a 54 pt row).
     nonisolated static let pixelHeight: CGFloat = 108
@@ -36,7 +46,7 @@ final class MarkerThumbnailer: ObservableObject {
     private var fingerprint: String?
     private var rate: Double = 0
     private var wanted: Set<Int> = []
-    private var failed: Set<Int> = []
+    private var attempts = ThumbnailAttempts()
     private var inFlight: Int?
     private var producer: ScrubFrameProducer?
     private var demand = 0
@@ -64,7 +74,8 @@ final class MarkerThumbnailer: ObservableObject {
         inFlight = nil
         images = [:]
         wanted = []
-        failed = []
+        attempts = ThumbnailAttempts()
+        noPreview = []
         self.fingerprint = fingerprint
         self.engine = engine
         playing = engine?.$isPlaying.removeDuplicates().receive(on: DispatchQueue.main)
@@ -76,7 +87,8 @@ final class MarkerThumbnailer: ObservableObject {
         self.rate = rate
         wanted = frames
         images = images.filter { frames.contains($0.key) }
-        failed.formIntersection(frames)
+        attempts.keep(frames)
+        noPreview.formIntersection(frames)
         if usesDisk, let fp = fingerprint { let c = cache; Self.work.async { c.keepOnly(frames, fingerprint: fp) } }
         pump()
     }
@@ -87,7 +99,8 @@ final class MarkerThumbnailer: ObservableObject {
     func regenerate(_ frames: Set<Int>? = nil) -> Int {
         let chosen = (frames ?? wanted).intersection(wanted)
         for f in chosen { images[f] = nil }
-        failed.subtract(chosen)
+        attempts.reset(chosen)
+        noPreview.subtract(chosen)
         if let f = inFlight, chosen.contains(f) { token = UUID(); inFlight = nil }   // its result would be the old one
         if let fp = fingerprint {
             let c = cache
@@ -105,7 +118,7 @@ final class MarkerThumbnailer: ObservableObject {
 
     private func pump() {
         guard demand > 0, inFlight == nil, let fp = fingerprint, rate > 0, let engine, !engine.isPlaying,
-              let frame = wanted.subtracting(images.keys).subtracting(failed).min() else { return }
+              let frame = wanted.subtracting(images.keys).subtracting(attempts.givenUp).min() else { return }
         inFlight = frame
         let t = token, c = cache
         let disk = usesDisk
@@ -123,36 +136,64 @@ final class MarkerThumbnailer: ObservableObject {
     }
 
     private func decode(_ frame: Int) {
-        guard let engine, !engine.isPlaying else { inFlight = nil; return }
+        guard let engine, !engine.isPlaying, let url = engine.currentURL, let libav = engine.frameRouteUsesLibav else {
+            inFlight = nil; return
+        }
+        let t = token, fp = usesDisk ? fingerprint : nil, c = cache, rate = self.rate
+        if !libav {
+            // AVFoundation: the exact frame, read on the work queue (blocking there, never on main).
+            let format = engine.decodePixelFormat
+            Self.work.async { [weak self] in
+                guard self != nil else { return }
+                let grabbed = try? ExactFrameGrabber.grab(url: url, index: frame, rate: rate, pixelFormat: format)
+                let jpeg = grabbed.flatMap { Self.jpeg(from: $0.pixelBuffer) }
+                self?.deliver(jpeg, frame: frame, token: t, fingerprint: fp, cache: c)
+            }
+            return
+        }
+        // libav (MXF): its own scrub-style producer, checked for the frame it delivers.
         if producer == nil { producer = engine.makeFrameProducer() }
-        guard let producer else { failed.insert(frame); inFlight = nil; return }
+        guard let producer else { fail(frame); return }
         guard producer.isReady else {
             // Opening: try again when it is ready.
             inFlight = nil
             producer.onReadyChanged = { [weak self] in MainActor.assumeIsolated { self?.pump() } }
             return
         }
-        let t = token, fp = usesDisk ? fingerprint : nil, c = cache
         // The quarter-frame landing every typed seek uses (TransportKeyMonitor.commit).
         producer.decode(at: (Double(frame) + 0.25) / rate) { [weak self] scrub in
             MainActor.assumeIsolated {
                 guard let self, t == self.token else { return }
+                // Nothing, or another frame than the one asked for: a failure, never a picture.
+                guard let scrub, ExactFrameGrabber.frameIndex(pts: scrub.pts, rate: rate) == frame else {
+                    self.fail(frame); return
+                }
                 // The ScrubFrame (Sendable) crosses to the work queue, not its bare CVPixelBuffer.
-                guard let scrub else { self.failed.insert(frame); self.inFlight = nil; self.pump(); return }
                 Self.work.async { [weak self] in
                     guard self != nil else { return }
-                    let jpeg = Self.jpeg(from: scrub.pixelBuffer)
-                    if let jpeg, let fp { c.write(jpeg, fingerprint: fp, frame: frame) }
-                    let image = jpeg.flatMap { NSImage(data: $0) }
-                    DispatchQueue.main.async { [weak self] in
-                        MainActor.assumeIsolated {
-                            guard let self, t == self.token else { return }
-                            if let image { self.finish(frame, image) } else { self.failed.insert(frame); self.inFlight = nil; self.pump() }
-                        }
-                    }
+                    self?.deliver(Self.jpeg(from: scrub.pixelBuffer), frame: frame, token: t, fingerprint: fp, cache: c)
                 }
             }
         }
+    }
+
+    /// On the work queue: cache the JPEG (when remembering) and hand the picture to main, or the failure.
+    nonisolated private func deliver(_ jpeg: Data?, frame: Int, token t: UUID, fingerprint fp: String?, cache c: MarkerThumbnailCache) {
+        if let jpeg, let fp { c.write(jpeg, fingerprint: fp, frame: frame) }
+        let image = jpeg.flatMap { NSImage(data: $0) }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, t == self.token else { return }
+                if let image { self.finish(frame, image) } else { self.fail(frame) }
+            }
+        }
+    }
+
+    /// A failed decode: tried once more, then "no preview" (`ThumbnailAttempts`).
+    private func fail(_ frame: Int) {
+        if attempts.recordFailure(frame) { noPreview.insert(frame) }
+        inFlight = nil
+        pump()
     }
 
     private func finish(_ frame: Int, _ image: NSImage) {

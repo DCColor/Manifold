@@ -19,8 +19,9 @@
 import Foundation
 
 public struct MarkerThumbnailCache: Sendable {
-    /// Bump when the thumbnail picture changes. 1 was the unversioned first build (2026-11-15).
-    public static let version = 2
+    /// Bump when the thumbnail picture changes. 1 was the unversioned first build (2026-11-15). 3: thumbnails are read
+    /// frame-exactly (`ExactFrameGrabber`); 1 and 2 held the NEAREST KEYFRAME's picture on long-GOP files.
+    public static let version = 3
 
     /// MarkerThumbnails itself; this version's files are in `versionDirectory`.
     public let directory: URL

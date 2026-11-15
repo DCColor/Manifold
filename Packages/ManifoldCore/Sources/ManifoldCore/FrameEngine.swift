@@ -2603,6 +2603,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The route the current scrub producer was built for, so `makeFrameProducer` builds the same kind.
     private var scrubRoute: (url: URL, useLibav: Bool)?
 
+    /// The current file decodes through libav (MXF, the container route), not AVFoundation. Nil with no file. Marker
+    /// thumbnails read an AVFoundation file frame-exactly themselves (`ExactFrameGrabber`) and use `makeFrameProducer`
+    /// only for libav files (docs/MARKERS_PLAN.md §4.4).
+    public var frameRouteUsesLibav: Bool? {
+        guard let r = scrubRoute, r.url == currentURL else { return nil }
+        return r.useLibav
+    }
+
+    /// The pixel format playback and scrub decode this file to (the file's chroma, Stage 3b S2).
+    public var decodePixelFormat: OSType { videoPixelFormat }
+
     /// A NEW decoder for frames out of band — marker thumbnails (docs/MARKERS_PLAN.md §4.4) — built exactly as the scrub
     /// producer is (same demuxer route, pixel format and ProRes options), but its own: its seeks never touch the scrub
     /// producer's or playback's. The caller owns it and must `close()` it. Nil with no file.

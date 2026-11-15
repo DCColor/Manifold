@@ -363,6 +363,10 @@ struct MarkerThumb: View {
         Group {
             if let image = thumbnails.images[frame] {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+            } else if thumbnails.noPreview.contains(frame) {
+                Rectangle().fill(Color.gray.opacity(0.18)).aspectRatio(16 / 9, contentMode: .fit)
+                    .overlay(Text("no preview").font(.system(size: max(7, height / 6))).foregroundStyle(.secondary))
+                    .help("This frame could not be decoded. Regenerate Thumbnail tries again.")
             } else {
                 Rectangle().fill(Color.gray.opacity(0.18)).aspectRatio(16 / 9, contentMode: .fit)
             }
