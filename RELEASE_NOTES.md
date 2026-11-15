@@ -7,9 +7,6 @@ changelog page. Format notes are at the bottom.
 
 ## 0.9.3
 
-Draft. The update dialog's notes: plain text, most consequential first. The dialog shows six and folds the
-rest behind "Show more".
-
 - SDI sound was about 2.5 frames late against its picture in 0.9.0 to 0.9.2. It is now in sync. Stream calibrations stay valid. If you set a stream's audio offset by ear against an SDI monitor, it will now play about 2.5 frames early: reset it.
 - Files with sound no longer repeat or skip a frame on SDI during long playback. With DeckLink output on, file playback now follows the card's own clock, as files without sound have since 0.9.2.
 - SDI sound stays locked to its picture, sample for sample, through Play, Pause, seeks, loops and output restarts.

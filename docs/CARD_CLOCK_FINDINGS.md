@@ -2288,8 +2288,8 @@ Not covered unattended: the card's look on a monitor (by eye on the FSI), the ou
   and `ao48-2398`, three in chain 30, f20 before). No correction rule in 0.9.3. **§10.24 decision 5 is closed this way.**
 - **The audio-only card, by eye (Robbie), over HDMI to his ATEM:** at 2160p23.98 (the ATEM down-converting) and at 1080p: correct.
   **Output restart with the file open:** correct. This is a by-eye check on the HDMI path through a switcher, not a reference
-  judgement and not the FSI over SDI. **Output started before the file was opened** (Robbie, by eye, 2026-11-14): with DeckLink output
-  already running, opening an audio-only file works as expected, in both directions (video file to audio-only and back). Still not
+  judgement and not the FSI over SDI. **Output already running when an audio-only file is opened into the window** (Robbie, by eye over
+  HDMI to the ATEM, 2026-11-14): correct, in both directions (video file to audio-only and back). Still not
   covered: interlaced modes.
 - **Fixtures:** the audio-only fixtures (`~/Code/_scratch/manifold-1c-wire/fixtures/ao*`) are kept until 0.9.3 ships, then deleted.
 - **Roadmap, after 0.9.3** (`docs/ROADMAP_IDEAS.md`, *Audio-only files: output-mode menu wording and memory*): word the disabled item
