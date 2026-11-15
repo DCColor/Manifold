@@ -11,10 +11,10 @@ changelog page. Format notes are at the bottom.
 - Files with sound no longer repeat or skip a frame on SDI during long playback. With DeckLink output on, file playback now follows the card's own clock, as files without sound have since 0.9.2.
 - SDI sound stays locked to its picture, sample for sample, through Play, Pause, seeks, loops and output restarts.
 - With DeckLink output on and sound on the Mac, the Mac's sound now stays locked to the SDI picture, through long playback and changes of output device. The window's picture runs ahead of both by about 0.1 s at 59.94 and 0.2 s at 23.98, the time a frame takes to reach SDI.
+- Audio-only files now play to SDI and HDMI, with the same card the window shows: name, format, channels, sample rate and length. Their sound follows the audio destination like a video file's, so with the destination set to SDI the Mac no longer plays it too. 44.1 kHz files are converted to 48 kHz for SDI.
 - SDI sound no longer goes silent for the rest of the session when the Mac's sound output changes during playback, for example when a screen-sharing app connects.
 - Starting DeckLink output no longer skips a frame on SDI shortly after it starts, and at 59.94 it no longer sometimes repeats a frame in the first seconds.
 - If SDI sound starts silent, Manifold now notices and restarts the output, a short break in picture and sound. This is rare, and seen when the same card is also capturing. If your DeckLink 8K Pro also captures, we recommend a connector mapping in Desktop Video Setup that gives output and capture separate sub-devices, such as "SDI 1 In or Out".
-- Audio-only files now play to SDI and HDMI, with the same card the window shows: name, format, channels, sample rate and length. Their sound follows the audio destination like a video file's, so with the destination set to SDI the Mac no longer plays it too. 44.1 kHz files are converted to 48 kHz for SDI.
 - Not tested with a genlocked DeckLink card (house reference). If you use reference and see a problem, let us know.
 
 ## 0.9.2
