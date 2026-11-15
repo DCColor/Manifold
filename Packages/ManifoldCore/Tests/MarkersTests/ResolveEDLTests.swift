@@ -207,6 +207,7 @@ final class ResolveEDLTests: XCTestCase {
         let c = Marker(frame: 11, name: "x", notes: "n")
         let r = ResolveEDL.merge([b, c, c], into: [a])
         XCTAssertEqual(r.added.map(\.frame), [11])
-        XCTAssertEqual(r.duplicates, 2)
+        XCTAssertEqual(r.identical, 2)   // b is a's twin; the second c is the first c's
+        XCTAssertEqual(r.occupied, 0)
     }
 }

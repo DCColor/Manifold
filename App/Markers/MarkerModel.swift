@@ -17,6 +17,7 @@ import AppKit
 import Combine
 import ManifoldCore
 import Markers
+import SMPTETimecode
 import UniformTypeIdentifiers
 
 @MainActor
@@ -47,8 +48,11 @@ final class MarkerModel: ObservableObject {
     /// Which colours the list shows. Empty = all.
     @Published var colorFilter: Set<MarkerColor> = []
 
+    /// Thumbnails of the markers' frames (§4.4), for the slot and the Markers window.
+    let thumbnails = MarkerThumbnailer()
+
     private weak var deck: WindowDeck?
-    private weak var engine: FrameEngine?
+    private(set) weak var engine: FrameEngine?
     private var doc: MarkerDocument?
     private var fileURL: URL?
     private var loadToken = UUID()
@@ -88,6 +92,7 @@ final class MarkerModel: ObservableObject {
         outPoint = nil
         editorMarker = nil
         notice = nil
+        thumbnails.reset(engine: engine, fingerprint: nil)
         guard let url, let engine, engine.mediaKind == .video else { state = .none; return }
         state = .loading
         let token = loadToken
@@ -122,6 +127,8 @@ final class MarkerModel: ObservableObject {
             markers = d.sorted
             startOverride = d.startOverride
             state = .ready
+            thumbnails.reset(engine: engine, fingerprint: fingerprint)
+            syncThumbnails()
             NSLog("%@", MarkerLog.loaded(count: markers.count, fingerprintMs: ms))
             if let seen = d.startTimecodeSeen, let basis, basis.hasTimecode, seen != basis.label(0), !markers.isEmpty {
                 show("This file’s start timecode now reads \(basis.label(0)); its markers were made at \(seen). They stay on the same frames.")
@@ -177,21 +184,26 @@ final class MarkerModel: ObservableObject {
 
     // MARK: Adding
 
-    /// M. On the frame on screen. With In and Out set, one marker from In to Out, and the marks are cleared (D4). M on
-    /// a frame where a marker already starts opens that marker instead of stacking a second one.
+    /// M and ⌥M. On the frame on screen; with In and Out set, one marker from In to Out, and the marks are cleared (D4).
+    /// ONE MARKER PER FRAME: if a marker already starts on that frame (the In frame, for a span), its editor opens instead
+    /// and nothing is added, whichever of M, ⌥M or the menu asked (`MarkerRules`). The In and Out are kept in that case,
+    /// for the editor's Set from In and Out.
+    ///
+    /// ⚠️ THE FIRST BUILD CHECKED THIS ON PLAIN M ONLY. ⌥M made a draft at the keypress and inserted it on Done without
+    /// asking, which is how the first attended run got two markers on 01:00:01:19 and on 01:00:04:03 (2026-11-15, the
+    /// store's `created` times against the log's `add` lines: §12).
     func addMarker(edit: Bool) {
         guard isActive, let frame = markFrame else { NSSound.beep(); return }
-        var draft: Marker
-        if let i = inPoint, let o = outPoint, o >= i {
-            draft = Marker(frame: i, duration: o - i + 1)
+        let span: (Int, Int)? = { if let i = inPoint, let o = outPoint, o >= i { return (i, o) } else { return nil } }()
+        let start = span?.0 ?? frame
+        if let existing = MarkerRules.occupant(of: start, in: markers) {
+            openEditor(existing)
+            return
+        }
+        let draft = span.map { Marker(frame: $0.0, duration: $0.1 - $0.0 + 1) } ?? Marker(frame: frame)
+        if span != nil {
             inPoint = nil
             outPoint = nil
-        } else {
-            if !edit, let existing = markers.first(where: { $0.frame == frame }) {
-                openEditor(existing)
-                return
-            }
-            draft = Marker(frame: frame)
         }
         if edit {
             editorIsNew = true
@@ -201,15 +213,31 @@ final class MarkerModel: ObservableObject {
         }
     }
 
+    /// Mark ▸ Edit Marker… (⇧M): the marker starting at the playhead, else the nearest one starting before it.
+    func editMarkerAtPlayhead() {
+        guard isActive, let f = engine?.currentFrame, let m = MarkerRules.markerToEdit(at: f, in: markers) else {
+            NSSound.beep(); return
+        }
+        openEditor(m)
+    }
+
     // MARK: Editing
 
+    /// The editor is a sheet on this marker's PLAYER window; from the Markers window that window is brought forward so
+    /// the sheet is seen.
     func openEditor(_ marker: Marker) {
         editorIsNew = false
         editorMarker = marker
+        if let w = deck?.window, !w.isKeyWindow { w.makeKeyAndOrderFront(nil) }
     }
 
-    /// The sheet's Save.
-    func commitEditor(_ edited: Marker) {
+    /// The sheet's Save. Returns why it cannot be saved (another marker starts on that frame), or nil when saved.
+    @discardableResult
+    func commitEditor(_ edited: Marker) -> String? {
+        if let other = MarkerRules.occupant(of: edited.frame, in: markers, excluding: edited.id) {
+            let at = basis?.label(other.frame) ?? "that frame"
+            return "A marker is already at \(at). One marker per frame."
+        }
         var m = edited
         m.modified = Date()
         if editorIsNew {
@@ -219,6 +247,7 @@ final class MarkerModel: ObservableObject {
         }
         editorMarker = nil
         editorIsNew = false
+        return nil
     }
 
     func cancelEditor() {
@@ -289,7 +318,9 @@ final class MarkerModel: ObservableObject {
         if trimmed.isEmpty || trimmed == "00:00:00:00" {
             new = nil
         } else {
-            guard let count = SMPTEValidation.nonDropCount(trimmed, nfr: b.nfr, rate: b.rate) else { return false }
+            // Typed as timecode entry is: "1000000" is 01:00:00:00, a pasted label works too.
+            guard let t = TypedTimecode(trimmed), !t.isRelative,
+                  let count = t.labelFrameCount(nfr: b.nfr, fps: b.rate, dropFrame: false) else { return false }
             new = TimecodeBasis(startFrame: count, nfr: b.nfr, rate: b.rate, dropFrame: false, hasTimecode: false).label(0)
         }
         startOverride = new
@@ -301,10 +332,10 @@ final class MarkerModel: ObservableObject {
 
     // MARK: Import (called by MarkerFileIO)
 
-    func importMarkers(_ incoming: [Marker]) -> (added: Int, duplicates: Int) {
+    func importMarkers(_ incoming: [Marker]) -> ResolveEDL.MergeResult {
         let r = ResolveEDL.merge(incoming, into: markers)
         if !r.added.isEmpty { apply(markers + r.added, action: "Import Markers", log: .add) }
-        return (r.added.count, r.duplicates)
+        return r
     }
 
     // MARK: Changes, undo and save
@@ -320,7 +351,12 @@ final class MarkerModel: ObservableObject {
             um.setActionName(action)
         }
         save()
+        syncThumbnails()
         NSLog("%@", MarkerLog.changed(count: markers.count, action: log))
+    }
+
+    private func syncThumbnails() {
+        thumbnails.sync(frames: Set(markers.map(\.frame)), rate: basis?.rate ?? 0)
     }
 
     private func save() {
@@ -343,12 +379,5 @@ final class MarkerModel: ObservableObject {
             guard !Task.isCancelled else { return }
             self?.notice = nil
         }
-    }
-}
-
-/// Typed start timecodes for the override: non-drop, any punctuation.
-enum SMPTEValidation {
-    static func nonDropCount(_ label: String, nfr: Int, rate: Double) -> Int? {
-        TimecodeBasis(startFrame: 0, nfr: nfr, rate: rate, dropFrame: false, hasTimecode: false).frame(label: label)
     }
 }

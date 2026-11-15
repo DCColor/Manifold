@@ -34,9 +34,9 @@ public enum MarkerLog {
 
     public static func exported(_ format: Format, count: Int) -> String { "[MARKERS] export \(format.rawValue) n=\(count)" }
 
-    public static func imported(added: Int, duplicates: Int, outside: Int, unknownColors: Int, shiftHours: Int,
-                                dropFrameMismatch: Bool) -> String {
-        "[MARKERS] import edl added=\(added) duplicates=\(duplicates) outside=\(outside) unknown-colours=\(unknownColors) "
+    public static func imported(added: Int, duplicates: Int, occupied: Int = 0, outside: Int, unknownColors: Int,
+                                shiftHours: Int, dropFrameMismatch: Bool) -> String {
+        "[MARKERS] import edl added=\(added) duplicates=\(duplicates) occupied=\(occupied) outside=\(outside) unknown-colours=\(unknownColors) "
             + "shift=\(shiftHours)h df-mismatch=\(dropFrameMismatch ? "yes" : "no")"
     }
 

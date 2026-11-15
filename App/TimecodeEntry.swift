@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import ManifoldCore
 import ShortcutRegistry
+import SMPTETimecode
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
 // TIMECODE ENTRY — type a position, land on it.
@@ -75,19 +76,11 @@ struct TimecodeEntry: Equatable {
     /// is the only reading that keeps "fill from the right" honest: if the frames field is where the
     /// last two digits land, then a two-digit number larger than the frame rate has to mean
     /// something, and "that many frames" is the only thing it can mean.
+    ///
+    /// The arithmetic is `SMPTETimecode.fillFromRight` (moved there 2026-11-15, unchanged), which the marker editor's Time
+    /// and Duration fields use too, so a typed "100" means the same thing in both (docs/MARKERS_PLAN.md §3.3).
     func fields(nfr: Int) -> (h: Int, m: Int, s: Int, f: Int) {
-        var value = 0
-        for d in digits { value = value * 10 + d }
-        // Split off the two-digit groups from the right: FF, SS, MM, then whatever is left is HH.
-        var f = value % 100; value /= 100
-        var s = value % 100; value /= 100
-        var m = value % 100; value /= 100
-        var h = value
-        guard nfr > 0 else { return (h, m, s, f) }
-        s += f / nfr;  f %= nfr
-        m += s / 60;   s %= 60
-        h += m / 60;   m %= 60
-        return (h, m, s, f)
+        SMPTETimecode.fillFromRight(digits: digits, nfr: nfr)
     }
 
     /// The entry read as a plain FRAME COUNT — no drop-frame adjustment and no origin.

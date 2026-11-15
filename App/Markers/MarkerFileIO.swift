@@ -154,11 +154,14 @@ enum MarkerFileIO {
             }
         }
         let result = model.importMarkers(placement.markers)
-        NSLog("%@", MarkerLog.imported(added: result.added, duplicates: result.duplicates, outside: placement.outside.count,
+        NSLog("%@", MarkerLog.imported(added: result.added.count, duplicates: result.identical, occupied: result.occupied,
+                                       outside: placement.outside.count,
                                        unknownColors: placement.unknownColors, shiftHours: shift,
                                        dropFrameMismatch: placement.dropFrameMismatch))
-        var lines = ["Imported \(result.added) marker\(result.added == 1 ? "" : "s")."]
-        if result.duplicates > 0 { lines.append("\(result.duplicates) already here, skipped.") }
+        let added = result.added.count
+        var lines = ["Imported \(added) marker\(added == 1 ? "" : "s")."]
+        if result.identical > 0 { lines.append("\(result.identical) already here, skipped.") }
+        if result.occupied > 0 { lines.append("\(result.occupied) skipped: frame already has a marker.") }
         if !placement.outside.isEmpty {
             let list = placement.outside.prefix(12).map { String(format: "%03d", $0) }.joined(separator: ", ")
             lines.append("\(placement.outside.count) outside this file, skipped (event\(placement.outside.count == 1 ? "" : "s") \(list)\(placement.outside.count > 12 ? ", …" : "")).")

@@ -13,40 +13,51 @@ import PlayheadSlider
 struct MarkerEditorSheet: View {
     @ObservedObject var model: MarkerModel
     @State private var draft: Marker
+    /// The committed values. The fields' text is what is being typed; it becomes these on commit (Tab, Return, leaving
+    /// the field) and is reformatted to full SMPTE.
+    @State private var start: Int
+    @State private var duration: Int
     @State private var startText: String
     @State private var durationText: String
     @State private var keywordsText: String
+    @State private var refusal: String?
     private let basis: TimecodeBasis
     private let isNew: Bool
-    @FocusState private var nameFocused: Bool
+    @FocusState private var focus: Field?
+
+    private enum Field: Hashable { case name, start, duration }
 
     init(model: MarkerModel, marker: Marker, basis: TimecodeBasis, isNew: Bool) {
         self.model = model
         self.basis = basis
         self.isNew = isNew
         _draft = State(initialValue: marker)
+        _start = State(initialValue: marker.frame)
+        _duration = State(initialValue: marker.duration)
         _startText = State(initialValue: basis.label(marker.frame))
         _durationText = State(initialValue: basis.durationLabel(marker.duration))
         _keywordsText = State(initialValue: marker.keywords.joined(separator: ", "))
     }
 
-    private var startFrame: Int? {
-        guard let f = basis.frame(label: startText), f <= model.lastFrame else { return nil }
+    // The typed text read by the transport's timecode-entry rules (`TimecodeBasis.typedFrame` / `typedDuration`):
+    // "100" is one second, "1" one frame, "+10" ten frames on. Relative entries count from the committed value.
+    private var typedStart: Int? {
+        guard let f = basis.typedFrame(startText, current: start), f >= 0, f <= model.lastFrame else { return nil }
         return f
     }
-    private var duration: Int? {
-        guard let d = basis.durationFrames(durationText), d >= 1 else { return nil }
+    private var typedDuration: Int? {
+        guard let d = basis.typedDuration(durationText, current: duration), d >= 1 else { return nil }
         return d
     }
-    private var endLabel: String {
-        guard let s = startFrame, let d = duration else { return "—" }
-        return basis.label(s + d - 1)
-    }
     private var endPastFile: Bool {
-        guard let s = startFrame, let d = duration else { return false }
+        guard let s = typedStart, let d = typedDuration else { return false }
         return s + d - 1 > model.lastFrame
     }
-    private var canSave: Bool { startFrame != nil && duration != nil && !endPastFile }
+    private var endLabel: String {
+        guard let s = typedStart, let d = typedDuration else { return "—" }
+        return basis.label(s + d - 1)
+    }
+    private var canSave: Bool { typedStart != nil && typedDuration != nil && !endPastFile }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -55,10 +66,11 @@ struct MarkerEditorSheet: View {
                 GridRow {
                     Text("Time").gridColumnAlignment(.trailing)
                     HStack(spacing: 14) {
-                        tcField($startText, invalid: startFrame == nil, help: "Start timecode")
+                        tcField($startText, field: .start, invalid: typedStart == nil,
+                                help: "As timecode entry: digits fill from the right (100 is 00:00:01:00); + or − for relative")
                         Text("Duration")
-                        tcField($durationText, invalid: duration == nil || endPastFile,
-                                help: "Length: a timecode (00:00:01:00 is one second) or a number of frames")
+                        tcField($durationText, field: .duration, invalid: typedDuration == nil || endPastFile,
+                                help: "As timecode entry: 100 is one second, 1 is one frame; + or − to lengthen or shorten")
                         Text("End").foregroundStyle(.secondary)
                         Text(endLabel).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
                     }
@@ -67,7 +79,7 @@ struct MarkerEditorSheet: View {
                     Text("Name")
                     TextField("", text: $draft.name)
                         .textFieldStyle(.roundedBorder)
-                        .focused($nameFocused)
+                        .focused($focus, equals: .name)
                 }
                 GridRow(alignment: .top) {
                     Text("Notes").padding(.top, 4)
@@ -91,12 +103,13 @@ struct MarkerEditorSheet: View {
             }
             if let i = model.inPoint, let o = model.outPoint, o >= i {
                 Button("Set Time and Duration from In and Out") {
-                    startText = basis.label(i)
-                    durationText = basis.durationLabel(o - i + 1)
+                    start = i; duration = o - i + 1
+                    startText = basis.label(i); durationText = basis.durationLabel(o - i + 1)
                 }
                 .help("In \(basis.label(i)), Out \(basis.label(o))")
             }
             if endPastFile { Text("The marker would end after the file’s last frame.").font(.caption).foregroundStyle(.red) }
+            if let refusal { Text(refusal).font(.caption).foregroundStyle(.red) }
             HStack {
                 if !isNew {
                     Button("Remove Marker", role: .destructive) {
@@ -114,26 +127,49 @@ struct MarkerEditorSheet: View {
         }
         .padding(18)
         .frame(width: 560)
-        .onAppear { nameFocused = true }
+        .onAppear { focus = .name }
+        // Leaving a timecode field commits it (Tab, a click elsewhere).
+        .onChange(of: focus) { old, _ in
+            if old == .start { commitStart() }
+            if old == .duration { commitDuration() }
+        }
+        .onChange(of: startText) { refusal = nil }
     }
 
-    private func tcField(_ text: Binding<String>, invalid: Bool, help: String) -> some View {
+    private func tcField(_ text: Binding<String>, field: Field, invalid: Bool, help: String) -> some View {
         TextField("", text: text)
             .font(.system(.body, design: .monospaced))
             .textFieldStyle(.roundedBorder)
             .frame(width: 112)
             .foregroundStyle(invalid ? Color.red : Color.primary)
+            .focused($focus, equals: field)
+            .onSubmit { field == .start ? commitStart() : commitDuration() }
             .help(help)
     }
 
+    /// The typed Time becomes the value and full SMPTE. Not a timecode: left as typed, in red.
+    private func commitStart() {
+        guard let f = typedStart else { return }
+        start = f
+        startText = basis.label(f)
+    }
+
+    private func commitDuration() {
+        guard let d = typedDuration else { return }
+        duration = d
+        durationText = basis.durationLabel(d)
+    }
+
     private func save() {
-        guard let s = startFrame, let d = duration, !endPastFile else { return }
+        // What is in the fields now, typed or committed: Return in a field reaches here too.
+        guard let s = typedStart, let d = typedDuration, !endPastFile else { return }
+        commitStart(); commitDuration()
         var m = draft
         m.frame = s
         m.duration = d
         m.name = Marker.singleLine(m.name)
         m.keywords = Marker.cleanKeywords(keywordsText.components(separatedBy: ","))
-        model.commitEditor(m)
+        refusal = model.commitEditor(m)
     }
 }
 

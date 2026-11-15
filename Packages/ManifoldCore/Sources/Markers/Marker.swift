@@ -109,7 +109,32 @@ public struct TimecodeBasis: Equatable, Sendable {
     }
 
     public func durationLabel(_ frames: Int) -> String { SMPTETimecode.durationLabel(frames: frames, nfr: nfr) }
-    public func durationFrames(_ label: String) -> Int? { SMPTETimecode.durationFrames(label: label, nfr: nfr) }
+
+    /// A typed Time field (the transport's rules, `TypedTimecode`): the file frame it names, relative entries counted from
+    /// `current`. Not bounded by the file's length: the caller refuses past the end. Nil if it is not a timecode.
+    public func typedFrame(_ text: String, current: Int) -> Int? {
+        guard let t = TypedTimecode(text) else { return nil }
+        switch t.sign {
+        case .plus: return current + t.plainFrameCount(nfr: nfr)
+        case .minus: return current - t.plainFrameCount(nfr: nfr)
+        case .absolute:
+            guard let count = t.labelFrameCount(nfr: nfr, fps: rate, dropFrame: dropFrame) else { return nil }
+            let day = framesPerDay
+            return day > 0 ? ((count - startFrame) % day + day) % day : count - startFrame
+        }
+    }
+
+    /// A typed Duration field: a length in frames ("100" is one second of frames, "1" one frame), relative entries
+    /// counted from `current`. Never drop-frame: a duration is not a position on a clock. Nil if it is not a timecode.
+    public func typedDuration(_ text: String, current: Int) -> Int? {
+        guard let t = TypedTimecode(text) else { return nil }
+        let n = t.plainFrameCount(nfr: nfr)
+        switch t.sign {
+        case .absolute: return n
+        case .plus: return current + n
+        case .minus: return current - n
+        }
+    }
 
     /// "23.976", "29.97", "25".
     public var rateLabel: String {
@@ -148,5 +173,21 @@ public struct MarkerDocument: Codable, Equatable, Sendable {
     /// Markers in time order (then by creation), the order every list and export uses.
     public var sorted: [Marker] {
         markers.sorted { ($0.frame, $0.created) < ($1.frame, $1.created) }
+    }
+}
+
+/// ONE MARKER PER FRAME (Robbie, 2026-11-15): no two markers start on the same frame. Every path that adds or moves a
+/// marker asks this first — Add Marker (M, ⌥M, and an In→Out span at its In frame) opens the marker already there, the
+/// editor refuses a Time on another marker's frame, and an import skips a marker landing on an occupied frame unless it
+/// is identical (`ResolveEDL.merge`).
+public enum MarkerRules {
+    /// The marker starting on `frame`, other than `excluding`.
+    public static func occupant(of frame: Int, in markers: [Marker], excluding: UUID? = nil) -> Marker? {
+        markers.first { $0.frame == frame && $0.id != excluding }
+    }
+
+    /// The marker Mark ▸ Edit Marker… opens: the one starting at the playhead, else the nearest one starting before it.
+    public static func markerToEdit(at playhead: Int, in markers: [Marker]) -> Marker? {
+        markers.filter { $0.frame <= playhead }.max { ($0.frame, $0.created) < ($1.frame, $1.created) }
     }
 }

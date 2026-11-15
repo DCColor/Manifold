@@ -515,8 +515,9 @@ final class KeyDispatchTests: XCTestCase {
             }
             checked += 1
         }
-        XCTAssertEqual(checked, 27, "every keyed, non-debug menu action (32, less the 5 with no key; Share Frame… keyed 2026-11-15; "
-                       + "Add Marker, Add Marker and Edit…, Mark In, Mark Out and Clear In and Out added 2026-11-15)")
+        XCTAssertEqual(checked, 29, "every keyed, non-debug menu action (34, less the 5 with no key; Share Frame… keyed 2026-11-15; "
+                       + "Add Marker, Add Marker and Edit…, Edit Marker…, Show Marker List, Mark In, Mark Out and Clear In "
+                       + "and Out added 2026-11-15)")
         XCTAssertEqual(registry.chord(for: .scopesTray), .char("s", [.command, .option]))
     }
 }

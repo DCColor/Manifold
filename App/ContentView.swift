@@ -1753,6 +1753,9 @@ struct ContentView: View {
             .nextMarker: DeckShortcut(enabled: { playhead() && deck.markers.isActive }) {
                 deck.markers.goToNeighbour(forward: true)
             },
+            .editMarker: DeckShortcut(enabled: { deck.markers.isActive && !deck.markers.markers.isEmpty }) {
+                deck.markers.editMarkerAtPlayhead()
+            },
             .markIn: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.markIn() },
             .markOut: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.markOut() },
             .clearInOut: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.clearInOut() },

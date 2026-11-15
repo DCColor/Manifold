@@ -209,6 +209,9 @@ targets:
       # content fingerprint and the store — a leaf target so `swift test` reaches all of it. Used by App/Markers.
       - package: ManifoldCore
         product: Markers
+      # The typed-timecode rules the marker editor shares with timecode entry (docs/MARKERS_PLAN.md §3.3).
+      - package: ManifoldCore
+        product: SMPTETimecode
       # Every shortcut's default, the user's overrides and the one key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4) — a leaf
       # target so `swift test` can drive the dispatcher with synthesized NSEvents. Used by App/Shortcuts and the menus.
       - package: ManifoldCore

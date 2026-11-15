@@ -406,6 +406,14 @@ struct ManifoldApp: App {
         }
         .commandsRemoved()
 
+        // Mark ▸ Show Marker List (⌃⌘M): the Markers window, following the key player window's file
+        // (docs/MARKERS_PLAN.md §4.1 (b)). Single-instance; choosing it again raises it.
+        Window("Markers", id: MarkersWindowScene.windowID) {
+            MarkersWindowView()
+        }
+        .defaultSize(width: 980, height: 420)
+        .commandsRemoved()
+
         // Help ▸ Sync and Color Guide. Single-instance, like Keyboard Shortcuts: choosing it again raises the window.
         Window(HelpGuide.syncAndColor.title, id: HelpGuide.syncAndColor.windowID) {
             HelpGuideView(guide: .syncAndColor)

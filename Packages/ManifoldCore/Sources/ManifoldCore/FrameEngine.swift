@@ -2600,7 +2600,24 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// necessary and not sufficient: the window that matters is between the decode STARTING and
     /// the pixels LANDING, which is precisely the window a load can slip into. So the check lives
     /// in the delivery closure below, one line before the hand-off.
+    /// The route the current scrub producer was built for, so `makeFrameProducer` builds the same kind.
+    private var scrubRoute: (url: URL, useLibav: Bool)?
+
+    /// A NEW decoder for frames out of band — marker thumbnails (docs/MARKERS_PLAN.md §4.4) — built exactly as the scrub
+    /// producer is (same demuxer route, pixel format and ProRes options), but its own: its seeks never touch the scrub
+    /// producer's or playback's. The caller owns it and must `close()` it. Nil with no file.
+    public func makeFrameProducer() -> ScrubFrameProducer? {
+        guard let route = scrubRoute, route.url == currentURL else { return nil }
+        return route.useLibav
+            ? LibavScrubProducer(url: route.url, pixelFormat: videoPixelFormat,
+                                 fileFormatDescription: libavFileFormatDescription,
+                                 proResVideoToolbox: proResVideoToolbox(for: route.url),
+                                 proResHeaderColor: proResHeaderColor(for: route.url))
+            : AVPlayerScrubProducer(url: route.url, pixelFormat: videoPixelFormat)
+    }
+
     private func installScrubProducer(for url: URL?, useLibav: Bool) {
+        scrubRoute = url.map { ($0, useLibav) }
         scrubCoalescer?.close()
         scrubCoalescer = nil
         // Bumped on teardown as well as on install, so a completion still in flight from the

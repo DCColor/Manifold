@@ -292,17 +292,27 @@ public enum ResolveEDL {
                          suggestedShiftHours: suggestion)
     }
 
-    /// Merge `incoming` into `existing`, skipping duplicates (same frame, name and notes; D9). Returns what was added.
-    public static func merge(_ incoming: [Marker], into existing: [Marker]) -> (added: [Marker], duplicates: Int) {
-        var added: [Marker] = []
-        var dupes = 0
+    /// What an import does to the window's markers (D9, and one marker per frame, Robbie 2026-11-15).
+    public struct MergeResult: Equatable, Sendable {
+        public var added: [Marker]
+        /// Same frame, name and notes as a marker already there: nothing to do.
+        public var identical: Int
+        /// The frame already has a different marker (or an earlier one in this import took it): skipped.
+        public var occupied: Int
+    }
+
+    /// Merge `incoming` into `existing`, one marker per start frame: an identical marker is merged (skipped silently, as
+    /// before); a different one on an occupied frame is skipped and counted. Within one import the first marker on a
+    /// frame wins.
+    public static func merge(_ incoming: [Marker], into existing: [Marker]) -> MergeResult {
+        var r = MergeResult(added: [], identical: 0, occupied: 0)
         for m in incoming {
-            if existing.contains(where: { $0.isDuplicate(of: m) }) || added.contains(where: { $0.isDuplicate(of: m) }) {
-                dupes += 1
+            if let there = MarkerRules.occupant(of: m.frame, in: existing + r.added) {
+                if there.isDuplicate(of: m) { r.identical += 1 } else { r.occupied += 1 }
             } else {
-                added.append(m)
+                r.added.append(m)
             }
         }
-        return (added, dupes)
+        return r
     }
 }

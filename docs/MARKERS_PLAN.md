@@ -1,8 +1,9 @@
 # Markers on files, with a Resolve round trip: plan
 
 Status: **v1 BUILT, NOT YET MEASURED IN THE APP** (2026-11-15). Plan written and decided the same day (§9); R0, R1 and R2
-done by Robbie (§0.5, §1); v1 built as §10 lists; fixtures generated (§8.0); the attended M-steps (§8.2) have not run.
-Not committed. Where a claim rests on a file, its path and line are given; where it rests on nothing measurable here it says
+done by Robbie (§0.5, §1); v1 built as §10 lists; fixtures generated (§8.0). First attended feedback the same day (§12):
+one marker per frame, the Markers window, thumbnails, transport-style timecode fields, Edit Marker, single-click jump;
+all built, not yet re-tested in the app. Not committed. Where a claim rests on a file, its path and line are given; where it rests on nothing measurable here it says
 **UNKNOWN** and names the step that settles it.
 
 Scope: **files only** for v1. Live streams come later (timecode on streams is not always present, `docs/ROADMAP_IDEAS.md:263`).
@@ -288,8 +289,14 @@ A sheet on the player window, laid out like Resolve's marker dialog: Name, Start
 (timecode, editable), End (read-only, derived), Notes (multi-line), Keywords (token field), Color (16 swatches, Resolve's
 names as tooltips and accessibility labels).
 
-- Typing a timecode in Start or Duration uses timecode entry's parser and rules, drop-frame labels included
-  (`TimecodeReader.parse`, `droppedFramesPerMinute`, `TimecodeReader.swift:30-60`).
+- **Time and Duration type exactly as timecode entry does (D21, 2026-11-15)**, through one shared copy of its arithmetic
+  (`SMPTETimecode.fillFromRight`, which `TimecodeEntry.fields` now calls; `TypedTimecode`, `TimecodeBasis.typedFrame` and
+  `typedDuration`): digits fill from the right ("100" is 00:00:01:00, "1" is one frame, "75" at 24 fps is 3 s 3 f), at
+  most eight; a leading "+" (or "=") or "−" makes it relative to the field's current value, as the transport's +/−
+  make an entry relative to the playhead; there is no "." in timecode entry, and a typed "." is read as a separator, as
+  ":" and ";" are, so a pasted label works. A drop-frame label that does not exist moves forward to the minute's first
+  frame, as in timecode entry. The field reformats to full SMPTE on Tab, Return or leaving it; Duration is always a
+  non-drop length. **The first build read a bare "100" in Duration as 100 frames and stored it so; fixed.**
 - **Duration by marking:** with In and Out set, M adds one marker spanning In → Out (duration = Out − In + 1) and clears
   them (D4). In the editor, "Set from In/Out".
 - Return saves, Esc cancels. The editor's text fields take every key: the dispatcher already gives typed keys to a text
@@ -312,15 +319,19 @@ it shows **timecode, colour, name, duration**; notes as a second line, truncated
 `App/ManifoldApp.swift:398`) that follows the **key player window's** file, says which file in its title, and shows full
 columns: timecode in, out, duration, colour, name, notes, keywords. Editing happens here or in the sheet.
 
-**Recommendation: both, (a) first.** The slot is where a reviewer looks while watching, and costs least (no new window,
-no "which window does it follow"). The window is where a list of 50 notes gets edited and read. If only one ships in
-v1, the slot (D7).
+**Built: both (D7 as changed 2026-11-15).** The window is Mark ▸ Show Marker List, ⌃⌘M (`MarkersWindow.swift`). It
+follows `DeckRegistry.keyDeck`, the last player window to become key, which stays put while the Markers window is in
+front, and is re-read whenever any window becomes key or closes. Its title is "Markers — <file name>", its toolbar holds
+the colour filter, Import and Export. A normal window, not always-on-top. Opening the editor from it brings that player
+window forward, because the editor is a sheet on the player window.
 
 ### 4.2 Behaviour of the list
 
 - Columns: timecode, colour, name, duration (both views); the window adds notes and keywords.
-- Single click selects; **double click** (or Return) jumps the playhead to the marker's frame (a single click jumping
-  would move the picture while you are selecting rows to delete). (D7)
+- **Click jumps** the playhead to the marker and selects it alone; **⌘-click** adds or removes it from the selection and
+  **⇧-click** selects a range, both without jumping; **double-click** opens the editor (D7, changed 2026-11-15). The rows
+  read the click themselves (modifiers and click count at mouse-up), so a click on an already-selected row jumps too, and
+  the jump does not wait out the double-click interval.
 - Edit: double-click the name/colour cell, or "Edit…" opens the sheet. Delete: ⌫ on the selection, with undo.
 - **Filter by colour:** a 16-swatch filter row, multi-select, plus a text filter on name/notes/keywords in the window.
 - Sorted by time, always.
@@ -338,6 +349,23 @@ Hover shows the name and timecode. Clicking a flag jumps to it. The track, its h
 
 Alternative: on the track itself, as Resolve's ruler does. Denser, but clicks near a marker become ambiguous (scrub or
 jump?), and the byte-identical Ball test would no longer hold.
+
+### 4.4 Thumbnails (D20, built 2026-11-15)
+
+A small picture of each marker's frame: always in the Markers window (96 pt wide), and in the slot behind a gear toggle,
+"Thumbnails", on by default (32 pt high, so a tray still shows several rows).
+
+- **Source:** the file at the marker's frame, decoded by a decoder of its own (`FrameEngine.makeFrameProducer`, the same
+  route, pixel format and ProRes options as scrub, a separate instance, so its seeks never touch scrub or playback),
+  landing a quarter-frame in, as typed seeks do.
+- **Picture:** Core Image draws the frame from its own colour tags, HDR tone-mapped to SDR, into sRGB, 108 px high, JPEG.
+  Not the display transform. **Not byte-for-byte Export Frame:** Export Frame reads the renderer's offscreen picture,
+  which carries a tag override or an interpretation LUT; no off-main path renders an arbitrary frame through the
+  renderer, so a thumbnail shows the file's own picture. Pixel aspect and clean aperture are not applied.
+- **Never blocks playback:** one frame at a time, utility priority, and nothing new starts while the file plays; the queue
+  resumes at the next pause. Made only while a view shows thumbnails.
+- **Cache:** in memory, and on disk only in `~/Library/Caches/com.graviton.manifold/MarkerThumbnails/<fingerprint>/<frame>.jpg`
+  (`MarkerThumbnailCache`). A deleted marker's thumbnail is removed; the folder goes with the file's last marker.
 
 ---
 
@@ -669,7 +697,7 @@ All as recommended, with the choices named below.
 | D4 | M with In and Out set | One duration marker from In to Out; the marks are cleared |
 | D5 | Playback while the editor is open | Continues |
 | D6 | Files without timecode | 00:00:00:00, plus a per-file marker start override; the readout is unchanged |
-| D7 | The list | Scope slot first, floating window after; double-click jumps |
+| D7 | The list | **Changed 2026-11-15:** scope slot AND the Markers window, both now (§4.1). Click jumps; ⌘-click and ⇧-click select without jumping; double-click opens the editor (§4.2) |
 | D8 | Menus | A top-level Mark menu; import and export in File |
 | D9 | Import | Merge, skip duplicates, one undo step |
 | D10 | The `@` line | **Omitted.** R2: Resolve imports it as the note's first line (§0.5) |
@@ -681,6 +709,10 @@ All as recommended, with the choices named below.
 | D16 | Audio-only files and stills | No markers in v1 |
 | D17 | Timecode gaps | The 24-hour wrap fixed now (built, §10); the edit-list case measured on a fixture before deciding |
 | D18 | Next tier | **Premiere first**, then Avid |
+| D19 | One marker per frame (2026-11-15) | No two markers start on one frame: M, ⌥M and an In→Out span open the marker already there; the editor refuses a Time on another marker's frame; an import skips a different marker on an occupied frame and counts it (an identical one merges) |
+| D20 | Thumbnails (2026-11-15) | In the Markers window always; in the slot, a gear toggle, on by default (§4.4) |
+| D21 | Timecode fields (2026-11-15) | Time and Duration follow timecode entry's rules and reformat to full SMPTE on commit (§3.3) |
+| D22 | Edit Marker (2026-11-15) | Mark ▸ Edit Marker…, ⇧M: the marker starting at the playhead, else the nearest one starting before it. Show Marker List ⌃⌘M (⇧⌘M is a Terminal Service on the build Mac) |
 
 ---
 
@@ -728,3 +760,55 @@ Not in v1: the floating Markers window (D7, after), Premiere/Avid/FCPXML, Send t
 4. Fixtures: `/opt/homebrew/bin/ffmpeg`, the Riedl build, run only (§8.0).
 
 Open after M1: whether Resolve's importer keeps é and emoji; if not, build the export warning.
+
+## 12. First attended feedback (Robbie, 2026-11-15)
+
+### 12.1 How the duplicates happened
+
+Two markers each on 01:00:01:19 (frame 43) and 01:00:04:03 (frame 99) of `HDR TEST.mov`. Read from the run log's
+`[MARKERS]` lines (counts only) and the stored document's frames and dates (no names or notes read out):
+
+| Marker | Frame | `created` (keypress) | inserted (`add` line) | Path |
+|---|---|---|---|---|
+| 1 | 43 | 21:52:33 | 21:52:33 | M |
+| 2 | 43 | 21:52:36 | 21:53:11 | **⌥M**: draft at the keypress, inserted on Done |
+| 3 | 99 | 21:53:24 | 21:53:24 | M |
+| 4 | 99 (duration 100) | 21:54:45 | 21:55:00 | **⌥M** |
+
+The "a marker starts here, so open it" check was on plain M only; ⌥M (Add Marker and Edit…), the In→Out span and the
+editor's Done inserted without asking. Markers 4 and 5 also show the Duration bug: "100" stored as 100 frames. No import
+ran in that session. Fixed by D19 (`MarkerRules`, every path) and D21.
+
+### 12.2 Unit tests added
+
+`MarkerEditingRulesTests` (8): "100" at 23.976, 25 and 29.97 DF in Time and Duration; Time against a 01:00:00:00 start and
+pasted labels; fill-from-right normalisation; relative entries; the drop-frame forward move; text that is not a timecode;
+one marker per frame and Edit Marker's choice; import skipping occupied frames and merging identical ones; the thumbnail
+cache's keys and clearing. `ShortcutRegistryTests`: Edit Marker and Show Marker List counted (29 keyed menu actions).
+Whole package: 1055 test cases, 0 failures.
+
+### 12.3 Attended steps for these six
+
+On `mk-2398-tc.mov` unless named; guarded launch as §8.2. Delete the old `HDR TEST.mov` markers first if you want a clean
+list (they hold the duplicates the old build made; the new build does not merge them).
+
+1. **One per frame.** Pause on a marked frame: M opens that marker; ⌥M opens it; Mark ▸ Add Marker opens it. Set In on a
+   marked frame and Out later, press M: the existing marker opens, In/Out stay. In the editor of another marker, type the
+   marked frame's Time and Done: "A marker is already at …", the sheet stays. Import an EDL with a different marker on an
+   occupied frame: "1 skipped: frame already has a marker".
+2. **Markers window.** Mark ▸ Show Marker List (⌃⌘M): the title names the file; columns thumbnail, In, Out, Duration,
+   Color, Name, Notes (wrapped), Keywords. Open a second player window with another fixture and click between the two:
+   the window follows.
+3. **Thumbnails.** In the window and the slot (gear ▸ Thumbnails on and off). Play the file with the window open:
+   playback is smooth and no new thumbnail appears until you pause. Check one HDR file (on the LG) and the MXF. Delete a
+   marker: its JPEG goes from `~/Library/Caches/com.graviton.manifold/MarkerThumbnails/<fingerprint>/`.
+4. **Timecode fields.** ⌥M, Duration "100", Tab: it reads 00:00:01:00 and End is a second on. Duration "1", Return: one
+   frame. Time "+10": ten frames later. Repeat Duration "100" on `mk-25-notc.mp4` and `mk-2997df-tc.mov` (25 and 30
+   frames). On the DF file type Time "1000000" then "1010000": the second lands on 01:01:00;02. In the transport,
+   type 100 ⏎: still one second on, unchanged.
+5. **Edit Marker.** Playhead on a marker, ⇧M: that marker. Playhead a few frames after it: ⇧M opens it too (the nearest
+   before). Before the first marker: a beep.
+6. **Clicks.** In the slot and the window: click a row, the playhead jumps; click it again after moving the playhead, it
+   jumps again; ⌘-click two more, no jump, three selected; ⇧-click a range; ⌫ deletes them (⌘Z restores); double-click
+   opens the editor.
+

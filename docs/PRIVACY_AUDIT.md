@@ -169,6 +169,9 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   the markers (names, notes, keywords: the user's content), the per-file start timecode override, and the media file's
   last path and a bookmark to it. Never in UserDefaults, never in Settings Transfer, never next to or inside the media.
   Removed when a file's last marker is deleted. Stays after uninstall until deleted.
+- **Marker thumbnails (2026-11-15, docs/MARKERS_PLAN.md §4.4):** `~/Library/Caches/com.graviton.manifold/MarkerThumbnails/
+  <fingerprint>/<frame>.jpg`: a small JPEG (108 px high) of each marker's frame, i.e. pictures from the user's media.
+  A cache: removed with its marker, the folder with a file's last marker; macOS may purge it. Never logged.
 - **`~/Library/Caches/com.graviton.manifold/Cache.db` (+ `-wal`, `-shm`, `fsCachedData`)** was the
   `URLSession.shared` disk cache.
   - At the audit it held:

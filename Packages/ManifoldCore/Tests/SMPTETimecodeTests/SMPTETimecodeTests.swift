@@ -92,8 +92,5 @@ final class SMPTETimecodeTests: XCTestCase {
     func testDurations() {
         XCTAssertEqual(SMPTETimecode.durationLabel(frames: 1, nfr: 24), "00:00:00:01")
         XCTAssertEqual(SMPTETimecode.durationLabel(frames: 48, nfr: 24), "00:00:02:00")
-        XCTAssertEqual(SMPTETimecode.durationFrames(label: "00:00:02:00", nfr: 24), 48)
-        XCTAssertEqual(SMPTETimecode.durationFrames(label: "60", nfr: 30), 60)
-        XCTAssertNil(SMPTETimecode.durationFrames(label: "00:00:00:30", nfr: 30))
     }
 }

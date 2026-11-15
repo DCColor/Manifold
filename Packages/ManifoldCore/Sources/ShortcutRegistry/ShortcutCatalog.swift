@@ -34,6 +34,8 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case addMarker = "mark.addMarker"
     case addMarkerAndEdit = "mark.addMarkerAndEdit"
     case deleteMarker = "mark.deleteMarker"
+    case editMarker = "mark.editMarker"
+    case showMarkerList = "mark.showMarkerList"
     case previousMarker = "mark.previousMarker"
     case nextMarker = "mark.nextMarker"
     case markIn = "mark.in"
@@ -270,6 +272,13 @@ public enum ShortcutCatalog {
         .init(.addMarkerAndEdit, "Add Marker and Edit…", .mark, .fileTransport, .menu, .char("m", [.option])),
         .init(.deleteMarker, "Delete Marker", .mark, .fileTransport, .menu, nil,
               note: "The marker at the playhead"),
+        // ⇧M (Robbie, 2026-11-15). Checked free that day against this catalog, `ShortcutRegistry.reserved`, the build Mac's
+        // symbolic hotkeys (none on the M key) and its 44 Services' key equivalents (a Service key always carries ⌘).
+        .init(.editMarker, "Edit Marker…", .mark, .fileTransport, .menu, .char("m", [.shift]),
+              note: "The marker at the playhead, else the nearest one before it"),
+        // ⌃⌘M, not ⇧⌘M: Terminal's Service "Open man Page in Terminal" holds ⇧⌘M on the build Mac (checked 2026-11-15;
+        // ⌥⌘M is Minimize All, ⌘M Minimize). ⌃⌘M: no Service, no symbolic hotkey, not reserved.
+        .init(.showMarkerList, "Show Marker List", .mark, .app, .menu, .char("m", [.control, .command])),
         .init(.previousMarker, "Previous Marker", .mark, .fileTransport, .key, .code(KeyCode.up, [.shift]), repeats: true),
         .init(.nextMarker, "Next Marker", .mark, .fileTransport, .key, .code(KeyCode.down, [.shift]), repeats: true),
         .init(.markIn, "Mark In", .mark, .fileTransport, .menu, .char("i")),
