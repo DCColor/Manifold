@@ -406,7 +406,8 @@ This section and §5.4 are **0.9.3 (B5)**. **Built 2026-11-14 on the card-clock 
 
 **Release prep (Robbie, 2026-11-14):** the card was checked by eye by Robbie over HDMI to his ATEM, at 2160p23.98 (the ATEM
 down-converting) and 1080p: correct. Output restart with the file open: correct. A by-eye check through a switcher, not a reference
-judgement. Still not covered: the output started before the file was opened, and interlaced modes. Appended edges at a Pause are
+judgement. Output started before the file was opened (Robbie, by eye): opening an audio-only file with DeckLink output already running
+works as expected, in both directions (video to audio-only and back). Still not covered: interlaced modes. Appended edges at a Pause are
 logged only for 0.9.3 (`docs/BUGS.md`, post-release). The audio-only fixtures (`~/Code/_scratch/manifold-1c-wire/fixtures/ao*`) are
 kept until 0.9.3 ships, then deleted. After 0.9.3 (`docs/ROADMAP_IDEAS.md`): the disabled menu item worded "Follow source — no video in
 this file", and the last output mode chosen for audio-only files remembered, if it is not already.

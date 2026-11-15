@@ -128,7 +128,45 @@ the pins, but reproducing them takes real time.
         play cycles with seeks and loop wraps, one launch each, alternating: a 59.94 file with sound to SDI (1080p59.94); a
         23.976 file with sound to Computer (1080p23.98); an audio-only 48 kHz WAV to SDI (1080p59.94); a file without sound
         (1080p59.94); then the first two again. Tools: `scripts/decklink-loopback/rc-soak.py`, `rc-soak-report.py`; chain
-        and logs in `~/Code/_scratch/manifold-rc-soak/`. Queued for 2026-11-14 23:00. **Result: pending.**
+        and logs in `~/Code/_scratch/manifold-rc-soak/`. Started early on Robbie's go: 2026-11-14 15:37–21:43, sha256
+        `250c0b5237466292…`, every block exit 0. **Result: met, with two named exceptions (Robbie, 2026-11-14): 0 freezes, 0
+        unrecovered events, 0 holds or skips beyond the expected cadence except (1) 1 hold, the known W7-5994 slip at
+        Computer, recovered; sound followed picture, and (2) 1 card drop of frame #0 at an output start, the known
+        start-time drop (both below).** The gate itself stays at 0 holds: any other kind of hold fails it. **Duration
+        (accepted, Robbie):** 6 h 07 min wall time, 5.60 h actual playing time, with the standard pause cycle (each
+        ~175 s cycle has its Pauses and seeks). 378 Plays, 378 seeks, 126 loop wraps, 941,043 card pulls while playing, 0
+        missed slots.
+        | Block | Freezes | Holds / skips | Renderer recoveries | Output starts; silent starts | SDI !! lines | Card late / dropped | Window late / dropped |
+        |---|---|---|---|---|---|---|---|
+        | 59.94 + sound, SDI (1) | 0 | 0 / 0 | 0 | 1 with sound; 0 | 12 appended edges | 0 / 0 | 17 / 7 of 201,069 |
+        | 23.976 + sound, Computer (1) | 0 | 0 / 0 | 0 | 1 with sound; 0 | none | 0 / 0 | 14 / 4 of 80,443 |
+        | WAV 48 kHz, SDI | 0 | 0 / 0 | 0 | 1 with sound; 0 | 9 appended edges | 0 / 0 | (no window picture) |
+        | No sound, SDI | 0 | 0 / 0 | 0 | 1; 0 | none | 0 / 0 | 16 / 6 of 201,312 |
+        | 59.94 + sound, SDI (2) | 0 | 0 / 0 | 0 | 1 with sound; 0 | 12 appended edges | 0 / 1 (frame 4, at output start) | 14 / 7 of 201,091 |
+        | 23.976 + sound, Computer (2) | 0 | **1** / 0 | 0 | 1 with sound; 0 | none | 0 / 0 | 9 / 3 of 80,447 |
+        | **Total** | **0** | **1 / 0** | **0** (0 attempts, 0 GAVE UP) | 6; **0** | 33 appended edges | 0 / 1 | 70 / 27 of 764,362 |
+        - **Exception 1, the hold: 1 hold, the known W7-5994 slip at Computer, recovered; sound followed picture**
+          (`rc-2398-cmp-2.log` line 112669, content 933.06 s). The card was handed pts 933.057125 twice
+          (slots 52149, 52150). Until then each frame was swapped in about 9 ms before its pull. The swap of 933.098833 came
+          55.9 ms after the one before, instead of 41.7 (about one 13.9 ms display tick late), 5 ms after the pull. The
+          picture took a new line (#63), and card lock moved the Mac's sound with it: `re-anchored to the SDI picture at its new
+          line #63 (a slip): it was +41.70 ms off` (1 in the run). Card late 0, dropped 0. This is the Computer slip of
+          `CARD_CLOCK_FINDINGS.md` §10.29 W7-5994 ("Stage 2 showed once in 2.5 h"), recovered by the slip write. It is the only
+          slip in the 6 blocks. Why the swap was late: UNKNOWN.
+        - **Exception 2, the card drop: frame #0 of an output start reported Dropped, the known start-time drop**
+          (`rc-5994-sdi-2.log`, the first completion after `StartScheduledPlayback`: `completion result 2 stream 0 done 0`,
+          then `DeckLink D3: !! Dropped at frame 4`, the index being refilled). A paused start: 4 preroll frames (#0–#3)
+          of the same paused picture, 3,840 audio samples prerolled, buffered 5; frames #1 onward completed (result 0), late
+          0 and no other drop in the block. Effect: the paused picture shows one frame later. Documented in `BUGS.md` "☐
+          OPEN — PRE-EXISTING … the first scheduled frame of an output start is now and then reported Dropped" (0.4 % of
+          532 starts, cause UNKNOWN, not fixed), `CARD_CLOCK_FINDINGS.md` §10.26 (`mid21`: "the known start-time drop of
+          frame 4") and §6 (3 of 48 sessions, "each frame 4, scheduled before Play"), `DISPLAY_LINK_PER_WINDOW_PLAN.md` §7.9 ("0 / 1 (frame 4, before
+          Play)"). The other three SDI blocks: frame #0 completed, 0 late and 0 dropped in their first 8 completions
+          and in their first card count at frame 48.
+        - Not counted as holds: 637 frames held around the loop's wrap (a seek).
+        - SDI bridge totals: 0 late edges, 9 re-latches, 100,492 missing samples. In every block the missing count rises
+          only in the Play from 1,895 s through the loop's wrap, once per cycle: positions past the end of the file's sound
+          (§10.24's reading, an inference from the lengths).
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
