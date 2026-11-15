@@ -512,7 +512,7 @@ final class KeyDispatchTests: XCTestCase {
             }
             checked += 1
         }
-        XCTAssertEqual(checked, 21, "every keyed, non-debug menu action (24, less the 3 with no key)")
+        XCTAssertEqual(checked, 22, "every keyed, non-debug menu action (24, less the 2 with no key; Share Frame… keyed 2026-11-15)")
         XCTAssertEqual(registry.chord(for: .scopesTray), .char("s", [.command, .option]))
     }
 }

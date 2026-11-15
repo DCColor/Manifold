@@ -195,6 +195,11 @@ final class Preferences: ObservableObject {
     // if sandboxing is ever added). Empty = default to ~/Desktop.
     @AppStorage("exportFolderBookmark") var exportFolderBookmark: Data = Data()
 
+    /// Settings ▸ Frame Export ▸ "Put exported frames in a folder per clip" (Robbie, 2026-11-15). Default OFF: frames go in
+    /// the export folder itself, as before. On: <export folder>/<clip or stream name>/. Export Frame only; Share Frame
+    /// writes into its own temporary folder, and Export Frame for Support into the folder its save panel picks.
+    @AppStorage("exportFramesPerClipFolder") var exportFramesPerClipFolder: Bool = false
+
     private static var desktopURL: URL {
         FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser

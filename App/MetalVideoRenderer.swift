@@ -19,6 +19,7 @@ import LUTCube           // colour S6: the Interpretation LUT's tables (docs/COL
 import FileScan          // interlaced I4: the window's field view (docs/INTERLACED_FINDINGS.md §14)
 import PictureGeometry   // a file's orientation, applied in the offscreen pass (docs/BUGS.md, iPhone clips, 2026-10-29)
 import OutputPacing      // the DeckLink output pacer's rate and statistics (docs/DISPLAY_LINK_PER_WINDOW_PLAN.md §4.4)
+import FrameShareFormat  // Export Frame's and Share Frame's file name, Share Frame's SDR JPEG (Robbie, 2026-11-15)
 
 // `UnfairLock` used to be defined here. It now lives in ManifoldCore (Sources/ManifoldCore/
 // UnfairLock.swift) because LiveClock needs the same primitive and ManifoldCore cannot depend on
@@ -5807,9 +5808,47 @@ final class MetalVideoRenderer {
         // Write into the user-chosen folder (security-scoped, resolved from a bookmark),
         // or ~/Desktop by default / on stale bookmark. Image encoding/colorspace above
         // is unchanged — only the destination differs.
-        Preferences.shared.withExportDirectory { dir in
-            writeFrameExport(export, to: dir.appendingPathComponent(export.filename))
+        // The name (Robbie, 2026-11-15) is "<clip> <HH-MM-SS-FF>" or "<stream> <date time>", the same frame twice gets
+        // " 2", " 3" as in Finder: an export never replaces an earlier one.
+        Preferences.shared.withExportDirectory { root in
+            var dir = root
+            // Settings ▸ Frame Export ▸ "Put exported frames in a folder per clip" (item 7, default off): <root>/<clip>/.
+            // A file in the way, or a folder that cannot be made: the root, and the banner says so.
+            if Preferences.shared.exportFramesPerClipFolder, let folder = export.folderName {
+                switch FrameFileName.clipFolder(in: root, name: folder) {
+                case .folder(let url):
+                    dir = url
+                case .root(_, let reason):
+                    print("[EXPORT] per-clip folder unavailable (\(reason == .fileInTheWay ? "a file is in the way" : "could not create"))"
+                        + " — saving to the export folder")
+                    onExportNotice?(FrameFileName.fallbackNotice(folder: folder, reason: reason))
+                }
+            }
+            writeFrameExport(export, to: FrameFileName.uniqueURL(in: dir, base: export.baseName,
+                                                                 suffix: export.parTag.map { "_\($0)" } ?? "", ext: "png"))
         }
+    }
+
+    /// The window's frame name (`FrameName`): the base, without extension or pixel-aspect tag ("<clip name> <HH-MM-SS-FF>"
+    /// for a file, "<stream name> <date time>" for a stream), and the per-clip folder's name. Set by `WindowDeck`; MAIN
+    /// THREAD, read when a frame is captured. nil, or nil from it: `FrameFileName.fallbackBase` and no folder.
+    var frameNameProvider: (() -> FrameName?)?
+
+    /// The window's banner, for an export that could not go where the settings said (the per-clip folder). MAIN THREAD.
+    var onExportNotice: ((String) -> Void)?
+
+    /// Share Frame… (Robbie, 2026-11-15; FrameShare.swift): the frame Export Frame would capture, as an 8-bit SDR JPEG
+    /// (quality 0.9, sRGB, `ShareJPEG`: one ColorSync draw, which tone-maps HLG and PQ), under Export Frame's base name with
+    /// `.jpg`, written into `folder` for the share sheet. Export Frame's PNG is unchanged. SILENT: no `[EXPORT]` lines,
+    /// since they carry the path; the only line a share leaves is FrameSharer's "[SHARE] frame shared". nil: no frame, or
+    /// the write failed.
+    func writeFrameForShare(into folder: URL) -> URL? {
+        guard let export = captureFrameExport(diagnosticSet: false),
+              let jpeg = ShareJPEG.encode(export.image, properties: export.properties) else { return nil }
+        let url = folder.appendingPathComponent(export.baseName + (export.parTag.map { "_\($0)" } ?? ""))
+            .appendingPathExtension("jpg")
+        do { try jpeg.write(to: url, options: .atomic) } catch { return nil }
+        return url
     }
 
     /// Help ▸ Export Frame for Support… (Robbie, 2026-10-24): the diagnostic set — `.png`, `.v210` (exactly what goes
@@ -5863,7 +5902,10 @@ final class MetalVideoRenderer {
         let width: Int, height: Int
         let pixelAspect: DeclaredPixelAspect
         let parTag: String?
-        let filename: String
+        /// `FrameFileName`'s base, no pixel-aspect tag, no extension. Export Frame for Support names its own files.
+        let baseName: String
+        /// The per-clip folder's name (item 7), or nil when there is no source name.
+        let folderName: String?
         let readback: [UInt8], readbackBytesPerRow: Int
         let v210Dump: V210Dump?
         #if DEBUG
@@ -5989,10 +6031,11 @@ final class MetalVideoRenderer {
                           kCGImagePropertyDPIHeight: Double(yPPM) * 0.0254]
         }
 
-        let ts = Int(Date().timeIntervalSince1970)
-        let filename = "Manifold_frame_\(ts)" + (parTag.map { "_\($0)" } ?? "") + ".png"
+        // The name (Robbie, 2026-11-15): the window's, read now, at the capture; `_par2-1` stays after it (above).
+        let name = frameNameProvider?()
         var export = FrameExport(image: cgImage, properties: properties, colorSpace: cs, width: width, height: height,
-                                 pixelAspect: pixelAspect, parTag: parTag, filename: filename,
+                                 pixelAspect: pixelAspect, parTag: parTag,
+                                 baseName: name?.base ?? FrameFileName.fallbackBase(date: Date()), folderName: name?.folder,
                                  readback: bytes, readbackBytesPerRow: bytesPerRow, v210Dump: v210Dump)
         #if DEBUG
         if diagnosticSet, Self.displayReadbackEnabled {
@@ -6008,13 +6051,19 @@ final class MetalVideoRenderer {
     }
 
     /// The PNG at `url`, and the diagnostic set's files beside it when the export carries a v210 dump.
-    private func writeFrameExport(_ export: FrameExport, to url: URL) {
+    /// The PNG alone, at `url`, logging nothing. Export Frame and Export Frame for Support write it here; Share Frame writes a JPEG (`writeFrameForShare`).
+    private static func encodePNG(_ export: FrameExport, to url: URL) -> Bool {
         guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-            print("[EXPORT] destination create failed"); return
-        }
+            url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return false }
         CGImageDestinationAddImage(dest, export.image, export.properties as CFDictionary?)
-        if CGImageDestinationFinalize(dest) {
+        return CGImageDestinationFinalize(dest)
+    }
+
+    private func writeFrameExport(_ export: FrameExport, to url: URL) {
+        if Self.encodePNG(export, to: url) {
+            // The name now carries the clip's or stream's name, with spaces: the diagnostics redactor has to know this path
+            // literally to withhold it from the line below (privacy P1, SessionPaths.swift).
+            SessionPaths.note(url)
             let cs = export.colorSpace
             let csName = cs.name.map { "\($0)" } ?? "\(cs)"
             print("[EXPORT] wrote \(url.path)")
@@ -6044,7 +6093,7 @@ final class MetalVideoRenderer {
             }
             #endif
         } else {
-            print("[EXPORT] PNG finalize failed")
+            print("[EXPORT] PNG write failed")
         }
     }
 

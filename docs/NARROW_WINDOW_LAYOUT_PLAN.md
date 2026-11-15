@@ -80,6 +80,7 @@ colour and audio labels (1077 vs 1151 measured), so a constant would be wrong fo
 | variant | fits from (content width) | button row |
 |---|---|---|
 | **Full** (today) | ≈ 1140–1210 pt (row + 2 × 12 + 2 × 16) | unchanged |
+| | *2026-11-15: + one Share button beside Export (≈ 36 pt: a 16-pt gap and the symbol), so Full now fits from ≈ 1175–1245 pt. Estimate, not measured; `ViewThatFits` measures the real row, so nothing in code moves.* | |
 | **Compact** | ≈ 760 pt | secondary tools move into one **More (…)** menu; colour label shortened |
 | **Narrow** (two rows of buttons) | the 720-pt minimum and below | two rows, below the scrubber |
 

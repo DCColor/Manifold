@@ -79,7 +79,7 @@ public enum MenuKeyAudit {
     /// The top-level menu each `.menu` action's item lives in. The tests hold it to the catalog: every `.menu` action has
     /// a home, and nothing else does.
     public static let menuHomes: [ShortcutID: String] = [
-        .fileOpen: "File", .exportFrame: "File", .disconnectLive: "File", .toggleDeckLink: "File",
+        .fileOpen: "File", .exportFrame: "File", .shareFrame: "File", .disconnectLive: "File", .toggleDeckLink: "File",
         .loop: "View", .raster100: "View", .raster75: "View", .raster50: "View", .raster25: "View", .rasterFit: "View",
         .inspector: "View", .fileName: "View", .alwaysShowControls: "View", .scopesTray: "View",
         .volumeUp: "View", .volumeDown: "View", .mute: "View",

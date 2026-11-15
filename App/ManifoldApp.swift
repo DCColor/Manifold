@@ -56,6 +56,8 @@ struct ManifoldApp: App {
         // take — transport, holds, timecode entry, the debug hooks. App-level because a hold needs key-up and
         // `ContentView` can take no more modifiers (§6.7); see Shortcuts/ShortcutCenter.swift.
         MainActor.assumeIsolated { ShortcutCenter.shared.install() }
+        // Share Frame…'s temporary files a previous run left behind, if any (FrameShare.swift).
+        MainActor.assumeIsolated { FrameSharer.sweepAtLaunch() }
         #if DEBUG
         MainActor.assumeIsolated { AppearanceProbe.startIfAsked() }
         #endif
@@ -320,6 +322,8 @@ struct ManifoldApp: App {
                 // ⌥⌘E, formerly the hidden ⌃⌥E (docs/SHORTCUTS_AUDIT.md §4.2). The control bar's button is the same
                 // action. The image only, since 2026-10-24 (§8 item 1).
                 ShortcutMenuItem(id: .exportFrame, registry: shortcuts)
+                // The same image through the share sheet (Robbie, 2026-11-15; FrameShare.swift). No default key.
+                ShortcutMenuItem(id: .shareFrame, registry: shortcuts)
                 // The measurement set (.rgba16f, .v210, .v210.json beside the PNG) is Help ▸ Export Frame for Support…
                 // since 2026-10-24, a public item; it was a debug item here that morning.
                 Divider()

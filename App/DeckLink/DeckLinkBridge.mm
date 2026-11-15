@@ -87,15 +87,21 @@ void cardClockLogReference(const char *when, IDeckLinkOutput *output) {
     NSInteger _index;
     NSString *_modelName;
     NSString *_displayName;
+    uint32_t _duplexMode;
+    BOOL _duplexKnown;
 }
 
 - (instancetype)initWithIndex:(NSInteger)index
                     modelName:(NSString *)modelName
-                  displayName:(NSString *)displayName {
+                  displayName:(NSString *)displayName
+                   duplexMode:(uint32_t)duplexMode
+                  duplexKnown:(BOOL)duplexKnown {
     if ((self = [super init])) {
         _index = index;
         _modelName = [modelName copy];
         _displayName = [displayName copy];
+        _duplexMode = duplexMode;
+        _duplexKnown = duplexKnown;
     }
     return self;
 }
@@ -103,6 +109,8 @@ void cardClockLogReference(const char *when, IDeckLinkOutput *output) {
 - (NSInteger)index { return _index; }
 - (NSString *)modelName { return _modelName; }
 - (NSString *)displayName { return _displayName; }
+- (uint32_t)duplexMode { return _duplexMode; }
+- (BOOL)duplexKnown { return _duplexKnown; }
 
 @end
 
@@ -2398,10 +2406,23 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
             CFStringRef displayName = NULL;
             device->GetDisplayName(&displayName);
 
+            // The sub-device's duplex under the ACTIVE profile (the card's connector mapping). IDeckLinkProfileAttributes
+            // from IDeckLink answers for the active profile; `bmdDuplexInactive` is a sub-device the mapping leaves
+            // unused (SDK 16.0 manual §2.4.11 p.31, BMDDeckLinkDuplex p.274, §3.60 p.299). Unread → not claimed inactive.
+            uint32_t duplex = 0; BOOL duplexKnown = NO;
+            IDeckLinkProfileAttributes *attrs = NULL;
+            if (device->QueryInterface(IID_IDeckLinkProfileAttributes, (void **)&attrs) == S_OK && attrs != NULL) {
+                int64_t v = 0;
+                if (attrs->GetInt(BMDDeckLinkDuplex, &v) == S_OK) { duplex = (uint32_t)v; duplexKnown = YES; }
+                attrs->Release();
+            }
+
             DeckLinkDeviceInfo *info =
                 [[DeckLinkDeviceInfo alloc] initWithIndex:index
                                                 modelName:model
-                                              displayName:NSStringTakeDeckLink(displayName)];
+                                              displayName:NSStringTakeDeckLink(displayName)
+                                               duplexMode:duplex
+                                              duplexKnown:duplexKnown];
             [usable addObject:info];
 
             output->Release();   // balance the QueryInterface +1
@@ -2417,6 +2438,65 @@ static BOOL DeckLinkVersionMeetsFloor(int major, int minor) {
 
     iterator->Release();         // balance CreateDeckLinkIteratorInstance +1
     return [[DeckLinkEnumerationResult alloc] initWithTotalCount:total usable:usable rejected:rejected];
+}
+
+// ── CONNECTOR-MAPPING (PROFILE) CHANGES ─────────────────────────────────────────────────────────────────────────────
+//
+// SDK 16.0 manual §2.4.11 "Handle a profile change notification" (p.33): subclass IDeckLinkProfileCallback, QueryInterface
+// IDeckLink for IID_IDeckLinkProfileManager, SetCallback. "The callback calls will be called asynchronously from an API
+// private thread", and they fire when ANOTHER application (Desktop Video Setup) changes the profile.
+//
+// ⚠️ NOTHING IS STOPPED FROM INSIDE ProfileChanging. The manual allows it (§2.5.48.1: "the opportunity to stop the
+// streams instead"), but the stop runs on the service's queue, which may itself be inside a driver call at that moment;
+// waiting on it from the driver's thread could deadlock the change. When `streamsWillBeForcedToStop`, the driver stops
+// the stream on return, and the service stops its side once the new profile is active.
+class DeckLinkProfileWatch final : public IDeckLinkProfileCallback {
+public:
+    DeckLinkProfileWatch(NSInteger index, DeckLinkProfileChangeBlock handler) : _index(index), _handler([handler copy]) {}
+    HRESULT ProfileChanging(IDeckLinkProfile *, bool streamsWillBeForcedToStop) override {
+        _handler(_index, NO, streamsWillBeForcedToStop ? YES : NO);
+        return S_OK;
+    }
+    HRESULT ProfileActivated(IDeckLinkProfile *) override {
+        _handler(_index, YES, NO);
+        return S_OK;
+    }
+    HRESULT QueryInterface(REFIID, LPVOID *ppv) override { if (ppv) { *ppv = NULL; } return E_NOINTERFACE; }
+    ULONG AddRef() override { return ++_refs; }
+    ULONG Release() override { ULONG r = --_refs; if (r == 0) { delete this; } return r; }
+private:
+    NSInteger _index;
+    DeckLinkProfileChangeBlock _handler;
+    std::atomic<ULONG> _refs{1};
+};
+
++ (NSInteger)installProfileCallbacks:(DeckLinkProfileChangeBlock)handler {
+    // Held for the process: the managers keep the callbacks registered.
+    static std::vector<IDeckLinkProfileManager *> managers;
+    static NSInteger installed = -1;
+    static std::mutex lock;
+    std::lock_guard<std::mutex> guard(lock);
+    if (installed >= 0) { return installed; }
+    installed = 0;
+    IDeckLinkIterator *iterator = CreateDeckLinkIteratorInstance();
+    if (iterator == NULL) { return 0; }
+    IDeckLink *device = NULL;
+    NSInteger index = 0;
+    while (iterator->Next(&device) == S_OK) {
+        IDeckLinkProfileManager *manager = NULL;
+        // Only a device with more than one profile vends a manager (DeckLinkAPI.h, IDeckLinkProfileManager).
+        if (device->QueryInterface(IID_IDeckLinkProfileManager, (void **)&manager) == S_OK && manager != NULL) {
+            DeckLinkProfileWatch *watch = new DeckLinkProfileWatch(index, handler);
+            if (manager->SetCallback(watch) == S_OK) { managers.push_back(manager); installed++; }
+            else { manager->Release(); }
+            watch->Release();   // the manager holds its own reference
+        }
+        device->Release();
+        device = NULL;
+        index++;
+    }
+    iterator->Release();
+    return installed;
 }
 
 + (BOOL)isDriverInstalled {

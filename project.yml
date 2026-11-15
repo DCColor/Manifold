@@ -201,6 +201,10 @@ targets:
       # can pin that only the measured busy code is mapped. Used by App/DeckLink/DeckLinkService.swift only.
       - package: ManifoldCore
         product: DeckLinkRefusal
+      # Export Frame's and Share Frame's file name and Share Frame's SDR JPEG (Robbie, 2026-11-15) — a leaf target so
+      # `swift test` pins the name rules and the conversion. Used by App/MetalVideoRenderer.swift and App/WindowDeck.swift.
+      - package: ManifoldCore
+        product: FrameShareFormat
       # Every shortcut's default, the user's overrides and the one key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4) — a leaf
       # target so `swift test` can drive the dispatcher with synthesized NSEvents. Used by App/Shortcuts and the menus.
       - package: ManifoldCore

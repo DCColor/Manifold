@@ -89,8 +89,26 @@ Depends on: nothing in Manifold. The output-device menu item below makes the map
 Size guess: an afternoon (the mapping change, a guarded 30 min run).
 
 ## DeckLink output-device menu: grey out sub-devices the mapping makes inactive
-Status: decided (Robbie, 2026-11-14; idea 2026-11-12)
+Status: built 2026-11-15, not committed; unit-tested; attended check passed 2026-11-15 (decided Robbie, 2026-11-14; idea 2026-11-12)
+Attended (Robbie, 2026-11-15): the lists match Blackmagic's table, 1, 1, 2 and 4 devices across the four mappings. A mapping
+change during playback stopped output, with the banner.
 Version: after 0.9.3
+
+Built (2026-11-15): each device's `BMDDeckLinkDuplex` (IDeckLinkProfileAttributes, active profile) is read at enumeration;
+`bmdDuplexInactive` rows are greyed in the DeckLink menu and in Settings ▸ DeckLink Output, with "Inactive in the card's current
+connector mapping". An `IDeckLinkProfileCallback` is installed on every device with an `IDeckLinkProfileManager`; on
+`ProfileActivated` the list is re-read. If the selected device is inactive (or the driver force-stopped its stream,
+`streamsWillBeForcedToStop`), output stops and the refusal banner says why; Manifold never selects another device. A start on an
+inactive device is refused with a message. SDK 16.0 manual: §2.4.11 (p.31–33), §2.5.48 (p.192–193), BMDDeckLinkDuplex (p.274),
+§3.60 (p.299). Code: `DeckLinkConnectorMapping` (DeckLinkRefusal package, tests), `DeckLinkBridge.installProfileCallbacks`,
+`DeckLinkService.connectorMappingChanged`.
+
+Open question answered (2026-11-15): the attribute is `BMDDeckLinkDuplex`. Read on the 8K Pro by a read-only probe under
+"SDI 1 & 2 In, SDI 3 & 4 Out" (one sub-device): (1) `dxfu`, (2)–(4) `dxin`; all four vend `IDeckLinkOutput` and a profile
+manager. The second mapping is the attended step.
+
+Limits: a card connected after the first device refresh gets no profile callback until relaunch. Whether a menu that is OPEN
+while the mapping changes redraws is UNKNOWN; the next opening shows the new state.
 
 What: the DeckLink output-device menu lists all four sub-devices of an 8K Pro even when the card's connector mapping makes
 some of them inactive (input-only, or not mapped to a connector). **Decided:** grey them out, using the SDK's duplex / active
@@ -108,8 +126,14 @@ Depends on: the "Open Desktop Video Setup" button (below) for the note's way out
 Size guess: ?
 
 ## Settings ▸ DeckLink: an "Open Desktop Video Setup" button
-Status: decided (Robbie, 2026-11-14)
+Status: built 2026-11-15, not committed; attended check passed 2026-11-15 (decided Robbie, 2026-11-14)
+Attended (Robbie, 2026-11-15): Desktop Video Setup opens from both places.
 Version: after 0.9.3
+
+Built (2026-11-15): "Open Desktop Video Setup…" in Settings ▸ DeckLink Output ▸ Device and in the DeckLink menu under the
+device list. Bundle ID `com.blackmagic-design.desktopvideo.utility`, read from the installed app's Info.plist
+(`/Applications/Blackmagic Desktop Video/Desktop Video Setup.app`); resolved through `NSWorkspace.urlForApplication(withBundleIdentifier:)`
+and opened with `openApplication(at:)`; hidden when it does not resolve. `App/DeckLink/DesktopVideoSetup.swift`.
 
 What: a button in Settings ▸ DeckLink Output that opens Blackmagic's Desktop Video Setup, **shown only if Desktop Video is
 installed**. Opened by its bundle ID through Launch Services (`NSWorkspace` URL for the bundle ID), never by a hard-coded path;
@@ -117,6 +141,61 @@ hidden when the bundle ID does not resolve.
 
 Why: the connector mapping, the input connection and the card's other settings live there, and the menu note above, the silent
 start advice and the guide (below) all send the user to it.
+
+Size guess: small.
+
+## Share Frame…
+Status: built 2026-11-15, not committed; first attended check passed 2026-11-15; follow-ups 1–5 and 7 built 2026-11-15, attended
+check outstanding.
+Attended (Robbie, 2026-11-15): Share works from More and from the Full-layout button, and the layout switches to Compact cleanly. A PQ
+frame (the PNG of the first build) shared to iPhone Messages arrived correctly tone-mapped to SDR, with cICP 9-16-9 honoured.
+Version: after 0.9.3
+
+What: "Share Frame…" directly under Export Frame in More (…) and in the File menu; a registry action, `file.shareFrame`,
+default key ⇧⌥⌘E (follow-up 3; drawn "⌥⇧⌘E" in Apple's modifier order). In the Full layout, which has no More menu, a standalone Share button (`square.and.arrow.up`, tooltip
+"Share Frame…") sits beside Export (Robbie, 2026-11-15). The sheet opens on More (…) in Compact and Narrow and on the Share button
+in Full, from the menu item too.
+The image (follow-up 1, decided Robbie, 2026-11-15) is an **8-bit SDR JPEG, quality 0.9, Rec. 709 primaries, tagged sRGB**:
+Export Frame's capture drawn into an 8-bit sRGB context with `CGContext.draw` (ColorSync's default conversion, which tone-maps
+HLG and PQ), then ImageIO (`ShareJPEG`, FrameShareFormat package). HLG matches As macOS Shows It on an SDR display within 1 code.
+**PQ does not quite:** it gets the `.ifSupported` curve, up to 14 codes darker below 200 nits. No API reproduces As macOS Shows It's
+PQ curve (`docs/HLG_MACOS_MODE_PLAN.md` §3.10e). Export Frame is unchanged (16-bit PNG). Typical size, measured 2026-11-15 on real
+frames: 4K 1.0–4.0 MB (graded commercial frames 3.5–4.0 MB, a PQ HDR10 frame 1.05 MB), 1080p 0.13–0.97 MB (4K frames scaled down).
+The file is written to
+`~/Library/Caches/<bundle id>/Shared Frames/<uuid>/` and deleted when the service reports done or failed, or the sheet is
+cancelled; leftovers are swept at the next share, at launch and at quit. One log line, "[SHARE] frame shared". `App/FrameShare.swift`.
+
+File names (follow-up 2): for Export and Share, a file is named "<clip name> <HH-MM-SS-FF>". The timecode is the source timecode
+when the file has a timecode track, otherwise the elapsed time, read at the playhead as the transport readout shows it. Example:
+"MyClip 01-02-14-05.jpg". A stream is named "<stream name> <yyyy-MM-dd HH-mm-ss>"; with no name, "Manifold frame <date time>".
+Export keeps .png and the `_par…` tag. An export never replaces an earlier one: the same frame twice gets " 2", " 3", as in Finder.
+During playback the name is the playhead's, and the captured picture can be a frame or two behind it. `FrameFileName`, tested.
+
+Focus (follow-up 4): when the sheet closes, sent or cancelled, the player view takes first responder, so the Open button no longer
+gets a focus ring. Export Frame reads "Export Frame…" in the File menu, More and the button's tooltip (follow-up 5).
+
+Folder per clip (follow-up 7): Settings ▸ Frame Export ▸ "Put exported frames in a folder per clip", default off. When on, Export
+Frame saves to <export folder>/<clip or stream name>/, creating the folder if needed. The folder name is the same name the files
+use, made safe (/ and : become -, trimmed, at most 100 bytes). If a file has that name, or the folder can't be created, the frame
+goes in the export folder and the banner says so. Share is unaffected.
+
+**HDR, decided 2026-11-15 (follow-up 1 above); the original question is kept for the record:** for a PQ or HLG picture, Export Frame
+(and so, in the first build, Share) writes a 16-bit PNG of the **signal
+values** (BT.2020 primaries, PQ or HLG code values), tagged with an ICC profile and a `cICP` chunk: 9,16,0,1 for PQ, 9,18,0,1 for
+HLG (measured 2026-11-15 by writing a frame through the same ImageIO path). A viewer that reads `cICP` or the HDR ICC shows it as
+HDR; one that reads neither shows the code values as SDR: PQ diffuse white near half grey, flat and desaturated; HLG closer but
+still desaturated. What Messages and Mail do with it (convert, keep `cICP`, tone map) is UNKNOWN until the attended step; the
+recipient's app matters as much. **Proposal, not built:** a Share-only "SDR (Rec. 709)" choice for HDR pictures: tone-mapped to
+an 8-bit sRGB/Rec. 709 PNG or JPEG, named in the file name, with Export Frame unchanged.
+
+Watch: whether Mail or AirDrop reads the file after reporting done. If an attachment arrives empty, delay the deletion.
+
+## Share for stills
+Status: idea (Robbie, 2026-11-15)
+Version: after the Share Frame follow-ups build
+
+What: Share Frame… for an open still image shares the still file itself, unconverted, rather than a rendered frame. Today Share
+Frame, like Export Frame, is disabled for anything but video (`engine.mediaKind != .video`).
 
 Size guess: small.
 

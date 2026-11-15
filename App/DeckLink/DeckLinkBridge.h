@@ -11,6 +11,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSString *modelName;
 /// Human display name (may include the connection/topology), e.g. "DeckLink 8K Pro (1)".
 @property (nonatomic, copy, readonly) NSString *displayName;
+/// IDeckLinkProfileAttributes GetInt(BMDDeckLinkDuplex) under the card's ACTIVE profile (connector mapping): a
+/// BMDDuplexMode four-character code, `bmdDuplexInactive` ('dxin') for a sub-device the mapping leaves unused. 0 when
+/// `duplexKnown` is NO (the attributes or the call failed). SDK 16.0 manual §2.4.11, p.274, §3.60.
+@property (nonatomic, readonly) uint32_t duplexMode;
+@property (nonatomic, readonly) BOOL duplexKnown;
 @end
 
 /// A device the iterator DID return but which refused `IID_IDeckLinkOutput` — i.e. hardware that is
@@ -168,6 +173,12 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
                               read:(DeckLinkAudioReadBlock)read;
 @end
 
+/// A connector-mapping (profile) change on one sub-device, from `IDeckLinkProfileCallback` (SDK 16.0 manual §2.4.11 p.33,
+/// §2.5.48 p.192–193). `activated` NO: ProfileChanging, with `streamsWillBeForcedToStop` as the SDK gave it; YES:
+/// ProfileActivated (the flag then NO), after which the devices' attributes are to be re-read. `deviceIndex` is the
+/// enumeration index the callback was installed for. Called on an SDK private thread: hand the work off, return at once.
+typedef void (^DeckLinkProfileChangeBlock)(NSInteger deviceIndex, BOOL activated, BOOL streamsWillBeForcedToStop);
+
 /// Objective-C++ bridge to the Blackmagic DeckLink SDK. The .mm side does all the C++/COM work
 /// (reference-counted interfaces, Release() on each) and hands back plain Obj-C value objects so
 /// Swift never sees a C++ type.
@@ -183,6 +194,12 @@ typedef int32_t (^DeckLinkAudioReadBlock)(double startTime, int32_t frameCount, 
 /// The same bus walk, undiminished: total returned, usable, and each rejection with its HRESULT and
 /// model name. One walk, so the counts cannot disagree with each other the way two calls could.
 + (DeckLinkEnumerationResult *)enumerateDevices;
+
+/// Install an IDeckLinkProfileCallback (through IDeckLinkProfileManager::SetCallback) on every device present that has a
+/// profile manager — a device with more than one profile, per the manual (§2.4.11). Once per process: later calls do
+/// nothing and return the count installed by the first. The callbacks and managers are held for the process. A card
+/// connected after this call has no callback until relaunch. Returns how many callbacks were installed.
++ (NSInteger)installProfileCallbacks:(DeckLinkProfileChangeBlock)handler;
 
 /// Whether the Blackmagic Desktop Video framework loaded — i.e. the driver is INSTALLED, independent
 /// of whether any card is connected. Lets the UI tell "driver absent" apart from "driver present, no

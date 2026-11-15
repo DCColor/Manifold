@@ -16,6 +16,10 @@ final class DeckLinkService: ObservableObject {
         let index: Int
         let modelName: String
         let displayName: String
+        /// Under the card's current connector mapping (BMDDeckLinkDuplex). `.inactive`: greyed in the menu and Settings,
+        /// and output cannot start on it (Robbie, 2026-11-15; DeckLinkConnectorMapping).
+        var duplex: DeckLinkDuplex = .unknown
+        var isInactive: Bool { duplex.isInactive }
     }
 
     /// A device the driver returned that would not open for output (mirrors
@@ -45,7 +49,8 @@ final class DeckLinkService: ObservableObject {
             return Enumeration(
                 total: r.totalCount,
                 usable: r.usable.map { Device(index: $0.index, modelName: $0.modelName,
-                                              displayName: $0.displayName) },
+                                              displayName: $0.displayName,
+                                              duplex: DeckLinkDuplex(code: $0.duplexKnown ? $0.duplexMode : nil)) },
                 rejected: r.rejected.map { RejectedDevice(index: $0.index, modelName: $0.modelName,
                                                           hresultHex: $0.hresultHex) })
         }
@@ -937,6 +942,7 @@ final class DeckLinkService: ObservableObject {
     /// Refresh the cached device list for the picker (call at startup / when the menu opens). Clamps
     /// the selection if the list shrank. Publishes on main.
     func refreshDevices() {
+        installProfileWatchOnce()
         let walk = Enumeration.probe()
         let ds = walk.usable
         // Same enumeration also settles the pthread_once framework load, so the driver-present read is
@@ -955,6 +961,64 @@ final class DeckLinkService: ObservableObject {
             self.driverVersion = version
             self.driverMeetsFloor = meetsFloor
             if self.selectedDeviceIndex >= ds.count { self.selectedDeviceIndex = 0 }
+        }
+    }
+
+    // MARK: - Connector mapping (Robbie, 2026-11-15)
+
+    private var profileWatchInstalled = false
+    /// Set by a `ProfileChanging` that said `streamsWillBeForcedToStop` for the selected device; read and cleared when
+    /// the new profile is active. Main.
+    private var forcedStopPending = false
+    /// Coalesces the per-sub-device `ProfileActivated` calls (four on an 8K Pro) into one re-read. Main.
+    private var profileRescanGeneration = 0
+
+    /// Register for the SDK's profile-change notification once the driver is loaded, so the device list follows a mapping
+    /// changed in Desktop Video Setup while Manifold runs (SDK 16.0 manual §2.4.11 p.33, §2.5.48 p.192–193).
+    private func installProfileWatchOnce() {
+        guard !profileWatchInstalled, DeckLinkBridge.isDriverInstalled() else { return }
+        profileWatchInstalled = true
+        let n = DeckLinkBridge.installProfileCallbacks { [weak self] index, activated, forced in
+            DispatchQueue.main.async { self?.profileChanged(deviceIndex: index, activated: activated, forced: forced) }
+        }
+        print("DeckLink: connector-mapping watch on \(n) device\(n == 1 ? "" : "s")")
+    }
+
+    /// One profile callback, on main. ProfileChanging only notes a forced stop of the selected device's stream; the
+    /// decision waits for ProfileActivated, when the devices can be re-read under the new mapping.
+    private func profileChanged(deviceIndex: Int, activated: Bool, forced: Bool) {
+        if !activated {
+            if forced && deviceIndex == selectedDeviceIndex && isOutputting { forcedStopPending = true }
+            return
+        }
+        profileRescanGeneration &+= 1
+        let generation = profileRescanGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, generation == self.profileRescanGeneration else { return }
+            self.connectorMappingChanged()
+        }
+    }
+
+    /// The new mapping is active: re-read the devices, publish them, and stop output if the selected device is no longer
+    /// usable. Never selects another device.
+    private func connectorMappingChanged() {
+        let walk = Enumeration.probe()
+        let selected = walk.usable.first { $0.index == selectedDeviceIndex }
+        let forced = forcedStopPending
+        forcedStopPending = false
+        print("DeckLink: connector mapping changed — "
+            + walk.usable.map { "[\($0.index)] \($0.duplex.logName)" }.joined(separator: ", "))
+        devices = walk.usable
+        devicesEnumerated = walk.total
+        rejectedDevices = walk.rejected
+        if selectedDeviceIndex >= walk.usable.count { selectedDeviceIndex = 0 }
+        let name = selected?.displayName ?? "The selected device"
+        if let message = DeckLinkConnectorMapping.verdictAfterChange(outputting: isOutputting, selected: selected?.duplex,
+                                                                     deviceName: name, forcedStop: forced) {
+            print("DeckLink: output stopped — connector mapping change (\(selected?.duplex.logName ?? "device gone")"
+                + (forced ? ", driver stopped the stream" : "") + ")")
+            stopScheduledOutput()
+            startRefusal = message   // the refusal banner and the menu's note carry it; cleared by the next start
         }
     }
 
@@ -1032,9 +1096,17 @@ final class DeckLinkService: ObservableObject {
         // every non-ready state, but ⌃⌥O and the auto-start path reach here directly — and the probe
         // is fresh, so a driver updated or a card unplugged mid-session is caught here too. Publishing
         // the refreshed facts keeps the Settings row and diagnostics in step with what just happened.
-        let status = probeDriverStatus()
+        let (status, walk) = probeDriverStatusAndEnumeration()
         guard status.canOutput else {
             print("DeckLink: output not started — " + (status.blockedReason ?? status.headline))
+            refreshDevices()
+            return
+        }
+        // An inactive sub-device cannot output (BMDDeckLinkDuplex; Robbie, 2026-11-15). Refused with a message, and the
+        // selection is left as it is: choosing another device is the operator's decision.
+        if let d = walk.usable.first(where: { $0.index == selectedDeviceIndex }), d.isInactive {
+            print("DeckLink: output not started — device \(d.index) is inactive in the card's connector mapping")
+            startRefusal = DeckLinkConnectorMapping.startRefusedMessage(device: d.displayName)
             refreshDevices()
             return
         }

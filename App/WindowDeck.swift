@@ -78,6 +78,7 @@ import ColorimetryModel   // SourceChroma — the file's chroma to the renderer 
 import ShortcutRegistry   // ShortcutID — the window's shortcut handlers (docs/SHORTCUTS_AUDIT.md §4.4)
 import AudioFileInfo   // AudioCardText — the audio-only card's words for the output (B5)
 import FileScan   // SourceScan, FieldView — the window's field view (interlaced I4)
+import FrameShareFormat   // FrameFileName — Export Frame's and Share Frame's file name (Robbie, 2026-11-15)
 
 // MARK: - Exclusive devices
 
@@ -339,6 +340,28 @@ final class WindowDeck: ObservableObject {
     /// the URL alone loses nothing and cannot go stale.
     var displayName: String? {
         engine?.currentURL?.lastPathComponent
+    }
+
+    /// The name Export Frame and Share Frame give a frame of this window, without extension (Robbie, 2026-11-15;
+    /// `FrameFileName`). A file: "<clip name> <HH-MM-SS-FF>", the clip name being the file's name without its extension
+    /// and the timecode the one the transport readout shows at the playhead: the file's source timecode, else the elapsed
+    /// time. A stream this deck owns: "<stream name> <date time>", the name being `windowTitle`'s (never a URL). Neither:
+    /// nil, and the renderer falls back to "Manifold frame <date time>". The folder (Settings' per-clip folder, item 7) is the
+    /// same clip or stream name, made safe for a folder (`FrameFileName.folderName`).
+    ///
+    /// The playhead, not the captured slot's own PTS: they are the same frame when paused, which is how frames are taken;
+    /// during playback the picture can be a frame or two behind the playhead (the render queue's depth).
+    var frameName: FrameName? {
+        if let engine, engine.hasMedia, let url = engine.currentURL {
+            let t = engine.currentTime
+            let tc = engine.currentSourceTimecode(at: t).map(FrameFileName.timecodeField)
+                ?? FrameFileName.elapsedTimecode(seconds: t, rate: engine.metadata?.frameRate ?? 0)
+            return .clip(name: url.deletingPathExtension().lastPathComponent, timecodeField: tc)
+        }
+        if let live = DeckRegistry.shared.liveLabel(for: self) {
+            return .stream(name: live, date: Date())
+        }
+        return nil
     }
 
     /// What this window is called in the Window menu and in Mission Control.
@@ -1125,6 +1148,17 @@ final class DeckRegistry {
         renderer.isPausedProvider = { engine.isPausedNow() }
         renderer.isFullRangeProvider = { engine.currentEffectiveIsFullRange() }
         renderer.chromaConventionProvider = { engine.currentChromaConventionRaw() }
+        // Export Frame's and Share Frame's file name (Robbie, 2026-11-15). Both capture on the main thread; anywhere else the
+        // renderer's own fallback name is used rather than reading main-actor state off it.
+        renderer.frameNameProvider = { [weak deck] in
+            guard Thread.isMainThread else { return nil }
+            return MainActor.assumeIsolated { deck?.frameName }
+        }
+        // An export that could not use the per-clip folder says so in this window's banner (item 7).
+        renderer.onExportNotice = { [weak deck] text in
+            guard Thread.isMainThread else { return }
+            MainActor.assumeIsolated { deck?.engine?.playbackNotice = text }
+        }
 
         // …and the engine feeds this window's renderer, and only this one.
         engine.onVideoFrame = { [weak renderer] sb in renderer?.enqueue(sb) }

@@ -11,6 +11,7 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     // File
     case fileOpen = "file.open"
     case exportFrame = "file.exportFrame"
+    case shareFrame = "file.shareFrame"
     // Sources and output
     case disconnectLive = "sources.disconnectLive"
     case toggleDeckLink = "output.toggleDeckLink"
@@ -198,6 +199,7 @@ public enum ShortcutCatalog {
     private static let cmd: KeyModifiers = [.command]
     private static let optCmd: KeyModifiers = [.option, .command]
     private static let shiftCmd: KeyModifiers = [.shift, .command]
+    private static let shiftOptCmd: KeyModifiers = [.shift, .option, .command]
     private static let ctlOpt: KeyModifiers = [.control, .option]
     private static let ctlOptShift: KeyModifiers = [.control, .option, .shift]
 
@@ -205,7 +207,12 @@ public enum ShortcutCatalog {
         // ── File ────────────────────────────────────────────────────────────────────────────────
         .init(.fileOpen, "Open…", .file, .app, .menu, .char("o", cmd),
               note: "The standard Mac key; not rebindable"),
-        .init(.exportFrame, "Export Frame", .file, .window, .menu, .char("e", optCmd)),
+        // "Export Frame…", never a bare "Export", in the menu, More and the button's tooltip (Robbie, 2026-11-15).
+        .init(.exportFrame, "Export Frame…", .file, .window, .menu, .char("e", optCmd)),
+        // The frame Export Frame captures, as an SDR JPEG through the macOS share sheet (Robbie, 2026-11-15). ⇧⌥⌘E, Export
+        // Frame's key with ⇧: checked free 2026-11-15 against this catalog, `ShortcutRegistry.reserved` and the system
+        // Services' key equivalents on the build Mac (none uses E).
+        .init(.shareFrame, "Share Frame…", .file, .window, .menu, .char("e", shiftOptCmd)),
 
         // ── Sources and output: device claims (Robbie, 2026-10-24: keys after all, with ⌘; §8) ─────────────
         .init(.disconnectLive, "Disconnect Live Source", .sources, .window, .menu, .code(KeyCode.delete, optCmd)),

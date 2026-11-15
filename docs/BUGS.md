@@ -2193,6 +2193,26 @@ All five share the signature: pts stuck while the clock runs on, the window pres
 
 **Fix: a watchdog, in production code (§10.15).** 20 Hz on main, while a file plays: renderer not ready, nothing of ours pending in it, no pump callback for 500 ms → flush it and re-arm its request on the same session, and log `[RENDERER-RECOVER]` with the state. If three re-arms bring no frame, rebuild the session at the clock, once. A state lasting over 100 ms that clears by itself logs `[RENDERER-NEARMISS]`. Counts in Export Diagnostics (*PICTURE RECOVERY*). Self-tested against a forced stall: recovered in 0.40 s, first frame 37 ms after the re-arm. Built, not committed. **Before/after (§10.15):** watchdog off 2.81 h / 170 Plays, nothing seen (0 near-misses, output on and off). Watchdog on 13.2 h / 808 Plays (gate on 5.75 h, off 7.46 h): 2 real stalls, one at Play (gate on), one 17.8 s into Play (gate off), both recovered on the first re-arm in 0.15 s and 0.39 s; 0 freezes, 0 rebuilds, 0 near-misses. The state never clears by itself. Root cause still open: the watchdog contains it, it does not prevent it. **Output off against on, 2026-11-10 (`CARD_CLOCK_FINDINGS.md` §10.18):** alternating blocks, gate off, watchdog on: output off 1.57 h / 96 Plays, 0 recoveries; output on 1.57 h / 96 Plays, 1 recovery (the same state, recovered on the first re-arm in 0.40 s). 0 near-misses, 0 freezes. Too few to tell the rates apart: with §10.15, output on 3 in 14.8 h, output off 0 in 2.5 h, which equal rates give 60 % of the time. Whether the card is involved stays UNKNOWN.
 
+## ☐ OPEN 2026-11-15 — FOUND WHILE BUILDING, NOT A DEFECT YET — DeckLink connector mapping and Share Frame: what is unverified
+
+From the 2026-11-15 build of inactive-sub-device greying, Open Desktop Video Setup and Share Frame… (`docs/ROADMAP_IDEAS.md`). Each
+is a limit or an unknown, to close or promote after the attended steps:
+
+- **Before this build, an inactive sub-device was offered like any other.** The 8K Pro's (2)–(4) vend `IDeckLinkOutput` under
+  "SDI 1 & 2 In, SDI 3 & 4 Out" (read-only probe, 2026-11-15), so they were selectable and a start on one gave no picture and no
+  reason. Now greyed, and a start on one is refused with a message.
+- **Profile callbacks cover the devices present at the first device refresh.** A card connected later has none until relaunch.
+- **A DeckLink menu left open during a mapping change may not redraw** (SwiftUI menus). UNKNOWN; the next opening is correct.
+- **Share Frame deletes its file when the service reports done.** If Mail or AirDrop still reads the file after that, the
+  attachment would arrive empty. UNKNOWN; the attended steps check Messages and AirDrop.
+- **~~An HDR frame shared to Messages or Mail may look wrong to the recipient~~.** Closed 2026-11-15: the first build's PQ PNG
+  arrived correctly tone-mapped in iPhone Messages (attended). Share now sends an SDR JPEG anyway (Robbie's decision).
+- **Share's PQ tone map is not quite As macOS Shows It's.** ColorSync's default draw gives the `.ifSupported` curve, up to 14 codes
+  darker below 200 nits; no API reproduces `.automatic` + `hdr10` (`docs/HLG_MACOS_MODE_PLAN.md` §3.10e). HLG matches. Robbie's
+  call whether to replace it with a measured curve.
+- **Attended 2026-11-15, passed:** connector-mapping lists (1, 1, 2, 4 devices), output stopped with the banner on a mapping change
+  during playback, Desktop Video Setup from both places, Share from More and the Full button, the switch to Compact.
+
 ## ☐ OPEN 2026-11-08 — LOW — the video pump parks thousands of times while paused before the first Play
 
 Found by the gate's counters (`CARD_CLOCK_FINDINGS.md` §10.14): in `il-off1` the pump parked on a full window queue **9,836 times** and was woken by a signal once, all before the launch's first Play was 0.3 s old, and never in the 17 Plays after. Each park overwrites the gate's single slot, so this reads as the pacing renderer calling its request block over and over while it is ready and the paused window queue is full. **Cost UNKNOWN** (CPU, battery, how long it lasts). Not the freeze: none of it falls near a freeze. Low priority; measure before changing anything.

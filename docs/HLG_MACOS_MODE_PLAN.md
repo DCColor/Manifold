@@ -915,6 +915,50 @@ frame, through the `CAImageQueue`, and the compositor tone-maps from those. No l
    AVKit's choice, or `.high`) behind an availability branch, with the §3.10c and T7/T8 measurements as its acceptance test.
    `BUGS.md`, 1.0.
 
+### 3.10e Offline HDR → SDR for Share Frame, 2026-11-15
+
+**Why.** Share Frame sends an 8-bit SDR JPEG, tagged sRGB, tone-mapped "the way As macOS Shows It renders on an SDR display"
+(Robbie, 2026-11-15). The compositor's result cannot be read back, so an offline API has to stand in for it.
+
+**Bench.** A scratch script (session scratchpad, not kept), with no Manifold launch. It used grey ramps as 16-bit CGImages tagged
+`itur_2100_HLG` (0–100 % in 5 % steps) and `itur_2100_PQ` (0–2000 nits), drawn into an 8-bit **sRGB** context, G channel. The
+ASUS was not connected, so the destination was sRGB, not the ASUS profile. The on-screen rows are §3.6a T3 and §3.10b (b)/(c),
+measured in the ASUS profile. Candidates: a plain `CGContext.draw`; `draw(…, by:)` with `.default`, `.referenceWhiteBased`,
+`.ituRecommended` and `.none`; the last three again with `kCGUseLegacyHDREcosystem` and `kCGUseBT1886ForCoreVideoGamma`; a
+Core Image default render; `CIToneMapHeadroom` → 1.0; and ImageIO `kCGImageDestinationEncodeToSDR` (JPEG, decoded back).
+
+| HLG % | 5 | 10 | 25 | 50 | **75** | 90 | 100 |
+|---|---|---|---|---|---|---|---|
+| on screen, T3 (As macOS Shows It) | 2 | 12 | 47 | 104 | **187** | 233 | 254 |
+| **plain `CGContext.draw`** (= `.default` = `.referenceWhiteBased` = ImageIO EncodeToSDR ±1) | 3 | 13 | 48 | 104 | **188** | 234 | 255 |
+| `.ituRecommended` = Core Image default | 4 | 15 | 45 | 87 | 146 | 203 | 255 |
+
+| PQ nits | 1 | 10 | 50 | **100** | 150 | **203** | 300 | 400 | 600 | 1000 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| on screen (b), `.automatic` + `hdr10` (As macOS Shows It) | 26 | 64 | 119 | **152** | 172 | **187** | 205 | 217 | 234 | 255 |
+| on screen (c), `.ifSupported` | 12 | 50 | 104 | 140 | 166 | 188 | 211 | 223 | 238 | 255 |
+| **plain `CGContext.draw`** (= `.default` = `.referenceWhiteBased` = ImageIO EncodeToSDR ±1) | 12 | 49 | 104 | **140** | 166 | **188** | 211 | 223 | 239 | 255 |
+| `.ituRecommended` = Core Image default (the AV `.forceSDR` curve, §3.10) | 15 | 63 | 136 | 186 | 213 | 229 | 243 | 250 | 254 | 255 |
+| `.none` = `CIToneMapHeadroom` → 1.0 | 15 | 63 | 136 | 186 | 223 | 255 | 255 | 255 | 255 | 255 |
+
+`.default` and `.referenceWhiteBased` with the legacy or BT.1886 option drew nothing (all 0). `.ituRecommended` with either option
+was unchanged.
+
+**Findings.**
+1. **HLG: the plain draw equals As macOS Shows It on an SDR display**, within 1 code at every bar. This is §3.6a finding 2 (T3 =
+   ColorSync's HLG → SDR), now in sRGB.
+2. **PQ: the plain draw is the `.ifSupported` curve (c), not As macOS Shows It's `.automatic` + `hdr10` (b).** Against (b) it is
+   darker below about 200 nits (1 nit 12 against 26, 10 nits 49 against 64, 100 nits 140 against 152). It is up to 6 codes
+   brighter from 300 to 600 nits, and equal from 1000 nits. **No API tried reproduces (b).**
+3. These match the ASUS rows within 1 code, although the destination was sRGB. The ASUS was not connected, so this was not
+   checked against its own profile.
+
+**Decision as built (2026-11-15):** `ShareJPEG` uses the plain draw for every transfer: SDR, HLG and PQ. For PQ the result is the
+closest API match, but it is not As macOS Shows It's curve. The alternative, not built, is a curve measured from (b) and applied
+as max(RGB) scaling (§3.10b step 1, colours 3 / 13 / 13). It would not be an API, and it rests on one display's measurements.
+Robbie's call. Pinned by `FrameShareFormatTests.testHLGMatchesAsMacOSShowsItOnAnSDRDisplay` and `testPQIsColorSyncsDefaultToneMap`
+(so an OS change that moves either curve fails a test).
+
 ### 3.7 Follow-ups, not in this change
 
 - File AVE through `hlg(ambientViewingEnvironment:)` from `kCMFormatDescriptionExtension_AmbientViewingEnvironment`

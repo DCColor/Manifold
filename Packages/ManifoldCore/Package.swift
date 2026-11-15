@@ -55,6 +55,7 @@ let package = Package(
         .library(name: "OutputPacing", targets: ["OutputPacing"]),
         // Linked by the APP target directly (project.yml): what a refused DeckLink output start says (docs/BUGS.md).
         .library(name: "DeckLinkRefusal", targets: ["DeckLinkRefusal"]),
+        .library(name: "FrameShareFormat", targets: ["FrameShareFormat"]),
         // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
         // key dispatcher (docs/SHORTCUTS_AUDIT.md §4.4).
         .library(name: "ShortcutRegistry", targets: ["ShortcutRegistry"]),
@@ -525,6 +526,23 @@ let package = Package(
             name: "DeckLinkRefusalTests",
             dependencies: ["DeckLinkRefusal"],
             path: "Tests/DeckLinkRefusalTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // Export Frame's and Share Frame's file name, and Share Frame's SDR JPEG (Robbie, 2026-11-15; App/FrameShare.swift).
+        // A leaf target, CoreGraphics and ImageIO only, so `swift test` pins the name rules and the measured conversion.
+        .target(
+            name: "FrameShareFormat",
+            path: "Sources/FrameShareFormat",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "FrameShareFormatTests",
+            dependencies: ["FrameShareFormat"],
+            path: "Tests/FrameShareFormatTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

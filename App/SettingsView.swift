@@ -18,6 +18,7 @@ import SwiftUI
 import AppKit
 import PlayheadSlider
 import ColorimetryModel
+import DeckLinkRefusal   // DeckLinkConnectorMapping — the greyed sub-devices' note
 
 /// The panes, in toolbar order. Why these and not the brief's list: docs/SETTINGS_REDESIGN.md §3.
 enum SettingsPane: String, CaseIterable, Identifiable {
@@ -376,6 +377,8 @@ private struct FilesSettingsPane: View {
 
     // For reactive display of the chosen export folder (writes go via Preferences).
     @AppStorage("exportFolderBookmark") private var exportFolderBookmark = Data()
+    /// Item 7 (Robbie, 2026-11-15): the same key as `Preferences.exportFramesPerClipFolder`. Default off.
+    @AppStorage("exportFramesPerClipFolder") private var exportFramesPerClipFolder = false
 
     var body: some View {
         Form {
@@ -432,6 +435,11 @@ private struct FilesSettingsPane: View {
                         Button("Use Desktop") { Preferences.shared.clearExportFolder() }
                     }
                 }
+                Toggle("Put exported frames in a folder per clip", isOn: $exportFramesPerClipFolder)
+                Text("Export Frame saves into a folder named after the clip, or the stream, inside this folder. "
+                     + "Share Frame is not affected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -626,8 +634,21 @@ private struct DeckLinkSettingsPane: View {
                 if let detail = dlStatus.detail {
                     SettingsCaption(detail)
                 } else if !dl.devices.isEmpty {
-                    // Ready — name the hardware (what the old single-device row showed).
-                    SettingsCaption(dl.devices.map(\.displayName).joined(separator: ", "))
+                    // Ready — name the hardware. A sub-device the card's connector mapping makes inactive
+                    // (BMDDeckLinkDuplex) is listed greyed, with the note (Robbie, 2026-11-15). Follows a mapping changed
+                    // in Desktop Video Setup while this pane is open: the service re-reads on the SDK's profile callback.
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(dl.devices, id: \.index) { d in
+                            Text(d.isInactive ? "\(d.displayName) — \(DeckLinkConnectorMapping.inactiveNote.lowercased())"
+                                              : d.displayName)
+                                .font(.caption)
+                                .foregroundStyle(d.isInactive ? .tertiary : .secondary)
+                        }
+                    }
+                }
+                // Where the connector mapping is changed. Shown only while the app is installed (DesktopVideoSetup.swift).
+                if DesktopVideoSetup.isInstalled {
+                    Button(DesktopVideoSetup.title) { DesktopVideoSetup.open() }
                 }
             }
 

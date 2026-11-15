@@ -5,6 +5,7 @@ import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picke
 import StreamBookmarkModel
 import SettingsTransfer   // SettingsFile.isSettingsFile — a settings file is not media (docs/SETTINGS_EXPORT_PLAN.md §5)
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision banner (0.9.1)
+import DeckLinkRefusal    // DeckLinkConnectorMapping — the greyed sub-devices' note
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -371,6 +372,8 @@ struct ContentView: View {
     @State private var showFileNameOverlay = false
     @State private var showGetFlipSheet = false
     @State private var showGuidesPanel = false
+    /// Where Share Frame…'s sheet hangs from in this window (FrameShare.swift).
+    @State private var shareAnchor = ShareAnchor()
     @State private var volumeHovering = false
     /// Constructed exactly once (see RendererStore). Same instance for display, scopes, DeckLink
     /// and export — read-only here; nothing reassigns it.
@@ -1734,6 +1737,8 @@ struct ContentView: View {
             .fileName: DeckShortcut { showFileNameOverlay.toggle() },
             .alwaysShowControls: DeckShortcut(enabled: { hasSource && !isDocked }) { togglePin() },
             .exportFrame: DeckShortcut(enabled: { metalRenderer != nil && engine.mediaKind.feedsRenderer }) { metalRenderer?.exportCurrentFrame() },
+            // File ▸ Share Frame…: Export Frame's image through the share sheet (FrameShare.swift). Gated as Export Frame is.
+            .shareFrame: DeckShortcut(enabled: { metalRenderer != nil && engine.mediaKind.feedsRenderer }) { shareFrame() },
             // Help ▸ Export Frame for Support…: the diagnostic set through a save panel, on this window.
             .exportFrameForSupport: DeckShortcut(enabled: { metalRenderer != nil }) {
                 metalRenderer?.exportFrameForSupport(window: deck.window)
@@ -2058,12 +2063,6 @@ struct ContentView: View {
         }
     }
 
-    /// Route the device picker through selectDevice (which cleanly stop/restarts if output is ON).
-    private var deckLinkDeviceBinding: Binding<Int> {
-        Binding(get: { deckLink.selectedDeviceIndex },
-                set: { DeckLinkService.shared.selectDevice($0) })
-    }
-
     /// The output-mode picker. `nil` tag = "Follow source"; a mode tag = the operator's pick, which
     /// wins until they clear it. Routed through `setManualMode` so the picker, persistence and the
     /// re-establish decision cannot diverge — the same discipline as the device and destination
@@ -2163,12 +2162,22 @@ struct ContentView: View {
                         // Say WHICH absence this is — an old driver is not a missing card.
                         Button(status.headline) {}.disabled(true)
                     } else {
-                        Picker("Output device", selection: deckLinkDeviceBinding) {
-                            ForEach(deckLink.devices, id: \.index) { d in
-                                Text(d.displayName).tag(d.index)
-                            }
+                        // One checkmark row per device, in enumeration order, instead of an inline Picker: a sub-device
+                        // the card's connector mapping makes inactive (BMDDeckLinkDuplex) is GREYED in place, which a
+                        // Picker row cannot be (Robbie, 2026-11-15). Unticking the selected row does nothing.
+                        ForEach(deckLink.devices, id: \.index) { d in
+                            Toggle(d.displayName, isOn: Binding(
+                                get: { deckLink.selectedDeviceIndex == d.index },
+                                set: { if $0 { DeckLinkService.shared.selectDevice(d.index) } }))
+                                .disabled(d.isInactive)
                         }
-                        .pickerStyle(.inline)
+                        if deckLink.devices.contains(where: \.isInactive) {
+                            Button("Greyed: " + DeckLinkConnectorMapping.inactiveNote.lowercased()) {}.disabled(true)
+                        }
+                    }
+                    // Where the mapping is changed. Shown only while the app is installed (DesktopVideoSetup.swift).
+                    if DesktopVideoSetup.isInstalled {
+                        Button(DesktopVideoSetup.title) { DesktopVideoSetup.open() }
                     }
                 }
                 // D4b-3: a live operational choice (a client may want the room speakers for a minute),
@@ -2251,7 +2260,8 @@ struct ContentView: View {
                 // The last start was refused with a message (another app holds the card). Output is off until the
                 // user starts it again; see DeckLinkService.startRefusal.
                 if let refusal = deckLink.startRefusal, !deckLink.isOutputting {
-                    Section("Not started") {
+                    // "Output off", not "Not started": a connector-mapping change that stops output says why here too.
+                    Section("Output off") {
                         Button("⚠️ \(refusal)") {}.disabled(true)
                     }
                 }
@@ -3031,6 +3041,8 @@ struct ContentView: View {
             if engine.mediaKind.feedsRenderer { flipButton }
             reloadButton
             exportButton
+            // Full only: Compact and Narrow have Share Frame… in More (…), under Export Frame (Robbie, 2026-11-15).
+            shareButton
 
             rowDivider
 
@@ -3186,7 +3198,11 @@ struct ContentView: View {
             // Video files only, as `captionControl` is.
             .disabled(engine.mediaKind != .video)
             Section {
-                Button(keys.helpText("Export Frame", .exportFrame)) { metalRenderer?.exportCurrentFrame() }
+                Button(keys.helpText("Export Frame…", .exportFrame)) { metalRenderer?.exportCurrentFrame() }
+                    .disabled(engine.mediaKind != .video)
+                // Directly below Export Frame (Robbie, 2026-11-15): the same image, through the share sheet, which hangs
+                // from this More control.
+                Button(keys.helpText("Share Frame…", .shareFrame)) { shareFrame() }
                     .disabled(engine.mediaKind != .video)
                 Button("Framing Guides…") { showGuidesPanel = true }
                 if includesLoop {
@@ -3204,6 +3220,7 @@ struct ContentView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(on.isEmpty ? "More" : "More — " + on.joined(separator: ", "))
+        .background(ShareAnchorView { [shareAnchor] in shareAnchor.more = $0 })
         .accessibilityIdentifier("moreControls")
         // "Framing Guides…" is a More item here, so its panel hangs off More (see `adaptiveButtonRows`).
         .popover(isPresented: $showGuidesPanel, arrowEdge: .bottom) {
@@ -3420,8 +3437,30 @@ struct ContentView: View {
         Button(action:         { metalRenderer?.exportCurrentFrame() }) {
             Image(systemName: "square.and.arrow.down")
         }
-        .help(keys.helpText("Export frame", .exportFrame))
+        .help(keys.helpText("Export Frame…", .exportFrame))
         .disabled(engine.mediaKind != .video)
+    }
+
+    /// Share Frame… (ACTION), in Full beside Export (Robbie, 2026-11-15): the standard share symbol, and the share sheet hangs
+    /// from this button, as it does when File ▸ Share Frame… is chosen while Full is on screen (FrameShare.swift). Compact
+    /// and Narrow have no button: Share Frame… is in More (…) there.
+    private var shareButton: some View {
+        Button { shareFrame() } label: {
+            Image(systemName: "square.and.arrow.up")
+        }
+        .help(keys.helpText("Share Frame…", .shareFrame))
+        .disabled(engine.mediaKind != .video)
+        .background(ShareAnchorView { [shareAnchor] in shareAnchor.shareButton = $0 })
+    }
+
+    /// Share Frame…: Export Frame's frame as an SDR JPEG through the macOS share sheet, anchored to More (…) or, in Full, the
+    /// Share button; the controls are woken first so the sheet does not hang from a faded bar. Focus returns to the player
+    /// view when the sheet closes. FrameShare.swift.
+    private func shareFrame() {
+        guard let renderer = metalRenderer else { NSSound.beep(); return }
+        wakeHUD()
+        guard let anchor = shareAnchor.view(fallback: deck.window?.contentView) else { NSSound.beep(); return }
+        FrameSharer.shared.share(anchor: anchor, focus: renderer.hostView) { renderer.writeFrameForShare(into: $0) }
     }
 
     // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is

@@ -35,6 +35,15 @@ final class MetalHostView: NSView {
     /// would close a cycle through `renderer.metalLayer === self.layer`.
     weak var renderer: MetalVideoRenderer?
 
+    /// KEYBOARD FOCUS (Robbie, 2026-11-15). The player view takes first responder, so that when Share Frame…'s sheet closes
+    /// focus comes back here (`FrameSharer.returnFocus`) and not to the window's first control, the Open button, which then
+    /// drew a focus ring. A click on the picture takes it too, as clicking an empty area of a document does. Shortcuts are
+    /// unaffected: they are dispatched by `ShortcutCenter`'s event monitor before any responder sees the key, and this view
+    /// is not a text field. It is not a Tab stop and draws no ring.
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { false }
+    override var focusRingType: NSFocusRingType { get { .none } set {} }
+
     /// Colour S1: the Reference plan depends on which DISPLAY this window is on, so the renderer is
     /// told when the view arrives in a window (it then learns the screen) and re-plans if it is in
     /// Reference. Later screen moves arrive as `NSWindow.didChangeScreenNotification`.
