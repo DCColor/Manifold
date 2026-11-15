@@ -199,7 +199,6 @@ public enum ShortcutCatalog {
     private static let cmd: KeyModifiers = [.command]
     private static let optCmd: KeyModifiers = [.option, .command]
     private static let shiftCmd: KeyModifiers = [.shift, .command]
-    private static let shiftOptCmd: KeyModifiers = [.shift, .option, .command]
     private static let ctlOpt: KeyModifiers = [.control, .option]
     private static let ctlOptShift: KeyModifiers = [.control, .option, .shift]
 
@@ -209,10 +208,11 @@ public enum ShortcutCatalog {
               note: "The standard Mac key; not rebindable"),
         // "Export Frame…", never a bare "Export", in the menu, More and the button's tooltip (Robbie, 2026-11-15).
         .init(.exportFrame, "Export Frame…", .file, .window, .menu, .char("e", optCmd)),
-        // The frame Export Frame captures, as an SDR JPEG through the macOS share sheet (Robbie, 2026-11-15). ⇧⌥⌘E, Export
-        // Frame's key with ⇧: checked free 2026-11-15 against this catalog, `ShortcutRegistry.reserved` and the system
-        // Services' key equivalents on the build Mac (none uses E).
-        .init(.shareFrame, "Share Frame…", .file, .window, .menu, .char("e", shiftOptCmd)),
+        // The frame Export Frame captures, as an SDR JPEG through the macOS share sheet (Robbie, 2026-11-15). ⇧⌘E (was
+        // ⇧⌥⌘E earlier the same day): checked free 2026-11-15 against this catalog, `ShortcutRegistry.reserved`, the system
+        // symbolic hotkeys and the Services' key equivalents on the build Mac (none uses E). The menu reads "Share Frame
+        // (SDR)…" while the key window's picture is PQ or HLG (`ShareLabel`); this is the title for an SDR picture.
+        .init(.shareFrame, "Share Frame…", .file, .window, .menu, .char("e", shiftCmd)),
 
         // ── Sources and output: device claims (Robbie, 2026-10-24: keys after all, with ⌘; §8) ─────────────
         .init(.disconnectLive, "Disconnect Live Source", .sources, .window, .menu, .code(KeyCode.delete, optCmd)),

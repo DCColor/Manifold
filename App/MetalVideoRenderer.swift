@@ -2182,8 +2182,17 @@ final class MetalVideoRenderer {
             pictureDerivedColorSpace = sourceDerivedColorSpace
             pictureWantsEDR = sourceWantsEDR
         }
-        return before != (picturePrimariesCode, pictureTransferCode, pictureMatrixCode, pictureStatedByLUT)
+        let moved = before != (picturePrimariesCode, pictureTransferCode, pictureMatrixCode, pictureStatedByLUT)
+        if moved { onPictureCodesChanged?() }
+        return moved
     }
+
+    /// MAIN. Called when the picture codes change (a source edge, a LUT or its output space). `WindowDeck` publishes
+    /// `pictureIsHDR` from it, for Share Frame's "(SDR)" titles (Robbie, 2026-11-15).
+    var onPictureCodesChanged: (() -> Void)?
+
+    /// MAIN. The PICTURE is PQ or HLG (picture codes, not source codes: a LUT stated as 709 makes an HDR source SDR here).
+    var pictureIsHDR: Bool { ShareLabel.isHDR(transfer: pictureTransferCode) }
 
     /// The `[EDR]` suffix that says the layer is configured from the LUT's stated output space; empty otherwise,
     /// so every no-LUT line reads exactly as before L2.
@@ -5845,8 +5854,9 @@ final class MetalVideoRenderer {
     func writeFrameForShare(into folder: URL) -> URL? {
         guard let export = captureFrameExport(diagnosticSet: false),
               let jpeg = ShareJPEG.encode(export.image, properties: export.properties) else { return nil }
-        let url = folder.appendingPathComponent(export.baseName + (export.parTag.map { "_\($0)" } ?? ""))
-            .appendingPathExtension("jpg")
+        // " SDR" at the end of the name when the picture is PQ or HLG, as the menu says "(SDR)" (Robbie, 2026-11-15).
+        let url = folder.appendingPathComponent(ShareLabel.fileName(base: export.baseName, parTag: export.parTag,
+                                                                    pictureIsHDR: pictureIsHDR))
         do { try jpeg.write(to: url, options: .atomic) } catch { return nil }
         return url
     }

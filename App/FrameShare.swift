@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import ShortcutRegistry   // ShortcutRegistry — File ▸ Share Frame…'s item
+import FrameShareFormat   // ShareLabel — "Share Frame (SDR)…" for an HDR picture (Robbie, 2026-11-15)
 
 // Share Frame… (Robbie, 2026-11-15): the frame Export Frame would capture, through the macOS share sheet
 // (NSSharingServicePicker): Messages, Mail, AirDrop, Notes, Photos and the rest.
@@ -17,6 +19,23 @@ import SwiftUI
 //
 // PRIVACY. Nothing leaves the app but the image itself: no path or name is logged, and the only log line is
 // "[SHARE] frame shared", with no target and no file name.
+
+/// The key deck's picture is PQ or HLG, for File ▸ Share Frame…'s title, which cannot observe a deck from inside a
+/// `commands` builder (Robbie, 2026-11-15; `ShareLabel`). Set by `WindowDeck` when the key deck changes or its picture does.
+@MainActor
+final class SharePictureState: ObservableObject {
+    static let shared = SharePictureState()
+    @Published var keyPictureIsHDR = false
+}
+
+/// File ▸ Share Frame…: "Share Frame (SDR)…" while the key window's picture is PQ or HLG.
+struct ShareFrameMenuItem: View {
+    @ObservedObject var registry: ShortcutRegistry
+    @ObservedObject private var state = SharePictureState.shared
+    var body: some View {
+        ShortcutMenuItem(id: .shareFrame, registry: registry, title: ShareLabel.title(pictureIsHDR: state.keyPictureIsHDR))
+    }
+}
 
 /// The NSViews the share sheet may hang from, in this window: More (…) in Compact and Narrow, where Share Frame… sits under
 /// Export Frame, and the Share button beside Export in Full, which has no More. Registered by `ShareAnchorView`; held weakly.

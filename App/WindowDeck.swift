@@ -351,6 +351,15 @@ final class WindowDeck: ObservableObject {
     ///
     /// The playhead, not the captured slot's own PTS: they are the same frame when paused, which is how frames are taken;
     /// during playback the picture can be a frame or two behind the playhead (the render queue's depth).
+    /// The picture (picture codes) is PQ or HLG: Share Frame reads "Share Frame (SDR)…" in More, the Share button's tooltip
+    /// and, while this is the key deck, the File menu (`SharePictureState`). Set from the renderer (`DeckRegistry.configure`).
+    @Published var pictureIsHDR = false {
+        didSet {
+            guard pictureIsHDR != oldValue, DeckRegistry.shared.keyDeck === self else { return }
+            SharePictureState.shared.keyPictureIsHDR = pictureIsHDR
+        }
+    }
+
     var frameName: FrameName? {
         if let engine, engine.hasMedia, let url = engine.currentURL {
             let t = engine.currentTime
@@ -702,6 +711,8 @@ final class DeckRegistry {
                 let registry = DeckRegistry.shared
                 guard registry.entries[ObjectIdentifier(window)] != nil else { return }
                 registry.keyDeckWindow = window
+                // File ▸ Share Frame…'s "(SDR)" follows the key deck's picture (Robbie, 2026-11-15).
+                SharePictureState.shared.keyPictureIsHDR = registry.entries[ObjectIdentifier(window)]?.deck?.pictureIsHDR ?? false
                 // ── WHERE THE SIZE CONSTRAINT IS INSTALLED, AND WHY HERE ──────────────────
                 //
                 // Taking `window.delegate` during SwiftUI's scene setup makes SwiftUI TEAR THE SCENE
@@ -1153,6 +1164,12 @@ final class DeckRegistry {
         renderer.frameNameProvider = { [weak deck] in
             guard Thread.isMainThread else { return nil }
             return MainActor.assumeIsolated { deck?.frameName }
+        }
+        // Share Frame's "(SDR)" titles follow the PICTURE's transfer (Robbie, 2026-11-15).
+        deck.pictureIsHDR = renderer.pictureIsHDR
+        renderer.onPictureCodesChanged = { [weak deck, weak renderer] in
+            guard Thread.isMainThread else { return }
+            MainActor.assumeIsolated { deck?.pictureIsHDR = renderer?.pictureIsHDR ?? false }
         }
         // An export that could not use the per-clip folder says so in this window's banner (item 7).
         renderer.onExportNotice = { [weak deck] text in

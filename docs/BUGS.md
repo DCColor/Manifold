@@ -2210,6 +2210,8 @@ is a limit or an unknown, to close or promote after the attended steps:
 - **Share's PQ tone map is not quite As macOS Shows It's.** ColorSync's default draw gives the `.ifSupported` curve, up to 14 codes
   darker below 200 nits; no API reproduces `.automatic` + `hdr10` (`docs/HLG_MACOS_MODE_PLAN.md` §3.10e). HLG matches. Robbie's
   call whether to replace it with a measured curve.
+- **Attended 2026-11-15, follow-ups, passed (Robbie):** all six steps: Rec. 709 and PQ shared to Messages, names, sizes, the shortcut,
+  no focus ring after closing, the folder per clip. A UHD Rec. 709 share was 4.4 MB.
 - **Attended 2026-11-15, passed:** connector-mapping lists (1, 1, 2, 4 devices), output stopped with the banner on a mapping change
   during playback, Desktop Video Setup from both places, Share from More and the Full button, the switch to Compact.
 

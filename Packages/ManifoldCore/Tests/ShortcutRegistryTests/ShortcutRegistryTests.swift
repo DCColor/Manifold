@@ -81,7 +81,7 @@ final class ShortcutRegistryTests: XCTestCase {
     func testDecidedDefaults() {
         let r = registry()
         let expected: [ShortcutID: String?] = [
-            .fileOpen: "⌘O", .exportFrame: "⌥⌘E", .shareFrame: "⌥⇧⌘E", .inspector: "⌘I", .alwaysShowControls: "⌥⌘T", .scopesTray: "⌥⌘S",
+            .fileOpen: "⌘O", .exportFrame: "⌥⌘E", .shareFrame: "⇧⌘E", .inspector: "⌘I", .alwaysShowControls: "⌥⌘T", .scopesTray: "⌥⌘S",
             .displayOS: "⌥⌘1", .displayReference: "⌥⌘2", .displayBypass: "⌥⌘3", .transformChain: "⌥⌘4",
             .holdCompare: "C (hold)", .holdCompareBypass: "⇧C (hold)", .holdCompareLUTOff: "⌥C (hold)",
             .toggleDeckLink: "⇧⌘D", .disconnectLive: "⌥⌘Delete",
@@ -113,8 +113,8 @@ final class ShortcutRegistryTests: XCTestCase {
         // Never a bare "Export" (Robbie, 2026-11-15).
         XCTAssertEqual(r.definition(.exportFrame).title, "Export Frame…")
         XCTAssertEqual(r.definition(.shareFrame).category, .file)
-        // ⇧⌥⌘E (2026-11-15): not macOS's, and no other action's.
-        let share = KeyChord.char("e", [.shift, .option, .command])
+        // ⇧⌘E (2026-11-15): not macOS's, and no other action's.
+        let share = KeyChord.char("e", [.shift, .command])
         XCTAssertNil(ShortcutRegistry.reserved[share])
         XCTAssertEqual(r.definitions.filter { $0.defaultChords.contains(share) }.map(\.id), [.shareFrame])
         XCTAssertEqual(r.definition(.cycleInterpretation).title, "Next Tag Override")

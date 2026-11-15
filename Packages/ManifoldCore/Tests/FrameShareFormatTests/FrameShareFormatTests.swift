@@ -258,3 +258,25 @@ final class ClipFolderTests: XCTestCase {
         for t in [a, b] { XCTAssertTrue(t.contains("“MyClip”")); XCTAssertFalse(t.contains("/")) }
     }
 }
+
+final class ShareLabelTests: XCTestCase {
+
+    func testOnlyPQAndHLGAreHDR() {
+        XCTAssertTrue(ShareLabel.isHDR(transfer: 16))
+        XCTAssertTrue(ShareLabel.isHDR(transfer: 18))
+        for t in [nil, 1, 13, 14, 15, 2] { XCTAssertFalse(ShareLabel.isHDR(transfer: t), "\(String(describing: t))") }
+    }
+
+    func testTitleSaysSDROnlyForAnHDRPicture() {
+        XCTAssertEqual(ShareLabel.title(pictureIsHDR: true), "Share Frame (SDR)…")
+        XCTAssertEqual(ShareLabel.title(pictureIsHDR: false), "Share Frame…")
+    }
+
+    /// Robbie's example, 2026-11-15.
+    func testFileNameEndsInSDROnlyForAnHDRPicture() {
+        XCTAssertEqual(ShareLabel.fileName(base: "MyClip 01-02-14-05", parTag: nil, pictureIsHDR: true), "MyClip 01-02-14-05 SDR.jpg")
+        XCTAssertEqual(ShareLabel.fileName(base: "MyClip 01-02-14-05", parTag: nil, pictureIsHDR: false), "MyClip 01-02-14-05.jpg")
+        XCTAssertEqual(ShareLabel.fileName(base: "MyClip 01-02-14-05", parTag: "par2-1", pictureIsHDR: true),
+                       "MyClip 01-02-14-05_par2-1 SDR.jpg")
+    }
+}

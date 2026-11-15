@@ -322,8 +322,9 @@ struct ManifoldApp: App {
                 // ⌥⌘E, formerly the hidden ⌃⌥E (docs/SHORTCUTS_AUDIT.md §4.2). The control bar's button is the same
                 // action. The image only, since 2026-10-24 (§8 item 1).
                 ShortcutMenuItem(id: .exportFrame, registry: shortcuts)
-                // The same image through the share sheet (Robbie, 2026-11-15; FrameShare.swift). No default key.
-                ShortcutMenuItem(id: .shareFrame, registry: shortcuts)
+                // The same frame as an SDR JPEG through the share sheet (Robbie, 2026-11-15; FrameShare.swift). ⇧⌘E. Reads
+                // "Share Frame (SDR)…" while the key window's picture is PQ or HLG.
+                ShareFrameMenuItem(registry: shortcuts)
                 // The measurement set (.rgba16f, .v210, .v210.json beside the PNG) is Help ▸ Export Frame for Support…
                 // since 2026-10-24, a public item; it was a debug item here that morning.
                 Divider()

@@ -145,14 +145,20 @@ start advice and the guide (below) all send the user to it.
 Size guess: small.
 
 ## Share Frame…
-Status: built 2026-11-15, not committed; first attended check passed 2026-11-15; follow-ups 1–5 and 7 built 2026-11-15, attended
-check outstanding.
+Status: built 2026-11-15, not committed; first attended check passed 2026-11-15; follow-ups 1–5 and 7 attended 2026-11-15, all
+six steps passed (Robbie). Second follow-ups (⇧⌘E, "(SDR)") built 2026-11-15, attended check outstanding.
+Attended (Robbie, 2026-11-15, follow-ups): all six steps passed. A UHD Rec. 709 frame shared at 4.4 MB, a little above the
+1.0–4.0 MB benchmark range.
 Attended (Robbie, 2026-11-15): Share works from More and from the Full-layout button, and the layout switches to Compact cleanly. A PQ
 frame (the PNG of the first build) shared to iPhone Messages arrived correctly tone-mapped to SDR, with cICP 9-16-9 honoured.
 Version: after 0.9.3
 
 What: "Share Frame…" directly under Export Frame in More (…) and in the File menu; a registry action, `file.shareFrame`,
-default key ⇧⌥⌘E (follow-up 3; drawn "⌥⇧⌘E" in Apple's modifier order). In the Full layout, which has no More menu, a standalone Share button (`square.and.arrow.up`, tooltip
+default key **⇧⌘E** (Robbie, 2026-11-15; ⇧⌥⌘E earlier the same day). ⇧⌘E was checked free against Manifold's actions,
+`ShortcutRegistry.reserved`, the system symbolic hotkeys and the Services' key equivalents on the build Mac.
+**HDR clarity (2026-11-15):** while the picture (picture codes) is PQ or HLG, File ▸ Share Frame…, the More item and the Share
+button's tooltip read "Share Frame (SDR)…", and the shared file's name ends in " SDR" ("MyClip 01-02-14-05 SDR.jpg"). An SDR
+picture is unchanged. `ShareLabel`, tested; the File menu follows the key window (`SharePictureState`). In the Full layout, which has no More menu, a standalone Share button (`square.and.arrow.up`, tooltip
 "Share Frame…") sits beside Export (Robbie, 2026-11-15). The sheet opens on More (…) in Compact and Narrow and on the Share button
 in Full, from the menu item too.
 The image (follow-up 1, decided Robbie, 2026-11-15) is an **8-bit SDR JPEG, quality 0.9, Rec. 709 primaries, tagged sRGB**:
@@ -189,6 +195,17 @@ recipient's app matters as much. **Proposal, not built:** a Share-only "SDR (Rec
 an 8-bit sRGB/Rec. 709 PNG or JPEG, named in the file name, with Export Frame unchanged.
 
 Watch: whether Mail or AirDrop reads the file after reporting done. If an attachment arrives empty, delay the deletion.
+
+## Share HDR stills as HDR
+Status: idea (Robbie, 2026-11-15)
+Version: after the Share Frame follow-ups build
+
+What: share an HDR picture as HDR rather than tone-mapped SDR: a JPEG or HEIC with an ISO gain map written by ImageIO
+(`kCGImageDestinationEncodeRequest` = `kCGImageDestinationEncodeToISOGainmap`, macOS 15), or AVIF. A viewer that does not read the
+gain map shows the SDR base image. Open: which base image to use (the `ShareJPEG` SDR rendering, or ImageIO's own), how Messages and
+Mail on iPhone and Mac handle each format, and the file size.
+
+Size guess: small to a session, mostly attended checks.
 
 ## Share for stills
 Status: idea (Robbie, 2026-11-15)

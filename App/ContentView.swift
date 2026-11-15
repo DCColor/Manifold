@@ -1,5 +1,6 @@
 import SwiftUI
 import ShortcutRegistry
+import FrameShareFormat   // ShareLabel — "Share Frame (SDR)…" for an HDR picture (Robbie, 2026-11-15)
 import ManifoldCore
 import UniformTypeIdentifiers   // UTType(filenameExtension:) for the .srt picker
 import StreamBookmarkModel
@@ -3202,7 +3203,7 @@ struct ContentView: View {
                     .disabled(engine.mediaKind != .video)
                 // Directly below Export Frame (Robbie, 2026-11-15): the same image, through the share sheet, which hangs
                 // from this More control.
-                Button(keys.helpText("Share Frame…", .shareFrame)) { shareFrame() }
+                Button(keys.helpText(ShareLabel.title(pictureIsHDR: deck.pictureIsHDR), .shareFrame)) { shareFrame() }
                     .disabled(engine.mediaKind != .video)
                 Button("Framing Guides…") { showGuidesPanel = true }
                 if includesLoop {
@@ -3448,7 +3449,7 @@ struct ContentView: View {
         Button { shareFrame() } label: {
             Image(systemName: "square.and.arrow.up")
         }
-        .help(keys.helpText("Share Frame…", .shareFrame))
+        .help(keys.helpText(ShareLabel.title(pictureIsHDR: deck.pictureIsHDR), .shareFrame))
         .disabled(engine.mediaKind != .video)
         .background(ShareAnchorView { [shareAnchor] in shareAnchor.shareButton = $0 })
     }
