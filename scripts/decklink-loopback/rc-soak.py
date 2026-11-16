@@ -231,6 +231,11 @@ def markers_setup(app, fixture, length, label, n):
     t1 = time.monotonic()
     while len(thumbs(fp)) < have and time.monotonic() - t1 < 60: time.sleep(0.5)
     cached = len(thumbs(fp)); save(thumbs_cached=cached); say(f"{cached} thumbnails in the disk cache")
+    # The paused Regenerate comes after the scripted seeks have all run ([TRANSPORT] done), on a file at rest: a file that already
+    # had its markers skips the adds and would otherwise press it mid-seek. (On 4067abb nothing was remade either way: stored
+    # markers that load before the file's rate get no thumbnails, docs/BUGS.md 2026-11-15. Thumbnails cached is checked above.)
+    while "[TRANSPORT] done" not in text() and time.monotonic() - t0 < 40 + 8 * n: time.sleep(0.25)
+    save(transport_done_before_regen="[TRANSPORT] done" in text())
     w0 = time.time(); r = sh(AXS, str(pid), "regen"); t2 = time.monotonic()
     while time.monotonic() - t2 < 60 and sum(1 for t in thumbs(fp).values() if t > w0) < have: time.sleep(0.5)
     regen_line = re.findall(r"\[MARKERS\] regenerate thumbnails n=(\d+)", text()); remade = sum(1 for t in thumbs(fp).values() if t > w0)

@@ -117,8 +117,9 @@ final class MarkerThumbnailer: ObservableObject {
     }
 
     private func pump() {
-        guard demand > 0, inFlight == nil, let fp = fingerprint, rate > 0, let engine, !engine.isPlaying,
-              let frame = wanted.subtracting(images.keys).subtracting(attempts.givenUp).min() else { return }
+        guard let fp = fingerprint, let engine,
+              let frame = ThumbnailQueue.next(wanted: wanted, made: Set(images.keys), givenUp: attempts.givenUp, rate: rate,
+                                              inFlight: inFlight, shown: demand > 0, playing: engine.isPlaying) else { return }
         inFlight = frame
         let t = token, c = cache
         let disk = usesDisk

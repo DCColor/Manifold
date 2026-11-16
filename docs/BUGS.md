@@ -2198,6 +2198,56 @@ than a rewrite), with 100 Pauses on the wire at 59.94 and 23.976 before and afte
 
 ---
 
+## ✅ FIXED 2026-11-15 (unit-tested; the real-build check is the 0.9.4 soak's marker setup) — MARKERS v1, ALL BUILDS SINCE REMEMBER MARKERS (D24) — Stored markers get no thumbnails, and Regenerate cannot make them, when they load before the file's frame rate
+
+**Found by the 0.9.4 soak's marker setup on `4067abb` (2026-11-15).** Three files with 5 stored markers each
+(`w1c-5994-1920s.mov`, `w1c-2398-1920s.mov`, `gop25-h264-1920s.mp4`), the Markers slot open with thumbnails on, paused. Two
+runs: no thumbnail reached the disk cache in 60 s after opening, and gear ▸ Regenerate Thumbnails (the app logged
+`regenerate thumbnails n=5`) removed the five cached JPEGs and made none in the next 60 s. The same files' markers, added in
+the session on `bdc1467` an hour earlier, got all five thumbnails at once, and a paused Regenerate remade them in about a second.
+Records: `~/Code/_scratch/manifold-rc094-soak/setup-try1/`, `setup-*.json`, `old-bdc1467/`.
+
+**Cause: an ordering race between two tasks started by opening a file.** `MarkerModel.fileChanged` fingerprints the file
+and reads the store; the engine reads the metadata, which carries the frame rate, in its own task (`FrameEngine.swift:2974-2981`,
+`MediaInspector.metadata`). The fingerprint reads at most 8 MB (3 ms here), so on a large file it usually finishes first.
+`finishLoad` then gave the thumbnailer `basis?.rate ?? 0`, which is 0 before the metadata, and `pump()` starts nothing at
+rate 0. Nothing gave it the rate later: the model's `$metadata` sink only re-published for the labels, and Regenerate
+pumped with the rate still 0. Only a marker change (`apply`) synced it, which is why markers added in a session worked.
+Effect for a user: reopen a large file with stored markers, and the thumbnails may never appear, Regenerate included,
+until a marker is added, edited or deleted. Regenerate also deletes the cached JPEGs, so it makes things worse.
+
+**Likely the blank thumbnails of the first markers test.** `HDR TEST.mov`'s blank early-frame thumbnails "cleared with
+Clear All", put down to the first build's cache (`docs/MARKERS_PLAN.md:377`, §14.1). Which action "Clear All" was is
+UNKNOWN: no commit has that string in the app, only in those two doc lines (`git log -S"Clear All"`). If it removed the
+markers (Settings ▸ Delete All Stored Markers… removes markers and thumbnails) and they were then added again, the new
+ones went through `apply`, which syncs the rate: the same pattern as here, stored markers blank and re-added ones fine. Not
+proven for that run; if blank thumbnails come back on a file with stored markers, this is the first suspect.
+
+**Fix (uncommitted at writing):** `ThumbnailFeed` (Packages/ManifoldCore/Sources/Markers/ThumbnailFeed.swift) holds the
+frames and rate the thumbnailer was last given. The model now also reports the metadata landing (`metadataChanged`) and
+Regenerate (before it drops the thumbnails); a report reaches the thumbnailer only when the frames or the rate changed, so
+the inspector's repeat publishes cost nothing. Load and marker changes sync as before. `pump()`'s rule moved unchanged into
+`ThumbnailQueue.next` (one at a time, only while a view shows thumbnails, never while playing, never at rate 0). Tests:
+`ThumbnailFeedTests` replays the model's calls in the failing order (markers in, rate nil; then the rate) and checks the
+thumbnails are requested once the rate arrives, Regenerate before and after it, and that a repeated rate is not a change.
+The wiring itself (the sink calling it) is app code with no test target: the soak setup checks it on the real build.
+
+**The same order, everywhere else that reads the rate (audited 2026-11-15):**
+- Marker timecode labels (slot, Markers window, timeline flags, editor sheet): read `basis` when drawn, and the metadata sink
+  re-publishes, so they relabel when the rate lands. They read "—" until then. Not affected.
+- The start-timecode override (gear field, D6): shown and applied through `basis` live, stored with the markers. Not affected.
+- EDL, CSV and text export, and EDL import: user actions gated on `isActive`, which needs `basis`; disabled until the rate
+  lands. Not affected. Add Marker before the rate beeps (`markFrame` nil), the same gate.
+- `startTimecodeSeen`, written at save (`MarkerModel.save`): saves follow a user change, after the rate. Not affected.
+- **Affected, fixed with it: the "This file's start timecode now reads …" notice** ran only in `finishLoad`, behind
+  `let basis`, so a file whose rate landed later was never checked. Now `checkStartTimecode()`, once per load, from
+  `finishLoad` or the metadata sink, whichever has the rate first.
+- `tcInfo` (the timecode half of `basis`) is set before the metadata task on the AVFoundation paths
+  (`FrameEngine.swift:2974`, `:3119`, `:3351`, `:3395`) and in the same main-actor turn on the libav path (`:3470`), so the
+  metadata sink sees both.
+
+---
+
 ## ☐ OPEN 2026-11-08 — TOP 1.0 BUG — PRE-EXISTING (gate off, `d7a4e93`; almost certainly 0.9.2) — A playing file's picture freezes for good while the clock and sound run on
 
 **Decided (Robbie, 2026-11-08): the top 1.0 bug, above the card-clock slips. Not Stage 1b's: it froze with the gate off.** `CARD_CLOCK_FINDINGS.md` §10.12 (Fault 3), §10.13, §10.14, §10.15.

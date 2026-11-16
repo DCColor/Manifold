@@ -59,6 +59,10 @@ final class MarkerModel: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
     private let store = MarkerStore.standard()
     private var noticeTask: Task<Void, Never>?
+    /// The frames and rate the thumbnailer was last given (`ThumbnailFeed`: the rate can land after the markers).
+    private var feed = ThumbnailFeed()
+    /// The start-timecode check (`checkStartTimecode`) has not run for this load: it needs the rate and timecode.
+    private var startCheckPending = false
 
     /// This file's markers are read from and written to the store: Remember markers between sessions was on when the
     /// file opened (§5.2). Off, they live in memory for as long as the file is open. Saving also asks the preference
@@ -86,10 +90,10 @@ final class MarkerModel: ObservableObject {
             .sink { [weak self] url in MainActor.assumeIsolated { self?.fileChanged(url) } }
             .store(in: &cancellables)
         // A stored override, or the "timecode reads differently" check, needs the rate and timecode, which land after
-        // the URL; re-publish so the list relabels.
+        // the URL (tcInfo is set by then: before the metadata task, or in the same main-actor turn on the libav path).
         engine.$metadata
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in MainActor.assumeIsolated { self?.objectWillChange.send() } }
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.metadataChanged() } }
             .store(in: &cancellables)
     }
 
@@ -98,6 +102,8 @@ final class MarkerModel: ObservableObject {
         loadToken = UUID()
         doc = nil
         fileURL = url
+        feed = ThumbnailFeed()
+        startCheckPending = false
         markers = []
         startOverride = nil
         inPoint = nil
@@ -145,11 +151,30 @@ final class MarkerModel: ObservableObject {
             startOverride = d.startOverride
             state = .ready
             thumbnails.reset(engine: engine, fingerprint: fingerprint, persist: persisting)
+            feed = ThumbnailFeed()
             syncThumbnails()
             NSLog("%@", MarkerLog.loaded(count: markers.count, fingerprintMs: ms))
-            if let seen = d.startTimecodeSeen, let basis, basis.hasTimecode, seen != basis.label(0), !markers.isEmpty {
-                show("This file’s start timecode now reads \(basis.label(0)); its markers were made at \(seen). They stay on the same frames.")
-            }
+            startCheckPending = true
+            checkStartTimecode()
+        }
+    }
+
+    /// The engine's metadata changed. The list relabels; and the file's rate may have just landed, after the markers
+    /// loaded (`ThumbnailFeed`'s note): the thumbnailer and the start-timecode check get it now. A repeat changes nothing.
+    private func metadataChanged() {
+        objectWillChange.send()
+        guard state == .ready else { return }
+        syncThumbnails(ifChanged: true)
+        checkStartTimecode()
+    }
+
+    /// "This file's start timecode now reads …": once per load, as soon as the rate and timecode are known. The first
+    /// build ran it only when the markers loaded, so a file whose metadata landed later was never checked.
+    private func checkStartTimecode() {
+        guard startCheckPending, let basis, let d = doc else { return }
+        startCheckPending = false
+        if let seen = d.startTimecodeSeen, basis.hasTimecode, seen != basis.label(0), !markers.isEmpty {
+            show("This file’s start timecode now reads \(basis.label(0)); its markers were made at \(seen). They stay on the same frames.")
         }
     }
 
@@ -370,6 +395,7 @@ final class MarkerModel: ObservableObject {
     /// Regenerate Thumbnails (gear, toolbar: nil = every marker) or Regenerate Thumbnail (row menu).
     func regenerateThumbnails(_ ids: Set<UUID>? = nil) {
         let frames = ids.map { ids in Set(markers.filter { ids.contains($0.id) }.map(\.frame)) }
+        if state == .ready { syncThumbnails(ifChanged: true) }   // with the current rate (`ThumbnailFeed`'s note)
         let n = thumbnails.regenerate(frames)
         NSLog("%@", MarkerLog.regenerate(thumbnails: n))
     }
@@ -413,8 +439,12 @@ final class MarkerModel: ObservableObject {
         NSLog("%@", MarkerLog.changed(count: markers.count, action: log))
     }
 
-    private func syncThumbnails() {
-        thumbnails.sync(frames: Set(markers.map(\.frame)), rate: basis?.rate ?? 0)
+    /// The thumbnailer gets the markers' frames and the file's current rate. Always after a load or a change (as before);
+    /// `ifChanged` (metadata, Regenerate) only when the frames or the rate differ from what it was last given.
+    private func syncThumbnails(ifChanged: Bool = false) {
+        let changed = feed.update(frames: Set(markers.map(\.frame)), rate: basis?.rate)
+        guard changed || !ifChanged else { return }
+        thumbnails.sync(frames: feed.frames, rate: feed.rate)
     }
 
     private func save() {
