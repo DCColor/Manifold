@@ -11,6 +11,9 @@ let repoRoot = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()   // Packages
     .deletingLastPathComponent()   // <repo root>
 let ffmpegInclude = repoRoot.appendingPathComponent("ThirdParty/ffmpeg/include").path
+// The vendored SHARED libav (LGPL §6), for the one test target that decodes real MXF (`LibavFrameRequestTests`). The app
+// links these through project.yml; no library target here links them.
+let ffmpegLib = repoRoot.appendingPathComponent("ThirdParty/ffmpeg/lib").path
 
 let package = Package(
     name: "ManifoldCore",
@@ -588,6 +591,24 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // Marker thumbnails on MXF (docs/MARKERS_PLAN.md §15): a small drop-frame ProRes MXF, decoded through the vendored libav
+        // with the rule LibavScrubProducer uses (`FrameRequest`), must give each frame its own picture. The ONLY target that
+        // links libav, so `swift test` reaches real MXF timestamps; it links the vendored shared dylibs and finds them at run
+        // time through an rpath to ThirdParty/ffmpeg/lib (gitignored, staged by scripts/build_ffmpeg.sh).
+        .testTarget(
+            name: "LibavFrameRequestTests",
+            dependencies: ["CFFmpeg", "FrameGrab"],
+            path: "Tests/LibavFrameRequestTests",
+            resources: [.copy("Fixtures")],
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", ffmpegInclude])
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-L", ffmpegLib, "-lavformat", "-lavcodec", "-lavutil",
+                              "-Xlinker", "-rpath", "-Xlinker", ffmpegLib])
+            ]
+        ),
         // Markers on files (docs/MARKERS_PLAN.md): the model, Resolve's 16 colours, the Resolve marker EDL, CSV and text,
         // the content fingerprint and the store. Foundation and CryptoKit only.
         .target(
@@ -795,7 +816,7 @@ let package = Package(
             dependencies: ["CFFmpeg", "ScopeCompute", "AudioResample", "LiveAudioResample", "CardClock", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
-                           "AudioFileInfo", "StillImageInfo", "SMPTETimecode"],
+                           "AudioFileInfo", "StillImageInfo", "SMPTETimecode", "FrameGrab"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

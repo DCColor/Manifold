@@ -160,8 +160,11 @@ final class MarkerThumbnailer: ObservableObject {
             producer.onReadyChanged = { [weak self] in MainActor.assumeIsolated { self?.pump() } }
             return
         }
-        // The quarter-frame landing every typed seek uses (TransportKeyMonitor.commit).
-        producer.decode(at: (Double(frame) + 0.25) / rate) { [weak self] scrub in
+        // ⚠️ A QUARTER FRAME BEFORE, NOT AFTER. This producer returns the first frame AT OR AFTER the time asked for
+        // (`FrameRequest.reaches`). The first MXF build asked for (frame + 0.25) / rate, the AVFoundation seek path's nudge:
+        // frame N's own time is before that, so it got frame N + 1, the frame check refused it twice, and every MXF marker
+        // read "no preview" (2026-11-15, docs/MARKERS_PLAN.md §15).
+        producer.decode(at: FrameRequest.firstAtOrAfter(index: frame, rate: rate)) { [weak self] scrub in
             MainActor.assumeIsolated {
                 guard let self, t == self.token else { return }
                 // Nothing, or another frame than the one asked for: a failure, never a picture.

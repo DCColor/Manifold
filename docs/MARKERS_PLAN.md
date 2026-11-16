@@ -357,7 +357,8 @@ A small picture of each marker's frame: always in the Markers window (96 pt wide
 
 - **Source: exactly the marker's frame** (fixed 2026-11-15, §14). An AVFoundation file is read by `ExactFrameGrabber`
   (an AVAssetReader over that one frame, in the playback pixel format, taking the frame whose time is within a quarter
-  frame of the target); a libav file (MXF) by its own scrub-style producer (`FrameEngine.makeFrameProducer`). Either way
+  frame of the target); a libav file (MXF) by its own scrub-style producer (`FrameEngine.makeFrameProducer`), asked for a
+  quarter frame BEFORE the frame, because it returns the first frame at or after the time asked (`FrameRequest`, §15). Either way
   the delivered frame is checked against the frame asked for; a mismatch is a failure, never a picture. Never the scrub
   or playback decoder. A failed decode is retried once, then the thumbnail reads "no preview" until Regenerate.
 - **Picture:** Core Image draws the frame from its own colour tags, HDR tone-mapped to SDR, into sRGB, 108 px high, JPEG.
@@ -937,4 +938,46 @@ No default key (§4.5). `testShowMarkersHasNoDefaultKeyAndIsAssignable`: no chor
    on that row and note whether it comes back.
 4. **MXF.** `mk-2997df-tc.mxf`: two markers one frame apart; each thumbnail shows its own number.
 5. **Show Markers.** View ▸ Show Markers shows no key; it still toggles. Assign one in Keyboard Shortcuts: it works.
+
+## 15. MXF thumbnails all read "no preview" (Robbie, 2026-11-15)
+
+On `mk-2997df-tc.mxf` (29.97 DF, start 00:59:59;00), markers at 01:00:12;00 and 01:00:12;01 both showed "no preview";
+the MP4 fixtures were right after §14.
+
+**Cause: the request time, not the decode and not the frame check's arithmetic.** The run log shows the MXF's thumbnail
+producer opening and decoding through VideoToolbox (`[PRORES-VT] … x422 confirmed`), with no fallback or error.
+`LibavScrubProducer` returns the FIRST frame whose time is at or after the time asked for. The thumbnailer asked for
+`(N + 0.25) / rate`, the quarter-frame nudge the AVFoundation seek path needs (TimecodeEntry): frame N's own time is
+earlier than that, so the producer skipped it and returned frame N + 1. §14's check (delivered frame = requested frame)
+then refused it, twice, so every MXF marker read "no preview". Before §14 the same request silently showed the NEXT
+frame's picture on MXF. MXF's first time is 0 after the producer's start offset, its edit units are frames, and the
+marker's frame index is relative to the file's first frame (drop-frame labels only label it), so none of those was
+involved; the unit test below checks the first frame is at 0.
+
+**Fix:** `FrameRequest` (FrameGrab) holds the producer's acceptance rule, moved out of `LibavScrubProducer` unchanged
+(`reaches`: `sec + 1e-6 >= target`; the producer's three call sites now use it, so scrub behaves as before), and the
+request for it: `firstAtOrAfter(index:rate:)` = `(N − 0.25) / rate`, which frame N − 1 does not reach and frame N does.
+The thumbnailer's libav path asks with it. The AVFoundation path (`ExactFrameGrabber`) is unchanged.
+
+**Test:** `LibavFrameRequestTests`, the package's first target that links libav (the vendored shared dylibs in
+`ThirdParty/ffmpeg/lib`, by rpath; the app links them through project.yml). Its fixture,
+`Tests/LibavFrameRequestTests/Fixtures/df-bars-2997.mxf` (70 KB), was made once with `/opt/homebrew/bin/ffmpeg` ("ffmpeg
+version 8.1.1-https://www.martin-riedl.de", run only): ProRes Proxy MXF, 160×90, 29.97, 60 frames, material package
+timecode 00:59:59;00 (frame 30 is 01:00:00;00), each frame's index drawn as ten 16-px luma bars (`geq` on N). The test
+decodes it as the producer does and reads the bars: frames 0, 1, 12, 13 (one apart), 29 and 30 (either side of the hour),
+31, 58, 59 each give their own picture and time; the first frame is at 0; and the old request for frame 12 gives frame
+13, which is the bug. Whole package: 1066 test cases, 0 failures.
+
+⚠️ A fresh checkout now needs `ThirdParty/ffmpeg/lib` staged (`scripts/build_ffmpeg.sh`) before `swift test` builds this
+target, as the app build already does. The release pipeline does not run `swift test`.
+
+The thumbnail cache version stays 3: the build that showed N + 1 on MXF was version 2, already purged, and failures are
+never cached.
+
+**Attended steps:**
+1. `mk-2997df-tc.mxf`: markers at 01:00:12;00 and 01:00:12;01 show "F 390" and "F 391" (13 s from 00:59:59;00; minute
+   0 drops no labels).
+2. Markers at 00:59:59;29 and 01:00:00;00 (frames 29 and 30): "F 29" and "F 30".
+3. The first and last frames: "F 0" and the last frame's number.
+4. `mk-2997df-tc.mov` and the two `.mp4`s still right (§14.4).
 

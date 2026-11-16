@@ -1,6 +1,7 @@
 import AVFoundation
 import CFFmpeg
 import ColorimetryModel   // ChromaReadout.fourCC
+import FrameGrab          // FrameRequest.reaches: the "first frame at or after" rule, shared with marker thumbnails
 
 /// The MXF half of the scrub seam: libav seeking, decoding one frame, and handing over a
 /// `CVPixelBuffer` in the file's resolved format, the one playback decodes to (`FileChromaProbe`;
@@ -286,7 +287,7 @@ private final class Decoder: @unchecked Sendable {
                 let ts = frame.pointee.best_effort_timestamp != Int64.min
                     ? frame.pointee.best_effort_timestamp : frame.pointee.pts
                 let sec = Double(ts - startTimeTicks) * Double(timeBase.num) / Double(timeBase.den)
-                if sec + 1e-6 < seconds { av_frame_unref(frame); continue }   // pre-target
+                if !FrameRequest.reaches(sec, seconds) { av_frame_unref(frame); continue }   // pre-target
                 framePts = sec
                 got = true
                 break
@@ -327,7 +328,7 @@ private final class Decoder: @unchecked Sendable {
             guard pkt.pointee.stream_index == videoStreamIndex else { av_packet_unref(pkt); continue }
             let ts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
             let sec = Double(ts - startTimeTicks) * Double(timeBase.num) / Double(timeBase.den)
-            if sec + 1e-6 < seconds { av_packet_unref(pkt); continue }
+            if !FrameRequest.reaches(sec, seconds) { av_packet_unref(pkt); continue }
             let pts = CMTime(value: (ts - startTimeTicks) &* Int64(timeBase.num), timescale: timeBase.den)
             let image = decoder.decode(packet: pkt, pts: pts, duration: .invalid)
             if let image, CVPixelBufferGetPixelFormatType(image) == cvFormat {
@@ -357,7 +358,7 @@ private final class Decoder: @unchecked Sendable {
             guard pkt.pointee.stream_index == videoStreamIndex else { av_packet_unref(pkt); continue }
             let ts = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
             let sec = Double(ts - startTimeTicks) * Double(timeBase.num) / Double(timeBase.den)
-            if sec + 1e-6 < seconds { av_packet_unref(pkt); continue }
+            if !FrameRequest.reaches(sec, seconds) { av_packet_unref(pkt); continue }
             let pts = CMTime(value: (ts - startTimeTicks) &* Int64(timeBase.num), timescale: timeBase.den)
             let headerColor = proResHeaderColor ? ProResVideoToolboxDecoder.headerColor(pkt) : nil
             let image = decoder.decode(packet: pkt, pts: pts, duration: .invalid)
