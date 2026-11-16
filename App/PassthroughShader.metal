@@ -615,10 +615,10 @@ struct WaveformParams {
 // increment. Output layout matches the CPU path EXACTLY: hist[row*scopeW + bucket],
 // row = (bins-1) - bin so luma-max sits at the top row.
 //
-// The offscreen texture is rgb10a2Unorm; Metal decodes it to a normalized float4 on
-// read (no manual 10-bit unpack — that's the CPU path's rgb10a2Channels job). Computing
-// 709 luma on the normalized float and binning to (bins-1) is equivalent to the CPU's
-// 8-bit-domain luma within rounding.
+// The offscreen texture is rgba16Float (half per channel, since E1 — MetalVideoRenderer.renderPixelFormat; it
+// was 10-bit packed rgb10a2Unorm before), or a still's rgba16Unorm frame; Metal reads either as a float4 with
+// no manual unpack. Values above 1.0 or below 0.0 clamp into the top or bottom bin. Luma is computed on that
+// float with the picture matrix's Kr/Kb (WaveformParams) and binned to (bins-1).
 kernel void waveformKernel(texture2d<float, access::read> offscreen [[texture(0)]],
                            device atomic_uint *hist                 [[buffer(0)]],
                            constant WaveformParams &p               [[buffer(1)]],
@@ -656,7 +656,7 @@ struct ParadeParams {
 };
 
 // RGB parade: three per-channel value histograms (R, G, B), computed directly on the
-// rgb10a2 offscreen. Mirrors waveformKernel but bins EACH channel's value instead of a
+// rgba16Float (half-float) offscreen. Mirrors waveformKernel but bins EACH channel's value instead of a
 // single luma. ONE buffer, three contiguous regions laid out [R | G | B], each colW*bins:
 //   hist[channel*colW*bins + row*colW + bucket],  row = (bins-1)-bin  (value-max at top).
 // Column/bucket mapping and row convention match the CPU parade exactly. Full-res.

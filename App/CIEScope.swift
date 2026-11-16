@@ -331,6 +331,11 @@ struct CIEScopeView: View {
     @AppStorage("manifold.cie.show709")  private var show709 = true
     @AppStorage("manifold.cie.showP3")   private var showP3 = true
     @AppStorage("manifold.cie.show2020") private var show2020 = true
+    /// The pixel grid the white-point cross is placed on (0.9.5).
+    @Environment(\.displayScale) private var displayScale
+    // Same key as Preferences.graticuleBrightness (Settings ▸ Scopes ▸ Graticule brightness); @AppStorage here so the
+    // graticule redraws live, as the value scopes' `scopeScale` does.
+    @AppStorage(Preferences.graticuleBrightnessKey) private var graticuleBrightness = Preferences.defaultGraticuleBrightness
 
     /// Header title for the active mode.
     private var modeLabel: String { useUV ? "CIE 1976 u′v′" : "CIE 1931 xy" }
@@ -399,12 +404,14 @@ struct CIEScopeView: View {
 
                 ZStack {
                     Color.black
+                    // Structure UNDER the trace, references and labels OVER it (ScopeGraticuleLayer).
+                    graticule(.underTrace)
                     ScopeTraceLayer(trace: model.trace) { img in
                         Image(decorative: img, scale: 1.0)
                             .resizable()
                             .interpolation(.none)
                     }
-                    graticule
+                    graticule(.overTrace)
                 }
                 .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
                 // Takes the height the square does not, so the VStack fills the slot and the header
@@ -442,17 +449,34 @@ struct CIEScopeView: View {
         return CGPoint(x: fa * size.width, y: (1 - fb) * size.height)
     }
 
-    private var graticule: some View {
+    /// One layer of the graticule (ScopeGraticuleLayer). Under the trace: the spectral locus and the D65 white point,
+    /// the structure the scatter is read inside. Over it: the gamut triangles and their legend, the references.
+    private func graticule(_ layer: ScopeGraticuleLayer) -> some View {
         Canvas { ctx, size in
-            // Spectral-locus horseshoe: closed polyline (locus + line of purples).
-            var locus = Path()
-            let pts = CIEScopeModel.spectralLocusXY.map { plot(x: $0.x, y: $0.y, in: size) }
-            if let first = pts.first {
-                locus.move(to: first)
-                for p in pts.dropFirst() { locus.addLine(to: p) }
-                locus.closeSubpath()   // 700 nm → 380 nm: the line of purples
+            let w = ScopeGraticuleStyle.lineWidth
+            let gb = graticuleBrightness
+            guard layer == .overTrace else {
+                // Spectral-locus horseshoe: closed polyline (locus + line of purples).
+                var locus = Path()
+                let pts = CIEScopeModel.spectralLocusXY.map { plot(x: $0.x, y: $0.y, in: size) }
+                if let first = pts.first {
+                    locus.move(to: first)
+                    for p in pts.dropFirst() { locus.addLine(to: p) }
+                    locus.closeSubpath()   // 700 nm → 380 nm: the line of purples
+                }
+                ctx.stroke(locus, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.cieLocusOpacity, gb))), lineWidth: w)
+
+                // D65 white-point marker (small cross), on the pixel grid.
+                let wp = plot(x: CIEScopeModel.whiteXY.x, y: CIEScopeModel.whiteXY.y, in: size)
+                let gx = gridAligned(wp.x, scale: displayScale, extent: size.width)
+                let gy = gridAligned(wp.y, scale: displayScale, extent: size.height)
+                var cross = Path()
+                cross.move(to: CGPoint(x: gx - 4, y: gy)); cross.addLine(to: CGPoint(x: gx + 4, y: gy))
+                cross.move(to: CGPoint(x: gx, y: gy - 4)); cross.addLine(to: CGPoint(x: gx, y: gy + 4))
+                ctx.stroke(cross, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.cieWhitePointOpacity, gb))),
+                           lineWidth: w)
+                return
             }
-            ctx.stroke(locus, with: .color(.white.opacity(0.35)), lineWidth: 0.75)
 
             // Gamut triangles — vertices from xy primaries, only if their flag is set.
             for gamut in CIEScopeModel.gamuts where isVisible(gamut) {
@@ -461,25 +485,19 @@ struct CIEScopeView: View {
                 let bP = plot(x: gamut.b.x, y: gamut.b.y, in: size)
                 var tri = Path()
                 tri.move(to: rP); tri.addLine(to: gP); tri.addLine(to: bP); tri.closeSubpath()
-                ctx.stroke(tri, with: .color(gamut.color.opacity(0.85)), lineWidth: 0.9)
+                ctx.stroke(tri, with: .color(gamut.color.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.cieTriangleOpacity, gb))),
+                       lineWidth: w)
             }
-
-            // D65 white-point marker (small cross).
-            let w = plot(x: CIEScopeModel.whiteXY.x, y: CIEScopeModel.whiteXY.y, in: size)
-            var cross = Path()
-            cross.move(to: CGPoint(x: w.x - 4, y: w.y)); cross.addLine(to: CGPoint(x: w.x + 4, y: w.y))
-            cross.move(to: CGPoint(x: w.x, y: w.y - 4)); cross.addLine(to: CGPoint(x: w.x, y: w.y + 4))
-            ctx.stroke(cross, with: .color(.white.opacity(0.7)), lineWidth: 0.75)
 
             // Legend (top-left) — swatch + name for each VISIBLE gamut only.
             var ly: CGFloat = 8
             for gamut in CIEScopeModel.gamuts where isVisible(gamut) {
                 var swatch = Path()
                 swatch.move(to: CGPoint(x: 8, y: ly + 4)); swatch.addLine(to: CGPoint(x: 20, y: ly + 4))
-                ctx.stroke(swatch, with: .color(gamut.color.opacity(0.9)), lineWidth: 1.5)
+                ctx.stroke(swatch, with: .color(gamut.color.opacity(ScopeGraticuleBrightness.line(0.9, gb))), lineWidth: 1.5)
                 ctx.draw(
                     Text(gamut.name).font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(gamut.color.opacity(0.9)),
+                        .foregroundColor(gamut.color.opacity(ScopeGraticuleBrightness.label(0.9, gb))),
                     at: CGPoint(x: 24, y: ly + 4), anchor: .leading
                 )
                 ly += 12

@@ -542,6 +542,8 @@ private struct PlaybackSettingsPane: View {
 
 private struct ScopesSettingsPane: View {
     @AppStorage("globalScopeIntensity") private var globalScopeIntensity: Double = 1.0
+    @AppStorage(Preferences.graticuleBrightnessKey) private var graticuleBrightness: Double =
+        Preferences.defaultGraticuleBrightness
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
 
     // Framing-guide styling (defaults reproduce Pass 1's look).
@@ -575,7 +577,19 @@ private struct ScopesSettingsPane: View {
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
                     }
                 }
-                SettingsCaption("Each scope's own intensity and trace color are in its header, in the scopes tray.")
+                // Built as Master scope intensity is, directly under it. One value for all four image scopes; the
+                // audio meters do not read it.
+                LabeledContent("Graticule brightness") {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sun.min").foregroundStyle(.secondary)
+                        Slider(value: $graticuleBrightness, in: Preferences.graticuleBrightnessRange)
+                            .frame(width: 160)
+                        Image(systemName: "sun.max").foregroundStyle(.secondary)
+                    }
+                }
+                SettingsCaption("Graticule brightness sets the lines in every scope; at its lowest the lines are off and "
+                                + "the labels stay. Each scope's own intensity and trace color are in its header, in the "
+                                + "scopes tray.")
             }
 
             // The guides popover's order and names (Robbie, 2026-10-29): Broadcast safe zones, Frame guide, Social safe

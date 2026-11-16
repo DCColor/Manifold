@@ -92,6 +92,15 @@ final class Preferences: ObservableObject {
     @AppStorage("paradeIntensity") var paradeIntensity: Double = 1.0
     @AppStorage("vectorscopeIntensity") var vectorscopeIntensity: Double = 1.0
     @AppStorage("globalScopeIntensity") var globalScopeIntensity: Double = 1.0
+    /// Settings ▸ Scopes & Guides ▸ Scopes ▸ "Graticule brightness" (0.9.5): one multiplier on every image scope's
+    /// graticule alphas (Waveform, Parade, Vectorscope, CIE), 0 (lines off, labels stay) … 2×. The scaling and its floors
+    /// are `ScopeGraticuleBrightness` (ScopeCompute). The scope views bind the same key with their own `@AppStorage` so
+    /// their graticules redraw live, as they do for `scopeScale`. The audio meters do not read it.
+    @AppStorage(Preferences.graticuleBrightnessKey) var graticuleBrightness: Double = Preferences.defaultGraticuleBrightness
+    static let graticuleBrightnessKey = "scopeGraticuleBrightness"
+    /// Slider range for Graticule brightness, beside `scopeIntensityRange`: 0 (lines off, labels stay) to 2×.
+    static let graticuleBrightnessRange: ClosedRange<Double> = ScopeGraticuleBrightness.range
+    static let defaultGraticuleBrightness: Double = ScopeGraticuleBrightness.defaultValue
 
     // Global vertical scale for the value-axis scopes (waveform/parade). Stored as the
     // enum's String raw value. Default .bit10 (the 1023 ruler read in Resolve).

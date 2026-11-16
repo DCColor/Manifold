@@ -106,7 +106,7 @@ final class WindowChrome: ObservableObject {
         static let rasterSize  = RasterSize.defaultsKey
     }
 
-    /// Scopes tray open/close for THIS window. Toggled by View ▸ Show/Hide Scopes (⌘7) and the control-bar scopes button.
+    /// Scopes tray open/close for THIS window. Toggled by View ▸ Show/Hide Scopes (⌥⌘S by default, `ShortcutCatalog`) and the control-bar scopes button.
     @Published var showTray: Bool { didSet { defaults.set(showTray, forKey: Key.showTray) } }
 
     /// The transform-chain popover on the display-transform control (Color ▸ Show/Hide Transform Chain, ⌥⌘4). Here

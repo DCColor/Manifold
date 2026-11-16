@@ -40,6 +40,13 @@ enum ScopePerf {
     /// overwriting, as `<scope>.rgba` (the CGImage's bytes as drawn into an 8-bit RGBA premultiplied context) and
     /// `<scope>.json` (width, height, a publish sequence number). Lets a run compare a paused frame's scope pictures
     /// between two builds at the data level, with no screenshot.
+    ///
+    /// ⚠️ SINCE 0.9.5 THE ALPHA BYTE IS THE TRACE'S COVERAGE, NOT 255. Each pixel's alpha is its brightest channel
+    /// (`ScopeTrace.coverage`, docs/SCOPES_095_PLAN.md §2.4 A); the R, G and B bytes the trace build writes are unchanged
+    /// (ScopeComputeTests), and the image was already premultiplied, so drawing it into this cleared context is
+    /// expected to leave them as they were (not yet confirmed against a dump from an earlier build). Comparing a dump with one from an earlier
+    /// build: compare R, G and B only. Waveform and parade dumps from before 0.9.5 have alpha 255 everywhere; vectorscope
+    /// and CIE dumps had 255 on every touched pixel and 0 elsewhere.
     static let dumpDir = ProcessInfo.processInfo.environment["MANIFOLD_SCOPE_DUMP_DIR"]
     private static var dumpSeq: [String: Int] = [:]
 

@@ -69,12 +69,35 @@ public enum ScopeTrace {
         for i in 0..<dispCount {
             let fv = Float(lut[Int(display[i])])
             let o = i * 4
-            pixels[o + 0] = UInt8(min(255, fv * colorR))
-            pixels[o + 1] = UInt8(min(255, fv * colorG))
-            pixels[o + 2] = UInt8(min(255, fv * colorB))
-            pixels[o + 3] = 255
+            let r = UInt8(min(255, fv * colorR))
+            let g = UInt8(min(255, fv * colorG))
+            let b = UInt8(min(255, fv * colorB))
+            pixels[o + 0] = r
+            pixels[o + 1] = g
+            pixels[o + 2] = b
+            pixels[o + 3] = coverage(r, g, b)
         }
         return pixels
+    }
+
+    /// The trace's ALPHA: its brightest channel (0.9.5, docs/SCOPES_095_PLAN.md §2.4 A).
+    ///
+    /// ⚠️ THE RGB BYTES ARE UNCHANGED; ONLY ALPHA MOVED. Until 0.9.5 every trace pixel was opaque (α 255), black
+    /// included, so the graticule could only be drawn OVER the trace, where it washed into it. With α = the brightest
+    /// channel, an empty area is transparent and a structure line drawn UNDER the trace shows there, while signal
+    /// covers it. The image is premultiplied (`premultipliedLast`), and every channel is ≤ this alpha, so it stays a
+    /// valid premultiplied image; composited over black it is exactly the old picture.
+    @inline(__always)
+    static func coverage(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> UInt8 {
+        max(r, max(g, b))
+    }
+
+    /// One mono-parade pixel: brightness `v` tinted by the mono color, alpha = its brightest channel.
+    @inline(__always)
+    private static func writeMono(_ pixels: inout [UInt8], _ o: Int, _ v: Float,
+                                  _ monoR: Float, _ monoG: Float, _ monoB: Float) {
+        let r = UInt8(min(255, v * monoR)), g = UInt8(min(255, v * monoG)), b = UInt8(min(255, v * monoB))
+        pixels[o + 0] = r; pixels[o + 1] = g; pixels[o + 2] = b; pixels[o + 3] = coverage(r, g, b)
     }
 
     /// RGB parade. Three per-channel histograms (each `colW*bins`, layout `[row*colW+bucket]`)
@@ -117,14 +140,15 @@ public enum ScopeTrace {
                 let oR = (rowOut + (0 * colW + bx)) * 4   // R column (left)
                 let oG = (rowOut + (1 * colW + bx)) * 4   // G column (mid)
                 let oB = (rowOut + (2 * colW + bx)) * 4   // B column (right)
+                // Alpha = the brightest channel (see `coverage`); RGB as before.
                 if mono {
-                    pixels[oR + 0] = UInt8(min(255, vR * monoR)); pixels[oR + 1] = UInt8(min(255, vR * monoG)); pixels[oR + 2] = UInt8(min(255, vR * monoB)); pixels[oR + 3] = 255
-                    pixels[oG + 0] = UInt8(min(255, vG * monoR)); pixels[oG + 1] = UInt8(min(255, vG * monoG)); pixels[oG + 2] = UInt8(min(255, vG * monoB)); pixels[oG + 3] = 255
-                    pixels[oB + 0] = UInt8(min(255, vB * monoR)); pixels[oB + 1] = UInt8(min(255, vB * monoG)); pixels[oB + 2] = UInt8(min(255, vB * monoB)); pixels[oB + 3] = 255
+                    writeMono(&pixels, oR, vR, monoR, monoG, monoB)
+                    writeMono(&pixels, oG, vG, monoR, monoG, monoB)
+                    writeMono(&pixels, oB, vB, monoR, monoG, monoB)
                 } else {
-                    pixels[oR + 0] = UInt8(vR); pixels[oR + 1] = 0; pixels[oR + 2] = 0; pixels[oR + 3] = 255
-                    pixels[oG + 0] = 0; pixels[oG + 1] = UInt8(vG); pixels[oG + 2] = 0; pixels[oG + 3] = 255
-                    pixels[oB + 0] = 0; pixels[oB + 1] = 0; pixels[oB + 2] = UInt8(vB); pixels[oB + 3] = 255
+                    pixels[oR + 0] = UInt8(vR); pixels[oR + 1] = 0; pixels[oR + 2] = 0; pixels[oR + 3] = UInt8(vR)
+                    pixels[oG + 0] = 0; pixels[oG + 1] = UInt8(vG); pixels[oG + 2] = 0; pixels[oG + 3] = UInt8(vG)
+                    pixels[oB + 0] = 0; pixels[oB + 1] = 0; pixels[oB + 2] = UInt8(vB); pixels[oB + 3] = UInt8(vB)
                 }
             }
         }
@@ -228,7 +252,10 @@ public enum ScopeTrace {
                         if nr > pixels[o + 0] { pixels[o + 0] = nr }
                         if ng > pixels[o + 1] { pixels[o + 1] = ng }
                         if nb > pixels[o + 2] { pixels[o + 2] = nb }
-                        pixels[o + 3] = 255
+                        // Alpha = the brightest channel (see `coverage`), MAX-blended like the channels, so it is
+                        // the brightest of the FINAL channels. Was 255 for any touched pixel; untouched stay 0.
+                        let a = coverage(nr, ng, nb)
+                        if a > pixels[o + 3] { pixels[o + 3] = a }
                     }
                 }
             }

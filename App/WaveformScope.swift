@@ -79,6 +79,11 @@ let waveformDisplayRows = 512
 // MARK: - Vertical scale (waveform + parade value axis)
 
 /// Graticule line opacities — scope-prefs: tunable.
+///
+/// ⚠️ SINCE 0.9.5 THESE FIVE, `graticuleEmphasisStyle` AND `drawGraticuleLabel`'s DEFAULTS ARE THE AUDIO METERS'
+/// VALUES, AND MUST NOT MOVE FOR THE SCOPES' SAKE. The four image scopes (waveform, parade, vectorscope, CIE) draw with
+/// `ScopeGraticuleStyle` below, which was brightened on its own (Robbie, 2026-11-16: "the audio meters must look exactly
+/// as they do today"). The meters read these at `AudioMeterScope.swift:623`, `:763-768` and `:773-780`.
 let graticuleMajorOpacity: Double = 0.22   // labeled major lines (brighter)
 let graticuleMinorOpacity: Double = 0.10   // unlabeled minor ticks (fainter)
 // Label legibility — scope-prefs: tunable. Labels read brighter/larger than the
@@ -91,6 +96,74 @@ let graticuleLabelBackingOpacity: Double = 0.45  // dark pill behind each label
 // so the max- and min-value labels stay fully visible and clear of the slider.
 let scopeHeaderHeight: CGFloat = 22
 let scopePlotInset: CGFloat = 10
+
+// MARK: - The image scopes' graticule style (0.9.5 visibility pass, docs/SCOPES_095_PLAN.md §2.4)
+
+/// Every graticule value the four image scopes draw with, in one place, so a later per-scope "Graticule brightness"
+/// control has one table to scale (plan §2.5). The audio meters do NOT use this; see the note on
+/// `graticuleMajorOpacity`.
+///
+/// THREE CHANGES FROM 0.9.4, ALL HERE OR DRIVEN FROM HERE:
+///  1. Lines are `lineWidth` (1 pt), placed on whole device pixels by `ScopePixelGrid` (`gridAligned` below). Both
+///     displays on the Mac Studio run at 1×, where the old 0.5-pt lines rendered at about half their stated alpha.
+///  2. Brighter lines and labels (the values below; old values in the trailing comments).
+///  3. The graticule is drawn in two LAYERS around the trace (`ScopeGraticuleLayer`): structure under it, references
+///     and labels over it. The trace image carries alpha since 0.9.5 (`ScopeTrace.coverage`), so empty trace shows the
+///     structure and signal covers it, instead of the lines washing into the trace from above.
+enum ScopeGraticuleStyle {
+    /// Every structure line, and most reference lines. Was 0.5 for the value scopes, the vectorscope circle,
+    /// crosshair and ticks; 0.75 for the brackets and CIE locus and cross; 0.9 for the CIE triangles.
+    static let lineWidth: CGFloat = 1.0
+
+    // ── Waveform and parade (value axis) ──
+    // The ruler lines and separators came down after the attended check on the LG (Robbie, 2026-11-16: "too intense").
+    // Each is half-way between the old and the first-pass intensity, measured as alpha × width: major 0.11 → 0.30 gives
+    // 0.205, minor 0.05 → 0.18 gives 0.115, separator 0.09 → 0.30 gives 0.195; at 1 pt those are the alphas below.
+    static let majorOpacity: Double = 0.20            // was graticuleMajorOpacity 0.22 at 0.5 pt; 0.30 in the first pass
+    static let minorOpacity: Double = 0.12            // was graticuleMinorOpacity 0.10 at 0.5 pt; 0.18 in the first pass
+    static let labelOpacity: Double = 0.85            // was graticuleLabelOpacity 0.6
+    static let labelBackingOpacity: Double = 0.60     // was graticuleLabelBackingOpacity 0.45
+    static let hlgNitsTickOpacity: Double = 0.30      // cyan; was 0.28 at 0.5 pt; 0.45 in the first pass (Robbie, 2026-11-16)
+    static let hlgNitsLabelOpacity: Double = 0.70     // was 0.5
+    static let paradeSeparatorOpacity: Double = 0.20  // was 0.18 at 0.5 pt; 0.30 in the first pass
+
+    // ── Vectorscope ──
+    static let vectorscopeCircleOpacity: Double = 0.35      // was 0.14
+    static let vectorscopeMinorTickOpacity: Double = 0.45   // was 0.42
+    static let vectorscopeMajorTickOpacity: Double = 0.65   // was 0.58
+    static let vectorscopeCrosshairOpacity: Double = 0.40   // was 0.20
+    static let vectorscopeCrosshairArm: CGFloat = 8         // was 6
+    /// The skin-tone axis and the target brackets are matched on purpose (see the axis's draw site).
+    static let vectorscopeSkintoneOpacity: Double = 0.70    // was 0.50
+    static let vectorscopeBracketOpacity: Double = 0.70     // was 0.50 (width 0.75 → `lineWidth`)
+    static let vectorscopeLabelOpacity: Double = 0.85       // hue names and user-target numerals; was 0.55
+    static let vectorscopeLabelFontSize: CGFloat = 9        // was 8
+    /// The faint keyline outside a user target's colored ring. Its width stays 0.5 pt: at 1 pt it would overlap the
+    /// 1.5-pt colored ring it sits 1 pt outside.
+    static let vectorscopeUserKeylineOpacity: Double = 0.50 // was 0.35
+
+    // ── CIE ──
+    static let cieLocusOpacity: Double = 0.55               // was 0.35 (width 0.75)
+    static let cieTriangleOpacity: Double = 0.90            // was 0.85 (width 0.9)
+    static let cieWhitePointOpacity: Double = 0.85          // was 0.70 (width 0.75)
+}
+
+/// Which side of the trace a graticule element is drawn on.
+///
+/// STRUCTURE (`.underTrace`) is what you read the trace AGAINST and look past: ruler lines and ticks, separators, the
+/// vectorscope circle, ticks and crosshair, the CIE locus and white point. REFERENCES (`.overTrace`) are what you measure
+/// against or read: every label, user lines, the PQ 100- and 203-nit lines, the vectorscope's skin-tone axis, target
+/// brackets, hue names and user targets, the CIE gamut triangles and legend. A label is always over: its backing pill
+/// is what keeps it readable on a trace.
+enum ScopeGraticuleLayer { case underTrace, overTrace }
+
+/// `v` (points) moved so a line of `width` points covers whole device pixels at `scale`, and stays inside `extent`.
+/// See `ScopePixelGrid` (ScopeCompute), where the rule is stated and tested at 1× and 2×.
+func gridAligned(_ v: CGFloat, width: CGFloat = ScopeGraticuleStyle.lineWidth, scale: CGFloat,
+                 extent: CGFloat? = nil) -> CGFloat {
+    CGFloat(ScopePixelGrid.alignedCenter(Double(v), lineWidth: Double(width), scale: Double(scale),
+                                         extent: extent.map(Double.init)))
+}
 
 // MARK: - Label gutter (waveform + parade) — keep the value labels off the trace
 //
@@ -510,6 +583,18 @@ func graticuleEmphasisStyle(_ e: GratEmphasis) -> (lineOpacity: Double, lineWidt
     }
 }
 
+/// The SCOPES' emphasis tiers (0.9.5). Same three steps as `graticuleEmphasisStyle`, which stays as the meters' (their
+/// level marker asks for `.key` by name). Every tier is `ScopeGraticuleStyle.lineWidth` wide, so every line is on the
+/// pixel grid; the tiers differ in alpha and in which layer they are drawn on (`.strong` and `.key` over the trace).
+/// Was: key 0.60 / 1.0 / 0.9, strong 0.42 / 1.0 / 0.8, normal 0.22 / 0.5 / 0.6.
+func scopeGraticuleEmphasisStyle(_ e: GratEmphasis) -> (lineOpacity: Double, lineWidth: CGFloat, labelOpacity: Double) {
+    switch e {
+    case .key:    return (0.75, ScopeGraticuleStyle.lineWidth, 1.0)
+    case .strong: return (0.55, ScopeGraticuleStyle.lineWidth, 0.9)
+    case .normal: return (ScopeGraticuleStyle.majorOpacity, ScopeGraticuleStyle.lineWidth, ScopeGraticuleStyle.labelOpacity)
+    }
+}
+
 /// One PQ nits reference line: its nits value, label, and emphasis.
 struct PQNitsLevel { let nits: Double; let label: String; let emphasis: GratEmphasis }
 
@@ -765,8 +850,12 @@ struct WaveformScopeView: View {
     var slotSelection: Binding<ScopeKind>? = nil
     // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
+    // Same key as Preferences.graticuleBrightness — @AppStorage here for live graticule updates, like scopeScale.
+    @AppStorage(Preferences.graticuleBrightnessKey) private var graticuleBrightness = Preferences.defaultGraticuleBrightness
     // Transfer-aware ruler override, SHARED with parade (one key). Default .auto follows the source.
     @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
+    /// The pixel grid the graticule lines are aligned to (0.9.5).
+    @Environment(\.displayScale) private var displayScale
 
     // ── This scope's two user reference lines ───────────────────────────────────────────────
     //
@@ -851,6 +940,9 @@ struct WaveformScopeView: View {
                 // the top (max) and bottom (0) labels stay fully visible.
                 ZStack {
                     Color.black
+                    // Structure UNDER the trace, references and labels OVER it (ScopeGraticuleLayer).
+                    graticule(.underTrace)
+                        .padding(.vertical, scopePlotInset)
                     ScopeTraceLayer(trace: model.trace) { img in
                         // .none (nearest-neighbor): keeps the thin bright trace crisp
                         // against black. A smoothing filter (.low/.high) would blur the
@@ -867,7 +959,7 @@ struct WaveformScopeView: View {
                             .padding(.leading, gutters.leading)
                             .padding(.trailing, gutters.trailing)
                     }
-                    graticule
+                    graticule(.overTrace)
                         .padding(.vertical, scopePlotInset)
                 }
             }
@@ -880,14 +972,17 @@ struct WaveformScopeView: View {
         }
     }
 
-    private var graticule: some View {
-        // The Canvas spans the FULL panel width (no leading padding): the lines are inset by the
-        // gutters, but the labels anchor to the panel edge so they land in the gutter.
-        // Keyed, so a new trace does not redraw it: see `KeyedCanvas`.
-        let key = ValueGraticuleKey(active: activeScale, sdrScale: scopeScale, gutters: gutters, userLines: userLines)
+    /// One layer of the graticule. The Canvas spans the FULL panel width (no leading padding): the
+    /// lines are inset by the gutters, but the labels anchor to the panel edge so they land in the
+    /// gutter. Keyed, so a new trace does not redraw it: see `KeyedCanvas`. The two layers share one
+    /// key; each is its own view, so each keeps its own drawing.
+    private func graticule(_ layer: ScopeGraticuleLayer) -> some View {
+        let key = ValueGraticuleKey(active: activeScale, sdrScale: scopeScale, gutters: gutters, userLines: userLines,
+                                    displayScale: displayScale, graticuleBrightness: graticuleBrightness)
         return KeyedCanvas(key: key) { ctx, size in
             drawActiveValueGraticule(ctx, size: size, active: key.active, sdrScale: key.sdrScale,
-                                     gutters: key.gutters, userLines: key.userLines)
+                                     gutters: key.gutters, userLines: key.userLines,
+                                     layer: layer, displayScale: key.displayScale, brightness: key.graticuleBrightness)
         }
         .equatable()
     }
@@ -898,32 +993,44 @@ struct WaveformScopeView: View {
 /// the selected scale, mapped value/rangeMax -> normalized height. Lines span the PLOT region
 /// (inside `gutters`), never the label column — the labels sit in the gutter on clean background.
 func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale,
-                        gutters: ScopePlotGutters) {
+                        gutters: ScopePlotGutters, layer: ScopeGraticuleLayer, displayScale: CGFloat,
+                        brightness: Double) {
     let maxV = scale.rangeMax
     guard maxV > 0 else { return }
     let x0 = gutters.leading
     let x1 = size.width - gutters.trailing
-
-    // Minor ticks: short marks at both plot edges (reduces clutter vs full-width lines).
-    for v in scale.minors {
-        let y = size.height * (1.0 - v / maxV)
-        var p = Path()
-        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x0 + 6, y: y))
-        p.move(to: CGPoint(x: x1 - 6, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
-        ctx.stroke(p, with: .color(.white.opacity(graticuleMinorOpacity)), lineWidth: 0.5)
+    let w = ScopeGraticuleStyle.lineWidth
+    func y(_ v: Double) -> CGFloat {
+        gridAligned(size.height * (1.0 - v / maxV), scale: displayScale, extent: size.height)
     }
 
-    // Major lines: full plot width + value label (larger, brighter, on a dark backing).
-    for v in scale.majors {
-        let y = size.height * (1.0 - v / maxV)
-        var p = Path()
-        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
-        ctx.stroke(p, with: .color(.white.opacity(graticuleMajorOpacity)), lineWidth: 0.5)
-
+    switch layer {
+    case .underTrace:
+        // Minor ticks: short marks at both plot edges (reduces clutter vs full-width lines).
+        for v in scale.minors {
+            let yy = y(v)
+            var p = Path()
+            p.move(to: CGPoint(x: x0, y: yy)); p.addLine(to: CGPoint(x: x0 + 6, y: yy))
+            p.move(to: CGPoint(x: x1 - 6, y: yy)); p.addLine(to: CGPoint(x: x1, y: yy))
+            ctx.stroke(p, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.minorOpacity,
+                                                                                    brightness))), lineWidth: w)
+        }
+        // Major lines: full plot width.
+        for v in scale.majors {
+            let yy = y(v)
+            var p = Path()
+            p.move(to: CGPoint(x: x0, y: yy)); p.addLine(to: CGPoint(x: x1, y: yy))
+            ctx.stroke(p, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.majorOpacity,
+                                                                                    brightness))), lineWidth: w)
+        }
+    case .overTrace:
         // Value label in the LEFT gutter (standard scope convention — Resolve/broadcast
         // waveforms put the scale on the left). Plain integer, no thousands separator.
-        drawGraticuleLabel(ctx, size: size, y: y, text: String(Int(v)),
-                           trailing: false, opacity: graticuleLabelOpacity)
+        for v in scale.majors {
+            drawGraticuleLabel(ctx, size: size, y: y(v), text: String(Int(v)), trailing: false,
+                               opacity: ScopeGraticuleBrightness.label(ScopeGraticuleStyle.labelOpacity, brightness),
+                               backingOpacity: ScopeGraticuleStyle.labelBackingOpacity)
+        }
     }
 }
 
@@ -950,9 +1057,13 @@ func drawValueGraticule(_ ctx: GraphicsContext, size: CGSize, scale: ScopeScale,
 /// value-axis scopes USE these labels, and the meters do not have a label gutter at all — their
 /// labels sit directly ON the bars, which is why the backing pill is load-bearing there rather than
 /// merely tidy. Nothing in this function assumes a gutter exists; do not add such an assumption.
+///
+/// `backingOpacity` (0.9.5): the pill's darkness. Its default is the meters' value, unchanged, so the meters' two calls
+/// (which pass none) draw exactly as before; the scopes pass `ScopeGraticuleStyle.labelBackingOpacity`.
 func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
                         text: String, trailing: Bool, opacity: Double,
-                        fontSize: CGFloat = graticuleLabelFontSize) {
+                        fontSize: CGFloat = graticuleLabelFontSize,
+                        backingOpacity: Double = graticuleLabelBackingOpacity) {
     let resolved = ctx.resolve(
         Text(verbatim: text)
             .font(.system(size: fontSize, design: .monospaced))
@@ -964,12 +1075,12 @@ func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
     if trailing {
         let cx = size.width - 4
         let bg = CGRect(x: cx - ts.width - 3, y: ly - halfH - 1, width: ts.width + 6, height: ts.height + 2)
-        ctx.fill(Path(roundedRect: bg, cornerRadius: 3), with: .color(.black.opacity(graticuleLabelBackingOpacity)))
+        ctx.fill(Path(roundedRect: bg, cornerRadius: 3), with: .color(.black.opacity(backingOpacity)))
         ctx.draw(resolved, at: CGPoint(x: cx, y: ly), anchor: .trailing)
     } else {
         let cx: CGFloat = 4
         let bg = CGRect(x: cx - 3, y: ly - halfH - 1, width: ts.width + 6, height: ts.height + 2)
-        ctx.fill(Path(roundedRect: bg, cornerRadius: 3), with: .color(.black.opacity(graticuleLabelBackingOpacity)))
+        ctx.fill(Path(roundedRect: bg, cornerRadius: 3), with: .color(.black.opacity(backingOpacity)))
         ctx.draw(resolved, at: CGPoint(x: cx, y: ly), anchor: .leading)
     }
 }
@@ -978,19 +1089,29 @@ func drawGraticuleLabel(_ ctx: GraphicsContext, size: CGSize, y: CGFloat,
 /// the ruler. Each nits level is placed at its ST2084 inverse-EOTF code height (non-linear /
 /// perceptual). 203 nits (BT.2408 HDR diffuse/graphics white — the key HDR grading reference)
 /// and 100 nits (SDR white) draw brighter/thicker so they stand out.
-func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGutters) {
+func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGutters,
+                     layer: ScopeGraticuleLayer, displayScale: CGFloat, brightness: Double) {
     let x0 = gutters.leading
     let x1 = size.width - gutters.trailing
     for level in pqNitsLevels {
         let norm = pqCodeNormalized(nits: level.nits)   // 0…1 == full-range code fraction == height
-        let y = size.height * (1.0 - norm)
-        let style = graticuleEmphasisStyle(level.emphasis)
-        var p = Path()
-        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
-        ctx.stroke(p, with: .color(.white.opacity(style.lineOpacity)), lineWidth: style.lineWidth)
+        let style = scopeGraticuleEmphasisStyle(level.emphasis)
+        let y = gridAligned(size.height * (1.0 - norm), width: style.lineWidth, scale: displayScale,
+                            extent: size.height)
+        // The plain levels are structure; the 100- and 203-nit references are drawn over the trace.
+        let lineLayer: ScopeGraticuleLayer = level.emphasis == .normal ? .underTrace : .overTrace
+        if layer == lineLayer {
+            var p = Path()
+            p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
+            ctx.stroke(p, with: .color(.white.opacity(ScopeGraticuleBrightness.line(style.lineOpacity, brightness))),
+                       lineWidth: style.lineWidth)
+        }
         // Nits label in the LEFT gutter (standard scope convention); line spans the plot region.
-        drawGraticuleLabel(ctx, size: size, y: y, text: level.label, trailing: false,
-                           opacity: style.labelOpacity)
+        if layer == .overTrace {
+            drawGraticuleLabel(ctx, size: size, y: y, text: level.label, trailing: false,
+                               opacity: ScopeGraticuleBrightness.label(style.labelOpacity, brightness),
+                               backingOpacity: ScopeGraticuleStyle.labelBackingOpacity)
+        }
     }
 }
 
@@ -999,27 +1120,44 @@ func drawPQGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGut
 /// 1000-nit peak display (via the HLG OOTF/EOTF), as a fainter reference. The dominant % labels
 /// anchor LEFT (standard scope convention); the nits secondary anchors RIGHT so the two rulers
 /// stay visually distinct and never collide. Trace unchanged — graticule only.
-func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGutters) {
+func drawHLGGraticule(_ ctx: GraphicsContext, size: CGSize, gutters: ScopePlotGutters,
+                      layer: ScopeGraticuleLayer, displayScale: CGFloat, brightness: Double) {
     let x0 = gutters.leading
     let x1 = size.width - gutters.trailing
+    let w = ScopeGraticuleStyle.lineWidth
+    let backing = ScopeGraticuleStyle.labelBackingOpacity
     // PRIMARY — HLG signal %: plot-width lines, dominant labels in the LEFT gutter.
     for pct in hlgPercentLevels {
-        let y = size.height * (1.0 - pct / 100.0)
-        var p = Path()
-        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
-        ctx.stroke(p, with: .color(.white.opacity(graticuleMajorOpacity)), lineWidth: 0.5)
-        drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(pct))%", trailing: false, opacity: graticuleLabelOpacity)
+        let y = gridAligned(size.height * (1.0 - pct / 100.0), scale: displayScale, extent: size.height)
+        switch layer {
+        case .underTrace:
+            var p = Path()
+            p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
+            ctx.stroke(p, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.majorOpacity,
+                                                                                    brightness))), lineWidth: w)
+        case .overTrace:
+            drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(pct))%", trailing: false,
+                               opacity: ScopeGraticuleBrightness.label(ScopeGraticuleStyle.labelOpacity, brightness),
+                               backingOpacity: backing)
+        }
     }
     // SECONDARY — nits @1000-nit peak: fainter short ticks at the plot edges, labels in the RIGHT
     // gutter (opposite the dominant % scale) so the practical nits reference reads clearly apart.
     for nits in hlgNitsLevels {
         let ep = hlgSignalForNits(nits)   // signal 0…1 == height fraction
-        let y = size.height * (1.0 - ep)
-        var p = Path()
-        p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x0 + 28, y: y))
-        p.move(to: CGPoint(x: x1 - 28, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
-        ctx.stroke(p, with: .color(.cyan.opacity(0.28)), lineWidth: 0.5)
-        drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(nits))", trailing: true, opacity: 0.5)
+        let y = gridAligned(size.height * (1.0 - ep), scale: displayScale, extent: size.height)
+        switch layer {
+        case .underTrace:
+            var p = Path()
+            p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x0 + 28, y: y))
+            p.move(to: CGPoint(x: x1 - 28, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
+            ctx.stroke(p, with: .color(.cyan.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.hlgNitsTickOpacity,
+                                                                                   brightness))), lineWidth: w)
+        case .overTrace:
+            drawGraticuleLabel(ctx, size: size, y: y, text: "\(Int(nits))", trailing: true,
+                               opacity: ScopeGraticuleBrightness.label(ScopeGraticuleStyle.hlgNitsLabelOpacity, brightness),
+                               backingOpacity: backing)
+        }
     }
 }
 
@@ -1077,25 +1215,37 @@ struct ValueGraticuleKey: Equatable {
     let sdrScale: ScopeScale
     let gutters: ScopePlotGutters
     let userLines: [Double]
+    /// The display's backing scale: the pixel grid the lines are aligned to (0.9.5). A window moved between a 1× and a
+    /// 2× display must redraw, so it is part of the key.
+    let displayScale: CGFloat
+    /// Settings ▸ Scopes ▸ Graticule brightness (`ScopeGraticuleBrightness`). Changing it must redraw both layers.
+    let graticuleBrightness: Double
 }
 
-/// Draw the active transfer-aware graticule onto a value-axis scope. Dispatches on the RESOLVED
-/// ruler; SDR falls through to the existing (unchanged) %/code graticule. Shared by waveform +
-/// parade so both annotate the same axis identically.
+/// Draw one LAYER of the active transfer-aware graticule onto a value-axis scope. Dispatches on the
+/// RESOLVED ruler; SDR falls through to the %/code graticule. Shared by waveform + parade so both
+/// annotate the same axis identically. Each scope calls this twice, once per layer: `.underTrace`
+/// below its trace image, `.overTrace` above it (see `ScopeGraticuleLayer`).
 func drawActiveValueGraticule(_ ctx: GraphicsContext, size: CGSize,
                               active: ActiveVerticalScale, sdrScale: ScopeScale,
-                              gutters: ScopePlotGutters, userLines: [Double]) {
+                              gutters: ScopePlotGutters, userLines: [Double],
+                              layer: ScopeGraticuleLayer, displayScale: CGFloat, brightness: Double) {
     switch active {
-    case .sdr: drawValueGraticule(ctx, size: size, scale: sdrScale, gutters: gutters)
-    case .pq:  drawPQGraticule(ctx, size: size, gutters: gutters)
-    case .hlg: drawHLGGraticule(ctx, size: size, gutters: gutters)
+    case .sdr: drawValueGraticule(ctx, size: size, scale: sdrScale, gutters: gutters,
+                                  layer: layer, displayScale: displayScale, brightness: brightness)
+    case .pq:  drawPQGraticule(ctx, size: size, gutters: gutters, layer: layer, displayScale: displayScale,
+                               brightness: brightness)
+    case .hlg: drawHLGGraticule(ctx, size: size, gutters: gutters, layer: layer, displayScale: displayScale,
+                                brightness: brightness)
     }
-    // AFTER the ruler, so a user line reads on top of the structure it is measured against — the
-    // same ordering decision the vectorscope's skintone axis records. Both scopes reach this one
-    // call, so a line drawn here appears on both by construction; the waveform's lines and the
-    // parade's differ only by the array that arrives here.
-    drawUserLines(ctx, size: size, active: active, sdrScale: sdrScale,
-                  gutters: gutters, positions: userLines)
+    // AFTER the ruler, and OVER the trace, so a user line reads on top of the structure it is
+    // measured against — the same ordering decision the vectorscope's skintone axis records. Both
+    // scopes reach this one call, so a line drawn here appears on both by construction; the
+    // waveform's lines and the parade's differ only by the array that arrives here.
+    if layer == .overTrace {
+        drawUserLines(ctx, size: size, active: active, sdrScale: sdrScale,
+                      gutters: gutters, positions: userLines, displayScale: displayScale)
+    }
 }
 
 /// User-placed reference lines. `positions` are NORMALIZED HEIGHTS (0 = bottom of the plot, 1 = top)
@@ -1107,30 +1257,37 @@ func drawActiveValueGraticule(_ ctx: GraphicsContext, size: CGSize,
 /// LABEL, which is `userLineLabels`' job. Storing nits instead would invert the situation: placement
 /// would need a forward map per ruler, and the line would jump whenever the transfer changed.
 ///
-/// Drawn at the `.key` tier — the weight the 203-nit BT.2408 line uses — via the shared
-/// `graticuleEmphasisStyle`, because a user line is the same KIND of thing: a reference you put
-/// there deliberately and read against, not background structure you look past.
+/// Drawn at the `.key` tier — the weight the 203-nit BT.2408 line uses — via the scopes'
+/// `scopeGraticuleEmphasisStyle`, because a user line is the same KIND of thing: a reference you put
+/// there deliberately and read against, not background structure you look past. Over the trace.
+///
+/// NOT GRATICULE: line and labels ignore Settings ▸ Scopes ▸ Graticule brightness and draw at the `.key` values at every
+/// slider position. They are the user's own marking (Robbie, 2026-11-16).
 private func drawUserLines(_ ctx: GraphicsContext, size: CGSize,
                            active: ActiveVerticalScale, sdrScale: ScopeScale,
-                           gutters: ScopePlotGutters, positions: [Double]) {
+                           gutters: ScopePlotGutters, positions: [Double], displayScale: CGFloat) {
     guard !positions.isEmpty else { return }
     let x0 = gutters.leading
     let x1 = size.width - gutters.trailing
-    let style = graticuleEmphasisStyle(.key)
+    let style = scopeGraticuleEmphasisStyle(.key)
+    let backing = ScopeGraticuleStyle.labelBackingOpacity
     for pos in positions {
-        let y = size.height * (1.0 - clampedUnit(pos))
+        let y = gridAligned(size.height * (1.0 - clampedUnit(pos)), width: style.lineWidth,
+                            scale: displayScale, extent: size.height)
         var p = Path()
         p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y))
+        // The user's own marking, not graticule: Graticule brightness does not touch it (Robbie, 2026-11-16).
         ctx.stroke(p, with: .color(.white.opacity(style.lineOpacity)), lineWidth: style.lineWidth)
+        let labelOpacity = style.labelOpacity
         // Both gutters were sized from these exact strings — see scopePlotGutters — so the labels
         // land on clean background rather than on the trace. The trailing one exists only under HLG,
         // whose ruler carries a second ladder on the right.
         let labels = userLineLabels(position: pos, active: active, sdrScale: sdrScale)
         drawGraticuleLabel(ctx, size: size, y: y, text: labels.leading,
-                           trailing: false, opacity: style.labelOpacity)
+                           trailing: false, opacity: labelOpacity, backingOpacity: backing)
         if let secondary = labels.trailing {
             drawGraticuleLabel(ctx, size: size, y: y, text: secondary,
-                               trailing: true, opacity: style.labelOpacity)
+                               trailing: true, opacity: labelOpacity, backingOpacity: backing)
         }
     }
 }

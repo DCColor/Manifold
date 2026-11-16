@@ -425,7 +425,8 @@ final class MetalVideoRenderer {
     private var vectorscopeHistogramBuffer: MTLBuffer?
     private let ciePipelineState: MTLComputePipelineState?
     private var cieHistogramBuffer: MTLBuffer?
-    /// CIE scope mode: true = CIE 1976 u'v', false = CIE 1931 xy. Flipped live (⌃⌥X) on main;
+    /// CIE scope mode: true = CIE 1976 u'v', false = CIE 1931 xy. Flipped live on main, from the CIE
+    /// gear menu or the "CIE: Switch xy / u′v′" shortcut (no default key; `ShortcutCatalog`);
     /// read on main in computeCIEGPU. The CIE scope's graticule mirrors this (kept in sync by
     /// the toggle) so scatter + overlay agree on the mode.
     var cieUseUV: Bool = true

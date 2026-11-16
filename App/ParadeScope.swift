@@ -202,8 +202,12 @@ struct ParadeScopeView: View {
     var slotSelection: Binding<ScopeKind>? = nil
     // Same key as Preferences.scopeScale — @AppStorage here for live graticule updates.
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
+    // Same key as Preferences.graticuleBrightness — @AppStorage here for live graticule updates, like scopeScale.
+    @AppStorage(Preferences.graticuleBrightnessKey) private var graticuleBrightness = Preferences.defaultGraticuleBrightness
     // Transfer-aware ruler override, SHARED with the waveform (one key). Default .auto follows source.
     @AppStorage("manifold.scope.verticalScale") private var verticalScale: ScopeVerticalScale = .auto
+    /// The pixel grid the graticule lines are aligned to (0.9.5).
+    @Environment(\.displayScale) private var displayScale
 
     // ── This scope's two user reference lines ───────────────────────────────────────────────
     //
@@ -282,6 +286,9 @@ struct ParadeScopeView: View {
                 // Scope area below the header: trace + graticule, vertically inset.
                 ZStack {
                     Color.black
+                    // Structure UNDER the trace, references and labels OVER it (ScopeGraticuleLayer).
+                    graticule(.underTrace)
+                        .padding(.vertical, scopePlotInset)
                     ScopeTraceLayer(trace: model.trace) { img in
                         Image(decorative: img, scale: 1.0)
                             .resizable()
@@ -292,7 +299,7 @@ struct ParadeScopeView: View {
                             .padding(.leading, gutters.leading)
                             .padding(.trailing, gutters.trailing)
                     }
-                    graticule
+                    graticule(.overTrace)
                         .padding(.vertical, scopePlotInset)
                 }
             }
@@ -305,25 +312,32 @@ struct ParadeScopeView: View {
         }
     }
 
-    private var graticule: some View {
-        // The Canvas spans the FULL panel width (no leading padding): lines and separators are
-        // inset by the gutters, but the labels anchor to the panel edge so they land in the gutter.
-        // Keyed, so a new trace does not redraw it: see `KeyedCanvas`.
-        let key = ValueGraticuleKey(active: activeScale, sdrScale: scopeScale, gutters: gutters, userLines: userLines)
+    /// One layer of the graticule (ScopeGraticuleLayer). The Canvas spans the FULL panel width (no
+    /// leading padding): lines and separators are inset by the gutters, but the labels anchor to the
+    /// panel edge so they land in the gutter. Keyed, so a new trace does not redraw it: see `KeyedCanvas`.
+    private func graticule(_ layer: ScopeGraticuleLayer) -> some View {
+        let key = ValueGraticuleKey(active: activeScale, sdrScale: scopeScale, gutters: gutters, userLines: userLines,
+                                    displayScale: displayScale, graticuleBrightness: graticuleBrightness)
         let g = key.gutters
         return KeyedCanvas(key: key) { ctx, size in
             // Transfer-aware value-axis graticule (same axis as waveform), spanning all 3 columns.
             drawActiveValueGraticule(ctx, size: size, active: key.active, sdrScale: key.sdrScale,
-                                     gutters: g, userLines: key.userLines)
+                                     gutters: g, userLines: key.userLines,
+                                     layer: layer, displayScale: key.displayScale, brightness: key.graticuleBrightness)
             // Thin R|G|B column separators at 1/3 and 2/3 OF THE PLOT REGION — must track the
-            // same inset as the trace image, or they'd drift off the channel boundaries.
+            // same inset as the trace image, or they'd drift off the channel boundaries. Structure,
+            // so under the trace; on the pixel grid like the ruler lines.
+            guard layer == .underTrace else { return }
             let x0 = g.leading, x1 = size.width - g.trailing
             for frac in [1.0 / 3.0, 2.0 / 3.0] {
-                let x = x0 + (x1 - x0) * frac
+                let x = gridAligned(x0 + (x1 - x0) * frac, scale: key.displayScale, extent: size.width)
                 var sep = Path()
                 sep.move(to: CGPoint(x: x, y: 0))
                 sep.addLine(to: CGPoint(x: x, y: size.height))
-                ctx.stroke(sep, with: .color(.white.opacity(0.18)), lineWidth: 0.5)
+                ctx.stroke(sep, with: .color(.white.opacity(
+                               ScopeGraticuleBrightness.line(ScopeGraticuleStyle.paradeSeparatorOpacity,
+                                                             key.graticuleBrightness))),
+                           lineWidth: ScopeGraticuleStyle.lineWidth)
             }
         }
         .equatable()

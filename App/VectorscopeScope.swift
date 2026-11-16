@@ -369,6 +369,11 @@ struct VectorscopeScopeView: View {
     /// (ContentView). The draw reads it directly, so a menu pick or the shortcut redraw the overlay
     /// immediately (overlay-only — the trace math is unaffected, exactly like the CIE triangle toggles).
     @AppStorage("manifold.vectorscope.graticule") private var graticule: VectorscopeGraticule = .fixed709
+    /// The pixel grid the axis-aligned graticule lines are placed on (0.9.5).
+    @Environment(\.displayScale) private var displayScale
+    // Same key as Preferences.graticuleBrightness (Settings ▸ Scopes ▸ Graticule brightness); @AppStorage here so the
+    // graticule redraws live, as the value scopes' `scopeScale` does.
+    @AppStorage(Preferences.graticuleBrightnessKey) private var graticuleBrightness = Preferences.defaultGraticuleBrightness
 
     /// Persisted target-box amplitude (75% / 100% / both) — orthogonal to the graticule reference,
     /// same key the ⌃⌥B shortcut writes. Overlay-only: the draw reads it directly and redraws.
@@ -496,12 +501,14 @@ struct VectorscopeScopeView: View {
 
                 ZStack {
                     Color.black
+                    // Structure UNDER the trace, references and labels OVER it (ScopeGraticuleLayer).
+                    graticuleStructure
                     ScopeTraceLayer(trace: model.trace) { img in
                         Image(decorative: img, scale: 1.0)
                             .resizable()
                             .interpolation(.none)
                     }
-                    graticuleView
+                    graticuleReferences
                 }
                 .aspectRatio(1, contentMode: .fit)   // stay square, fit available space
                 // ⚠️ THE GREEDY FRAME IS WHAT SEPARATES THE HEADER FROM THE PLOT, and without it the
@@ -552,26 +559,22 @@ struct VectorscopeScopeView: View {
         }
     }
 
-    private var graticuleView: some View {
+    /// STRUCTURE, drawn under the trace: the boundary circle, the optional outer ticks, the center crosshair.
+    private var graticuleStructure: some View {
         Canvas { ctx, size in
             let cx = size.width * 0.5
             let cy = size.height * 0.5
+            let w = ScopeGraticuleStyle.lineWidth
+            let gb = graticuleBrightness
 
-            // Box-placement coefficients: FIXED 709, or the SOURCE gamut's (from primariesCode).
-            // The trace math is independent (source matrix, in-kernel) — this only moves the boxes.
-            let (kr, kb): (Float, Float)
-            switch graticule {
-            case .fixed709:
-                (kr, kb) = (VectorscopeScopeModel.kr709, VectorscopeScopeModel.kb709)
-            case .sourcePrimaries:
-                (kr, kb) = VectorscopeScopeModel.graticuleKrKb(forPrimariesCode: model.sourcePrimariesCode)
-            }
-
-            // Outer chroma boundary circle (subtle). Sized to enclose the 100% targets.
+            // Outer chroma boundary circle. Sized to enclose the 100% targets. A circle cannot sit on the
+            // pixel grid; 1 pt still gives it a full pixel of coverage at 1×.
             let circleR = size.width * VectorscopeScopeModel.graticuleCircleFrac
             let circleRect = CGRect(x: cx - circleR, y: cy - circleR,
                                     width: circleR * 2, height: circleR * 2)
-            ctx.stroke(Path(ellipseIn: circleRect), with: .color(.white.opacity(0.14)), lineWidth: 0.5)
+            ctx.stroke(Path(ellipseIn: circleRect),
+                       with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.vectorscopeCircleOpacity, gb))),
+                       lineWidth: w)
 
             // Optional degree ticks radiating INWARD from the boundary circle (broadcast-vectorscope
             // idiom; off by default). Minor every 5°, longer majors every 45°, in the subtle
@@ -588,15 +591,37 @@ struct VectorscopeScopeView: View {
                     if isMajor { majorTicks.move(to: outer); majorTicks.addLine(to: inner) }
                     else       { minorTicks.move(to: outer); minorTicks.addLine(to: inner) }
                 }
-                ctx.stroke(minorTicks, with: .color(.white.opacity(0.42)), lineWidth: 0.5)
-                ctx.stroke(majorTicks, with: .color(.white.opacity(0.58)), lineWidth: 0.5)
+                ctx.stroke(minorTicks, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.vectorscopeMinorTickOpacity, gb))),
+                           lineWidth: w)
+                ctx.stroke(majorTicks, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.vectorscopeMajorTickOpacity, gb))),
+                           lineWidth: w)
             }
 
-            // Faint center crosshair.
+            // Center crosshair, on the pixel grid.
+            let gx = gridAligned(cx, scale: displayScale, extent: size.width)
+            let gy = gridAligned(cy, scale: displayScale, extent: size.height)
+            let arm = ScopeGraticuleStyle.vectorscopeCrosshairArm
             var cross = Path()
-            cross.move(to: CGPoint(x: cx - 6, y: cy)); cross.addLine(to: CGPoint(x: cx + 6, y: cy))
-            cross.move(to: CGPoint(x: cx, y: cy - 6)); cross.addLine(to: CGPoint(x: cx, y: cy + 6))
-            ctx.stroke(cross, with: .color(.white.opacity(0.2)), lineWidth: 0.5)
+            cross.move(to: CGPoint(x: gx - arm, y: gy)); cross.addLine(to: CGPoint(x: gx + arm, y: gy))
+            cross.move(to: CGPoint(x: gx, y: gy - arm)); cross.addLine(to: CGPoint(x: gx, y: gy + arm))
+            ctx.stroke(cross, with: .color(.white.opacity(ScopeGraticuleBrightness.line(ScopeGraticuleStyle.vectorscopeCrosshairOpacity, gb))),
+                       lineWidth: w)
+        }
+    }
+
+    /// REFERENCES, drawn over the trace: the skin-tone axis, the target brackets and hue names, the user targets.
+    private var graticuleReferences: some View {
+        Canvas { ctx, size in
+            let gb = graticuleBrightness
+            // Box-placement coefficients: FIXED 709, or the SOURCE gamut's (from primariesCode).
+            // The trace math is independent (source matrix, in-kernel) — this only moves the boxes.
+            let (kr, kb): (Float, Float)
+            switch graticule {
+            case .fixed709:
+                (kr, kb) = (VectorscopeScopeModel.kr709, VectorscopeScopeModel.kb709)
+            case .sourcePrimaries:
+                (kr, kb) = VectorscopeScopeModel.graticuleKrKb(forPrimariesCode: model.sourcePrimariesCode)
+            }
 
             // Skintone (I) axis — a FIXED reference ray at 123°, placed through the SAME plotPoint
             // mapping as the target boxes, so it is positioned AGAINST them rather than merely near
@@ -610,10 +635,11 @@ struct VectorscopeScopeView: View {
                 var axis = Path()
                 axis.move(to: VectorscopeScopeModel.plotPoint(cb: 0, cr: 0, in: size))
                 axis.addLine(to: VectorscopeScopeModel.plotPoint(cb: ucb * m, cr: ucr * m, in: size))
-                // 0.5 at 1.0pt — the TARGET BRACKETS' weight, and DELIBERATELY NOT
-                // `graticuleMajorOpacity`.
+                // `vectorscopeSkintoneOpacity` (0.70 since 0.9.5, was 0.5) at 1.0 pt — the TARGET
+                // BRACKETS' weight, and DELIBERATELY NOT the structure weight. Drawn OVER the trace
+                // (ScopeGraticuleLayer), like the brackets.
                 //
-                // ⚠️ DO NOT "FIX" THIS BACK TO THE SHARED CONSTANT. 0.22 is the weight for
+                // ⚠️ DO NOT "FIX" THIS BACK TO THE STRUCTURE CONSTANT. 0.22 (0.30 since 0.9.5) is the weight for
                 // ALWAYS-ON STRUCTURE — the value scopes' rulers, the boundary circle — which is
                 // on screen unasked and exists to be looked PAST while you read the trace. This
                 // axis is OPT-IN: it is off by default, so the only reason it is drawn at all is
@@ -622,14 +648,19 @@ struct VectorscopeScopeView: View {
                 // shipped at 0.22 first and was reported unreadable — it disappeared into the
                 // trace, which is precisely what background structure is supposed to do.
                 //
-                // The 0.5 is the brackets' own literal (see `drawTargets` below); they are matched
-                // on purpose, so changing one is a reason to look at the other. Heavier than their
-                // 0.75pt because a full-radius line must hold weight down its whole length, where
-                // a bracket leg only has to read as a corner.
+                // Its opacity equals the brackets' (`vectorscopeBracketOpacity`, see `drawTargets`
+                // below); they are matched on purpose, so changing one is a reason to look at the
+                // other. Until 0.9.5 the axis was heavier than the brackets' 0.75 pt, because a
+                // full-radius line must hold weight down its whole length; since then every line is
+                // 1 pt (the pixel-grid width) and the two are equal.
                 //
                 // STILL STROKED BEFORE THE TARGETS: equal weight now, but the boxes are the thing
                 // you measure against, so a bracket keeps the overlap.
-                ctx.stroke(axis, with: .color(.white.opacity(0.5)), lineWidth: 1.0)
+                // Graticule brightness scales it, but never below `ScopeGraticuleBrightness.referenceFloor`: an
+                // opt-in reference stays readable with the lines turned down (the reason above).
+                ctx.stroke(axis, with: .color(.white.opacity(
+                               ScopeGraticuleBrightness.reference(ScopeGraticuleStyle.vectorscopeSkintoneOpacity, gb))),
+                           lineWidth: ScopeGraticuleStyle.lineWidth)
             }
 
             // Targets — derived from the SAME chroma transform as the data. Up to two concentric sets
@@ -649,8 +680,11 @@ struct VectorscopeScopeView: View {
                     let bxCenterX = centre.x
                     let bxCenterY = centre.y
                     let h = box / 2
-                    let l = bxCenterX - h, r = bxCenterX + h   // frame edges
-                    let tp = bxCenterY - h, bt = bxCenterY + h
+                    // Frame edges, each on the pixel grid (the legs are axis-aligned lines).
+                    let l = gridAligned(bxCenterX - h, scale: displayScale)
+                    let r = gridAligned(bxCenterX + h, scale: displayScale)
+                    let tp = gridAligned(bxCenterY - h, scale: displayScale)
+                    let bt = gridAligned(bxCenterY + h, scale: displayScale)
                     // Four corner brackets — each an L (one horizontal + one vertical leg) meeting at
                     // a corner, leaving the center open so the trace point reads inside the frame.
                     var brackets = Path()
@@ -666,11 +700,16 @@ struct VectorscopeScopeView: View {
                     // bottom-right
                     brackets.move(to: CGPoint(x: r, y: bt)); brackets.addLine(to: CGPoint(x: r - arm, y: bt))
                     brackets.move(to: CGPoint(x: r, y: bt)); brackets.addLine(to: CGPoint(x: r, y: bt - arm))
-                    ctx.stroke(brackets, with: .color(.white.opacity(0.5)), lineWidth: 0.75)
+                    // Floored with the skin-tone axis: the brackets are what the bars are measured against.
+                    ctx.stroke(brackets, with: .color(.white.opacity(
+                                   ScopeGraticuleBrightness.reference(ScopeGraticuleStyle.vectorscopeBracketOpacity, gb))),
+                               lineWidth: ScopeGraticuleStyle.lineWidth)
                     if set == labelSet {
                         ctx.draw(
-                            Text(t.name).font(.system(size: 8, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.55)),
+                            Text(t.name).font(.system(size: ScopeGraticuleStyle.vectorscopeLabelFontSize,
+                                                      design: .monospaced))
+                                .foregroundColor(.white.opacity(
+                                    ScopeGraticuleBrightness.label(ScopeGraticuleStyle.vectorscopeLabelOpacity, gb))),
                             at: CGPoint(x: bxCenterX, y: bxCenterY - box), anchor: .center
                         )
                     }
@@ -721,6 +760,9 @@ struct VectorscopeScopeView: View {
             // ordering, which yields to the boxes — that axis is on the plot at a fixed angle
             // whether or not it relates to the shot, where this is at a colour the user just asked
             // about.
+            //
+            // NOT GRATICULE: ring, keyline and numeral ignore Settings ▸ Scopes ▸ Graticule brightness and draw at
+            // these values at every slider position. They are the user's own marking (Robbie, 2026-11-16).
             let ringD: CGFloat = 11
             for (n, entry) in [(1, target1On ? target1Value : ""), (2, target2On ? target2Value : "")] {
                 guard let srgb = VectorscopeUserTarget.parse(entry) else { continue }
@@ -732,15 +774,17 @@ struct VectorscopeScopeView: View {
                 let ring = CGRect(x: centre.x - ringD / 2, y: centre.y - ringD / 2,
                                   width: ringD, height: ringD)
                 ctx.stroke(Path(ellipseIn: ring.insetBy(dx: -1, dy: -1)),
-                           with: .color(.white.opacity(0.35)), lineWidth: 0.5)
+                           with: .color(.white.opacity(ScopeGraticuleStyle.vectorscopeUserKeylineOpacity)),
+                           lineWidth: 0.5)
                 ctx.stroke(Path(ellipseIn: ring),
                            with: .color(VectorscopeUserTarget.swatch(entry) ?? .white),
                            lineWidth: 1.5)
                 // Numeral where the hue names ride, in the hue names' style: two targets have to be
                 // told apart when both are enabled and one is off-screen colour-wise.
                 ctx.draw(
-                    Text(verbatim: "\(n)").font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(.white.opacity(0.55)),
+                    Text(verbatim: "\(n)").font(.system(size: ScopeGraticuleStyle.vectorscopeLabelFontSize,
+                                                         design: .monospaced))
+                        .foregroundColor(.white.opacity(ScopeGraticuleStyle.vectorscopeLabelOpacity)),
                     at: CGPoint(x: centre.x, y: centre.y - ringD), anchor: .center
                 )
             }

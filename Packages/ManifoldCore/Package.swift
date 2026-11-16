@@ -117,6 +117,16 @@ let package = Package(
                 .unsafeFlags(["-O"])
             ]
         ),
+        // The trace builds' alpha and the graticule pixel grid (docs/SCOPES_095_PLAN.md §2.4). ScopeCompute is a leaf
+        // with no dependencies, so `swift test` reaches it directly. Public API only (no @testable): the target is -O.
+        .testTarget(
+            name: "ScopeComputeTests",
+            dependencies: ["ScopeCompute"],
+            path: "Tests/ScopeComputeTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The polyphase ASRC (docs/AUDIO_RESAMPLER_DESIGN.md §3.6). Pure arithmetic over arrays
         // plus Accelerate — no media types, no libav, no app state.
         //
