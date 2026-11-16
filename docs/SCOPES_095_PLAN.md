@@ -530,3 +530,40 @@ ticks (0.45), the PQ 100- and 203-nit lines, user lines, the vectorscope and CIE
   graticule.** They ignore the slider and draw at their own values at every position. This supersedes "At 0" above.
 - **Color-bar target brackets** follow the slider with a floor of 0.50, like the skin-tone axis.
   `ScopeGraticuleBrightness.reference` (floor `referenceFloor` 0.50) serves both, and replaces `skintoneAxis`.
+
+## As implemented: part 1, YRGB parade (2026-11-16)
+
+Robbie's decisions, 2026-11-16:
+
+- A new scope, "YRGB Parade": four columns Y, R, G, B. The Waveform and the RGB Parade are unchanged.
+- The Y trace is neutral gray-white (`E6E6E6`, `yrgbLumaTraceHex`). R, G and B are pure, as in the parade.
+- It has its own intensity (`yrgbIntensity`) in its header.
+- Shortcut: no default. The catalog row "Parade: Switch RGB / YRGB" (`scopes.yrgbParade`) is unbound.
+- It uses Graticule brightness and the parade's under/over layering.
+
+**What was built (option A, §1.4).**
+
+- **Compute.** `MetalVideoRenderer.computeYRGBGPU` encodes `waveformKernel` (at `scopeW = colW`, with Kr/Kb from
+  `scopeCodes.matrix`) and `paradeKernel` into one command buffer with one completion.
+  - It has its own buffers, `yrgbLumaHistogramBuffer` and `yrgbRGBHistogramBuffer`.
+  - The single-kernel scopes go through the same `commitScopePasses`, with one pass each.
+- **Trace.** `ScopeTrace.yrgbPixels` calls `waveformPixels` and `paradePixels` and copies rows. Y keeps its own max;
+  R, G and B share theirs.
+- **Model and view** (`App/YRGBScope.swift`).
+  - `sampleInputs` includes `renderer?.pictureMatrixCode`, as the waveform's does.
+  - Its header fields are written by `ScopeColorFeed` only.
+  - Separators sit at 1/4, 2/4 and 3/4.
+  - User lines use `manifold.yrgb.line1/2.*`.
+  - `colW` is slot/4, clamped to 128–512.
+- **No mono mode.** The decision named none, so R, G and B are always pure color.
+- **Tests.** `YRGBTraceTests` (7) check that, at equal `colW`:
+  - Y is byte-equal to `waveformPixels`;
+  - R, G and B are byte-equal to `paradePixels`;
+  - Y and RGB normalize independently;
+  - Y matches the brightness curve directly;
+  - an all-zero frame and degenerate sizes are handled.
+  The histogram identity holds by construction (the same kernels and parameters), and `swift test` cannot reach the
+  GPU.
+- **Not built:** the `MANIFOLD_YRGB_SELFCHECK` GPU comparison (§1.6, item 2).
+- **GPU cost.** In DEBUG, `MANIFOLD_SCOPE_PERF=1` now adds `gpu.<scope>=<mean ms>/<n>` per second, from each scope
+  command buffer's `gpuEndTime − gpuStartTime`. No reading has been taken yet.
