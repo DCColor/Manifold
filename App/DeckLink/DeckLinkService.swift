@@ -1780,7 +1780,8 @@ final class FirstFrameProbe: @unchecked Sendable {
 /// line is the tag actually applied.
 extension DeckLinkService {
     /// Measurement only (repeat-then-skip after Play, docs/BUGS.md): one [CADENCE] line per scheduled frame.
-    static let cadenceLog = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] == "1"
+    /// `=2` (the card-pull measurement build, docs/CARD_PULL_MARGIN.md) keeps these lines and adds its own.
+    static let cadenceLog = ["1", "2"].contains(ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] ?? "")
 }
 
 final class SignalTrace: @unchecked Sendable {

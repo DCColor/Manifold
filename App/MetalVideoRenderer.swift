@@ -506,7 +506,30 @@ final class MetalVideoRenderer {
     }
     /// [CADENCE] every front swap: its host time and source pts, so a frame that was in front between two pulls and
     /// never pulled can be told from one that never reached the front.
-    static let cadenceLog = ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] == "1"
+    /// `=2` (the card-pull measurement build, `CardPullPhaseLog`) keeps these lines too, so the soak tools that read them still do.
+    static let cadenceLog = ["1", "2"].contains(ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_CADENCE_LOG"] ?? "")
+    /// Card-pull measurement (docs/CARD_PULL_MARGIN.md, *Measurement build*; `MANIFOLD_DECKLINK_CADENCE_LOG=2` only): each ring
+    /// slot's publish host, written beside the ring under `deckLinkLock` at the publish, read only by the pull's log record.
+    private var deckLinkSlotPublishHostDbg = [Double](repeating: .nan, count: MetalVideoRenderer.deckLinkRingCount)
+    /// The tick thread's own (`displayTick`), `=2` only: the tick before's host, this tick's interval and the tick before's
+    /// duration, for [TICKPHASE] and [LATE-SWAP].
+    private var ppLastTickHost = Double.nan
+    private var ppTickInterval = Double.nan
+    private var ppPrevTickDuration = Double.nan
+    /// Test switch (§9.2), `MANIFOLD_DECKLINK_LATE_SWAP_AT="120,247:2,374:ms6"`, parsed like `MANIFOLD_DECKLINK_SLIP_AT`
+    /// (`LateSwapSchedule`). Each entry fires once, at the first new frame at or past its content time while playing at 1× with
+    /// output on: ticks mode withholds that frame from the window's selection for n pacer ticks (a late swap, as a tick crossing
+    /// its due time makes one); `msN` delays its publish to the DeckLink ring by N ms (a slow convert). Read once, at init.
+    static let lateSwapEntries = LateSwapSchedule.parse(ProcessInfo.processInfo.environment["MANIFOLD_DECKLINK_LATE_SWAP_AT"] ?? "")
+    static let lateSwapArmed = !lateSwapEntries.isEmpty
+    /// Tick thread only, under `queueLock`.
+    private var lateSwapTickEntries = MetalVideoRenderer.lateSwapEntries.filter { if case .ticks = $0.mode { return true }; return false }
+    private var lateSwapHold: (pts: Double, ticksLeft: Int)?
+    /// The convert's completion; `lateSwapPublishLock`.
+    private let lateSwapPublishLock = NSLock()
+    private var lateSwapPublishEntries = MetalVideoRenderer.lateSwapEntries.filter {
+        if case .publishDelay = $0.mode { return true }; return false
+    }
     /// Test switch (Stage 2, docs/CARD_CLOCK_FINDINGS.md §10.29): `MANIFOLD_DECKLINK_SLIP_AT="120:-1,240:+1"` moves the timed pull's
     /// target by that many card frames once the source clock passes each time, for the rest of the session, which is what a slip of
     /// the card against the picture clock does: −1 hands one frame twice, +1 skips one. Under `deckLinkLock`.
@@ -1203,6 +1226,12 @@ final class MetalVideoRenderer {
         // effect on the normal display path.
         metalLayer.framebufferOnly = false
         metalLayer.isOpaque = true
+        #if DEBUG
+        // Card-pull measurement (docs/CARD_PULL_MARGIN.md, *Measurement build*): the switches are read, and the log created, here
+        // on init, never first on the tick, fill or completion threads.
+        if CardPullPhaseLog.enabled { _ = CardPullPhaseLog.shared }
+        _ = Self.lateSwapArmed
+        #endif
 
         // ── THE PRESENT IS OURS TO TIME ─────────────────────────────────────────────────
         //
@@ -3186,6 +3215,13 @@ final class MetalVideoRenderer {
             }
         }
         queueLock.unlock()
+        #if DEBUG
+        if CardPullPhaseLog.enabled {   // card-pull measurement: when this decoded frame entered the frame queue
+            var r = CardPullPhaseLog.Record(kind: .enqueue)
+            r.owner = ObjectIdentifier(self).hashValue; r.host = CACurrentMediaTime(); r.a = pts
+            CardPullPhaseLog.shared.append(r)
+        }
+        #endif
         if let evictionLog { print(evictionLog) }
 
         // Outside the lock: the sink takes LiveClock's lock, and holding two is how deadlocks are
@@ -3407,6 +3443,10 @@ final class MetalVideoRenderer {
         // DISPLAY-LINK CADENCE: stamp the interval since the previous tick BEFORE any work, so it
         // measures the callback's arrival cadence, not how long this tick takes. See rpLastTickWall.
         let rpTickWall = CACurrentMediaTime()
+        if CardPullPhaseLog.enabled {   // card-pull measurement: before rpLastTickWall and the watch clocks move on
+            ppTickInterval = rpLastTickWall != 0 ? rpTickWall - rpLastTickWall : .nan
+            ppPrevTickDuration = watchTickEnded > watchTickBegan ? watchTickEnded - watchTickBegan : .nan
+        }
         if rpLastTickWall != 0 {
             let dt = rpTickWall - rpLastTickWall
             rpTickSum += dt
@@ -3644,15 +3684,33 @@ final class MetalVideoRenderer {
                                                           glassHost: pacerPresentsOn ? nil : tickGlassHost,
                                                           previous: lastClockReading)
         lastClockReading = (now, clockHost)
+        // The selection's limit: `selectNow`, except while the DEBUG forced-late-swap switch withholds a frame (`lateSwapLimitLocked`).
+        #if DEBUG
+        var selectLimit = selectNow
+        #else
+        let selectLimit = selectNow
+        #endif
         #if DEBUG
         let statsPrevNow = playbackStatsLastNow
         playbackStatsLastNow = selectNow
+        var ppPrevTickHost = Double.nan
+        var ppPacer = false
+        if CardPullPhaseLog.enabled || Self.lateSwapArmed {
+            ppPrevTickHost = ppLastTickHost
+            ppLastTickHost = clockHost
+            ppPacer = pacerPresentsOn   // read here, outside `queueLock`: it takes the present gate's lock
+        }
         #endif
         // A live clock measuring its start-up window holds the picture (`LiveClock.presentationHoldFloor`).
         // Read before the queue lock, like the clock: it takes the clock's lock.
         let holdFloor = presentationHoldFloor?()
 
         queueLock.lock()
+        #if DEBUG
+        if Self.lateSwapArmed, holdFloor == nil, ppPacer {
+            selectLimit = lateSwapLimitLocked(selectNow: selectNow, previous: statsPrevNow)
+        }
+        #endif
         // Find the newest frame with pts <= now.
         var chosen: CVPixelBuffer?
         var chosenPts: Double = -1
@@ -3667,7 +3725,7 @@ final class MetalVideoRenderer {
             if stale > 0 { frameQueue.removeFirst(stale) }
         } else {
             for (i, frame) in frameQueue.enumerated() {
-                if frame.pts <= selectNow {
+                if frame.pts <= selectLimit {
                     chosen = frame.pixelBuffer
                     chosenPts = frame.pts
                     dropCount = i
@@ -3783,6 +3841,13 @@ final class MetalVideoRenderer {
             avLagProbe = nil
             onFrameSelected?(chosenPts, dropCount)
             notePlaybackStats(pts: chosenPts, dropped: dropCount, now: selectNow, prevNow: statsPrevNow)
+            if CardPullPhaseLog.enabled, ppPacer {   // card-pull measurement: a pacer tick that chose a new frame
+                var r = CardPullPhaseLog.Record(kind: .tick)
+                r.owner = ObjectIdentifier(self).hashValue
+                r.host = clockHost; r.a = selectNow; r.b = chosenPts; r.c = statsPrevNow; r.d = ppPrevTickHost
+                r.e = ppTickInterval; r.f = ppPrevTickDuration; r.g = CardPullPhaseLog.shared.mainAgo(at: clockHost)
+                CardPullPhaseLog.shared.append(r)
+            }
             #endif
             // A frame satisfied the strict gate — the post-seek one-shot is moot. Clear it
             // so a seek that resolves normally (incl. seek-and-play) never touches the
@@ -5412,6 +5477,10 @@ final class MetalVideoRenderer {
         cmd.addCompletedHandler { [weak self] cb in
             guard let self else { return }
             #if DEBUG
+            // Forced-late-swap switch, msN mode (docs/CARD_PULL_MARGIN.md §9.2): this frame reaches the ring N ms late.
+            if Self.lateSwapArmed, let delay = self.lateSwapPublishDelay(pts: sourcePts) { Thread.sleep(forTimeInterval: delay) }
+            #endif
+            #if DEBUG
             // Wall time covers encode → GPU done, i.e. what the convert costs the pipeline; `gpu`
             // is the dispatch alone. The two differ by queue wait, which is the number that grows
             // when a drag outruns the card.
@@ -5430,6 +5499,7 @@ final class MetalVideoRenderer {
             #if DEBUG
             let swapHost = CACurrentMediaTime()
             self.deckLinkFrontSwapHost = swapHost
+            if CardPullPhaseLog.enabled { self.deckLinkSlotPublishHostDbg[backIndex] = swapHost }
             #endif
             self.deckLinkFrontPts = sourcePts
             self.deckLinkFrontSignal = frameOutput.signal
@@ -5449,6 +5519,11 @@ final class MetalVideoRenderer {
             self.deckLinkLock.unlock()
             #if DEBUG
             if Self.cadenceLog { print(String(format: "[CADENCE-SWAP] host %.6f pts %.6f", swapHost, sourcePts)) }
+            if CardPullPhaseLog.enabled {   // card-pull measurement: the publish, after the lock, beside [CADENCE-SWAP]
+                var r = CardPullPhaseLog.Record(kind: .publish)
+                r.owner = ObjectIdentifier(self).hashValue; r.host = swapHost; r.a = sourcePts
+                CardPullPhaseLog.shared.append(r)
+            }
             #endif
         }
         cmd.commit()
@@ -5541,6 +5616,10 @@ final class MetalVideoRenderer {
         cmd.addCompletedHandler { [weak self] cb in
             guard let self else { return }
             #if DEBUG
+            // Forced-late-swap switch, msN mode (docs/CARD_PULL_MARGIN.md §9.2): this frame reaches the ring N ms late.
+            if Self.lateSwapArmed, let delay = self.lateSwapPublishDelay(pts: sourcePts) { Thread.sleep(forTimeInterval: delay) }
+            #endif
+            #if DEBUG
             self.v210Lock.lock()
             self.v210WallSum += CACurrentMediaTime() - v210EncodeStart
             let gpu = cb.gpuEndTime - cb.gpuStartTime
@@ -5554,6 +5633,7 @@ final class MetalVideoRenderer {
             #if DEBUG
             let swapHost = CACurrentMediaTime()
             self.deckLinkFrontSwapHost = swapHost
+            if CardPullPhaseLog.enabled { self.deckLinkSlotPublishHostDbg[backIndex] = swapHost }
             #endif
             self.deckLinkFrontPts = sourcePts
             self.deckLinkFrontSignal = frameOutput.signal
@@ -5569,6 +5649,11 @@ final class MetalVideoRenderer {
             self.deckLinkLock.unlock()
             #if DEBUG
             if Self.cadenceLog { print(String(format: "[CADENCE-SWAP] host %.6f pts %.6f", swapHost, sourcePts)) }
+            if CardPullPhaseLog.enabled {   // card-pull measurement: the publish, after the lock, beside [CADENCE-SWAP]
+                var r = CardPullPhaseLog.Record(kind: .publish)
+                r.owner = ObjectIdentifier(self).hashValue; r.host = swapHost; r.a = sourcePts
+                CardPullPhaseLog.shared.append(r)
+            }
             #endif
         }
         cmd.commit()
@@ -5656,8 +5741,89 @@ final class MetalVideoRenderer {
         deckLinkHandedTimed = deckLinkPullTimedNow
         deckLinkHandedDue = deckLinkPullTimedNow ? deckLinkPullDueNow : .nan
         deckLinkHandSeq &+= 1
+        #if DEBUG
+        if CardPullPhaseLog.enabled { notePullPhaseLocked(index: index, host: host, clock: clockNow) }
+        #endif
         return deckLinkSlotSignal[slot]
     }
+
+    #if DEBUG
+    // MARK: - Card-pull measurement build (docs/CARD_PULL_MARGIN.md, *Measurement build*). DEBUG, behind its switches only.
+
+    /// The fill callback, `deckLinkLock` held, after the pull: copy what it did into one record. Reads only; formats nothing.
+    /// The target is read back from `deckLinkPullDueNow`, which a timed pull sets to its target plus its 2 ms hysteresis
+    /// (`deckLinkPullSlotLocked`); the pull itself is not touched.
+    private func notePullPhaseLocked(index: Int64, host: Double, clock: Double?) {
+        var r = CardPullPhaseLog.Record(kind: .pull)
+        r.owner = ObjectIdentifier(self).hashValue
+        r.index = index
+        r.host = host
+        r.a = clock ?? .nan
+        r.b = deckLinkHandedPts
+        r.c = deckLinkPullTimedNow ? deckLinkPullDueNow - 0.002 : .nan
+        r.d = deckLinkPullMarginLocked
+        r.e = deckLinkCardFrame
+        r.f = deckLinkSourceFrame
+        r.g = deckLinkFrontPts
+        let p = deckLinkSlotPts, q = deckLinkSlotPublishHostDbg
+        if p.count == 4, q.count == 4 {
+            r.ring = (p[0], p[1], p[2], p[3])
+            r.ringHost = (q[0], q[1], q[2], q[3])
+        }
+        r.flag = deckLinkPullTimedNow
+        CardPullPhaseLog.shared.append(r)
+    }
+
+    /// Forced-late-swap switch, ticks mode (§9.2). The tick thread, `queueLock` held, only while output's pacer ticks. Returns the
+    /// selection's limit: `selectNow`, or just below a withheld frame's pts while it is withheld. An entry fires at the first new
+    /// frame at or past its time while playing at 1× (the clock moved forward by under 0.1 s since the tick before); entries already
+    /// passed by then (a seek, a wrap, a Play from further on) fire together as one, and the line names the latest.
+    private func lateSwapLimitLocked(selectNow: Double, previous: Double) -> Double {
+        if var hold = lateSwapHold {
+            if hold.ticksLeft > 0 {
+                hold.ticksLeft -= 1
+                lateSwapHold = hold
+                return min(selectNow, hold.pts - 1e-6)
+            }
+            lateSwapHold = nil
+            return selectNow
+        }
+        guard let first = lateSwapTickEntries.first, isPausedProvider?() != true,
+              previous.isFinite, selectNow > previous, selectNow - previous < 0.1 else { return selectNow }
+        var candidate = Double.nan
+        for frame in frameQueue { if frame.pts <= selectNow { candidate = frame.pts } else { break } }
+        guard candidate.isFinite, candidate >= first.at else { return selectNow }
+        var fired = first
+        var passed = 0
+        while let e = lateSwapTickEntries.first, candidate >= e.at { fired = e; lateSwapTickEntries.removeFirst(); passed += 1 }
+        guard case .ticks(let n) = fired.mode else { return selectNow }
+        lateSwapHold = (candidate, n - 1)
+        let clock = selectNow, at = fired.at, skipped = passed - 1
+        DispatchQueue.global(qos: .utility).async {
+            print(String(format: "[LATE-SWAP-TEST] pts %.6f held %d tick(s) at clock %.6f · entry %.3f s", candidate, n, clock, at)
+                + (skipped > 0 ? " · \(skipped) earlier entr\(skipped == 1 ? "y" : "ies") passed with it" : ""))
+        }
+        return min(selectNow, candidate - 1e-6)
+    }
+
+    /// Forced-late-swap switch, msN mode (§9.2). The convert's completion, before the publish: the delay to apply to this frame,
+    /// or nil. Fires at the first frame at or past an entry's time while the file is not paused; passed entries fire with it.
+    private func lateSwapPublishDelay(pts: Double) -> Double? {
+        guard pts.isFinite, isPausedProvider?() != true else { return nil }
+        lateSwapPublishLock.lock()
+        var fired: LateSwapEntry?
+        var passed = 0
+        while let e = lateSwapPublishEntries.first, pts >= e.at { fired = e; lateSwapPublishEntries.removeFirst(); passed += 1 }
+        lateSwapPublishLock.unlock()
+        guard let fired, case .publishDelay(let delay) = fired.mode else { return nil }
+        let at = fired.at, skipped = passed - 1
+        DispatchQueue.global(qos: .utility).async {
+            print(String(format: "[LATE-SWAP-TEST] pts %.6f publish delayed %.1f ms · entry %.3f s", pts, delay * 1000, at)
+                + (skipped > 0 ? " · \(skipped) earlier entr\(skipped == 1 ? "y" : "ies") passed with it" : ""))
+        }
+        return delay
+    }
+    #endif
 
     /// The test switch's shift of the timed pull's target (`deckLinkSlipPending`); 0 outside DEBUG. Called with `deckLinkLock` held.
     private func deckLinkSlipShiftLocked(clock: Double, index: Int64) -> Double {

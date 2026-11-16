@@ -78,7 +78,21 @@ class Freeze:
         elif l.startswith("[TRANSPORT] done"): s.done = True
     def still(s): return s.playing and s.host and s.host - max(s.moved, s.play + GRACE) >= STILL
 
-def block(app, fixture, length, mode, dest, label, minutes, markers=0):
+# The card-pull measurement build (docs/CARD_PULL_MARGIN.md, *Measurement build*): the only variables `env NAME=VALUE` may add.
+# Neither changes the card lock, Stage 2, the recovery paths or the audio routing; without `env` nothing here changes.
+EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None}
+
+def parse_extra_env(items):
+    out = {}
+    for it in items:
+        name, eq, value = it.partition("=")
+        allowed = EXTRA_ENV_ALLOWED.get(name, False)
+        if not eq or allowed is False or (allowed is not None and value not in allowed):
+            sys.exit(f"rc-soak.py: env {it!r} is not allowed (only {', '.join(sorted(EXTRA_ENV_ALLOWED))})")
+        out[name] = value
+    return out
+
+def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env=None):
     guard()
     if resolve_running(): say("Resolve is running: stopping"); sys.exit(4)
     os.makedirs(OUT, exist_ok=True); log = f"{OUT}/{label}.log"; title = os.path.basename(fixture)
@@ -87,8 +101,10 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0):
     steps = "wait 16;" + ";".join(cycle(rng, length) for _ in range(k))
     env = {k2: v for k2, v in os.environ.items() if not k2.startswith("MANIFOLD_")}
     env.update(MANIFOLD_DEBUG_TRANSPORT=steps, MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1")
+    if extra_env: env.update(extra_env)
     meta = dict(label=label, app=app, fixture=fixture, length=length, mode=mode, dest=dest, minutes=minutes, cycles=k, seed=seed,
                 env=sorted(x for x in env if x.startswith("MANIFOLD_")), began=datetime.datetime.now().isoformat(timespec="seconds"), freezes=[])
+    if extra_env: meta["extra_env"] = {k2: (v if k2 == "MANIFOLD_DECKLINK_CADENCE_LOG" else f"{len(v.split(','))} entries") for k2, v in extra_env.items()}
     if markers: fp = fingerprint(fixture); meta.update(markers_expected=markers, fingerprint=fp[:16], regens=[], latedrop=[])
     defp = subprocess.Popen([f"{DEV}/defout", "100000", f"{OUT}/{label}.defout"])
     p = subprocess.Popen([app, "-manifold.decklink.audioDestination", dest, "-manifold.decklink.manualOutputMode", mode],
@@ -247,13 +263,16 @@ def markers_setup(app, fixture, length, label, n):
 
 if __name__ == "__main__":
     a = sys.argv[1:]
+    extra = {}
+    if a and a[0] == "block" and "env" in a:   # rc-soak.py block … [markers <n>] env NAME=VALUE …
+        i = a.index("env"); extra = parse_extra_env(a[i + 1:]); a = a[:i]
     if a and a[0] == "block" and len(a) in (8, 10):
         assert os.path.isfile(a[1]) and os.path.isfile(a[2]) and a[5] in ("sdi", "computer") and (len(a) == 8 or a[8] == "markers")
-        block(a[1], a[2], float(a[3]), a[4], a[5], a[6], float(a[7]), int(a[9]) if len(a) == 10 else 0)
+        block(a[1], a[2], float(a[3]), a[4], a[5], a[6], float(a[7]), int(a[9]) if len(a) == 10 else 0, extra)
     elif a and a[0] == "markers-setup" and len(a) == 6:
         assert os.path.isfile(a[1]) and os.path.isfile(a[2])
         markers_setup(a[1], a[2], float(a[3]), a[4], int(a[5]))
     elif a and a[0] == "report":
         os.execvp(sys.executable, [sys.executable, f"{HERE}/rc-soak-report.py"] + a[1:])
-    else: sys.exit("rc-soak.py block <app> <fixture> <length s> <mode> <sdi|computer> <label> <minutes> [markers <n>] | "
+    else: sys.exit("rc-soak.py block <app> <fixture> <length s> <mode> <sdi|computer> <label> <minutes> [markers <n>] [env NAME=VALUE …] | "
                   "markers-setup <app> <fixture> <length s> <label> <n> | report <dir> <label>...")
