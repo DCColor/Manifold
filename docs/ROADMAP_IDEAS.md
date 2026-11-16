@@ -460,3 +460,12 @@ Research notes (2026-10-08, unverified, check before committing):
   - NVIDIA Parakeet (CC-BY-4.0): very accurate and fast, narrower language coverage, Mac ports less mature.
 - Beyond transcription: subtitle line segmentation and timing (reading speed, line length, shot changes), export (SRT, WebVTT, possibly SCC/608), optional speaker labels (diarization model licences need checking).
 - Suggested first step: prototype with Apple's framework (no dependencies), benchmark against WhisperKit large-v3-turbo on real programme clips, decide from the accuracy gap.
+
+## Scope preferences in settings export
+Status: idea (2026-11-16)
+Version: unscheduled
+
+What: Export/Import Settings carries shortcuts and streams (with their saved A/V offsets). No scope preference is exported: not Master scope intensity
+(`globalScopeIntensity`), not Graticule brightness (`scopeGraticuleBrightness`, 0.9.5), not the per-scope intensities, colors,
+scales or overlays. `docs/SETTINGS_EXPORT_PLAN.md` §1 (line 105) lists "Look of scopes, guides, safe zones" as "Out, next": about 50 keys, each
+needing a range check, best added as one reviewed "Preferences" section.
