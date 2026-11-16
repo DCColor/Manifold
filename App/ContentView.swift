@@ -17,11 +17,14 @@ enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 /// `ScopeKind(rawValue:) ?? .waveform`, so a stored selection written by an older build still
 /// resolves and an unknown one falls back rather than throwing.
 ///
-/// ⚠️ `meters` IS THE ONE THAT IS NOT RENDER-COUPLED. The other four sample the frame the
+/// `yrgb` (0.9.5) is the YRGB parade, its own scope beside the RGB `parade`. An older build reading "yrgb" falls back
+/// to its slot's default kind, so a downgrade is safe.
+///
+/// ⚠️ `meters` IS THE ONE THAT IS NOT RENDER-COUPLED. The other five sample the frame the
 /// renderer just drew; the meters sample audio on their own timer, because audio moves when no
 /// frame is being drawn and a paused file draws nothing at all. See AudioMeterScope.swift.
 enum ScopeKind: String, CaseIterable, Identifiable {
-    case waveform, parade, vectorscope, cie, meters
+    case waveform, parade, yrgb, vectorscope, cie, meters
     /// The window's markers on its file (docs/MARKERS_PLAN.md §4.1). Not a scope and not render-coupled: it samples
     /// nothing, so `updateScopeSampling` has nothing to start for it.
     case markers
@@ -30,6 +33,7 @@ enum ScopeKind: String, CaseIterable, Identifiable {
         switch self {
         case .waveform:    return "Waveform"
         case .parade:      return "Parade"
+        case .yrgb:        return "YRGB Parade"
         case .vectorscope: return "Vectorscope"
         case .cie:         return "CIE"
         case .meters:      return "Audio Meters"
@@ -289,6 +293,7 @@ private final class RendererStore: ObservableObject {
 private final class ScopeModelStore: ObservableObject {
     let waveform = WaveformScopeModel()
     let parade = ParadeScopeModel()
+    let yrgb = YRGBScopeModel()
     let vectorscope = VectorscopeScopeModel()
     let cie = CIEScopeModel()
     let meter = AudioMeterModel()
@@ -471,6 +476,7 @@ struct ContentView: View {
     @StateObject private var scopeModels = ScopeModelStore()
     private var waveformModel: WaveformScopeModel { scopeModels.waveform }
     private var paradeModel: ParadeScopeModel { scopeModels.parade }
+    private var yrgbModel: YRGBScopeModel { scopeModels.yrgb }
     private var vectorscopeModel: VectorscopeScopeModel { scopeModels.vectorscope }
     private var cieModel: CIEScopeModel { scopeModels.cie }
     private var meterModel: AudioMeterModel { scopeModels.meter }
@@ -711,7 +717,7 @@ struct ContentView: View {
             #endif
             // The scope headers' source colour, from this window's renderer — BEFORE the sampling
             // below, which reseeds through it. Here and not as its own modifier (§6.7).
-            scopeColorFeed.bind(deck: deck, waveform: waveformModel, parade: paradeModel,
+            scopeColorFeed.bind(deck: deck, waveform: waveformModel, parade: paradeModel, yrgb: yrgbModel,
                                 vectorscope: vectorscopeModel, cie: cieModel)
             // Persisted arrangement may reopen the tray with scopes already on —
             // start their sampling to match the restored visibility.
@@ -750,6 +756,7 @@ struct ContentView: View {
             metalRenderer?.stop()
             waveformModel.stop()
             paradeModel.stop()
+            yrgbModel.stop()
             vectorscopeModel.stop()
             cieModel.stop()
         }
@@ -1526,6 +1533,7 @@ struct ContentView: View {
         switch kind {
         case .waveform:    WaveformScopeView(model: waveformModel, slotSelection: selection)
         case .parade:      ParadeScopeView(model: paradeModel, slotSelection: selection)
+        case .yrgb:        YRGBScopeView(model: yrgbModel, slotSelection: selection)
         case .vectorscope: VectorscopeScopeView(model: vectorscopeModel, slotSelection: selection)
         case .cie:         CIEScopeView(model: cieModel, slotSelection: selection)
         case .meters:      AudioMeterScopeView(model: meterModel, slotSelection: selection)
@@ -1554,7 +1562,7 @@ struct ContentView: View {
         // the tray during a live stream put that file's colour over the stream's picture.
         scopeColorFeed.refresh()
 
-        // Waveform / parade / vectorscope / CIE: plain start/stop.
+        // Waveform / parade / YRGB / vectorscope / CIE: plain start/stop.
         if active.contains(.waveform) {
             waveformModel.renderer = metalRenderer
             waveformModel.start()
@@ -1565,6 +1573,11 @@ struct ContentView: View {
             paradeModel.start()
         }
         else { paradeModel.stop() }
+        if active.contains(.yrgb) {
+            yrgbModel.renderer = metalRenderer
+            yrgbModel.start()
+        }
+        else { yrgbModel.stop() }
         if active.contains(.vectorscope) {
             vectorscopeModel.renderer = metalRenderer
             vectorscopeModel.start()
@@ -1679,13 +1692,14 @@ struct ContentView: View {
             meterModel.start()
         } else { meterModel.stop() }
 
-        let wf = active.contains(.waveform), pd = active.contains(.parade)
+        let wf = active.contains(.waveform), pd = active.contains(.parade), yr = active.contains(.yrgb)
         let vs = active.contains(.vectorscope), cie = active.contains(.cie)
         metalRenderer?.onFrameRendered = active.isEmpty
             ? nil
-            : { [weak waveformModel, weak paradeModel, weak vectorscopeModel, weak cieModel] in
+            : { [weak waveformModel, weak paradeModel, weak yrgbModel, weak vectorscopeModel, weak cieModel] in
                 if wf { waveformModel?.frameRendered() }
                 if pd { paradeModel?.frameRendered() }
+                if yr { yrgbModel?.frameRendered() }
                 if vs { vectorscopeModel?.frameRendered() }
                 if cie { cieModel?.frameRendered() }
               }
@@ -1699,6 +1713,7 @@ struct ContentView: View {
     private func clearScopes() {
         waveformModel.clear()
         paradeModel.clear()
+        yrgbModel.clear()
         vectorscopeModel.clear()
         cieModel.clear()
     }
@@ -1790,6 +1805,14 @@ struct ContentView: View {
             },
             .vectorscopeGraticule: DeckShortcut {
                 vectorscopeGraticule = (vectorscopeGraticule == .fixed709) ? .sourcePrimaries : .fixed709
+            },
+            // RGB ↔ YRGB in every slot of this window that holds either; a no-op if none does. The slot change reaches
+            // `updateScopeSampling` through `.onChange(of: activeKinds)`, as a slot-menu pick does.
+            .yrgbParade: DeckShortcut {
+                func swapped(_ k: ScopeKind) -> ScopeKind { k == .parade ? .yrgb : (k == .yrgb ? .parade : k) }
+                if swapped(chrome.slot0) != chrome.slot0 { chrome.slot0 = swapped(chrome.slot0) }
+                if swapped(chrome.slot1) != chrome.slot1 { chrome.slot1 = swapped(chrome.slot1) }
+                if swapped(chrome.slot2) != chrome.slot2 { chrome.slot2 = swapped(chrome.slot2) }
             },
             .vectorscopeBoxes: DeckShortcut {
                 switch vectorscopeBoxAmplitude {

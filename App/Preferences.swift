@@ -91,6 +91,8 @@ final class Preferences: ObservableObject {
     @AppStorage("waveformIntensity") var waveformIntensity: Double = 1.0
     @AppStorage("paradeIntensity") var paradeIntensity: Double = 1.0
     @AppStorage("vectorscopeIntensity") var vectorscopeIntensity: Double = 1.0
+    /// The YRGB parade's own intensity (0.9.5), in its header like the others.
+    @AppStorage("yrgbIntensity") var yrgbIntensity: Double = 1.0
     @AppStorage("globalScopeIntensity") var globalScopeIntensity: Double = 1.0
     /// Settings ▸ Scopes & Guides ▸ Scopes ▸ "Graticule brightness" (0.9.5): one multiplier on every image scope's
     /// graticule alphas (Waveform, Parade, Vectorscope, CIE), 0 (lines off, labels stay) … 2×. The scaling and its floors
@@ -163,6 +165,9 @@ final class Preferences: ObservableObject {
     }
     var vectorscopeIntensityBinding: Binding<Double> {
         Binding(get: { self.vectorscopeIntensity }, set: { self.vectorscopeIntensity = $0 })
+    }
+    var yrgbIntensityBinding: Binding<Double> {
+        Binding(get: { self.yrgbIntensity }, set: { self.yrgbIntensity = $0 })
     }
 
     // Per-scope trace COLOR (hue the trace is painted in; intensity stays orthogonal).

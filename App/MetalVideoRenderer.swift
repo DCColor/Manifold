@@ -421,6 +421,11 @@ final class MetalVideoRenderer {
     private var histogramBuffer: MTLBuffer?
     private let paradePipelineState: MTLComputePipelineState?
     private var paradeHistogramBuffer: MTLBuffer?
+    /// The YRGB parade's two histograms (0.9.5). ITS OWN, never `histogramBuffer` or `paradeHistogramBuffer`: each
+    /// model gates only its own compute, so a waveform or parade in another slot would tear a shared buffer
+    /// (docs/SCOPES_095_PLAN.md §1.4). Same pipelines as the waveform and the parade.
+    private var yrgbLumaHistogramBuffer: MTLBuffer?
+    private var yrgbRGBHistogramBuffer: MTLBuffer?
     private let vectorscopePipelineState: MTLComputePipelineState?
     private var vectorscopeHistogramBuffer: MTLBuffer?
     private let ciePipelineState: MTLComputePipelineState?
@@ -4856,44 +4861,79 @@ final class MetalVideoRenderer {
         pipeline: MTLComputePipelineState?,
         buffer: inout MTLBuffer?,
         count: Int,
-        setParams: (MTLComputeCommandEncoder) -> Void,
+        perfName: String,
+        setParams: @escaping (MTLComputeCommandEncoder) -> Void,
         completion: @escaping (_ hist: [UInt32]) -> Void
     ) -> Bool {
-        guard let pipeline, let src = scopeTexture, count > 0 else { return false }
-        let width = src.width
-        let height = src.height
+        guard let pipeline, let hist = scopeHistogramBuffer(&buffer, count: count) else { return false }
+        return commitScopePasses([ScopePass(pipeline: pipeline, buffer: hist, count: count, setParams: setParams)],
+                                 perfName: perfName) { completion($0[0]) }
+    }
 
-        // Grow the reusable histogram buffer on demand (shared so the CPU can read it).
+    /// One kernel over `scopeTexture` into one histogram: what `commitScopePasses` encodes.
+    private struct ScopePass {
+        let pipeline: MTLComputePipelineState
+        let buffer: MTLBuffer
+        let count: Int
+        /// The kernel's uniforms at buffer(1). Called synchronously, while encoding.
+        let setParams: (MTLComputeCommandEncoder) -> Void
+    }
+
+    /// `buffer`, grown on demand to `count` UInt32s (shared, so the CPU can read it back). Nil if `count` is 0 or the
+    /// allocation fails.
+    private func scopeHistogramBuffer(_ buffer: inout MTLBuffer?, count: Int) -> MTLBuffer? {
+        guard count > 0 else { return nil }
         let neededBytes = count * MemoryLayout<UInt32>.stride
         if buffer == nil || buffer!.length < neededBytes {
             buffer = device.makeBuffer(length: neededBytes, options: .storageModeShared)
         }
+        return buffer
+    }
+
+    /// Encode `passes` into ONE command buffer on the scope queue (each pass zeroes its own histogram, then its kernel
+    /// accumulates into it) and call `completion` once, with every histogram in `passes`' order. The single-kernel
+    /// scopes send one pass (`dispatchScopeKernel`); the YRGB parade sends two (`computeYRGBGPU`). Every pass's buffer
+    /// must belong to the caller alone, which gates to one compute in flight.
+    @discardableResult
+    private func commitScopePasses(_ passes: [ScopePass], perfName: String,
+                                   completion: @escaping (_ hists: [[UInt32]]) -> Void) -> Bool {
+        guard !passes.isEmpty, let src = scopeTexture else { return false }
+        let width = src.width
+        let height = src.height
         // Commit on the DEDICATED scope queue (not the render's) so scope compute runs
         // concurrently with renders instead of serialized behind them + the present/vsync wait.
         // `src` is the readable (completed) frame — safe to read off-queue (see offscreen ring).
-        guard let hist = buffer,
-              let cmd = scopeCommandQueue.makeCommandBuffer() else { return false }
+        guard let cmd = scopeCommandQueue.makeCommandBuffer() else { return false }
 
-        // Clear this frame's histogram to zero (blit fill), then accumulate.
+        // Clear this frame's histograms to zero (blit fill), then accumulate.
         if let blit = cmd.makeBlitCommandEncoder() {
-            blit.fill(buffer: hist, range: 0..<neededBytes, value: 0)
+            for pass in passes {
+                blit.fill(buffer: pass.buffer, range: 0..<(pass.count * MemoryLayout<UInt32>.stride), value: 0)
+            }
             blit.endEncoding()
         }
 
         guard let enc = cmd.makeComputeCommandEncoder() else { return false }
-        enc.setComputePipelineState(pipeline)
-        enc.setTexture(src, index: 0)
-        enc.setBuffer(hist, offset: 0, index: 0)
-        setParams(enc)   // scope-specific uniforms at buffer(1) — called synchronously
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let tgs = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
-        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
+        for pass in passes {
+            enc.setComputePipelineState(pass.pipeline)
+            enc.setTexture(src, index: 0)
+            enc.setBuffer(pass.buffer, offset: 0, index: 0)
+            pass.setParams(enc)   // scope-specific uniforms at buffer(1) — called synchronously
+            enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: tpg)
+        }
         enc.endEncoding()
 
-        cmd.addCompletedHandler { _ in
-            // GPU done — read the small histogram out of the shared buffer (one copy).
-            let ptr = hist.contents().bindMemory(to: UInt32.self, capacity: count)
-            completion(Array(UnsafeBufferPointer(start: ptr, count: count)))
+        cmd.addCompletedHandler { cb in
+            #if DEBUG
+            ScopePerf.gpuTime(perfName, seconds: cb.gpuEndTime - cb.gpuStartTime)
+            #endif
+            // GPU done — read the small histograms out of the shared buffers (one copy each).
+            completion(passes.map { pass in
+                let ptr = pass.buffer.contents().bindMemory(to: UInt32.self, capacity: pass.count)
+                return Array(UnsafeBufferPointer(start: ptr, count: pass.count))
+            })
         }
         cmd.commit()
         return true
@@ -4986,7 +5026,7 @@ final class MetalVideoRenderer {
                                     rowStride: UInt32(max(1, rowStride)),
                                     kr: m.kr, kb: m.kb)
         return dispatchScopeKernel(
-            pipeline: waveformPipelineState, buffer: &histogramBuffer, count: scopeW * bins,
+            pipeline: waveformPipelineState, buffer: &histogramBuffer, count: scopeW * bins, perfName: "wf",
             setParams: { $0.setBytes(&params, length: MemoryLayout<WaveformParams>.stride, index: 1) },
             completion: { [weak self] hist in
                 #if DEBUG
@@ -5009,7 +5049,7 @@ final class MetalVideoRenderer {
                                   colW: UInt32(colW), bins: UInt32(bins),
                                   rowStride: UInt32(max(1, rowStride)))
         return dispatchScopeKernel(
-            pipeline: paradePipelineState, buffer: &paradeHistogramBuffer, count: colW * bins * 3,
+            pipeline: paradePipelineState, buffer: &paradeHistogramBuffer, count: colW * bins * 3, perfName: "parade",
             setParams: { $0.setBytes(&params, length: MemoryLayout<ParadeParams>.stride, index: 1) },
             completion: { [weak self] hist in
                 #if DEBUG
@@ -5019,6 +5059,45 @@ final class MetalVideoRenderer {
                 #endif
                 completion(hist, colW, bins)
             })
+    }
+
+    /// GPU YRGB-parade histograms (0.9.5, docs/SCOPES_095_PLAN.md §1.4, option A): the Y waveform's kernel at
+    /// `scopeW = colW` and the RGB parade's kernel at the same `colW`, in ONE command buffer with one completion.
+    ///
+    /// ⚠️ Y IS THE WAVEFORM'S Y BY CONSTRUCTION, AND THESE LINES ARE WHY. Same pipeline (`waveformKernel`), the same
+    /// `scopeCodes.matrix` through the same `ycbcrKrKb`, the same `WaveformParams`: at equal columns the histogram is
+    /// the waveform's, bin for bin. R, G and B are `paradeKernel`'s, unchanged. No shader is involved but those two. The
+    /// model re-samples on `pictureMatrixCode`, as the waveform does. `y` is `colW*bins`; `rgb` is `[R | G | B]`, each
+    /// `colW*bins`, as `computeParadeGPU` returns it.
+    @discardableResult
+    func computeYRGBGPU(
+        colW: Int, bins: Int, rowStride: Int,
+        completion: @escaping (_ y: [UInt32], _ rgb: [UInt32], _ colW: Int, _ bins: Int) -> Void
+    ) -> Bool {
+        guard let src = scopeTexture, let lumaPipeline = waveformPipelineState,
+              let rgbPipeline = paradePipelineState,
+              let yBuf = scopeHistogramBuffer(&yrgbLumaHistogramBuffer, count: colW * bins),
+              let rgbBuf = scopeHistogramBuffer(&yrgbRGBHistogramBuffer, count: colW * bins * 3) else { return false }
+        let m = ycbcrKrKb(forMatrixCode: scopeCodes.matrix)
+        var lumaParams = WaveformParams(width: UInt32(src.width), height: UInt32(src.height),
+                                        scopeW: UInt32(colW), bins: UInt32(bins),
+                                        rowStride: UInt32(max(1, rowStride)),
+                                        kr: m.kr, kb: m.kb)
+        var rgbParams = ParadeParams(width: UInt32(src.width), height: UInt32(src.height),
+                                     colW: UInt32(colW), bins: UInt32(bins),
+                                     rowStride: UInt32(max(1, rowStride)))
+        let passes = [
+            ScopePass(pipeline: lumaPipeline, buffer: yBuf, count: colW * bins,
+                      setParams: { $0.setBytes(&lumaParams, length: MemoryLayout<WaveformParams>.stride, index: 1) }),
+            ScopePass(pipeline: rgbPipeline, buffer: rgbBuf, count: colW * bins * 3,
+                      setParams: { $0.setBytes(&rgbParams, length: MemoryLayout<ParadeParams>.stride, index: 1) }),
+        ]
+        return commitScopePasses(passes, perfName: "yrgb") { [weak self] hists in
+            #if DEBUG
+            self?.probeScope("yrgb Y", hists[0], columns: colW, bins: bins)
+            #endif
+            completion(hists[0], hists[1], colW, bins)
+        }
     }
 
     /// GPU vectorscope histogram (Phase 3). A square plane×plane 2-D chroma histogram,
@@ -5037,7 +5116,7 @@ final class MetalVideoRenderer {
                                        plane: UInt32(plane), rowStride: UInt32(max(1, rowStride)),
                                        chromaScale: chromaScale, kr: m.kr, kb: m.kb)
         return dispatchScopeKernel(
-            pipeline: vectorscopePipelineState, buffer: &vectorscopeHistogramBuffer, count: plane * plane,
+            pipeline: vectorscopePipelineState, buffer: &vectorscopeHistogramBuffer, count: plane * plane, perfName: "vs",
             setParams: { $0.setBytes(&params, length: MemoryLayout<VectorscopeParams>.stride, index: 1) },
             completion: { completion($0, plane) })
     }
@@ -5066,7 +5145,7 @@ final class MetalVideoRenderer {
                                uMin: bounds.aMin, uMax: bounds.aMax, vMin: bounds.bMin, vMax: bounds.bMax,
                                rgbToXYZ: (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))
         return dispatchScopeKernel(
-            pipeline: ciePipelineState, buffer: &cieHistogramBuffer, count: planeW * planeH,
+            pipeline: ciePipelineState, buffer: &cieHistogramBuffer, count: planeW * planeH, perfName: "cie",
             setParams: { $0.setBytes(&params, length: MemoryLayout<CIEParams>.stride, index: 1) },
             completion: { completion($0, planeW, planeH) })
     }

@@ -64,6 +64,7 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case cieSpace = "scopes.cieSpace"
     case vectorscopeGraticule = "scopes.vectorscopeGraticule"
     case vectorscopeBoxes = "scopes.vectorscopeBoxes"
+    case yrgbParade = "scopes.yrgbParade"
     case cie709 = "scopes.cie709"
     case cieP3 = "scopes.cieP3"
     case cie2020 = "scopes.cie2020"
@@ -322,6 +323,10 @@ public enum ShortcutCatalog {
         .init(.cieSpace, "CIE: Switch xy / u′v′", .scopes, .window, .key, nil),
         .init(.vectorscopeGraticule, "Vectorscope: Rec. 709 / Source Primaries Graticule", .scopes, .window, .key, nil),
         .init(.vectorscopeBoxes, "Vectorscope: 75% / 100% / Both Boxes", .scopes, .window, .key, nil),
+        // Swaps every slot in the window holding the RGB Parade for the YRGB Parade, and back (0.9.5). NO DEFAULT KEY
+        // (Robbie, 2026-11-16); assignable in the Keyboard Shortcuts window. ⌥⌘Y was the candidate
+        // (docs/SCOPES_095_PLAN.md §1.4).
+        .init(.yrgbParade, "Parade: Switch RGB / YRGB", .scopes, .window, .key, nil),
         .init(.cie709, "CIE: Show/Hide Rec. 709 Triangle", .scopes, .window, .key, nil),
         .init(.cieP3, "CIE: Show/Hide P3 Triangle", .scopes, .window, .key, nil),
         .init(.cie2020, "CIE: Show/Hide Rec. 2020 Triangle", .scopes, .window, .key, nil),

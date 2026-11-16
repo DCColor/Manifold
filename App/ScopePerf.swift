@@ -36,6 +36,20 @@ enum ScopePerf {
         lock.unlock()
     }
 
+    private static var gpuSeconds: [String: (sum: Double, n: Int)] = [:]
+
+    /// One scope command buffer's GPU time (`gpuEndTime − gpuStartTime`), from its completion handler. With
+    /// `MANIFOLD_SCOPE_PERF=1`, each second's line adds `gpu.<scope>=<mean ms>/<n>`: the mean GPU time per compute
+    /// (0.9.5, docs/SCOPES_095_PLAN.md §1.5). Unset, nothing is recorded.
+    static func gpuTime(_ scope: String, seconds: Double) {
+        guard enabled, seconds.isFinite, seconds >= 0 else { return }
+        lock.lock()
+        let t = gpuSeconds[scope] ?? (0, 0)
+        gpuSeconds[scope] = (t.sum + seconds, t.n + 1)
+        lock.unlock()
+        count("gpu.n.\(scope)")
+    }
+
     /// `MANIFOLD_SCOPE_DUMP_DIR=<dir>` (launch environment): every scope image published is also written there,
     /// overwriting, as `<scope>.rgba` (the CGImage's bytes as drawn into an 8-bit RGBA premultiplied context) and
     /// `<scope>.json` (width, height, a publish sequence number). Lets a run compare a paused frame's scope pictures
@@ -75,9 +89,16 @@ enum ScopePerf {
         lock.lock()
         let snapshot = counts
         counts = [:]
+        let gpu = gpuSeconds
+        gpuSeconds = [:]
         lock.unlock()
         guard !snapshot.isEmpty else { return }
-        let line = snapshot.keys.sorted().map { "\($0)=\(snapshot[$0]!)" }.joined(separator: " ")
+        let gpuPart = gpu.keys.sorted().map { k -> String in
+            let t = gpu[k]!
+            return String(format: "gpu.%@=%.2fms/%d", k, t.n > 0 ? t.sum / Double(t.n) * 1000 : 0, t.n)
+        }
+        let line = (snapshot.keys.sorted().filter { !$0.hasPrefix("gpu.n.") }.map { "\($0)=\(snapshot[$0]!)" } + gpuPart)
+            .joined(separator: " ")
         print("[SCOPE-PERF] \(line)")
     }
 }

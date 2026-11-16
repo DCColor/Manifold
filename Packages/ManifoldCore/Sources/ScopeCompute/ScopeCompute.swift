@@ -155,6 +155,35 @@ public enum ScopeTrace {
         return pixels
     }
 
+    /// YRGB parade (0.9.5, docs/SCOPES_095_PLAN.md part 1): four columns Y | R | G | B, each `colW` wide, in one RGBA
+    /// buffer of `4*colW × displayRows`.
+    ///
+    /// ⚠️ BUILT BY CALLING `waveformPixels` AND `paradePixels`, NOT BY COPYING THEM, AND THAT IS THE IDENTITY. Column 0 is
+    /// byte-for-byte the Y waveform's image at `scopeW = colW`, and columns 1–3 the RGB parade's at the same `colW`
+    /// (ScopeComputeTests). So Y keeps ITS OWN max, as the waveform does, and R, G and B keep their SHARED max, as the
+    /// parade does: a bright Y never dims the channels, and a dense channel never dims Y. `y` is the waveform kernel's
+    /// histogram (`[row*colW + bucket]`); `r`, `g`, `b` the parade kernel's three regions. R, G and B are always pure
+    /// red, green and blue; the Y trace takes `yColor` (each 0…1).
+    public static func yrgbPixels(y accY: [UInt32], r accR: [UInt32], g accG: [UInt32], b accB: [UInt32],
+                                  colW: Int, bins: Int, displayRows: Int, gain: Float,
+                                  yColorR: Float, yColorG: Float, yColorB: Float) -> [UInt8] {
+        let yPix = waveformPixels(histogram: accY, scopeW: colW, bins: bins, displayRows: displayRows, gain: gain,
+                                  colorR: yColorR, colorG: yColorG, colorB: yColorB)
+        let rgbPix = paradePixels(r: accR, g: accG, b: accB, colW: colW, bins: bins, displayRows: displayRows,
+                                  gain: gain, mono: false, monoR: 1, monoG: 1, monoB: 1)
+        let yRow = colW * 4, rgbRow = colW * 3 * 4, outRow = colW * 4 * 4
+        guard colW > 0, displayRows > 0, yPix.count >= yRow * displayRows,
+              rgbPix.count >= rgbRow * displayRows else { return [] }
+        var pixels = [UInt8](repeating: 0, count: outRow * displayRows)
+        for row in 0..<displayRows {
+            // Row copies only: no pixel is recomputed here.
+            let o = row * outRow
+            pixels.replaceSubrange(o..<(o + yRow), with: yPix[(row * yRow)..<((row + 1) * yRow)])
+            pixels.replaceSubrange((o + yRow)..<(o + outRow), with: rgbPix[(row * rgbRow)..<((row + 1) * rgbRow)])
+        }
+        return pixels
+    }
+
     /// Dedicated vectorscope trace multiplier, applied on top of the caller's intensity-derived gain
     /// (baseGain × perScope × global). The vectorscope is a SPARSE chroma scatter — a bars frame's
     /// saturated primaries are lone outer bins dwarfed by the central neutral pile — so it uses the

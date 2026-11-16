@@ -37,6 +37,7 @@ final class ScopeColorFeed: ObservableObject {
     private weak var deck: WindowDeck?
     private weak var waveform: WaveformScopeModel?
     private weak var parade: ParadeScopeModel?
+    private weak var yrgb: YRGBScopeModel?
     private weak var vectorscope: VectorscopeScopeModel?
     private weak var cie: CIEScopeModel?
     private var observers: [NSObjectProtocol] = []
@@ -64,11 +65,12 @@ final class ScopeColorFeed: ObservableObject {
     /// ⚠️ OBSERVES UNFILTERED AND COMPARES THE RENDERER IN THE HANDLER — `DisplayChainModel.bind`'s
     /// reasoning: `deck.renderer` is a plain stored property populated by `WindowDeckRegistrar`, not
     /// necessarily in place when `.onAppear` runs, so it is resolved at delivery time.
-    func bind(deck: WindowDeck, waveform: WaveformScopeModel, parade: ParadeScopeModel,
+    func bind(deck: WindowDeck, waveform: WaveformScopeModel, parade: ParadeScopeModel, yrgb: YRGBScopeModel,
               vectorscope: VectorscopeScopeModel, cie: CIEScopeModel) {
         self.deck = deck
         self.waveform = waveform
         self.parade = parade
+        self.yrgb = yrgb
         self.vectorscope = vectorscope
         self.cie = cie
         guard observers.isEmpty else { refresh(trigger: "bind"); return }
@@ -93,6 +95,7 @@ final class ScopeColorFeed: ObservableObject {
                       r === self.deck?.renderer else { return }
                 self.waveform?.clear()
                 self.parade?.clear()
+                self.yrgb?.clear()
                 self.vectorscope?.clear()
                 self.cie?.clear()
                 NSLog("[SCOPE-COLOR] released: traces blanked")
@@ -135,10 +138,14 @@ final class ScopeColorFeed: ObservableObject {
         waveform?.sourceMatrixCode = now.matrix
         waveform?.sourceTransferCode = now.transfer
         parade?.sourceTransferCode = now.transfer
+        // YRGB: the waveform's matrix (its Y is the waveform's Y) and the value scopes' transfer.
+        yrgb?.sourceMatrixCode = now.matrix
+        yrgb?.sourceTransferCode = now.transfer
         vectorscope?.sourceMatrixCode = now.matrix
         vectorscope?.sourcePrimariesCode = now.primaries
         waveform?.headerNote = now.note
         parade?.headerNote = now.note
+        yrgb?.headerNote = now.note
         vectorscope?.headerNote = now.note
         let header = now.note ?? (now.sourcePresent
             ? Self.cieHeader(primaries: now.primaries, transfer: now.transfer,

@@ -94,7 +94,7 @@ final class ShortcutRegistryTests: XCTestCase {
             .audioLater10: "⌥⇧]", .audioEarlier10: "⌥⇧[",
             // No default.
             .cycleInterpretation: nil, .resetInterpretation: nil, .cieSpace: nil, .vectorscopeGraticule: nil,
-            .vectorscopeBoxes: nil, .cie709: nil, .cieP3: nil, .cie2020: nil, .exportFrameForSupport: nil,
+            .vectorscopeBoxes: nil, .yrgbParade: nil, .cie709: nil, .cieP3: nil, .cie2020: nil, .exportFrameForSupport: nil,
             // Debug. ⌃⌥R is gone (§8 item 4); Connect to First NDI Source is back on ⌃⌥N, as a debug hook (item 6).
             .debugToneTest: "⌃⌥A", .debugScrubBench: "⌃⌥⇧B", .debugNDIConnect: "⌃⌥N", .debugWebRTCSmoke: "⌃⌥W",
             .debugWHEPConnect: "⌃⌥H", .debugWHEPRetire: "⌃⌥⇧H", .debugWHEPExportFrame: "⌃⌥⇧E",
