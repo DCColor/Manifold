@@ -665,7 +665,8 @@ assume exists. `d76bb21` fixed that the same afternoon and both configurations h
 repeatedly since, so the item is back to being a checklist line and the audit half of it is what
 remains open. The promotion is recorded rather than deleted because raising an item to blocker was
 the right call at the time and the mechanism is worth reading before touching any `#if DEBUG`
-declaration.
+declaration. **2026-11-16: Release does not compile again** (*Release configuration does not compile: DeckLinkBridge.mm uses
+os_unfair_lock*, below). Whether that makes it a blocker again is Robbie's call; it is not promoted here.
 
 ---
 
@@ -896,7 +897,35 @@ they are noise in a gate, and gating on them is how a useful check gets disabled
 
 ---
 
+## ☐ PRE-SHIP: Release configuration does not compile: DeckLinkBridge.mm uses os_unfair_lock (:2132) but includes its header only under #if DEBUG (:20-22) (found 2026-11-16, PRE-EXISTING, not fixed)
+
+**Found** 2026-11-16 by the card-pull measurement build's Release compile check (`CARD_PULL_MARGIN.md` §11.5).
+`xcodebuild -configuration Release -derivedDataPath ./.build-pp-release ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
+build` fails, with errors in `App/DeckLink/DeckLinkBridge.mm` only:
+- `:2132` `unknown type name 'os_unfair_lock'`. `<os/lock.h>` (with `<mach/mach_time.h>`) is included only inside `#if DEBUG`
+  at `:20-22`, so in Release the type is undeclared.
+- Five errors follow at `:479`, `:614`, `:721`, `:724` and `:727` (the player is "not related by inheritance" to the SDK's callback
+  interfaces). Inference: they follow from the first error, which breaks the class declaration. UNKNOWN until the first is fixed.
+- Every Swift file compiled in that Release run, with no errors.
+
+**Pre-existing.** CONFIRMED: the file was last modified 2026-11-15 13:26, before the measurement build, which did not touch it or any
+header it includes. The last Release compile that a doc records as passing is Stage 1b's B17 (`CARD_CLOCK_FINDINGS.md` §10.12,
+2026-11-07). Which change since then put `os_unfair_lock` outside the `#if DEBUG` block: UNKNOWN.
+
+**Not fixed.** `DeckLinkBridge.mm` is a protected path (SDI audio, 1c), and the fix belongs in a session for that file. It is likely a
+one-line include, but that is an inference.
+
+**Before any Release build or Release-only check** (`PRIVACY_AUDIT.md` item 8; the `strings` checks of `CARD_CLOCK_FINDINGS.md`
+§10.6): fix it, then re-run the Release compile and the dev-path audit below.
+
+---
+
 ## ☐ PRE-SHIP: the dev-path audit is outstanding. (The Release compile half is FIXED.)
+
+**⚠️ 2026-11-16: "The Release compile half is FIXED" (the heading, and "The blocking half is fixed and verified" below) is no longer
+true.** Release does not compile today: see *Release configuration does not compile: DeckLinkBridge.mm uses os_unfair_lock* above.
+The `d76bb21` fix still stands; this is a new break of the same kind (a declaration Release needs, inside `#if DEBUG`). The heading is
+left as written so links to it keep working.
 
 **Status:** ☐ **OPEN as a checklist item — NO LONGER A BLOCKER, lowered 2026-09-21.** The blocking
 half is fixed and verified; the audit half is untouched and stays open. **Raised:** 2026-08-27 as
@@ -1713,19 +1742,30 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ## ☐ AFTER 0.9.4: the card pull's margin over the window swap is under one refresh in many Plays, so one late frame is a repeat (Robbie, 2026-11-16)
 
-**What happens.** The card pull hands the card the frame the window last swapped in. When that swap comes one display
-refresh late and lands after the pull, the card gets the previous frame again: a hold of one slot, recovered by a new picture
-line. Card lock then re-anchors the Mac's sound (`re-anchored to the SDI picture at its new line #n (a slip)`), and the SDI
-sound starts a new run. Seen once in the 0.9.3 gate (Computer, 23.976) and twice in the 0.9.4 gate: Computer at 23.976
-(`rc-2398-cmp-1.log` line 181796: lead 10.7 ms at a 13.90 ms refresh, swap 3.3 ms after the pull) and SDI at 25p
-(`rc-gop25-sdi-1.log` line 58250: lead 12.9 ms at a 13.33 ms refresh, swap 0.4 ms after the pull). Accepted for 0.9.4 as the
-named exception "a late window frame repeated once (either destination), recovered, sound followed" (`Manifold-BUILD.md`, 0.9.4
-release gate). Logs: `~/Code/_scratch/manifold-rc094-soak/`.
+**Audit and plan: `docs/CARD_PULL_MARGIN.md`** (read-only audit 2026-11-16; corrections below are from its §10).
+
+**What happens.** At a matched rate the card pull hands the card the frame after the one it handed last as soon as that frame
+is in the ring, which is when the window swaps it in (the half-frame band of `CARD_CLOCK_FINDINGS.md` §10.30;
+`CARD_PULL_MARGIN.md` §1). When that swap comes one output-pacer tick late and lands after the pull, the card gets the previous
+frame again: a hold of one slot, recovered by a new picture line. Card lock then re-anchors the Mac's sound (`re-anchored to the
+SDI picture at its new line #n (a slip)`), and the SDI sound starts a new run. Seen once in the 0.9.3 gate (Computer, 23.976) and
+twice in the 0.9.4 gate: Computer at 23.976 (`rc-2398-cmp-1.log` line 181796: lead 10.7 ms at a 13.90 ms pacer tick, swap 3.3 ms
+after the pull) and SDI at 25p (`rc-gop25-sdi-1.log` line 58250: lead 12.9 ms at a 13.33 ms pacer tick, swap 0.4 ms after the
+pull). Accepted for 0.9.4 as the named exception "a late window frame repeated once (either destination), recovered, sound
+followed" (`Manifold-BUILD.md`, 0.9.4 release gate). Logs: `~/Code/_scratch/manifold-rc094-soak/`.
+
+**Why the swap is late (CONFIRMED for all three holds, `CARD_PULL_MARGIN.md` §5).** With output on, the window is ticked by
+the output pacer on the host clock, not by a display. Under card lock the frames' due times run on the card's clock, about
+−11 ppm against the host on this rig, so each tick lands about 12 µs/s earlier against its frame's due time. When a tick drifts
+across a due time, that frame and every one after it render one tick later. Not a missed tick (`[PACER]` missed deadlines 0),
+not a slow render (tick → ring max 3.3 ms), not decode starvation (window `late` 0). All 25 late-swap Plays in the 10 video
+blocks of the two gates were such crossings; 3 of them fell in a Play whose lead was under one tick.
 
 **The margin, measured on the 0.9.4 soak logs** (swap-to-pull lead, `swapAgo` on `[CADENCE]` pulls while playing; median per
-Play, the first 50 pulls of each Play skipped):
+Play, the first 50 pulls of each Play skipped). **Correction:** the "refresh" column is the output pacer's period (`P = frame / k`,
+`[PACER] started … P 13.90 ms (k 3, 71.93 Hz)`), not a display's.
 
-| Block | Display refresh | Frame | Lead per Play: min / median / max | Plays with lead < 1 refresh |
+| Block | Pacer tick (P) | Frame | Lead per Play: min / median / max | Plays with lead < 1 tick |
 |---|---|---|---|---|
 | 59.94, SDI (1) | 8.34 ms | 16.68 ms | 0.29 / 9.38 / 16.53 ms | 28 of 63 |
 | 23.976, Computer (1) | 13.90 ms | 41.71 ms | 0.59 / 18.44 / 40.48 ms | 25 of 63 |
@@ -1733,24 +1773,24 @@ Play, the first 50 pulls of each Play skipped):
 | 59.94, SDI (2) | 8.34 ms | 16.68 ms | 0.21 / 8.68 / 16.39 ms | 29 of 63 |
 | 23.976, Computer (2) | 13.90 ms | 41.71 ms | 0.34 / 18.79 / 41.43 ms | 18 of 63 |
 
-The lead is fixed within a Play and set afresh at each one, spread across the whole frame, from about 0 to one frame. So it is
-not thin everywhere: **119 of 315 Plays (38 %) had less than one refresh of margin**, and in those Plays any swap one refresh late
-is a repeat. In the rest a late swap still lands before the pull. (The first report of the 0.9.4 run said every frame in these
-blocks led its pull by under one refresh. That was true of the two holds' Plays only; the table corrects it.)
+The lead is fixed within a Play and set afresh at each one, spread across the whole frame, from about 0 to one frame: the pacer's
+phase restarts at each wake, the clock starts at Play with no reference to the card's slots, and the half-frame band lets the
+swap set the card's phase (`CARD_PULL_MARGIN.md` §1–§2). **Correction to the exposure:** the table's `swapAgo` counts from the
+newest swap, so 119 of 315 Plays (38 %) overstates it. When the card is already a frame behind the window a late swap cannot cause
+a hold. Measured from the handed frame's own swap, **76 of 525 steady-play segments (14 %)** were exposed (`CARD_PULL_MARGIN.md`
+§2.4; a Play is split at its loop wrap there, so 105 segments a block).
 
-**To investigate:**
-- Why a swap is occasionally one refresh late: UNKNOWN (0.9.3 and 0.9.4 alike). 3 in about 9 h of video playing time in the two gates.
-- Why the lead is left to chance at each Play: is the window's frame chosen without regard to the card pull's phase? Could
-  the card path take its frame from the decoded queue (the frame due at the pull) instead of the last swapped frame, or hold
-  a fixed lead of at least one refresh plus slack?
-- Rate-mismatched cases explicitly: 25p on SDI shown on a display running 75 Hz (13.33 ms refresh) and 23.976 at 72 Hz, where
-  the refresh is a third of a frame; and 59.94 at 120 Hz (8.34 ms).
-- Whatever changes, it must keep the window and the card on the same frame within the card lock's bounds, and must not trade
-  repeats for skips.
+**Still open:**
+- Whether any late swap other than a crossing occurs: none seen in about 10 video-block hours, but the logs cannot see whether
+  the late frame was already decoded at the earlier tick. The measurement build answers it (`CARD_PULL_MARGIN.md`, *Measurement build*).
+- The rate-mismatched case proper (C6, e.g. a 25p file on 1080p59.94): no soak block has run it. The named cases (25p at 75 Hz,
+  23.976 at 71.93 Hz, 59.94 at 119.88 Hz) are pacer rates at a matched card and source rate.
+- Whatever changes must keep the window and the card on the same frame within the card lock's bounds, and must not trade
+  repeats for skips (`CARD_PULL_MARGIN.md` §6).
 
-**What it would take:** a measurement build that logs the pull's phase against the display link at each Play, a forced-late-swap
-test switch (in the spirit of `MANIFOLD_DECKLINK_SLIP_AT`), and the soak blocks above re-run, with the 25p file at SDI included.
-No code change for 0.9.4.
+**What it would take:** the measurement build (`MANIFOLD_DECKLINK_CADENCE_LOG=2`, the forced-late-swap switch
+`MANIFOLD_DECKLINK_LATE_SWAP_AT`), its Stage 1 soak, then the recommended fix (option C, the pacer's phase held against the frame
+grid, behind its own switch) and an overnight A/B, per `CARD_PULL_MARGIN.md` §8–§9. No code change for 0.9.4.
 
 ---
 
