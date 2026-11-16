@@ -5,6 +5,18 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.9.4
+
+- Markers: press M to mark the frame on screen, even while playing. A marker has a name, notes, keywords, a duration and one of Resolve's 16 colors. There is one marker per frame. ⇧M edits a marker, ⌥M adds one and opens it for editing, and I and O mark a span.
+- The Markers list sits in a scope slot or in its own window (⌃⌘M), with a thumbnail for each marker. Click a marker to jump to it; double-click to edit it.
+- Round trip with DaVinci Resolve. File ▸ Export Markers… writes a marker EDL that Resolve imports onto a timeline at the file's own timecode, frame-exact, drop-frame included. File ▸ Import Markers… brings Resolve's markers back. Markers also export as CSV and plain text. Keywords don't travel through EDLs (a Resolve limit).
+- Markers are saved per file on this Mac, never written into your media, and follow the file if it's renamed or moved. You can turn that off in Settings ▸ Files.
+- Files without timecode count markers from 00:00:00:00. If your Resolve timeline starts at 01:00:00:00 (Resolve's default), set the marker start timecode in the Markers slot's gear menu before exporting, so the markers land on the right frames. When you import an EDL that's an hour off, Manifold offers to shift it.
+- View ▸ Show Markers hides markers without deleting anything.
+- Share Frame… (⇧⌘E) sends the current frame as a JPEG through the macOS share menu. HDR (PQ/HLG) pictures are tone-mapped to SDR for sharing; Export Frame still saves the full-quality PNG, HDR included. For HDR pictures the menu reads "Share Frame (SDR)…" and the shared file name ends in " SDR".
+- Export Frame… and Share Frame… now name files after the clip and its timecode (e.g. "MyClip 01-02-14-05"), or the stream and the date and time. Settings ▸ Frame Export can put exported frames in a folder per clip.
+- DeckLink: Open Desktop Video Setup… is in Settings ▸ DeckLink Output and the DeckLink menu. Sub-devices the card's connector mapping makes inactive are grayed out, and if a mapping change makes the output's sub-device unusable while output is on, output stops with a message saying why.
+
 ## 0.9.3
 
 - SDI sound was about 2.5 frames late against its picture in 0.9.0 to 0.9.2. It is now in sync. Stream calibrations stay valid. If you set a stream's audio offset by ear against an SDI monitor, it will now play about 2.5 frames early: reset it.

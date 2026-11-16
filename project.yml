@@ -455,7 +455,7 @@ targets:
         # YES and a build setting beats a key in the source plist. Verified against the BUILT
         # Info.plist, not assumed. A release script must edit THIS line; editing the generated
         # plist would appear to work and change nothing.
-        MARKETING_VERSION: "0.9.3"
+        MARKETING_VERSION: "0.9.4"
         CURRENT_PROJECT_VERSION: "26"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Graviton Tools"

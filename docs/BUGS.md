@@ -1711,6 +1711,49 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
+## ☐ AFTER 0.9.4: the card pull's margin over the window swap is under one refresh in many Plays, so one late frame is a repeat (Robbie, 2026-11-16)
+
+**What happens.** The card pull hands the card the frame the window last swapped in. When that swap comes one display
+refresh late and lands after the pull, the card gets the previous frame again: a hold of one slot, recovered by a new picture
+line. Card lock then re-anchors the Mac's sound (`re-anchored to the SDI picture at its new line #n (a slip)`), and the SDI
+sound starts a new run. Seen once in the 0.9.3 gate (Computer, 23.976) and twice in the 0.9.4 gate: Computer at 23.976
+(`rc-2398-cmp-1.log` line 181796: lead 10.7 ms at a 13.90 ms refresh, swap 3.3 ms after the pull) and SDI at 25p
+(`rc-gop25-sdi-1.log` line 58250: lead 12.9 ms at a 13.33 ms refresh, swap 0.4 ms after the pull). Accepted for 0.9.4 as the
+named exception "a late window frame repeated once (either destination), recovered, sound followed" (`Manifold-BUILD.md`, 0.9.4
+release gate). Logs: `~/Code/_scratch/manifold-rc094-soak/`.
+
+**The margin, measured on the 0.9.4 soak logs** (swap-to-pull lead, `swapAgo` on `[CADENCE]` pulls while playing; median per
+Play, the first 50 pulls of each Play skipped):
+
+| Block | Display refresh | Frame | Lead per Play: min / median / max | Plays with lead < 1 refresh |
+|---|---|---|---|---|
+| 59.94, SDI (1) | 8.34 ms | 16.68 ms | 0.29 / 9.38 / 16.53 ms | 28 of 63 |
+| 23.976, Computer (1) | 13.90 ms | 41.71 ms | 0.59 / 18.44 / 40.48 ms | 25 of 63 |
+| Long-GOP 25p, SDI | 13.33 ms | 40.00 ms | 0.20 / 22.07 / 39.63 ms | 19 of 63 |
+| 59.94, SDI (2) | 8.34 ms | 16.68 ms | 0.21 / 8.68 / 16.39 ms | 29 of 63 |
+| 23.976, Computer (2) | 13.90 ms | 41.71 ms | 0.34 / 18.79 / 41.43 ms | 18 of 63 |
+
+The lead is fixed within a Play and set afresh at each one, spread across the whole frame, from about 0 to one frame. So it is
+not thin everywhere: **119 of 315 Plays (38 %) had less than one refresh of margin**, and in those Plays any swap one refresh late
+is a repeat. In the rest a late swap still lands before the pull. (The first report of the 0.9.4 run said every frame in these
+blocks led its pull by under one refresh. That was true of the two holds' Plays only; the table corrects it.)
+
+**To investigate:**
+- Why a swap is occasionally one refresh late: UNKNOWN (0.9.3 and 0.9.4 alike). 3 in about 9 h of video playing time in the two gates.
+- Why the lead is left to chance at each Play: is the window's frame chosen without regard to the card pull's phase? Could
+  the card path take its frame from the decoded queue (the frame due at the pull) instead of the last swapped frame, or hold
+  a fixed lead of at least one refresh plus slack?
+- Rate-mismatched cases explicitly: 25p on SDI shown on a display running 75 Hz (13.33 ms refresh) and 23.976 at 72 Hz, where
+  the refresh is a third of a frame; and 59.94 at 120 Hz (8.34 ms).
+- Whatever changes, it must keep the window and the card on the same frame within the card lock's bounds, and must not trade
+  repeats for skips.
+
+**What it would take:** a measurement build that logs the pull's phase against the display link at each Play, a forced-late-swap
+test switch (in the spirit of `MANIFOLD_DECKLINK_SLIP_AT`), and the soak blocks above re-run, with the 25p file at SDI included.
+No code change for 0.9.4.
+
+---
+
 ## ☐ AFTER 0.9.4: American English in log lines (Robbie, 2026-11-15)
 
 `fbb735a` made every user-facing string American, and `scripts/check-us-spelling.py` now runs in `release-mac.sh`'s
@@ -2216,14 +2259,13 @@ pumped with the rate still 0. Only a marker change (`apply`) synced it, which is
 Effect for a user: reopen a large file with stored markers, and the thumbnails may never appear, Regenerate included,
 until a marker is added, edited or deleted. Regenerate also deletes the cached JPEGs, so it makes things worse.
 
-**Likely the blank thumbnails of the first markers test.** `HDR TEST.mov`'s blank early-frame thumbnails "cleared with
-Clear All", put down to the first build's cache (`docs/MARKERS_PLAN.md:377`, §14.1). Which action "Clear All" was is
-UNKNOWN: no commit has that string in the app, only in those two doc lines (`git log -S"Clear All"`). If it removed the
-markers (Settings ▸ Delete All Stored Markers… removes markers and thumbnails) and they were then added again, the new
-ones went through `apply`, which syncs the rate: the same pattern as here, stored markers blank and re-added ones fine. Not
-proven for that run; if blank thumbnails come back on a file with stored markers, this is the first suspect.
+**The blank thumbnails of the first markers test were this bug, not a stale cache (confirmed by Robbie, 2026-11-15).**
+`HDR TEST.mov`'s blank early-frame thumbnails "cleared with Clear All" and were put down to the first build's cache
+(`docs/MARKERS_PLAN.md:377`, §14.1). Robbie had deleted and added markers by hand in those files during that testing, which is
+when the thumbnails reappeared: a marker change goes through `apply`, which synced the rate. The cache explanation in the
+plan is superseded by this entry.
 
-**Fix (uncommitted at writing):** `ThumbnailFeed` (Packages/ManifoldCore/Sources/Markers/ThumbnailFeed.swift) holds the
+**Fix (`7b99b09`):** `ThumbnailFeed` (Packages/ManifoldCore/Sources/Markers/ThumbnailFeed.swift) holds the
 frames and rate the thumbnailer was last given. The model now also reports the metadata landing (`metadataChanged`) and
 Regenerate (before it drops the thumbnails); a report reaches the thumbnailer only when the frames or the rate changed, so
 the inspector's repeat publishes cost nothing. Load and marker changes sync as before. `pump()`'s rule moved unchanged into

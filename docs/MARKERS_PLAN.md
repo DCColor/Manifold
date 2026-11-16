@@ -375,7 +375,9 @@ A small picture of each marker's frame: always in the Markers window (96 pt wide
   file), "Regenerate Thumbnail" in a row's context menu (that marker, or the selection). Drops them from memory and disk
   and makes them again through the same queue: off the main thread, never while playing.
 - The blank early-frame thumbnails seen in the first test cleared with Clear All; most likely the first build's cache
-  (Robbie, 2026-11-15). Not investigated further unless it recurs.
+  (Robbie, 2026-11-15). Not investigated further unless it recurs. **Superseded (Robbie, 2026-11-15): not the cache.**
+  Stored markers that load before the file's frame rate got no thumbnails until a marker changed, which is when they
+  reappeared; fixed in `7b99b09` (`docs/BUGS.md`, "Stored markers get no thumbnails …").
 
 ### 4.5 View ▸ Show Markers (D25, built 2026-11-15)
 
@@ -889,7 +891,7 @@ Attended steps (guarded launch as §8.2; on `mk-2398-tc.mov` with a few markers)
 | M6 (no timecode) | Markers count from 00:00:00:00 on the no-timecode file. The hour-shift offer works (tested with a Resolve EDL; Frame.io's EDL could not be chosen in the panel then, §16) |
 | M7 (storage) | Moving the file keeps its markers |
 | M9 (timeline strip) | Flags show with the Ball playhead |
-| Thumbnails | Blank early-frame thumbnails cleared after Clear All: most likely the first build's cache. Not pursued unless it recurs. **Bug**, below |
+| Thumbnails | Blank early-frame thumbnails cleared after Clear All: most likely the first build's cache. Not pursued unless it recurs. **Superseded 2026-11-15: the stored-markers rate race, `docs/BUGS.md`, fixed in `7b99b09`.** **Bug**, below |
 
 ### 14.2 The bug: a marker one frame after another stayed blank
 

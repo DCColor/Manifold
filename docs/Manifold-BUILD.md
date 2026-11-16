@@ -152,7 +152,8 @@ the pins, but reproducing them takes real time.
           picture took a new line (#63), and card lock moved the Mac's sound with it: `re-anchored to the SDI picture at its new
           line #63 (a slip): it was +41.70 ms off` (1 in the run). Card late 0, dropped 0. This is the Computer slip of
           `CARD_CLOCK_FINDINGS.md` §10.29 W7-5994 ("Stage 2 showed once in 2.5 h"), recovered by the slip write. It is the only
-          slip in the 6 blocks. Why the swap was late: UNKNOWN.
+          slip in the 6 blocks. Why the swap was late: UNKNOWN. (From 0.9.4 this exception is named "a late window frame
+          repeated once (either destination), recovered, sound followed"; see the 0.9.4 gate below.)
         - **Exception 2, the card drop: frame #0 of an output start reported Dropped, the known start-time drop**
           (`rc-5994-sdi-2.log`, the first completion after `StartScheduledPlayback`: `completion result 2 stream 0 done 0`,
           then `DeckLink D3: !! Dropped at frame 4`, the index being refilled). A paused start: 4 preroll frames (#0–#3)
@@ -167,6 +168,66 @@ the pins, but reproducing them takes real time.
         - SDI bridge totals: 0 late edges, 9 re-latches, 100,492 missing samples. In every block the missing count rises
           only in the Play from 1,895 s through the loop's wrap, once per cycle: positions past the end of the file's sound
           (§10.24's reading, an inference from the lengths).
+      - **0.9.4 release gate (Robbie, 2026-11-15): the 0.9.3 gate (0 freezes, 0 unrecovered events, 0 holds or skips
+        beyond the expected cadence, at least 6 h) plus markers.** Named exceptions: (1) **a late window frame repeated
+        once (either destination), recovered, sound followed**, renamed from 0.9.3's "the W7-5994 slip at Computer" and
+        widened to SDI (Robbie, 2026-11-16, after this run's hold 2); (2) the frame #0 start drop. The gate stays at 0 holds
+        for any other cause. Candidate: a plain Profile build of `7b99b09` (no `-DMANIFOLD_CARDCLOCK`),
+        `.build-rc094`, unsigned, sha256 `73aac1313696e52d…`. Rules and variables as for 0.9.3. Seven one-hour blocks,
+        alternating: 59.94 with sound to SDI (1080p59.94); 23.976 with sound to Computer (1080p23.98); the 48 kHz WAV to
+        SDI (1080p59.94); a long-GOP H.264 file to SDI (`fixtures/soak/gop25-h264-1920s.mp4`: 1080p25, keyframe every 250
+        frames, 3 B-frames, AAC; 1080p25 output); then the first three again. **Markers:** each video file had 5 stored
+        markers, loaded at launch, the Markers slot open and thumbnails on. Every 600 s, while playing, the run pressed
+        Regenerate Thumbnails (Markers gear, by accessibility click) and read the thumbnail disk cache's file times against
+        the transport's Pause and Play. Setup (2026-11-15 22:30–22:44) confirmed on this build that the 5 stored markers'
+        thumbnails reach the disk cache at load on all three files: the `7b99b09` fix (`BUGS.md`, stored markers get no
+        thumbnails). Tools: `scripts/decklink-loopback/rc-soak.py`, `rc-soak-report.py`, `rc-soak-ax`; chain and logs in
+        `~/Code/_scratch/manifold-rc094-soak/`. 2026-11-15 23:00 – 2026-11-16 06:08, every block exit 0. **Result: met, with
+        one named exception (Robbie, 2026-11-16): 0 freezes, 0 unrecovered events, 0 skips, 0 holds beyond the expected
+        cadence except 2 holds, each a late window frame repeated once, recovered, sound followed** (one at Computer, one at
+        SDI on the 25p file; below). The frame #0 start drop did not occur. Markers: met. As first reported, before the
+        exception was widened, hold 2 failed the gate as written (it was at SDI); Robbie accepted it as the same mechanism.
+        Follow-up after 0.9.4: `BUGS.md`, "the card pull's margin over the window swap is under one refresh". **Duration:** 7 h 08 min wall time, 6.54 h playing time. 441 Plays, 441 seeks, 147 loop wraps,
+        1,022,905 card pulls while playing, 0 missed slots.
+        | Block | Freezes | Holds / skips | Renderer recoveries | Output starts; silent starts | SDI !! lines | Card late / dropped | Window late / dropped |
+        |---|---|---|---|---|---|---|---|
+        | 59.94 + sound, SDI (1) | 0 | 0 / 0 | 0 | 1 with sound; 0 | 10 appended edges | 0 / 0 | 11 / 12 of 201,082 |
+        | 23.976 + sound, Computer (1) | 0 | **1** / 0 | 0 | 1 with sound; 0 | none | 0 / 0 | 13 / 3 of 80,448 |
+        | WAV 48 kHz, SDI (1) | 0 | 0 / 0 | 0 | 1 with sound; 0 | 14 appended edges | 0 / 0 | (no window picture) |
+        | Long-GOP H.264 25p, SDI | 0 | **1** / 0 | 0 | 1 with sound; 0 | none | 0 / 0 | 25 / 22 of 83,898 |
+        | 59.94 + sound, SDI (2) | 0 | 0 / 0 | 0 | 1 with sound; 0 | 17 appended edges | 0 / 0 | 10 / 11 of 201,083 |
+        | 23.976 + sound, Computer (2) | 0 | 0 / 0 | 0 | 1 with sound; 0 | none | 0 / 0 | 9 / 3 of 80,446 |
+        | WAV 48 kHz, SDI (2) | 0 | 0 / 0 | 0 | 1 with sound; 0 | 11 appended edges | 0 / 0 | (no window picture) |
+        | **Total** | **0** | **2 / 0** | **0** (0 attempts, 0 GAVE UP) | 7; **0** | 52 appended edges | 0 / 0 | 68 / 51 of 646,957 |
+        - **Hold 1, the named exception (a late window frame repeated once), at Computer: recovered; sound followed picture**
+          (`rc-2398-cmp-1.log` line 181796, content 986.40 s). The card was handed pts 986.402083 twice (pulls #84157,
+          #84158). Until then each frame was swapped in about 10.7 ms before its pull, at a 13.90 ms display tick. The swap
+          of 986.443792 came 55.7 ms after the one before, instead of 41.7 (one tick late), 3.3 ms after the pull. New
+          picture line #103; `re-anchored to the SDI picture at its new line #103 (a slip): it was +41.71 ms off` (line
+          181815). Card late 0, dropped 0. Why the swap was late: UNKNOWN, as in 0.9.3.
+        - **Hold 2, the named exception (a late window frame repeated once), at SDI on the 25p file: recovered; sound
+          followed picture. Accepted by Robbie, 2026-11-16, as the same mechanism as hold 1**
+          (`rc-gop25-sdi-1.log` line 58250, content 261.48 s). The card was handed pts 261.480000 twice (pulls #27074,
+          #27075). Each frame had been swapped in about 12.9 ms before its pull, at a 13.33 ms display tick. The swap of
+          261.520000 came 53.4 ms after the one before, instead of 40.0 (one tick late), 0.4 ms after the pull. The SDI
+          sound ended its run (`off the line on a timed pull`) and re-latched from the held frame's last showing (latch #33).
+          The Mac sound was re-anchored to new picture line #32, +40.00 ms off (line 58266). Card late 0, dropped 0. Not near
+          a transport step (the next, a seek, came 14 s later) nor a Regenerate (480 s after one, 120 s before the next).
+          Why the swap was late: UNKNOWN. In both holds the swap led its pull by less than one display tick, so any swap
+          one tick late is a hold. Under the 0.9.3 wording (the exception named Computer only) it failed the gate; the
+          exception was renamed to cover either destination.
+        - **The frame #0 start drop did not occur:** card late 0 and dropped 0 in all 7 blocks.
+        - **Slip writes:** 5 in all. Two are the holds above. One is at a loop wrap (`rc-2398-cmp-1`, content 0.705 s).
+          Two are in the second WAV block (content 1152.2 and 1895.3 s), which has no window picture to hold.
+        - Not counted as holds: 705 frames held around the loop's wrap (a seek).
+        - SDI bridge totals: 0 late edges, 23 re-latches, 179,583 missing samples.
+        - **Markers: met.** 5 of 5 stored markers loaded, the Markers slot open, and 5 thumbnails cached at the start of
+          each of the 5 video blocks. 30 Regenerates, each pressed while playing: every one removed 5 and remade 5
+          (150 in all). **0 made while playing:** every thumbnail was written in the next Pause, the first 0.028–0.060 s
+          after it, and none was still being made after Play resumed. Around each press (±10 s): 0 holds, 0 skips,
+          6 window late/dropped frames in all (1 at 2398-1 regen 2, 1 at 2398-1 regen 4, 3 at GOP25 regen 5, 1 at 5994-2
+          regen 5). That is in line with each block's own background rate (119 late/dropped frames in 4.65 h of video blocks,
+          about 4.3 expected in 30 × 20 s). From each Pause to its last thumbnail + 10 s: 0 holds, 0 skips, 0 late/dropped.
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
