@@ -469,3 +469,34 @@ What: Export/Import Settings carries shortcuts and streams (with their saved A/V
 (`globalScopeIntensity`), not Graticule brightness (`scopeGraticuleBrightness`, 0.9.5), not the per-scope intensities, colors,
 scales or overlays. `docs/SETTINGS_EXPORT_PLAN.md` §1 (line 105) lists "Look of scopes, guides, safe zones" as "Out, next": about 50 keys, each
 needing a range check, best added as one reviewed "Preferences" section.
+
+## Scopes: SIMD-aggregated histogram atomics
+Status: idea (2026-11-16)
+Version: unscheduled (not 0.9.5)
+
+Performance. Measured on UHD 24p (DEBUG, `MANIFOLD_SCOPE_PERF=1`), with column counts cols.wf 640, cols.parade 192 and cols.yrgb 128:
+
+| Layout | gpu.wf | gpu.parade | gpu.yrgb |
+|---|---|---|---|
+| Waveform \| YRGB \| Parade | ≈ 0.8 ms | ≈ 3.7 ms | ≈ 7.1 ms (7.4 before concurrent dispatch) |
+| YRGB \| Meters \| Meters | – | – | ≈ 1.8 ms |
+
+- **Queue contention.** Most of the three-scope figure is contention: every scope commits to one shared scope queue,
+  and `gpuEndTime − gpuStartTime` counts time spent sharing the GPU with the other scopes' buffers as the scope's own.
+- **Atomics.** The remaining per-scope cost is device atomics serializing at narrow columns. Each pixel ends in an
+  `atomic_fetch_add` at `hist[row·cols + bucket]`. With few columns, neighboring pixels land on the same address
+  (at 128 columns, 30 source pixels per bucket at UHD) (docs/SCOPES_095_PLAN.md, "As implemented: YRGB follow-up").
+
+Proposal: in `waveformKernel` and `paradeKernel` (App/PassthroughShader.metal), lanes of a SIMD group that share an
+address sum their increments, and one lane issues a single device atomic. Counts are integers, so every histogram
+stays the same.
+
+Conditions:
+- The GPU self-check (docs/SCOPES_095_PLAN.md §1.6, item 2) is built first, and it shows identical histograms.
+- Before and after readings are taken on every scope, alone and with the others open. Wide columns on noisy content
+  may cost more.
+
+Also worth considering: whether all scopes need one shared queue, or whether each scope should get its own queue or
+its own timing measure. One shared queue is what makes the three-scope readings overlap.
+
+Size guess: Medium

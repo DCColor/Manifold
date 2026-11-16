@@ -555,7 +555,8 @@ Robbie's decisions, 2026-11-16:
   - Separators sit at 1/4, 2/4 and 3/4.
   - User lines use `manifold.yrgb.line1/2.*`.
   - `colW` is slot/4, clamped to 128–512.
-- **No mono mode.** The decision named none, so R, G and B are always pure color.
+- **No mono mode** at first: the decision named none. Superseded by the follow-up below, where YRGB follows the RGB
+  Parade's mono setting.
 - **Tests.** `YRGBTraceTests` (7) check that, at equal `colW`:
   - Y is byte-equal to `waveformPixels`;
   - R, G and B are byte-equal to `paradePixels`;
@@ -567,3 +568,116 @@ Robbie's decisions, 2026-11-16:
 - **Not built:** the `MANIFOLD_YRGB_SELFCHECK` GPU comparison (§1.6, item 2).
 - **GPU cost.** In DEBUG, `MANIFOLD_SCOPE_PERF=1` now adds `gpu.<scope>=<mean ms>/<n>` per second, from each scope
   command buffer's `gpuEndTime − gpuStartTime`. No reading has been taken yet.
+
+## As implemented: YRGB follow-up, mono and GPU cost (2026-11-16)
+
+Decisions (Robbie, 2026-11-16, after the attended check passed): YRGB follows the RGB Parade's mono setting, with the
+same preference and the same look; and the GPU cost needs explaining.
+
+### Mono
+
+- **Preference.** YRGB reads `paradeMonochrome` and `paradeMonoColor`, the parade's own keys. It has no setting of its
+  own. The YRGB header carries the parade's color well and reset button, bound to the same keys, so changing either
+  header changes both scopes.
+- **Look.** In mono, all four columns take the mono color. R, G and B are `paradePixels(mono: true)`, and Y is
+  `waveformPixels` in the mono color. Normalization is unchanged.
+- **Re-sampling.** `YRGBScopeModel.sampleInputs` includes both keys, so a change redraws a paused frame.
+- **Tests.**
+  - `testMonoFollowsTheParade` checks, across three mono colors, that R, G and B are byte-equal to the parade's mono
+    image and Y to the waveform's image in that color.
+  - `testMonoOffIgnoresTheMonoColor` checks that with mono off the image is the color image, whatever mono color is
+    stored.
+
+### GPU cost
+
+**Measured** (UHD 24p, slots Waveform | YRGB | Parade):
+
+| Field | Reading |
+|---|---|
+| `gpu.wf` | ≈ 0.9 ms per update |
+| `gpu.parade` | ≈ 3.8 ms per update |
+| `gpu.yrgb` | ≈ 7.4 ms per update |
+
+**What the field measures** (`ScopePerf.gpuTime`, `commitScopePasses`):
+
+- Each sample commits one command buffer, and each completed buffer adds one GPU span. Each second's line prints
+  sum ÷ n, with n after the slash, so the figure is a mean per update over that second.
+- The span is wall-clock time on the GPU, not exclusive GPU time.
+  - It covers the zero-fill and the kernels.
+  - It stretches while other work shares the GPU: the render, DeckLink, and the other scopes' buffers.
+- The CPU readback and the trace build happen after `gpuEndTime`, so they are not in it.
+
+**Where the time goes, by item:**
+
+| Item | Effect | Basis |
+|---|---|---|
+| Histogram clears | negligible | A blit fill of `4·colW·1024·4` bytes, about 3 MB at colW 192. The parade's fill is in its own span too. |
+| Readbacks | none in the span | Done in the completion handler, after `gpuEndTime`. CPU cost: 4 histograms against the parade's 3. |
+| Row copy (`yrgbPixels`) | none in the span | CPU, on the completion thread. |
+| Texture reads | small | Y reads the UHD frame a second time: about 66 MB at rgba16Float, around 0.1–0.2 ms of bandwidth. |
+| Waveform kernel at the parade's column width | **main cause** | See below. |
+| Narrower RGB columns | **adds to it** | YRGB's colW is slot/4; the parade's is slot/3. |
+| Serialization in one command buffer | **adds to it** | The default compute encoder is serial, so the RGB dispatch waited for Y to drain. |
+| Contention with the other two scopes | **likely inflates the reading** | All scope buffers share one queue, committed in the order Waveform, Parade, YRGB from one fan-out (`ContentView` `onFrameRendered`). YRGB is always last, so its span is most likely to overlap the parade's. |
+
+**The main cause: atomics on fewer columns.**
+
+- Both kernels end in a device `atomic_fetch_add` per channel, at `hist[row·cols + bucket]`, where
+  `bucket = x·cols / width`.
+- Fewer columns put more neighboring source pixels into the same bucket. Neighboring pixels usually share a value bin
+  as well, so the atomics hit the same address and serialize.
+- Pixels per bucket at UHD width 3840:
+  - the waveform, at its own 256–1024 columns (slot width): 4–15;
+  - YRGB's Y pass, at colW 128–512 (slot/4): 7.5–30, which is 4× the waveform's in the same tray, because its slot
+    divides by four.
+- A 16-pixel threadgroup row covers less than one bucket at colW 192 or below, so a 32-lane SIMD group's atomics land
+  on one or two addresses.
+- The parade already shows this: it does 3 atomics per pixel against the waveform's 1, but costs 4.2× (3.8 ÷ 0.9).
+- So "Waveform + Parade = 4.7 ms" is the wrong baseline. YRGB does 4 atomics per pixel, all at the narrowest column
+  count of the three scopes.
+- The plan's 1.1–1.35× assumed the Y pass costs what one parade channel costs at the same width. It did not count the
+  narrower RGB columns (slot/4 against slot/3) or the serial encoder.
+
+**Built (safe, identical histograms):**
+
+- `commitScopePasses` encodes multiple passes with `makeComputeCommandEncoder(dispatchType: .concurrent)`.
+  - The passes write disjoint buffers and only read `src`, so they need no barrier.
+  - The zero-fill is in the earlier blit encoder, which Metal orders first.
+  - Atomic sums do not depend on order, so the histograms are unchanged.
+  - Single-pass scopes keep the serial encoder, so the Waveform, Parade, Vectorscope and CIE encode exactly as before.
+- DEBUG readout: each second's line now adds `src.w`, `cols.wf`, `cols.parade` and `cols.yrgb`, so pixels per bucket
+  can be read beside the timing.
+- Expected gain: the Y pass's tail no longer blocks the RGB pass. How much that saves is UNKNOWN: if the device
+  atomics are the limit, overlap helps little.
+
+**Proposed, not built: SIMD-aggregated atomics in `waveformKernel` and `paradeKernel`.**
+
+- How it works: before each device atomic, the lanes of a SIMD group that share an address sum their increments
+  (`simd_broadcast_first` on the address, then `simd_sum` of the matches), and one lane issues a single add of the
+  total. The loop repeats until no lanes are left.
+- Results: counts are integers and addition is commutative, so every histogram is unchanged.
+- Expected effect: the waveform, the parade and YRGB all get faster, most at narrow columns, which is exactly where
+  YRGB sits.
+- Why it is not built: it changes the standalone scopes' kernels; `swift test` cannot check GPU histograms; and wide
+  columns on noisy content could cost more (up to 32 loop iterations per SIMD group). It needs the GPU self-check
+  (§1.6, item 2) and a before/after measurement on every scope.
+
+**Re-measured after concurrent dispatch** (Robbie, 2026-11-16, UHD 24p, `MANIFOLD_SCOPE_PERF=1`; cols.wf 640,
+cols.parade 192, cols.yrgb 128):
+
+| Layout | gpu.wf | gpu.parade | gpu.yrgb |
+|---|---|---|---|
+| Waveform \| YRGB \| Parade | ≈ 0.8 ms | ≈ 3.7 ms | ≈ 7.1 ms (7.4 before concurrent dispatch) |
+| YRGB \| Meters \| Meters | – | – | ≈ 1.8 ms |
+
+- **Queue contention.** Alone, YRGB costs about a quarter of its three-scope figure, so most of that figure is
+  contention on the one shared scope queue. `gpuEndTime − gpuStartTime` counts that time as the scope's own.
+- **Atomics.** The rest of each scope's cost is atomics serializing at narrow columns. At 128 columns, 30 UHD pixels
+  share a bucket, against 6 for the waveform's 640.
+- **Concurrent dispatch** saved about 0.3 ms in the three-scope layout.
+- **Next step: a roadmap item, not 0.9.5.** "Scopes: SIMD-aggregated histogram atomics" (docs/ROADMAP_IDEAS.md)
+  holds:
+  - the proposal: SIMD-aggregated atomics;
+  - its conditions: the GPU self-check (§1.6, item 2), and before and after readings on every scope, alone and
+    together;
+  - the open question of whether all scopes need one shared queue.
