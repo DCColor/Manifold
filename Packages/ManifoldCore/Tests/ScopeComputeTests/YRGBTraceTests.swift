@@ -134,6 +134,44 @@ final class YRGBTraceTests: XCTestCase {
         }
     }
 
+    /// Mono (the RGB Parade's own setting, which YRGB follows): R, G, B == the parade's MONO image and Y == the waveform's
+    /// image in the same mono color, byte for byte, so all four columns are one hue. Several mono colors, including one
+    /// with a zero channel.
+    func testMonoFollowsTheParade() {
+        let monos: [(Float, Float, Float)] = [(1, 1, 1), (0.2, 1, 0.3), (1, 0.5, 0)]
+        for (i, c) in cases.enumerated() {
+            let m = monos[i % monos.count]
+            let n = c.colW * bins
+            let y = histogram(n, seed: 90 + UInt64(i)), r = histogram(n, seed: 91), g = histogram(n, seed: 92)
+            let b = histogram(n, seed: 93)
+            let px = ScopeTrace.yrgbPixels(y: y, r: r, g: g, b: b, colW: c.colW, bins: bins, displayRows: c.displayRows,
+                                           gain: c.gain, yColorR: yColor.0, yColorG: yColor.1, yColorB: yColor.2,
+                                           mono: true, monoR: m.0, monoG: m.1, monoB: m.2)
+            let parade = ScopeTrace.paradePixels(r: r, g: g, b: b, colW: c.colW, bins: bins,
+                                                 displayRows: c.displayRows, gain: c.gain,
+                                                 mono: true, monoR: m.0, monoG: m.1, monoB: m.2)
+            let wf = ScopeTrace.waveformPixels(histogram: y, scopeW: c.colW, bins: bins, displayRows: c.displayRows,
+                                               gain: c.gain, colorR: m.0, colorG: m.1, colorB: m.2)
+            XCTAssertEqual(rgbColumns(px, colW: c.colW, rows: c.displayRows),
+                           paradeColumns(parade, colW: c.colW, rows: c.displayRows), "case \(i)")
+            XCTAssertEqual(column(px, 0, colW: c.colW, rows: c.displayRows), wf, "case \(i)")
+        }
+    }
+
+    /// `mono: false` (the default) is the color image, whatever mono color is passed: the parade's reset turns YRGB back
+    /// to color without touching the stored mono color.
+    func testMonoOffIgnoresTheMonoColor() {
+        let c = cases[0]
+        let n = c.colW * bins
+        let y = histogram(n, seed: 100), r = histogram(n, seed: 101), g = histogram(n, seed: 102)
+        let b = histogram(n, seed: 103)
+        let color = build(c, y: y, r: r, g: g, b: b)
+        let off = ScopeTrace.yrgbPixels(y: y, r: r, g: g, b: b, colW: c.colW, bins: bins, displayRows: c.displayRows,
+                                        gain: c.gain, yColorR: yColor.0, yColorG: yColor.1, yColorB: yColor.2,
+                                        mono: false, monoR: 0.2, monoG: 1, monoB: 0.3)
+        XCTAssertEqual(off, color)
+    }
+
     /// No signal: a fully transparent image of the right size.
     func testAllZeroIsTransparent() {
         let c = Case(colW: 128, displayRows: 512, gain: 2)

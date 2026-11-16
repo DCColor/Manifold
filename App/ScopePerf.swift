@@ -41,6 +41,11 @@ enum ScopePerf {
     /// One scope command buffer's GPU time (`gpuEndTime − gpuStartTime`), from its completion handler. With
     /// `MANIFOLD_SCOPE_PERF=1`, each second's line adds `gpu.<scope>=<mean ms>/<n>`: the mean GPU time per compute
     /// (0.9.5, docs/SCOPES_095_PLAN.md §1.5). Unset, nothing is recorded.
+    ///
+    /// One call per command buffer, and each scope commits one command buffer per sample, so the figure is a mean per
+    /// update over that second, with `n` updates. It is a wall-clock span on the GPU, not exclusive GPU time: it covers
+    /// the zero-fill and the kernels, and stretches while other work shares the GPU (the render, DeckLink, and the other
+    /// scopes' buffers on the same scope queue). CPU work after completion (readback, trace build) is not in it.
     static func gpuTime(_ scope: String, seconds: Double) {
         guard enabled, seconds.isFinite, seconds >= 0 else { return }
         lock.lock()
@@ -48,6 +53,17 @@ enum ScopePerf {
         gpuSeconds[scope] = (t.sum + seconds, t.n + 1)
         lock.unlock()
         count("gpu.n.\(scope)")
+    }
+
+    private static var values: [String: Int] = [:]
+
+    /// The latest value of a setting a reading depends on (each scope's column count, `cols.<scope>`), printed with each
+    /// second's line as `<key>=<value>`. Not a count: the last value stands until it changes. Unset, nothing is recorded.
+    static func value(_ key: String, _ v: Int) {
+        guard enabled else { return }
+        lock.lock()
+        values[key] = v
+        lock.unlock()
     }
 
     /// `MANIFOLD_SCOPE_DUMP_DIR=<dir>` (launch environment): every scope image published is also written there,
@@ -91,13 +107,16 @@ enum ScopePerf {
         counts = [:]
         let gpu = gpuSeconds
         gpuSeconds = [:]
+        let latest = values
         lock.unlock()
         guard !snapshot.isEmpty else { return }
         let gpuPart = gpu.keys.sorted().map { k -> String in
             let t = gpu[k]!
             return String(format: "gpu.%@=%.2fms/%d", k, t.n > 0 ? t.sum / Double(t.n) * 1000 : 0, t.n)
         }
-        let line = (snapshot.keys.sorted().filter { !$0.hasPrefix("gpu.n.") }.map { "\($0)=\(snapshot[$0]!)" } + gpuPart)
+        let valuePart = latest.keys.sorted().map { "\($0)=\(latest[$0]!)" }
+        let line = (snapshot.keys.sorted().filter { !$0.hasPrefix("gpu.n.") }.map { "\($0)=\(snapshot[$0]!)" }
+                    + gpuPart + valuePart)
             .joined(separator: " ")
         print("[SCOPE-PERF] \(line)")
     }

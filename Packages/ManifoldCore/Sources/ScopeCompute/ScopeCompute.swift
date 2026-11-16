@@ -162,15 +162,21 @@ public enum ScopeTrace {
     /// byte-for-byte the Y waveform's image at `scopeW = colW`, and columns 1–3 the RGB parade's at the same `colW`
     /// (ScopeComputeTests). So Y keeps ITS OWN max, as the waveform does, and R, G and B keep their SHARED max, as the
     /// parade does: a bright Y never dims the channels, and a dense channel never dims Y. `y` is the waveform kernel's
-    /// histogram (`[row*colW + bucket]`); `r`, `g`, `b` the parade kernel's three regions. R, G and B are always pure
-    /// red, green and blue; the Y trace takes `yColor` (each 0…1).
+    /// histogram (`[row*colW + bucket]`); `r`, `g`, `b` the parade kernel's three regions.
+    ///
+    /// Color: by default R, G and B are pure red, green and blue and the Y trace takes `yColor` (each 0…1). With `mono`
+    /// (the RGB Parade's own monochrome setting, which YRGB follows), ALL FOUR columns take the mono color: R, G, B are
+    /// the parade's mono image and Y is the waveform's image in that color, so a monochrome YRGB is one hue throughout,
+    /// as a monochrome parade is. Brightness and normalization are unchanged by `mono`.
     public static func yrgbPixels(y accY: [UInt32], r accR: [UInt32], g accG: [UInt32], b accB: [UInt32],
                                   colW: Int, bins: Int, displayRows: Int, gain: Float,
-                                  yColorR: Float, yColorG: Float, yColorB: Float) -> [UInt8] {
+                                  yColorR: Float, yColorG: Float, yColorB: Float,
+                                  mono: Bool = false, monoR: Float = 1, monoG: Float = 1, monoB: Float = 1) -> [UInt8] {
         let yPix = waveformPixels(histogram: accY, scopeW: colW, bins: bins, displayRows: displayRows, gain: gain,
-                                  colorR: yColorR, colorG: yColorG, colorB: yColorB)
+                                  colorR: mono ? monoR : yColorR, colorG: mono ? monoG : yColorG,
+                                  colorB: mono ? monoB : yColorB)
         let rgbPix = paradePixels(r: accR, g: accG, b: accB, colW: colW, bins: bins, displayRows: displayRows,
-                                  gain: gain, mono: false, monoR: 1, monoG: 1, monoB: 1)
+                                  gain: gain, mono: mono, monoR: monoR, monoG: monoG, monoB: monoB)
         let yRow = colW * 4, rgbRow = colW * 3 * 4, outRow = colW * 4 * 4
         guard colW > 0, displayRows > 0, yPix.count >= yRow * displayRows,
               rgbPix.count >= rgbRow * displayRows else { return [] }

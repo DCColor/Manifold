@@ -4900,6 +4900,9 @@ final class MetalVideoRenderer {
         guard !passes.isEmpty, let src = scopeTexture else { return false }
         let width = src.width
         let height = src.height
+        #if DEBUG
+        ScopePerf.value("src.w", width)   // with cols.<scope>: source pixels per column bucket
+        #endif
         // Commit on the DEDICATED scope queue (not the render's) so scope compute runs
         // concurrently with renders instead of serialized behind them + the present/vsync wait.
         // `src` is the readable (completed) frame — safe to read off-queue (see offscreen ring).
@@ -4913,7 +4916,13 @@ final class MetalVideoRenderer {
             blit.endEncoding()
         }
 
-        guard let enc = cmd.makeComputeCommandEncoder() else { return false }
+        // Several passes dispatch CONCURRENTLY (0.9.5 YRGB follow-up): each writes only its own histogram and they all
+        // only read `src`, so no pass depends on another and no barrier is needed between them; the zero-fill above is
+        // in an earlier encoder, which Metal orders before this one. Atomic sums do not depend on order, so every
+        // histogram is the same as from a serial encoder. One pass keeps the default serial encoder, so the four
+        // single-kernel scopes encode exactly as before.
+        guard let enc = passes.count > 1 ? cmd.makeComputeCommandEncoder(dispatchType: .concurrent)
+                                         : cmd.makeComputeCommandEncoder() else { return false }
         let tpg = MTLSize(width: 16, height: 16, depth: 1)
         let tgs = MTLSize(width: (width + 15) / 16, height: (height + 15) / 16, depth: 1)
         for pass in passes {
@@ -5021,6 +5030,9 @@ final class MetalVideoRenderer {
         // live so a mid-session source change re-weights on the next sample. nil/2/unknown → 709.
         // Colour S6, L2: the picture codes, so a LUT's stated output is weighed as what it is.
         let m = ycbcrKrKb(forMatrixCode: scopeCodes.matrix)
+        #if DEBUG
+        ScopePerf.value("cols.wf", scopeW)
+        #endif
         var params = WaveformParams(width: UInt32(src.width), height: UInt32(src.height),
                                     scopeW: UInt32(scopeW), bins: UInt32(bins),
                                     rowStride: UInt32(max(1, rowStride)),
@@ -5045,6 +5057,9 @@ final class MetalVideoRenderer {
         completion: @escaping (_ hist: [UInt32], _ colW: Int, _ bins: Int) -> Void
     ) -> Bool {
         guard let src = scopeTexture else { return false }
+        #if DEBUG
+        ScopePerf.value("cols.parade", colW)
+        #endif
         var params = ParadeParams(width: UInt32(src.width), height: UInt32(src.height),
                                   colW: UInt32(colW), bins: UInt32(bins),
                                   rowStride: UInt32(max(1, rowStride)))
@@ -5079,6 +5094,9 @@ final class MetalVideoRenderer {
               let yBuf = scopeHistogramBuffer(&yrgbLumaHistogramBuffer, count: colW * bins),
               let rgbBuf = scopeHistogramBuffer(&yrgbRGBHistogramBuffer, count: colW * bins * 3) else { return false }
         let m = ycbcrKrKb(forMatrixCode: scopeCodes.matrix)
+        #if DEBUG
+        ScopePerf.value("cols.yrgb", colW)
+        #endif
         var lumaParams = WaveformParams(width: UInt32(src.width), height: UInt32(src.height),
                                         scopeW: UInt32(colW), bins: UInt32(bins),
                                         rowStride: UInt32(max(1, rowStride)),

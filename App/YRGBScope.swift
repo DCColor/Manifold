@@ -5,7 +5,8 @@ import Combine
 import ManifoldCore   // ScopeTrace — the -O-compiled trace-build (fast in Debug too)
 
 /// The YRGB parade's Y trace color: a neutral gray-white, so Y does not read as a fourth color channel (Robbie,
-/// 2026-11-16). R, G and B are pure red, green and blue, as in the RGB parade.
+/// 2026-11-16). R, G and B are pure red, green and blue, as in the RGB parade. With the RGB Parade's monochrome setting
+/// on, all four columns take its mono color instead (Robbie, 2026-11-16: YRGB follows that setting).
 let yrgbLumaTraceHex = "E6E6E6"
 
 /// YRGB parade (0.9.5, docs/SCOPES_095_PLAN.md part 1): four side-by-side columns, Y | R | G | B. A scope of its own:
@@ -68,7 +69,7 @@ final class YRGBScopeModel: ObservableObject {
     /// none, so it is the wrong template here (docs/SCOPES_095_PLAN.md §1.2).
     private var sampleInputs: [AnyHashable] {
         [Preferences.shared.yrgbIntensity, Preferences.shared.globalScopeIntensity, columnWidth,
-         renderer?.pictureMatrixCode]
+         renderer?.pictureMatrixCode, Preferences.shared.paradeMonochrome, Preferences.shared.paradeMonoColorHex]
     }
     private var sampledWith: [AnyHashable]?
 
@@ -133,6 +134,10 @@ final class YRGBScopeModel: ObservableObject {
             * Float(Preferences.shared.yrgbIntensity)
             * Float(Preferences.shared.globalScopeIntensity)
         let yColor = ScopeColorCodec.rgb(fromHex: yrgbLumaTraceHex)
+        // The RGB Parade's monochrome setting, read here as the parade reads it (Robbie, 2026-11-16): one preference
+        // drives both scopes. Mono paints all four columns in the parade's mono color (`yrgbPixels`).
+        let mono = Preferences.shared.paradeMonochrome
+        let monoColor = ScopeColorCodec.rgb(fromHex: Preferences.shared.paradeMonoColorHex)
 
         let colW = columnWidth
         let bins = gpuBins
@@ -145,7 +150,7 @@ final class YRGBScopeModel: ObservableObject {
             }
             let img = Self.buildTraceImage(y: y, r: Array(rgb[0..<n]), g: Array(rgb[n..<(2 * n)]),
                                            b: Array(rgb[(2 * n)..<(3 * n)]), colW: cw, bins: b, gain: gain,
-                                           yColor: yColor)
+                                           yColor: yColor, mono: mono, monoColor: monoColor)
             DispatchQueue.main.async {
                 if self.active, !self.cleared, let img { self.image = img }
                 #if DEBUG
@@ -162,12 +167,14 @@ final class YRGBScopeModel: ObservableObject {
 
     /// The Y|R|G|B CGImage, `4·colW × paradeDisplayRows`, premultiplied like every scope trace.
     private static func buildTraceImage(y: [UInt32], r: [UInt32], g: [UInt32], b: [UInt32], colW: Int, bins: Int,
-                                        gain: Float, yColor: (r: Float, g: Float, b: Float)) -> CGImage? {
+                                        gain: Float, yColor: (r: Float, g: Float, b: Float),
+                                        mono: Bool, monoColor: (r: Float, g: Float, b: Float)) -> CGImage? {
         guard colW > 0, bins > 0 else { return nil }
         let displayRows = min(bins, max(1, paradeDisplayRows))
         let totalW = colW * 4
         let pixels = ScopeTrace.yrgbPixels(y: y, r: r, g: g, b: b, colW: colW, bins: bins, displayRows: displayRows,
-                                           gain: gain, yColorR: yColor.r, yColorG: yColor.g, yColorB: yColor.b)
+                                           gain: gain, yColorR: yColor.r, yColorG: yColor.g, yColorB: yColor.b,
+                                           mono: mono, monoR: monoColor.r, monoG: monoColor.g, monoB: monoColor.b)
         guard pixels.count == totalW * displayRows * 4 else { return nil }
         let cs = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
@@ -239,6 +246,18 @@ struct YRGBScopeView: View {
                            in: Preferences.scopeIntensityRange)
                         .controlSize(.mini)
                         .frame(width: 70)
+                    // The RGB Parade's own mono controls, on the SAME preferences: picking a color here or there turns
+                    // both scopes monochrome in it; reset returns both to color.
+                    ColorPicker("", selection: Preferences.shared.paradeMonoColorBinding)
+                        .labelsHidden()
+                        .controlSize(.mini)
+                    Button { Preferences.shared.paradeMonochrome = false } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .help("Reset parades to color")
                 }
                 .padding(.horizontal, 6)
                 .frame(height: scopeHeaderHeight)
