@@ -4,7 +4,9 @@
 American English everywhere a user reads (Robbie, 2026-11-15): menus, buttons, tooltips, labels,
 alerts, banners, Settings, accessibility labels, export summaries and the files Manifold writes.
 
-Scans STRING LITERALS (never comments) in App/ and Packages/*/Sources, Swift and Objective-C.
+Scans STRING LITERALS (never comments) in App/ and Packages/*/Sources, Swift and Objective-C, and the
+release notes as text: RELEASE_NOTES.md and docs/release-notes/*.md (Robbie, 2026-11-16).
+Also flags day-month-year dates ("16 November 2026"): write "November 16, 2026".
 Not scanned, on purpose:
   * a literal inside a log call (NSLog, print, os_log, Logger methods, fatalError, assert…), or
     one that starts with a `[TAG]` log prefix. Log text is diagnostics, and soak/report scripts
@@ -26,7 +28,8 @@ BRITISH = re.compile(r"""(?ix)\b(
     \w*colour\w* | grey\w* | \w*behaviour\w* | licenc\w* | \w*centr(e|es|ed|ing)\b |
     cancell(ed|ing)\b | \w*favour\w* | \w*honour\w* | \w*labour\w* | \w*neighbour\w* | \w*flavour\w* |
     \w*(label|model|travel|signal|level|dial|total|fuel|channel|cancel|tunnel|pixel)l(ed|ing)\b |
-    programmes? | artefacts? | \w*catalogue\w* | analogue | dialogue | analys(e|es|ed|ing) |
+    programmes? | artefacts? | \w*catalogue\w* | analogue | analys(e|es|ed|ing) |
+    tick | ticked | unticked |
     whilst | amongst | judgement | ageing | fulfil | enrol(s|ment)? | aluminium | defence | offence |
     metres? | litres? | fibres? | calibre | manoeuvr\w* |
     \w{2,}is(e|es|ed|ing|ation|ations|er|ers|able)
@@ -41,6 +44,10 @@ ISE_OK = re.compile(r"""(?ix)^(
     \w*tois(e|es) | porpois\w* | valis\w* | turquois\w* | elis(e|es) | louis\w* | denis\w* |
     mortis\w* | precis\w* | concis\w* | excis\w* | incis\w* | dais\w* | appris\w*
 )$""")
+# "dialogue" is allowed (Robbie, 2026-11-16). Whole words only: "tick" never matches "ticks" or "tickMs".
+# Day-month-year dates, in any scanned text.
+DMY = re.compile(r"(?i)\b\d{1,2} (January|February|March|April|May|June|July|August|September|October|November|"
+                 r"December) \d{4}\b")
 GREY_OK = re.compile(r"(?i)^(grey(hound|stone)s?)$")
 # "Licence" survives only where the text is ABOUT the old spelling (release notes don't live here).
 LOG_CALLS = {"NSLog", "print", "debugPrint", "os_log", "log", "trace", "debug", "info", "notice",
@@ -61,6 +68,15 @@ ALLOW = [
     ("Packages/ManifoldCore/Sources/LiveAudioResample/SenderReportLineFit.swift", "RE-LEVELLED"),     # → NSLog; tests match it
     ("Packages/ManifoldCore/Sources/LicenseRecord/LicenseRecordSync.swift", "legacy licence values"), # migration log
     ("Packages/ManifoldCore/Sources/FileChroma/BitstreamColorCheck.swift", "bitstream states no colour"),  # → NSLog
+    # "tick" as a clock tick, not a checkbox (American too):
+    ("App/AudioMeterScope.swift", "meter.tick"),                                       # ScopePerf counter key (DEBUG)
+    ("App/DiagnosticsExport.swift", "the decode-rate tick"),                           # diagnostics note
+    ("Packages/ManifoldCore/Sources/LiveAudioResample/LiveAudioResampleStage.swift", "at in-tick"),  # → NSLog
+]
+
+# (file, snippet of the line): release-note text that is ABOUT a British spelling, so must keep it.
+NOTES_ALLOW = [
+    ("RELEASE_NOTES.md", 'some text read "licence" where it should have read "license"'),   # a fix note
 ]
 
 
@@ -168,24 +184,51 @@ def findings(root):
                         continue
                     if any(rel.endswith(p) and s in text for p, s in ALLOW):
                         continue
-                    for m in BRITISH.finditer(text):
-                        word = m.group(0)
-                        if ISE_OK.match(word) or GREY_OK.match(word):
-                            continue
-                        yield rel, line, word, text.strip()
+                    for word, why in check_text(text):
+                        yield rel, line, word, why + " in user-facing string", text.strip()
+
+
+def check_text(text):
+    """Yield (word, why) for every finding in one piece of text."""
+    for m in BRITISH.finditer(text):
+        word = m.group(0)
+        if not (ISE_OK.match(word) or GREY_OK.match(word)):
+            yield word, "British spelling"
+    for m in DMY.finditer(text):
+        yield m.group(0), "day-month-year date"
+
+
+def note_findings(root):
+    """The release notes, line by line, as text (they are all user-facing)."""
+    paths = [os.path.join(root, "RELEASE_NOTES.md")]
+    rn = os.path.join(root, "docs", "release-notes")
+    if os.path.isdir(rn):
+        # *-changelog.md is skipped: changelogs copy commit titles word for word, and those can't change.
+        paths += [os.path.join(rn, f) for f in sorted(os.listdir(rn))
+                  if f.endswith(".md") and not f.endswith("-changelog.md")]
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        rel = os.path.relpath(path, root)
+        with open(path, encoding="utf-8") as fh:
+            for line, text in enumerate(fh, 1):
+                if any(rel == p and s in text for p, s in NOTES_ALLOW):
+                    continue
+                for word, why in check_text(text):
+                    yield rel, line, word, why, text.strip()
 
 
 def main():
     root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1
                            else os.path.join(os.path.dirname(__file__), ".."))
-    bad = list(findings(root))
-    for rel, line, word, text in bad:
-        print(f"{rel}:{line}: British spelling '{word}' in user-facing string: {text[:120]!r}")
+    bad = list(findings(root)) + list(note_findings(root))
+    for rel, line, word, why, text in bad:
+        print(f"{rel}:{line}: {why} '{word}': {text[:120]!r}")
     if bad:
         print(f"\n{len(bad)} finding(s). Use American spelling, or, for log text built outside a log "
               "call, add it to ALLOW in scripts/check-us-spelling.py.")
         return 1
-    print("check-us-spelling: no British spellings in user-facing strings.")
+    print("check-us-spelling: no British spellings or day-month-year dates in user-facing strings or release notes.")
     return 0
 
 

@@ -61,7 +61,7 @@ The update dialog's notes: plain text, most consequential first. The dialog show
 rest behind "Show more". The full notes for testers are `docs/release-notes/0.9.1.md`; the internal
 changelog is `docs/release-notes/0.9.1-changelog.md`.
 
-- Build 23: if you clicked the This display checkbox in 0.9.1 build 22, check it's still set the way you want in Reference. The checkbox is now greyed when it should be, and the section says when it applies.
+- Build 23: if you clicked the This display checkbox in 0.9.1 build 22, check it's still set the way you want in Reference. The checkbox is now grayed when it should be, and the section says when it applies.
 - SDI no longer stutters with a 60 Hz main display: output is timed by its own frame rate, and 1080p119.88 is frame-accurate.
 - HDR in As macOS Shows It now matches QuickTime: HLG and PQ highlights roll off instead of clipping.
 - HLG in Reference is no longer far too bright. It follows BT.2408, with reference white at 203 nits.
@@ -168,7 +168,7 @@ changelog is `docs/release-notes/0.9.0-changelog.md`.
   keyframe wait. Measured over 13 minutes on a real connection: 82 packets lost, 62 recovered,
   no decode errors.
 - New audio meters, a fifth scope alongside waveform, RGB parade, vectorscope and CIE. Channels
-  are labelled with their roles from the file — L, R, C, LFE, Ls, Rs — where the file declares
+  are labeled with their roles from the file — L, R, C, LFE, Ls, Rs — where the file declares
   them.
 - Multi-track files: any audio track can now be selected. Previously only track 1 played.
   Switching tracks no longer disturbs video playback.
@@ -178,12 +178,12 @@ changelog is `docs/release-notes/0.9.0-changelog.md`.
 
 ## 0.6.2
 
-- Fixed: licence keys were not surviving app updates. The key itself was always safely stored —
+- Fixed: license keys were not surviving app updates. The key itself was always safely stored —
   the app was checking a separate settings file first and giving up before it ever read the key.
-  It now reads the key first, so your licence carries across this and every future update. You
+  It now reads the key first, so your license carries across this and every future update. You
   should not need to enter it again; if you were asked to re-enter it after the last update, this
   build restores it on its own the first time you open it.
-- Play/pause, the scrubber, J/K/L, the arrow-key jog and timecode entry are now greyed out while a
+- Play/pause, the scrubber, J/K/L, the arrow-key jog and timecode entry are now grayed out while a
   live stream is showing, with a tooltip saying why. They never did anything on a stream — a live
   source has no playback position to move to. Volume, mute, scopes, guides, framing, raster size,
   frame export and the inspector all stay available as before.
@@ -251,7 +251,7 @@ Rules the parser enforces:
   anyway, so the real notes above are the first `## 0.5.0` in the file under either rule.
 
 **Newest version first.** The parser takes the first matching heading, so ordering is a second
-line of defence against a duplicated section.
+line of defense against a duplicated section.
 
 If there is no section for the version being released, the release still goes out: the uploader
 warns and publishes an empty notes array. It will not fail a build that is already signed,

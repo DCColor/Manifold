@@ -431,7 +431,7 @@ struct DisplayCalibrationSection: View {
                 .disabled(inactiveNote != nil)
                 .fixedSize()
                 if inactiveNote == nil {
-                    caption("Tick only if the monitor itself applies BT.1886, e.g. hardware-calibrated. "
+                    caption("Check only if the monitor itself applies BT.1886, e.g. hardware-calibrated. "
                             + "Manifold then sends the picture untouched.")
                 }
                 let fieldsGreyed = inactiveNote != nil || cal.calibrated
