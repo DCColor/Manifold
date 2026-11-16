@@ -615,6 +615,10 @@ the entries at a spacing that is not a multiple of a frame or of the transport c
 
 ## 11. Measurement build (built 2026-11-16; not soaked)
 
+**Commit `3f05914`** (the measurement build's code; its docs are `d105e81`). **Candidate binary:** `.build-pullphase`, a plain Profile
+build, unsigned, written 2026-11-16 12:19:11, sha256 `fcb2a2edaa4c6a0d901db4cee874261f5a609c866695fac7782997d1ac31fd8f`.
+CONFIRMED: no file under `App/`, `Packages/ManifoldCore/Sources/` or `project.yml` is newer than that binary.
+
 Logging and one DEBUG test switch, as §9.1 and §9.2 specify, with the deviations listed below. No behavior change with the switches
 unset. Line numbers in this section are the working tree after this build, not HEAD `537726a`.
 
@@ -783,7 +787,8 @@ This is a code-level argument. A behavioral comparison needs a run; §11.6's tim
 
 **Folder:** `~/Code/_scratch/manifold-cardpull-s1/`: `common.sh`, `soak.sh`, `timing-check.py`.
 
-**Candidate:** `.build-pullphase`, a plain Profile build, unsigned, binary written 2026-11-16 12:19:11, sha256 `fcb2a2edaa4c6a0d…`. Built with:
+**Candidate:** commit `3f05914`; `.build-pullphase`, a plain Profile build, unsigned, binary written 2026-11-16 12:19:11, sha256
+`fcb2a2edaa4c6a0d901db4cee874261f5a609c866695fac7782997d1ac31fd8f`. Built with:
 
 ```
 xcodegen generate
@@ -798,7 +803,8 @@ same fixtures. Process checks read `ps -axo comm=` with exact matches; no `pgrep
 1. `manifold-proc.sh guard` before and after (`guardp`), and again inside `rc-soak.py`. A tripped guard stops the night.
 2. Launched by absolute path (`$APP`), held by PID, quit by PID through `manifold-proc.sh quit`.
 
-**Start:** `~/Code/_scratch/manifold-cardpull-s1/soak.sh main`. **Stop:** `touch …/STOP`.
+**Start:** `~/Code/_scratch/manifold-cardpull-s1/soak.sh main`. Its preflight (`need`) stops the night unless `$APP`'s sha256 is the
+`3f05914` candidate's. **Stop:** `touch …/STOP`.
 
 | # | Label | Invocation (`blk` → `rc-soak.py block $APP <fixture> 1920 <mode> <dest> <label> <minutes> …`) | Env added by `rc-soak.py` |
 |---|---|---|---|
