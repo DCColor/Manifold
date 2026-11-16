@@ -887,7 +887,7 @@ enum DiagnosticsReport {
               RTCP SR/DLSR computes the round trip at the SENDER, not the receiver; libdatachannel
               carries no RTCP XR; and NACKing a packet we already hold is rejected by SRTP replay
               protection (measured: 73 probes, 73 timeouts). The figure shown is the WHEP
-              signalling POST — an HTTPS round trip over a different path, always an overestimate,
+              signaling POST — an HTTPS round trip over a different path, always an overestimate,
               and labeled COARSE for that reason. `floor` is the threshold below which an arrival
               is too fast to have been caused by our request. `NOT MEASURED` means recoveries are
               reported as `unattributed` rather than sorted into a bucket on a guess.

@@ -34,7 +34,7 @@ struct MarkersScopeView: View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
                 ScopeSlotHeader(name: "MARKERS", suffix: headerSuffix, selection: slotSelection)
-                ScopeGear(title: "Markers", help: "Thumbnails, colours shown, start timecode") { gearContent }
+                ScopeGear(title: "Markers", help: "Thumbnails, colors shown, start timecode") { gearContent }
                 Spacer(minLength: 4)
                 if let i = model.inPoint { markChip("IN \(label(i))") }
                 if let o = model.outPoint { markChip("OUT \(label(o))") }
@@ -109,7 +109,7 @@ struct MarkerColorFilter: View {
     @ObservedObject var model: MarkerModel
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Colours").font(.caption).foregroundStyle(.secondary)
+            Text("Colors").font(.caption).foregroundStyle(.secondary)
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(20), spacing: 4), count: 8), spacing: 4) {
                 ForEach(MarkerColor.allCases) { c in
                     Button {
@@ -124,7 +124,7 @@ struct MarkerColorFilter: View {
                     .accessibilityLabel(c.name)
                 }
             }
-            Button("Show All Colours") { model.colorFilter = [] }.disabled(model.colorFilter.isEmpty)
+            Button("Show All Colors") { model.colorFilter = [] }.disabled(model.colorFilter.isEmpty)
         }
     }
 }
@@ -156,7 +156,7 @@ struct MarkerListBody: View {
             if !model.isActive { empty("Markers are for video files.") }
             else if !showMarkers { empty(hiddenHint) }
             else if model.markers.isEmpty { empty(addHint) }
-            else if model.visibleMarkers.isEmpty { empty("No markers in the colours chosen.") }
+            else if model.visibleMarkers.isEmpty { empty("No markers in the colors chosen.") }
             else { list }
         }
     }

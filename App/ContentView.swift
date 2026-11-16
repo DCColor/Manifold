@@ -2205,7 +2205,7 @@ struct ContentView: View {
                                 .disabled(d.isInactive)
                         }
                         if deckLink.devices.contains(where: \.isInactive) {
-                            Button("Greyed: " + DeckLinkConnectorMapping.inactiveNote.lowercased()) {}.disabled(true)
+                            Button("Grayed: " + DeckLinkConnectorMapping.inactiveNote.lowercased()) {}.disabled(true)
                         }
                     }
                     // Where the mapping is changed. Shown only while the app is installed (DesktopVideoSetup.swift).

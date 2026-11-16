@@ -478,7 +478,7 @@ static NSString *ManifoldWHEPDescribeRtt(const ManifoldH264DepacketizerStats *s)
                    @"rather than sorted into a bucket on a guess";
         case ManifoldRttSourceSignalling:
             return [NSString stringWithFormat:
-                    @"~%llu us COARSE (signalling POST, discounted — an HTTPS round trip, NOT the "
+                    @"~%llu us COARSE (signaling POST, discounted — an HTTPS round trip, NOT the "
                     @"media path). ⚠️ NO FLOOR DERIVED FROM IT: it measures the wrong path and "
                     @"binning by it reported the reordering tail as retransmit latency. "
                     @"Attribution suspended; read the arrival-latency histograms instead.",

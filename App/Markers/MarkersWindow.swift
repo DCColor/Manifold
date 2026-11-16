@@ -78,10 +78,10 @@ private struct MarkersWindowContent: View {
             // Frame. The filter stays an icon.
             ToolbarItem {
                 Button { filterOpen.toggle() } label: {
-                    Label("Filter by Colour", systemImage: model.colorFilter.isEmpty
+                    Label("Filter by Color", systemImage: model.colorFilter.isEmpty
                           ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
                 }
-                .help("Filter by Colour")
+                .help("Filter by Color")
                 .popover(isPresented: $filterOpen, arrowEdge: .bottom) {
                     MarkerColorFilter(model: model).padding(12)
                 }

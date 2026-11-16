@@ -172,7 +172,7 @@ enum MarkerFileIO {
             let list = placement.outside.prefix(12).map { String(format: "%03d", $0) }.joined(separator: ", ")
             lines.append("\(placement.outside.count) outside this file, skipped (event\(placement.outside.count == 1 ? "" : "s") \(list)\(placement.outside.count > 12 ? ", …" : "")).")
         }
-        if placement.unknownColors > 0 { lines.append("\(placement.unknownColors) with an unknown colour are Blue.") }
+        if placement.unknownColors > 0 { lines.append("\(placement.unknownColors) with an unknown color are Blue.") }
         if placement.dropFrameMismatch {
             lines.append("The EDL says \(parsed.dropFrame == true ? "drop" : "non-drop") frame and this file is \(basis.dropFrame ? "drop" : "non-drop") frame; timecodes were read as the EDL states them.")
         }

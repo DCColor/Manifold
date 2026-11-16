@@ -97,7 +97,7 @@ public enum DiagnosticsRedaction {
 
         // ── Display serials asked for by name. The numbers themselves are matched literally from
         //    the attached displays (see `Options.displaySerials`); this catches a labelled one. ──
-        (#"(?i)\bserial(?:\s*(?:number|no\.?|#))?\s*[=:]\s*[A-Za-z0-9-]+"#, "serial=(serial withheld)", "labelled serial numbers"),
+        (#"(?i)\bserial(?:\s*(?:number|no\.?|#))?\s*[=:]\s*[A-Za-z0-9-]+"#, "serial=(serial withheld)", "labeled serial numbers"),
     ]
 
     /// Absolute-path roots that hold only the system's own files and are KEPT, because a
