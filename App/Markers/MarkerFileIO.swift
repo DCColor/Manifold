@@ -111,10 +111,16 @@ enum MarkerFileIO {
         panel.title = "Import Markers"
         panel.prompt = "Import"
         panel.message = "Choose a DaVinci Resolve marker EDL (Timeline ▸ Export ▸ Timeline Markers to EDL)."
-        panel.allowedContentTypes = [UTType(filenameExtension: "edl") ?? .plainText, .plainText]
+        // ⚠️ NO `allowedContentTypes`: the panel enables files by EXTENSION through its delegate (`.edl`, any case), whatever
+        // type macOS has given the file. With content types, Frame.io's EDL was greyed out while Resolve's own could be
+        // chosen (Robbie, 2026-11-15; docs/MARKERS_PLAN.md §16). The parser decides whether it holds markers.
         panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        let filter = EDLPanelFilter()
+        panel.delegate = filter
         let finish: (NSApplication.ModalResponse) -> Void = { response in
             MainActor.assumeIsolated {
+                withExtendedLifetime(filter) {}   // the panel holds its delegate weakly
                 guard response == .OK, let url = panel.url else { return }
                 // After the panel has gone, so an alert can take the window.
                 DispatchQueue.main.async { MainActor.assumeIsolated { read(url, into: model, window: window) } }
@@ -223,3 +229,15 @@ private final class ExportAccessory: NSObject {
         onChange?()
     }
 }
+
+/// Enables `.edl` files (any case) and folders in Import Markers…'s panel, by extension alone (`ResolveEDL.isImportCandidate`).
+private final class EDLPanelFilter: NSObject, NSOpenSavePanelDelegate {
+    func panel(_ sender: Any, shouldEnable url: URL) -> Bool {
+        if (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            // A folder can be opened; a package (an .app, a library) is a file here, and not an EDL.
+            return !((try? url.resourceValues(forKeys: [.isPackageKey]).isPackage) ?? false)
+        }
+        return ResolveEDL.isImportCandidate(url)
+    }
+}
+

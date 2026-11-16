@@ -1,9 +1,7 @@
 # Markers on files, with a Resolve round trip: plan
 
-Status: **v1 BUILT, NOT YET MEASURED IN THE APP** (2026-11-15). Plan written and decided the same day (§9); R0, R1 and R2
-done by Robbie (§0.5, §1); v1 built as §10 lists; fixtures generated (§8.0). First attended feedback the same day (§12):
-one marker per frame, the Markers window, thumbnails, transport-style timecode fields, Edit Marker, single-click jump;
-all built, not yet re-tested in the app. Not committed. Where a claim rests on a file, its path and line are given; where it rests on nothing measurable here it says
+Status: **v1 COMPLETE** (Robbie, 2026-11-15; §14.5). Plan written and decided the same day (§9); built as §10 lists, with
+the follow-ups in §12–§16; attended steps passed (§14.1, §14.5). Where a claim rests on a file, its path and line are given; where it rests on nothing measurable here it says
 **UNKNOWN** and names the step that settles it.
 
 Scope: **files only** for v1. Live streams come later (timecode on streams is not always present, `docs/ROADMAP_IDEAS.md:263`).
@@ -888,7 +886,7 @@ Attended steps (guarded launch as §8.2; on `mk-2398-tc.mov` with a few markers)
 | M1 / M4 (Resolve round trip) | **Passed** on 23.976 and 29.97 DF, multi-line notes and unusual characters intact |
 | M2 (CSV, text) | **Passed**: the CSV opens correctly in Excel and Numbers; the plain text is correct |
 | M5 (drop-frame) | **Passed**: 01:01:00;00 is refused and corrected to ;02 on the DF `.mov` and the MXF |
-| M6 (no timecode) | Markers count from 00:00:00:00 on the no-timecode file |
+| M6 (no timecode) | Markers count from 00:00:00:00 on the no-timecode file. The hour-shift offer works (tested with a Resolve EDL; Frame.io's EDL could not be chosen in the panel then, §16) |
 | M7 (storage) | Moving the file keeps its markers |
 | M9 (timeline strip) | Flags show with the Ball playhead |
 | Thumbnails | Blank early-frame thumbnails cleared after Clear All: most likely the first build's cache. Not pursued unless it recurs. **Bug**, below |
@@ -939,6 +937,18 @@ No default key (§4.5). `testShowMarkersHasNoDefaultKeyAndIsAssignable`: no chor
 4. **MXF.** `mk-2997df-tc.mxf`: two markers one frame apart; each thumbnail shows its own number.
 5. **Show Markers.** View ▸ Show Markers shows no key; it still toggles. Assign one in Keyboard Shortcuts: it works.
 
+### 14.5 v1 complete (Robbie, 2026-11-15)
+
+Markers v1 is complete. Remaining attended results:
+
+| Step | Result |
+|---|---|
+| M6 (start-timecode override) | **Passed**: with the gear's start timecode set, the markers relabel; the transport readout is unchanged |
+| M8 (privacy) | **Passed**: the sentinel is absent from Export Diagnostics |
+| M9 (timeline strip) | **Passed**: flags and the duration band in both playhead styles, tooltips, click-to-jump |
+| Thumbnails | MXF and long-GOP thumbnails exact (§14.2, §15) |
+| Import | Import accepts any `.edl` (§16) |
+
 ## 15. MXF thumbnails all read "no preview" (Robbie, 2026-11-15)
 
 On `mk-2997df-tc.mxf` (29.97 DF, start 00:59:59;00), markers at 01:00:12;00 and 01:00:12;01 both showed "no preview";
@@ -980,4 +990,32 @@ never cached.
 2. Markers at 00:59:59;29 and 01:00:00;00 (frames 29 and 30): "F 29" and "F 30".
 3. The first and last frames: "F 0" and the last frame's number.
 4. `mk-2997df-tc.mov` and the two `.mp4`s still right (§14.4).
+
+## 16. Import Markers… greyed out Frame.io's EDL (Robbie, 2026-11-15)
+
+**M6 result:** the hour-shift offer works, tested with a Resolve EDL. Frame.io's EDL
+(`docs/markers/frameio-reference/Offset_Ep066_Sofrware_Copying_Resolve.edl`) was greyed out in the panel, while Resolve's
+own EDLs could be chosen.
+
+**What was checked.** The panel allowed `UTType(filenameExtension: "edl")` and `public.plain-text`.
+- `mdls`: all three EDLs have `kMDItemContentType` `dyn.ah62d4rv4ge80n3dq`, tree `public.item`, the dynamic type,
+  `public.data` (no `public.plain-text`).
+- Live, from a separate process: each file's `URLResourceValues.contentType` is that same dynamic type, and
+  `UTType(filenameExtension: "edl")` (and `"EDL"`) resolves to it too.
+- So by type, the panel should have enabled all three. The only difference on the Frame.io file is its extended
+  attributes (`com.apple.quarantine`, `com.apple.provenance`, `com.apple.macl`, a download source) and on-disk
+  compression; the Resolve EDLs have none. **Why the panel greyed it out is UNKNOWN**: reproducing it needs the panel on
+  screen, and no copy of that EDL exists elsewhere (Spotlight, by name).
+
+**Fix (whatever the cause):** the panel no longer filters by content type. A delegate enables files by extension alone,
+`.edl` in any case (`ResolveEDL.isImportCandidate`), and folders; the parser decides whether a chosen file holds markers
+("No markers in that file." otherwise). `testImportCandidatesAreChosenByExtensionInAnyCase`: `.edl`, `.EDL`, `.Edl` yes;
+`.txt`, `.edl.txt`, `.edlx`, a bare `edl` no. Whole package: 1067 test cases, 0 failures.
+
+**Attended steps:**
+1. File ▸ Import Markers… with `mk-2398-notc.mp4` open: Frame.io's EDL in `docs/markers/frameio-reference/` can be
+   chosen, and so can both Resolve EDLs. Frame.io's gives the "shift by −01:00:00:00" alert (on this 60 s fixture most
+   markers then fall outside, and the alert's count says so).
+2. Copy one Resolve EDL to a name ending `.EDL` (outside TEST FLIP): it can be chosen and imports.
+3. A `.txt` file is greyed out. A non-marker file renamed `.edl` can be chosen and gives "No markers in that file."
 

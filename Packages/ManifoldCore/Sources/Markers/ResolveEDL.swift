@@ -109,6 +109,16 @@ public enum ResolveEDL {
         s.components(separatedBy: .newlines).joined(separator: " ")
     }
 
+    // MARK: - Choosing a file
+
+    /// Import Markers… offers a file when its extension is `.edl`, in any case, WHATEVER TYPE macOS ASSIGNS IT: an EDL
+    /// has no registered type (it gets a dynamic one, or whatever another app declares), and on 2026-11-15 the open panel
+    /// greyed out Frame.io's EDL while Resolve's could be chosen. Whether a chosen file holds markers is the parser's
+    /// question (`parse` throws `noMarkers`), not the panel's.
+    public static func isImportCandidate(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "edl"
+    }
+
     // MARK: - Reading
 
     /// One marker as the EDL states it: an absolute timecode label, not yet placed on a file.

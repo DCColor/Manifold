@@ -265,6 +265,24 @@ Open questions:
 Depends on: shortcut registry (marker keys), reliable timecode readout.
 Size guess: medium.
 
+## Markers: user guide section
+Status: idea (Robbie, 2026-11-15)
+Version: when the user guide is written
+
+What: a "Markers" section in the user guide, featuring the start-timecode override (the Markers slot's gear menu): files
+without timecode count from 00:00:00:00, and Resolve's default timeline starts at 01:00:00:00, so set the override before
+exporting (`docs/MARKERS_PLAN.md` §14.5).
+
+Size guess: small.
+
+## Markers: thicker duration band
+Status: idea (Robbie, 2026-11-15)
+Version: only if testers ask
+
+What: make the marker duration band on the timeline strip slightly thicker, if testers find it hard to see.
+
+Size guess: small.
+
 ## Social Reframes with Export
 Status: idea (2026-10-06)
 Version: 1.5?

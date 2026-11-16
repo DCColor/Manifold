@@ -201,6 +201,16 @@ final class ResolveEDLTests: XCTestCase {
         XCTAssertThrowsError(try ResolveEDL.parse(Data(edl.utf8))) { XCTAssertEqual($0 as? ResolveEDL.ParseError, .noMarkers) }
     }
 
+    /// Import Markers… offers any `.edl`, any case, by extension (§16): Frame.io's and Resolve's EDLs alike.
+    func testImportCandidatesAreChosenByExtensionInAnyCase() {
+        for name in ["Offset_Ep066_Sofrware_Copying_Resolve.edl", "resolve-reference-2398.edl", "A.EDL", "b.Edl", "c.eDl"] {
+            XCTAssertTrue(ResolveEDL.isImportCandidate(URL(fileURLWithPath: "/x/" + name)), name)
+        }
+        for name in ["notes.txt", "list.edl.txt", "edl", "a.edlx", "a.xml"] {
+            XCTAssertFalse(ResolveEDL.isImportCandidate(URL(fileURLWithPath: "/x/" + name)), name)
+        }
+    }
+
     func testMergeSkipsDuplicates() {
         let a = Marker(frame: 10, name: "x", notes: "n")
         let b = Marker(frame: 10, name: "x", notes: "n")
