@@ -13,10 +13,15 @@
 #   SDI (bridge)       every "[SDI-AUDIO] !!" line by kind, and the "[SDI-AUDIO] stopped" totals (late edges, missing samples, re-latches,
 #                      edges appended by the card)
 #   late / dropped     the card's "DeckLink D3: !!" lines; the window's [PLAYBACK-STATS] sums
+#   markers (0.9.4)    per Regenerate Thumbnails while playing (rc-soak.py `markers <n>`): the app's count, thumbnails removed and
+#                      remade, how many were made while playing (written before the next Pause: must be 0), in the pause, or finished
+#                      after Play resumed; and holds / skips / late / dropped in two windows: ±WIN s around the press, and from the
+#                      Pause to WIN s after the last thumbnail was made (the next Play included). Those are inside the totals above too.
 #   rc-soak-report.py <dir> <label>...     (labels without .log)
 import collections, json, re, sys
-EXCL, STARTX, WRAP = 1.0, 20.0, 30
-FRAME = {"1080p59.94": 1001 / 60000, "1080p23.98": 1001 / 24000, "2160p59.94": 1001 / 60000, "2160p23.98": 1001 / 24000}
+EXCL, STARTX, WRAP, WIN = 1.0, 20.0, 30, 10.0
+FRAME = {"1080p59.94": 1001 / 60000, "1080p23.98": 1001 / 24000, "2160p59.94": 1001 / 60000, "2160p23.98": 1001 / 24000,
+         "1080p25": 1 / 25, "2160p25": 1 / 25}
 
 def analyse(path, mode, length):
     f = FRAME[mode]; r = collections.Counter(); kinds = collections.Counter(); ev = []; holds = []; stopped = []
@@ -94,6 +99,39 @@ def analyse(path, mode, length):
     tot = {k: sum(s[k] for s in stopped) for k in ("late_edges", "missing", "relatches", "appended")}
     return dict(counts=dict(r), played_h=round(played / 3600, 3), freezes=fz, holds=holds, sdi_lines=dict(kinds), sdi_stopped=tot, silent=silent)
 
+def markers_report(meta, a, total):
+    rg = meta["regens"]; ld = meta.get("latedrop", [])
+    print(f"   markers: expected {meta['markers_expected']}, loaded {meta.get('markers_loaded')}, Markers slot "
+          f"{'open' if meta.get('markers_slot') else 'NOT FOUND'}, thumbnails cached at start {meta.get('thumbs_at_start')}; "
+          f"Regenerate while playing {len(rg)}")
+    ok = meta.get("markers_loaded") == meta["markers_expected"] and meta.get("markers_slot")
+    def window(lo, hi):
+        hs = [h for h in a["holds"] if lo <= h[1] <= hi]
+        lds = collections.Counter()
+        for t, k, n in ld:
+            if lo <= t <= hi: lds[k] += n
+        return sum(1 for h in hs if h[0] == "hold"), sum(1 for h in hs if h[0] == "skip"), dict(lds)
+    for r in rg:
+        w1 = window(r["host"] - WIN, r["host"] + WIN)
+        end = (max(r["made"]) if r.get("made") else (r["pause_host"] or r["host"])) + WIN
+        w2 = window(r["pause_host"], end) if r.get("pause_host") is not None else (0, 0, {})
+        good = r.get("ax_rc") == 0 and r.get("app_n") == meta["markers_expected"] and len(r.get("made", [])) == meta["markers_expected"] \
+            and r.get("made_while_playing") == 0
+        ok = ok and good
+        print(f"     regen {r['n']} at {r['wall']}: {r.get('ax')}; app n={r.get('app_n')}, removed {r.get('removed')}, remade "
+              f"{len(r.get('made', []))}: while playing {r.get('made_while_playing')}, in the pause {r.get('made_in_pause')}, finished after "
+              f"Play {r.get('finished_after_play')}, first {r.get('first_after_pause_s')} s after Pause{'' if good else '  !!'}"
+              + (f" ({r['note']})" if r.get("note") else ""))
+        print(f"        around the press ±{WIN:.0f} s: holds {w1[0]}, skips {w1[1]}, late/dropped {w1[2] or 'none'}; "
+              f"Pause → last thumbnail +{WIN:.0f} s: holds {w2[0]}, skips {w2[1]}, late/dropped {w2[2] or 'none'}")
+        total["markers regenerates"] += 1; total["markers thumbnails remade"] += len(r.get("made", []))
+        total["markers thumbnails made while playing"] += r.get("made_while_playing") or 0
+        total["markers thumbnails finished after Play resumed"] += r.get("finished_after_play") or 0
+        total["markers holds+skips near regenerate"] += w1[0] + w1[1] + w2[0] + w2[1]
+        total["markers late/dropped near regenerate"] += sum(w1[2].values()) + sum(w2[2].values())
+    if not ok: total["markers blocks failing"] += 1
+    total["markers blocks"] += 1
+
 def main(d, labels):
     total = collections.Counter(); allh = 0.0; gate = []
     for lab in labels:
@@ -118,6 +156,7 @@ def main(d, labels):
         print(f"   SDI bridge: !! lines {a['sdi_lines'] or 'none'}; stopped totals {a['sdi_stopped']}")
         print(f"   late/dropped: card late {c.get('card late', 0)}, card dropped {c.get('card dropped', 0)}; window late {c.get('window late', 0)}, "
               f"dropped {c.get('window dropped', 0)} of {c.get('window presented', 0)} presented")
+        if "regens" in meta: markers_report(meta, a, total)
         for k, v in c.items(): total[k] += v
         total["freezes"] += len(a["freezes"]); total["unrecovered freezes"] += unrec_fz; total["holds"] += nh; total["skips"] += ns
         total["silent starts"] += len(a["silent"]); total["unrecovered silent starts"] += unrec_ss
@@ -127,6 +166,12 @@ def main(d, labels):
     for k in sorted(total): print(f"   {k}: {total[k]}")
     unrec = total["unrecovered freezes"] + total["unrecovered silent starts"] + total["renderer GAVE UP"] + total["silent-start recovery dropped"]
     ok = total["freezes"] == 0 and unrec == 0 and total["holds"] + total["skips"] == 0
+    if total["markers blocks"]:
+        mk = total["markers blocks failing"] == 0 and total["markers thumbnails made while playing"] == 0
+        print(f"== MARKERS (every Regenerate pressed and remade all thumbnails, none made while playing): {'PASS' if mk else 'FAIL'} — "
+              f"regenerates {total['markers regenerates']}, made while playing {total['markers thumbnails made while playing']}, "
+              f"blocks failing {total['markers blocks failing']}; near them: holds+skips {total['markers holds+skips near regenerate']}, "
+              f"late/dropped {total['markers late/dropped near regenerate']}")
     print(f"== GATE (0 freezes, 0 unrecovered events, 0 holds/skips beyond expected cadence): {'PASS' if ok else 'FAIL'} — "
           f"freezes {total['freezes']}, unrecovered {unrec}, holds {total['holds']}, skips {total['skips']}")
 

@@ -1711,6 +1711,33 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
+## ☐ AFTER 0.9.4: American English in log lines (Robbie, 2026-11-15)
+
+`fbb735a` made every user-facing string American, and `scripts/check-us-spelling.py` now runs in `release-mac.sh`'s
+preflight and fails the release on a finding. **Log text is out of the check's scope on purpose**: a literal inside a log call
+or starting with a `[TAG]` prefix is skipped, and log text built outside a log call is listed in its `ALLOW`. Soak and report
+scripts and tests match on log text, so it changes only deliberately, and not in the week of a release soak.
+
+**What remains (2026-11-15, the check's own scanner, run over the text it skips): 42 log lines in 21 files**, 43 words:
+colour(s) 12, signalling 4, behaviour 4, synchronisable 4, dialling 3, labelled/labelling 4, programme 2, honoured 2,
+quantisation/quantised 3, licence 2, recognised 1, synthesised 1, levelled 1. By file: `App/WebRTC/DataChannelBridge.m` 6,
+`App/MetalVideoRenderer.swift` 4, `App/SRT/SRTAudioDecoder.swift` 3, `App/NDI/NDIService.swift` 3,
+`App/SRT/SRTFrameRouter.swift` 3, `SenderReportLineFit.swift` 3, `App/HLS/HLSClient.swift` 2, `FrameEngine.swift` 2,
+`LicenseRecordSync.swift` 2, `App/Live/StreamColorimetry.swift` 2, `App/Preferences.swift` 2, one each in
+`BitstreamColorCheck.swift`, `App/ManifoldApp.swift`, `App/WebRTC/WHEPFrameRouter.swift`, `MarkerLog.swift` (the import line's
+`unknown-colours=`), `App/InterpretationLUT.swift`, `LibavFrameSource.swift`, `App/NDI/NDIBridge.mm`,
+`DNxHRVideoToolboxDecoder.swift`, `App/HLS/HLSAudioTap.swift`, `App/ContentView.swift`.
+
+**What it takes:**
+- Change each line's text, and with it every matcher. Known: `SenderReportLineFitTests.swift:440`, `:657`, `:687` count
+  `RE-LEVELLED`. Before each change, grep `Packages/*/Tests`, `scripts/` and the docs for the exact text. A soak or report
+  script that silently stops matching counts zero, which reads as a pass.
+- Remove the matching `ALLOW` entries from `check-us-spelling.py` once their text is American.
+- Optional: a `--logs` mode for the check, so the log text stays American once it is.
+- Not the identifiers, which are already American (*American English — a RECURRING DRIFT*, "DO NOT BLANKET-REPLACE").
+
+---
+
 ## ☐ PRE-SHIP: privacy hardening — P1 built and measured 2026-10-19 (`14e1ea5`); P2 built and tested unattended 2026-10-23 (`3c5526d`), real install migrated automatically 2026-10-24; the licensing port and Release builds to follow
 
 **The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy

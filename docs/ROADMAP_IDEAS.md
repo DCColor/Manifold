@@ -246,8 +246,14 @@ Depends on: HEVC over SRT (shared parser/decoder work).
 Size guess: ?
 
 ## Timecoded markers with EDL export
-Status: idea (2026-10-06)
-Version: 1.5?
+Status: built in markers v1 (v1 complete, Robbie, 2026-11-15; idea 2026-10-06). Plan: docs/MARKERS_PLAN.md
+Version: 0.9.4
+
+Built: files only (live streams later, `docs/MARKERS_PLAN.md:7`). Markers carry source timecode. Resolve marker EDL
+export and import, CSV and plain-text export (`docs/MARKERS_PLAN.md:567`); the Resolve round trip passed on 23.976 and
+29.97 DF (M1/M4, §14.1). Stored per file, by content fingerprint, while Remember markers between sessions is on (§5.2).
+The open questions below are answered in the plan's decisions (§9). Not in v1: Premiere/Avid/FCPXML, Send to Resolve,
+live streams, audio-only (`docs/MARKERS_PLAN.md:792`).
 
 What: Drop markers on the timeline at the current timecode, with a colour and a note, and export them as a marker EDL that Resolve (and others) can import.
 

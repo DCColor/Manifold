@@ -205,6 +205,20 @@ case "$CONFIG" in
 esac
 ok "configuration: ${CONFIG}"
 
+# American English in every user-facing string (Robbie, 2026-11-15; docs/BUGS.md "American English — a RECURRING DRIFT").
+# A manual sweep did not hold, so the release refuses a British spelling. Exit 1 is a finding; any other non-zero exit
+# means the check itself did not run, and a check that did not run must not pass either. Log text is out of its scope.
+SPELL_RC=0
+SPELL_OUT=$(python3 "${REPO_ROOT}/scripts/check-us-spelling.py" "${REPO_ROOT}" 2>&1) || SPELL_RC=$?
+if [[ $SPELL_RC -eq 1 ]]; then
+    die "British spelling in user-facing strings (scripts/check-us-spelling.py):
+$(printf '%s\n' "$SPELL_OUT" | sed 's/^/       /')"
+elif [[ $SPELL_RC -ne 0 ]]; then
+    die "scripts/check-us-spelling.py did not run (exit ${SPELL_RC}):
+$(printf '%s\n' "$SPELL_OUT" | sed 's/^/       /')"
+fi
+ok "American spelling in user-facing strings"
+
 [[ -f "$PROJECT_YML" ]] || die "project.yml not found at ${PROJECT_YML}"
 
 for tool in xcodegen xcodebuild create-dmg codesign hdiutil python3; do
