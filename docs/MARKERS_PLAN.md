@@ -734,7 +734,7 @@ All as recommended, with the choices named below.
 | D3 | New marker's default name | **Empty**, so nobody has to delete placeholder text |
 | D4 | M with In and Out set | One duration marker from In to Out; the marks are cleared |
 | D5 | Playback while the editor is open | Continues |
-| D6 | Files without timecode | 00:00:00:00, plus a per-file marker start override; the readout is unchanged |
+| D6 | Files without timecode | 00:00:00:00, plus a per-file marker start override; the readout is unchanged. **Reversed for that case by D-C17 (2026-11-16):** where the override applies, it also drives the transport readout, timecode entry and Export Frame names, so a window never shows two timecodes (`docs/CHAPTER_MARKERS_PLAN.md` §13.4, built in its Stage 4) |
 | D7 | The list | **Changed 2026-11-15:** scope slot AND the Markers window, both now (§4.1). Click jumps; ⌘-click and ⇧-click select without jumping; double-click opens the editor (§4.2) |
 | D8 | Menus | A top-level Mark menu; import and export in File |
 | D9 | Import | Merge, skip duplicates, one undo step |

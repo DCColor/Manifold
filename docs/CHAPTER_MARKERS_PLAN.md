@@ -942,3 +942,453 @@ No app file changed, and nothing links `ChapterRead` yet.
   `ChapterReader.swift`). The before run was incremental and printed none.
 - **App:** Profile build into `.build-cc`, **BUILD SUCCEEDED**. 19 unique source warnings, all in App files this stage
   did not touch, **identical** to the 2026-11-15 build (`~/Code/_scratch/manifold-fixcheck-build.log`). Not launched.
+
+---
+
+## 12. Premiere XMP, all marker types (2026-11-16)
+
+**File:** `~/Code/Manifold/fixtures/chapters/w1/premiere_allmarkers - h264.mp4`, read-only, not modified. It is a Premiere
+Pro H.264 export with "Include Markers", 3840×2160, 23.976, 30.03 s, made 2026-11-16 19:10.
+
+**Tools,** all run read-only:
+
+- `/opt/homebrew/bin/ffmpeg -v trace` (box list);
+- `exiftool -ee -G1 -a -s` (tag names);
+- `exiftool -ee -struct -j -G1 -XMP-xmpDM:Tracks`, piped into short `python3 -I` scripts in `~/Code/_scratch/manifold-chapters/`
+  that print types, times, colors and **presence only** of every other field;
+- `exiftool -b -XMP` for element and attribute names (no values);
+- a `python3 -I` walk of the root boxes.
+
+No name, comment, URL or GUID is quoted.
+
+### 12.1 Where the XMP lives and the units
+
+- **A root `uuid` box**, UUID `BE7ACFCB-97A9-42E8-9C71-999491E3AFAC` (Adobe's XMP UUID), at offset 17761, 10 508 bytes,
+  after `moov` and before `free` and `mdat`. CONFIRMED (box walk).
+- **No `udta/XMP_`, no chapter track, no `chpl`** (`-v trace`: two `trak`, `udta` with no children of those types, one
+  root `uuid`). ffmpeg prints no "Chapters:".
+  - So the libav reader and AVFoundation would find **0 chapters**. That is inferred from the boxes and from
+    `premiere_chapters - h264.mp4` (§11.3); the reader was not run, since this check allowed no build.
+- **One `xmpDM:Tracks` entry**, with `trackName` present and **`frameRate` `f24000s1001`**.
+- **Units: `xmpDM:startTime` is an integer frame count at that `frameRate`.**
+  - CONFIRMED on `premiere_chapters - prores.mov`, where XMP 101 / 280 / 532 equal the chapter track's 101101 / 280280 /
+    532532 at 1/24000 (§11.3).
+  - Counted from the file's first frame or from its start timecode? Both are 00:00:00:00 here. **Settled in §12.6: from
+    the first frame.**
+
+### 12.2 The markers
+
+| # | `type` | `startTime` (frames) | `duration` | `name` | `comment` | `location` | `target` | `cuePointParams` | Color |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | **Comment** | 78 | **absent** | yes | yes | no | no | yes (2 keys) | `{"color":4281740498}` = 0xFF362CD2 → **#D22C36**, a red |
+| 1 | **Chapter** | 197 | absent | yes | yes | no | no | yes (2 keys) | 4280578025 = 0xFF246FE9 → **#E96F24**, an orange |
+| 2 | **Segmentation** | 325 | absent | yes | yes | no | no | yes (2 keys) | 4289825711 = 0xFFB18BAF → **#AF8BB1**, a lavender |
+| 3 | **WebLink** | 501 | absent | yes | yes | **yes** (the URL) | no | yes (2 keys) | 4280578025 → **#E96F24**, the same orange as #1 |
+
+- **FLVCuePoint: none in this file.** Whether Premiere still offers that type is UNKNOWN. No `cuePointType` field on any
+  marker.
+- **`duration` is absent on all four.** The two `xmpDM:duration` elements in the packet are the file's own duration
+  (`DurationValue`/`Scale`) and its copy in `xmpMM:Pantry`, not the markers'. How Premiere writes a marker **with** a
+  duration is settled in §12.6: `xmpDM:duration` in frames at the track's `frameRate`.
+- **`cuePointParams`**, two key/value pairs on every marker:
+  - `marker_guid`: a 36-character GUID, distinct per marker;
+  - **`keywordExtDVAv1_<GUID>`**: the value is JSON, `{"color": <uint32>}`. The key name and number are printed above;
+    they are Adobe's schema word and a color, not user text.
+- **Color.** There is no `xmpDM` color field; it is only in that cuePointParam.
+  - Read as **A,B,G,R**, the byte order MARKERS_PLAN §0.2 established for Premiere's `pproColor` (0xFFFC8D42 → blue,
+    matching the Avid export), the values give red, orange and lavender.
+  - The same uint32 read as A,R,G,B would give #362CD2 (blue) for #0. **Settled in §12.5: A,B,G,R is CONFIRMED** (Robbie
+    set Red, Orange, Purple, Orange).
+  - `premiere_chapters - h264.mp4` uses 4281740498 (#D22C36) on all three of its markers.
+- **Name and comment are separate fields.** `xmpDM:name` is Premiere's marker name; `xmpDM:comment` is its comment.
+  Both are present on all four.
+
+### 12.3 Anything else marker-like
+
+- **Nothing else holds markers.**
+  - `xmpDM:markers` occurs once, in the one track.
+  - `xmpMM:Pantry` (Premiere's copy of the source clip's metadata) holds timecode, duration and history, but no markers.
+  - `xmpMM:Ingredients` has `stRef:maskMarkers`, a flag on the source ingredient saying whether its markers were masked;
+    it is not a marker.
+- **The rest is file-level:** `xmpDM:startTimecode` (00:00:00:00, 23.976), `altTimecode`, `projectRef` (its `type` is
+  the fifth `xmpDM:type` in the packet), creator-atom and history.
+- **The QuickTime `udta` start timecode** (`StartTimecode`, `StartTimeScale`, `StartTimeSampleSize` in exiftool's
+  UserData group) is timecode, not markers.
+
+### 12.4 What this means for Stage 3 (the XMP reader)
+
+1. **Types: Premiere puts all its markers in one list, typed.**
+   - Chapter is one of five types (Comment, Chapter, Segmentation, WebLink, FLVCuePoint).
+   - The XMP reader should keep the type. Recommended:
+     - **Chapter** markers join the chapter layer exactly as chapter-track chapters do (D-C1).
+     - Comment, Segmentation and WebLink markers also show on the read-only layer, labelled by type, because they are
+       the file's embedded markers and the goal says embedded markers show up.
+   - In a `.mov` where Premiere also wrote a chapter track, an XMP Chapter on the same frame with the same name is the
+     same chapter, and is shown once.
+   - **Decision for Robbie (D-C12):** all types, or Chapter only.
+2. **Color.**
+   - The layer stays the neutral outline (D-C1). Optionally the outline could take the marker's own color; that is a
+     decision, not built.
+   - On **Convert**, an XMP marker with a color should map to the nearest of Resolve's 16, by the rule in MARKERS_PLAN §7,
+     instead of D-C4's fixed Blue, once the byte order and Premiere's names are known.
+   - D-C4's Blue stays for chapter-track and `chpl` chapters, which carry no color.
+   - **Decision D-C13.**
+3. **Notes and name.**
+   - `name` → the marker's name (single line);
+   - `comment` → **notes** (may be multi-line);
+   - `location` (WebLink's URL) → appended to the notes as its own line on Convert.
+   - The type → a keyword on Convert (`comment`, `chapter`, `segmentation`, `weblink`), alongside D-C4's "chapter" for
+     Chapter type.
+   - None of these is ever logged (`MarkerLog` counts only).
+4. **Duration.**
+   - Every marker here is a point.
+   - With no `duration`: a **Chapter**-type marker uses the chapter rule (to the next chapter, D-C8); every other type is
+     **1 frame**, as a marker.
+   - With a `duration`, frames at the track's `frameRate` (CONFIRMED on a real Premiere file, §12.6), it is used as
+     stated.
+5. **Time.**
+   - `startTime` is an integer frame count at a stated rational rate, so it needs **no rounding rule**. D-C7 and D-C7a
+     don't apply: the frame is `startTime` when the track's `frameRate` equals the file's.
+   - When it differs, rescale exactly, flooring as D-C7. That case is UNKNOWN in practice.
+   - Frames count from the first frame, not from the start timecode (CONFIRMED, §12.6).
+6. **Stable ids.** `marker_guid` is a GUID per marker, so Convert can give each marker a stable id and a second Convert
+   can recognize what it already converted, beyond D19's same-frame-same-name rule.
+7. **Where to read it:** the root `uuid` box in MP4 (here) and `moov/udta/XMP_` in `.mov` (§11.3). libav does not parse
+   either into chapters, so this is a Manifold box walk plus an XML parse of a ~10 KB packet. It is pure and testable, in
+   the Markers target or beside `ChapterRead`.
+   - Flip would need the same reader for the two apps to agree (D-C9).
+
+### 12.5 Recorded (Robbie, 2026-11-16)
+
+**Color byte order: CONFIRMED A,B,G,R.**
+
+- The four markers were set to Red, Purple (which Premiere shows as lavender), Orange and Orange. As a set, that is
+  exactly the decoded #D22C36, #AF8BB1, #E96F24, #E96F24.
+- By marker:
+
+  | Marker | Color set | Decoded |
+  |---|---|---|
+  | #0 Comment | Red | #D22C36 |
+  | #1 Chapter | Orange | #E96F24 |
+  | #2 Segmentation | Purple | #AF8BB1 |
+  | #3 WebLink | Orange | #E96F24 |
+
+- Read as A,R,G,B instead, #0 would be blue, which is wrong.
+
+**Premiere's marker palette is 8 colors**, in dialog order: **Green, Red, Purple, Orange, Yellow, White, Blue, Cyan.**
+This palette is separate from Premiere's 16 label colors. Three values are now measured:
+
+| Color | Stored | Decoded |
+|---|---|---|
+| Red | 4281740498 | #D22C36 |
+| Purple | 4289825711 | #AF8BB1 |
+| Orange | 4280578025 | #E96F24 |
+
+The other five are not yet measured.
+
+**Decisions:**
+
+| # | Decision | Decided |
+|---|---|---|
+| D-C12 | Which XMP types show | **All four seen** (Comment, Chapter, Segmentation, WebLink) on the read-only layer, **labeled by type**. Chapter type keeps the chapter rules (D-C8 duration, dedup against a chapter track on the same frame with the same name) |
+| D-C13 | XMP color | **Convert maps Premiere's color to the nearest of Resolve's 16** (table below). **On the read-only layer an XMP marker's outline is drawn in its own color**, and neutral when it has none (chapter-track and `chpl` chapters, and any XMP marker without the color param). This refines D-C1's "fixed neutral" for XMP markers only |
+| D-C14 | Repeat Convert | **`marker_guid` is used so a second Convert does not duplicate**: a converted XMP marker keeps its GUID, and Convert skips any GUID already in the store. Chapter-track and `chpl` chapters have no GUID and keep D19's same-frame, same-name rule |
+
+**The 8-to-16 table (D-C13). Decided (Robbie, 2026-11-16): as proposed, with Orange → Sand and Purple → Lavender.**
+
+- Distances are CIEDE2000 between Premiere's decoded value and Resolve's swatch (MARKERS_PLAN §1, R0 values), computed
+  2026-11-16.
+- Only Red, Purple and Orange have measured Premiere values. The other five rows map by name until one export of each
+  color is decoded.
+
+| Premiere | Value | Nearest three in Resolve (ΔE00) | Strict nearest | **Decided** |
+|---|---|---|---|---|
+| Green | not measured | — | Green (name) | **Green** |
+| Red | #D22C36 | Red 10.8, Fuchsia 19.2, Cocoa 21.5 | Red | **Red** |
+| Purple | #AF8BB1 | **Lavender 8.8**, Rose 17.5, Pink 17.9 | Lavender | **Lavender** (by value; Resolve's Purple #9B0FFE is a vivid violet, and Premiere shows this one as lavender) |
+| Orange | #E96F24 | **Red 14.4**, Sand 16.2, Yellow 21.1 | Red | **Sand** (see below) |
+| Yellow | not measured | — | Yellow (name) | **Yellow** |
+| White | not measured | — | Cream (lightest) | **Cream** |
+| Blue | not measured | — | Blue (name) | **Blue** |
+| Cyan | not measured | — | Cyan (name) | **Cyan** |
+
+- **Orange is the one judgment call.** Strictly nearest is Red, but then Premiere's Red and Orange arrive in Resolve as
+  one color and the distinction is lost.
+- Recommended: **keep the eight distinct.** Orange takes its next-nearest, Sand (16.2), rather than Yellow (21.1), which
+  Premiere's own Yellow needs.
+- If Robbie prefers strict nearest, Orange → Red and the table is no longer one-to-one.
+- On import back from Resolve the map is not reversible either way (16 → 8), which is the same limit MARKERS_PLAN §7
+  records for Premiere xmeml.
+
+Both UNKNOWNs that were pending `w1/premiere_ranged_tc1h - h264.mp4` are settled in §12.6.
+
+### 12.6 A ranged marker on a 01:00:00:00 sequence (2026-11-16)
+
+**File:** `~/Code/Manifold/fixtures/chapters/w1/premiere_ranged_tc1h - h264.mp4`, read-only, not modified. It is a
+Premiere H.264 export, 3840×2160, 23.976, 30.03 s, from a sequence starting at 01:00:00:00 with one Comment marker 4
+seconds long (Robbie).
+
+**Tools:** the same as §12. No name, comment or GUID is quoted.
+
+**Boxes** (`-v trace`):
+
+- two `trak` (video and audio), a `udta`, and one root `uuid` (XMP);
+- **no `tmcd` track, no chapter track, no `chpl`**;
+- ffmpeg prints no "Chapters:" and **no `timecode`**.
+
+**The marker:**
+
+| Field | Value |
+|---|---|
+| `type` | **Comment** |
+| `startTime` | **186** |
+| `duration` | **96** |
+| Track `frameRate` | **`f24000s1001`** |
+| Other fields | `name` yes, `comment` yes, `location` no, `target` no, `cuePointParams` yes (`marker_guid`, `keywordExtDVAv1_…`) |
+| Color | `{"color":4281740498}` → #D22C36, Red |
+
+**The file's start timecode:**
+
+- `xmpDM:startTimecode` = **01:00:00:00**, timeFormat 23.976 fps; `xmpDM:altTimecode` the same;
+- a QuickTime user-data start timecode, exiftool `UserData:StartTimecode` = **01:00:00:00**, with `StartTimeScale`
+  24000 and `StartTimeSampleSize` 1001. The `udta` child atom's name was not identified by `-v trace`.
+- **There is no `tmcd` track**, and libav exposes no `timecode` for the file.
+
+**Settled:**
+
+1. **Ranged markers: CONFIRMED.**
+   - Premiere writes `xmpDM:duration` on the marker, **in frames at the track's `frameRate`**. 96 frames at 24000/1001 is
+     4.004 s, the 4-second duration as Premiere's 24-frame timecode counts it (00:00:04:00).
+   - Point markers have no `duration` element at all (§12.2).
+2. **Origin: CONFIRMED, `startTime` counts from the file's first frame, not from the start timecode.**
+   - The start timecode 01:00:00:00 is frame 86 400 of the 24-frame count. Counted from it, the marker would have to
+     read 86 586; it reads **186**.
+   - So the marker is at file frame 186, labeled **01:00:07:18** against the file's own 01:00:00:00. Robbie can check that
+     label against the sequence.
+   - This is the same convention as a Manifold marker's frame index (MARKERS_PLAN §1), so `startTime` maps to `frame`
+     with no offset when the rates match.
+
+**New finding: the start timecode is in XMP and `udta` only, not in a `tmcd` track.**
+
+- Manifold's timecode readers look for a `tmcd` track, then the container's `timecode` metadata (MARKERS_PLAN §2,
+  `TimecodeReader.swift`, `LibavFrameSource.swift:390-401`). This file has neither: ffmpeg shows no `timecode`.
+- So **Manifold today labels this file from 00:00:00:00, and its markers and chapters would read 00:00:07:18 where
+  Premiere says 01:00:07:18.** That is inferred from the readers' rules; the app was not run.
+- The D6 start-timecode override fixes it by hand.
+- For Stage 3: reading `xmpDM:startTimecode` (or the `udta` start timecode) as a further timecode source, after `tmcd`
+  and container metadata, would make Premiere MP4s label like Premiere. That reaches beyond markers: the transport
+  readout and Export Frame names use the same readers.
+- **Decision for Robbie (D-C15):** add it as a timecode source, or leave Premiere MP4s at 00:00:00:00 with the override.
+
+**V2, sequence timecode (2026-11-16).** Robbie: the first file's 01:00:00:00 had been set as **metadata** timecode, not
+on the sequence. `premiere_ranged_tc1h - h264_V2.mp4` is the export with the **sequence** starting at 01:00:00:00. Read the
+same way, read-only:
+
+- **Everything reported above is identical:** boxes (no `tmcd`, no chapter track, no `chpl`, one root XMP `uuid`), no
+  libav `timecode`, `xmpDM:startTimecode` and `altTimecode` 01:00:00:00 at 23.976, `UserData:StartTimecode` 01:00:00:00
+  (24000/1001), one Comment marker with `startTime` **186**, `duration` **96**, `frameRate` `f24000s1001`, and the same
+  color.
+- The two files are the same size and differ in **367 bytes** (`cmp -l`). The first differences are at offsets 48, 52 and
+  164, where `mvhd`/`tkhd` creation and modification dates are stored. The XMP packets differ (SHA-1 `5f2804e2…` vs
+  `f4030930…`), with their `xmp:MetadataDate` values among the differences; that the rest is dates and instance IDs is
+  inferred, not diffed field by field.
+- So **Premiere writes the same thing whether 01:00:00:00 comes from the sequence or from the clip's metadata
+  timecode**, and both conclusions stand for both files:
+  - `startTime` counts from the first frame (186, not 86 586);
+  - `duration` is in frames.
+- The start timecode lives only in XMP and `udta` either way. D-C15 applies to both.
+
+**V3, a third way of setting the timecode (2026-11-16).** `premiere_ranged_tc1h - h264_V3.mp4` was exported after
+Robbie set 01:00:00:00 a third way. Read the same way:
+
+- **Identical again:** no `tmcd` track, no libav `timecode`, `xmpDM:startTimecode`, `altTimecode` and
+  `UserData:StartTimecode` all 01:00:00:00, and the same one Comment marker (`startTime` 186, `duration` 96, `f24000s1001`).
+- It differs from the first file in **393 bytes** (`cmp -l`), the same kind of header and XMP-date differences as V2.
+- **Three ways of setting 01:00:00:00 produce the same H.264 MP4.** As far as these exports show, Premiere's H.264 export
+  never writes a `tmcd` track, and always records the start timecode in XMP and `udta`, with marker times from the first
+  frame.
+- A timecode **track** from Premiere was seen only on its ProRes `.mov` (`premiere_chapters - prores.mov`, `tmcd`
+  00:00:00:00, §11.3). Whether a Premiere `.mov` export carries 01:00:00:00 in its `tmcd` when the sequence starts there
+  is **UNKNOWN**: one ProRes export from this sequence would settle it.
+- That bears on D-C15. For Premiere MP4s the XMP/`udta` timecode is the only source there is.
+
+**`premiere_ranged_tc1h - prores.mov.mp4` (2026-11-16, read-only).** The expected `premiere_ranged_tc1h - prores.mov` is
+not in `w1/`; the only file by that stem is **`… - prores.mov.mp4`**, and it is **not ProRes and not a QuickTime movie.**
+
+- exiftool: `FileType` MP4, `MajorBrand` "MP4 v2 [ISO 14496-14]", `CompressorID` avc1.
+- ffmpeg: H.264 (Main) 3840×2160 23.976 and AAC.
+- It is 232 146 875 bytes, the same as the three H.264 exports, and differs from the first in 376 bytes (`cmp -l`).
+- Read as §12.6:
+  - no `tmcd` track, no chapter track, no `chpl`, no libav `timecode`;
+  - `xmpDM:startTimecode` and `UserData:StartTimecode` 01:00:00:00;
+  - one Comment marker, `startTime` 186, `duration` 96, `f24000s1001`.
+- **It is a fourth copy of the H.264 export**, most likely a ProRes preset with the H.264 format still selected, or a
+  rename. So **whether Premiere writes a `tmcd` track in a `.mov` from a 01:00:00:00 sequence is still UNKNOWN.**
+  - The only Premiere `.mov` seen, `premiere_chapters - prores.mov` (§11.3), has a `tmcd` reading 00:00:00:00, from a
+    sequence at 00:00:00:00. It shows Premiere's `.mov` export does write a `tmcd` track, but not what it writes for
+    01:00:00:00.
+- **Is D-C15 then needed only for MP4s?** **Probably, but not shown.**
+  - If a ProRes `.mov` from this sequence carries `tmcd` 01:00:00:00, source 1 covers Premiere `.mov`s today, and
+    sources 3–4 matter only for Premiere MP4s (and any other writer that puts timecode only in `udta`/XMP).
+  - Pending a real `.mov` export: File ▸ Export ▸ Media, Format **QuickTime**, Apple ProRes.
+
+**`premiere_ranged_tc1h - prores.mov`, corrected by Robbie (2026-11-16 19:31, read-only).** This one is a real QuickTime
+ProRes export: `FileType` MOV, `MajorBrand` "Apple QuickTime (.MOV/QT)", ProRes 422 HQ 3840×2160 23.976, PCM audio,
+2 558 045 412 bytes.
+
+- **`tmcd` track: yes, reading 01:00:00:00.**
+  - It is track 3 (handler `tmcd`). The video and audio tracks both reference it (`tref tmcd` → 3).
+  - libav reports `timecode 01:00:00:00` on the video, audio and `tmcd` streams.
+  - So Manifold's existing `tmcd` reader (source 1) labels this file 01:00:00:00 today. That is inferred from the
+    readers' rules; the app was not run.
+- **Chapter track: none.**
+  - The video and audio `tref` boxes each contain `chap`, but **pointing at track ID 0**, which is no track. A box walk
+    of track IDs, `tref` targets and handlers found only video (1), audio (2) and `tmcd` (3).
+  - ffmpeg lists no chapters, so libav reads 0. The reader was not run (no build).
+  - Premiere evidently writes the chapter text track only when there are **Chapter**-type markers
+    (`premiere_chapters - prores.mov` has one, §11.3), and leaves an empty `chap` reference otherwise.
+  - Whether AVFoundation tolerates a `chap` reference to track 0 without error is **UNKNOWN** (not run). The libav reader
+    is unaffected.
+- **XMP: `udta/XMP_`**, as in Premiere's other `.mov`.
+  - One **Comment** marker, `startTime` **186**, `duration` **96**, frames at `f24000s1001`. That is the same marker as
+    the MP4s, in the same units.
+  - `xmpDM:startTimecode` and `altTimecode` 01:00:00:00 at 23.976.
+- **User data:** `UserData:StartTimecode` 01:00:00:00 (24000/1001), beside `Cr8r`, `FIEL` and `XMP_` in `udta`.
+- **Origin: marker times count from the first frame** here too. With a real `tmcd` at 01:00:00:00 (frame 86 400),
+  `startTime` is still 186, not 86 586.
+- **D-C15 is therefore needed only for MP4s, as far as Premiere goes.**
+  - Premiere's `.mov` carries the start timecode in a `tmcd` track (source 1, read today).
+  - Its H.264 MP4s carry it only in `udta` and XMP (sources 3–4).
+  - Stage 4 stays general (any file with timecode only in `udta`/XMP), but its only real-world case seen so far is
+    Premiere MP4.
+
+**What it means for Stage 3's mapping:**
+
+- `frame = startTime` and `duration = duration` (frames, at least 1) when the track's `frameRate` equals the file's.
+- Otherwise rescale both exactly. Start is floored, as D-C7; the end is floored too, and duration = end − start.
+- A Comment marker with a duration is a ranged marker on the layer (drawn with a band? D-C1 has no band for chapters;
+  for ranged XMP markers a band in their own color matches how markers are drawn) and **converts with its duration**.
+- **Decision for Robbie (D-C16):** a band for ranged XMP markers on the read-only layer, or flags only.
+
+---
+
+## 13. Decisions D-C15 and D-C16, and Stage 4's scope (Robbie, 2026-11-16)
+
+### 13.1 Decisions
+
+| # | Decision | Decided |
+|---|---|---|
+| D-C16 | Ranged XMP markers | A marker whose XMP **states** a `duration` gets a **duration band** on the read-only layer, **in its own color and lighter than a user marker's band**. A user marker's band is the color at 0.55 alpha (`PlayheadSlider.swift:619-623`); the XMP band's exact alpha is chosen in Stage 3. **Chapters, whose durations are implied** (chapter track, `chpl`, XMP Chapter without `duration`), **stay flags only** |
+| D-C15 | Premiere's start timecode | **Yes, as Stage 4**, after the XMP reader (Stage 3) |
+
+**Stage 4, the timecode-source precedence:**
+
+1. **`tmcd` track**
+2. **container timecode** (libav's `timecode` metadata, format then stream)
+3. **QuickTime user-data start timecode** (`udta`, exiftool's `UserData:StartTimecode`, `StartTimeScale` /
+   `StartTimeSampleSize`)
+4. **XMP `xmpDM:startTimecode`**
+
+- A lower source is used **only when nothing above exists**.
+- **The per-file start-timecode override wins over all of them.**
+- **The readout names the source** whenever it is not a `tmcd` track (e.g. "TC from XMP").
+
+**Pending:** `w1/premiere_ranged_tc1h - prores.mov`, which shows whether Premiere writes a `tmcd` track in a `.mov` from a
+01:00:00:00 sequence. If it does, a Premiere `.mov` labels correctly through source 1 today, and Stage 4 matters for
+Premiere's MP4s only.
+
+### 13.2 Where the timecode basis is produced today
+
+All CONFIRMED by reading.
+
+| Producer | File:line | What it reads |
+|---|---|---|
+| `TimecodeReader.readStartTimecode(url:)` | `Packages/ManifoldCore/Sources/ManifoldCore/TimecodeReader.swift:50` onward | the **`tmcd` track only** (the `trak` whose `hdlr` is `tmcd`) |
+| `MediaInspector.timecode(for:)` | `Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift:220-222` | forwards to the above: **the funnel for every AVFoundation-path load** |
+| `FrameEngine.tcInfo`, set from that funnel | `FrameEngine.swift:2974` (AVFoundation load), `:3119` (audio-only), `:3351` (container-slack route), `:3395` (MXF: nil, then below), `:1811-1816` (re-inspect) | — |
+| Container timecode (libav) | `LibavFrameSource.swift:393-401` (format, then any stream `timecode`), carried as `StreamInfo.startTimecode` (`:68`, `:451`) | **libav path only**, applied at `FrameEngine.swift:3469-3470` (`TimecodeReader.parse`) |
+| Inspector's Start Timecode string | `MediaInspector.swift:76-77` (tmcd), `FrameEngine.swift:3387` (container route), `:3460` (libav) | — |
+
+**Two gaps Stage 4 must close:**
+
+- **Container timecode is read only on the libav path.** An AVFoundation-played file is asked for `tmcd` alone. Source 2
+  never reaches it, which matters little for `.mov`/`.mp4` in practice.
+- **The precedence has no single home.** Two producers write `tcInfo` on different routes.
+
+The natural seam is to give `MediaInspector.timecode(for:)` (or a successor) the whole precedence and a **source** field
+on `TimecodeReader.Result`, and to route the libav path's container string through the same function.
+
+### 13.3 Every reader of the timecode basis that would change
+
+All CONFIRMED by reading. Each follows `tcInfo` today, so each changes as soon as `tcInfo` carries a `udta` or XMP
+start.
+
+| Reader | File:line | Effect of Stage 4 |
+|---|---|---|
+| **Transport readout**, Source mode | `App/ContentView.swift:3783` (`engine.currentSourceTimecode(at:)`), fallback to elapsed at `:3804` | Premiere MP4s read 01:00:07:18 instead of falling back to elapsed. **The readout must name the source** (new UI) |
+| `FrameEngine.currentSourceTimecode(at:)` | `Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift:2691-2699` | formats `tcInfo`; unchanged code, new input |
+| **Timecode entry** (typed seeks) | `App/TimecodeEntry.swift:154-170` (`TimecodeContext.init`: `startFrame`, `dropFrame`, `hasTimecode` from `engine.tcInfo`); used at `:368`, `:376`, `:406`, `:415` | typed 01:00:07:18 lands on frame 186. Must change **with** the readout so entry and readout never disagree |
+| **Export Frame file names** | `App/WindowDeck.swift:369` (`engine.currentSourceTimecode(at:)` → `FrameFileName.timecodeField`) | names carry 01:00:… instead of elapsed time |
+| **Marker labels** (`TimecodeBasis`) | `App/Markers/MarkerModel.swift:192-199` (`basis` from `engine.tcInfo` through `TimecodeBasis.forFile`, `Packages/ManifoldCore/Sources/Markers/Marker.swift:85-97`) | every marker and chapter label |
+| Marker list, slot and window | `App/Markers/MarkersScopeView.swift:63`, `:266-267` (labels), **`:84`** (the start-override field shows only when `!basis.hasTimecode`) | labels follow. **The override field must stay available when the TC came from `udta`/XMP**, since the override wins over all (below) |
+| Marker editor and strip tooltips | `App/Markers/MarkerEditorSheet.swift:32`, `:213`, `:243-245`; `App/Markers/MarkerModel.swift:287` | labels follow |
+| **EDL / CSV / text export** | `App/Markers/MarkerFileIO.swift:37`, `:133` (`model.basis`) → `ResolveEDL.export`, `MarkerCSV`, `MarkerPlainText` | timecodes in exported files move to 01:00:… for Premiere MP4s, so an export lands on a Resolve timeline at 01:00:00:00 without the override |
+| EDL import placement | `ResolveEDL.place(_:basis:…)` (`Packages/ManifoldCore/Sources/Markers/ResolveEDL.swift:267`), via `MarkerFileIO` | an EDL at 01:00:… places directly; the whole-hour shift offer (MARKERS_PLAN §6.4) stops appearing for these files |
+| "Start timecode now reads differently" check | `App/Markers/MarkerModel.swift:176`, `:456` (`startTimecodeSeen`) | **one-time notice on every Premiere MP4 that already has stored markers**, because the seen value changes from 00:00:00:00 to 01:00:00:00. Expected, and worth a release note |
+| Inspector, Start Timecode row | `App/InspectorPanel.swift:128` (`VideoMetadata.startTimecode`) | should show the same value and source as the readout; today it is filled separately (§13.2) |
+| `AVPlayerEngine.currentSourceTimecode` | `Packages/ManifoldCore/Sources/ManifoldCore/AVPlayerEngine.swift:148`, `tcInfo` at `:67-78` | **not constructed by the app** (no `AVPlayerEngine(` in `App/` or `project.yml`); unaffected unless revived |
+
+### 13.4 The override winning over all
+
+- Today the per-file override (D6) applies **only to files without timecode** (`TimecodeBasis.forFile`,
+  `Marker.swift:85-97`; `MarkersScopeView.swift:84`).
+- It **relabels markers only**. The transport readout, timecode entry and Export Frame names ignore it (MARKERS_PLAN §2,
+  D6).
+- It is stored in the marker document (`MarkerDocument.startOverride`, `Marker.swift:147` onward), so it is **absent when
+  Remember markers between sessions is off** (MARKERS_PLAN §5.2).
+
+"The override wins over all" changes all three. Stage 4 must decide:
+
+1. **The override applies over a `tmcd` too.** `forFile` and the slot field (`:84`) change, and `startTimecodeSeen`
+   compares the override-free value.
+2. **Whether the override also drives the readout, entry and Export Frame names.** That reverses D6's "the readout is
+   unchanged". Robbie's wording ("wins over all") suggests yes, for consistency with the readout naming its source
+   (e.g. "TC from override").
+3. **Where it is stored when Remember is off.** Today it is lost with the session.
+
+These were **D-C17**.
+
+**D-C17, decided (Robbie, 2026-11-16):**
+
+- **(a) Where the override is offered.** Only when the file has **no `tmcd` track and no container timecode**. In Stage 4
+  that **includes files whose timecode comes only from QuickTime user data or XMP**: the override can replace a
+  `udta`/XMP start (it wins over sources 3 and 4). It **never relabels a `tmcd` or container timecode**.
+  - So `TimecodeBasis.forFile`'s rule ("override only without timecode", `Marker.swift:85-97`) becomes "override only
+    without a source-1 or source-2 timecode".
+  - The slot's field (`MarkersScopeView.swift:84`) shows on that condition, not on `!hasTimecode`.
+- **(b) What it drives.** Where it applies, it drives the **transport readout, timecode entry, Export Frame names and
+  markers alike**, so one window never shows two timecodes.
+  - **This reverses D6** (MARKERS_PLAN §9: "the readout is unchanged") for that case. MARKERS_PLAN's D6 entry now points
+    here.
+  - In Stage 4 the override is folded into the one precedence function (§13.5), last, with the source "override", so
+    every reader in §13.3 follows it. That includes `TimecodeContext` (entry), `currentSourceTimecode` (readout) and
+    Export Frame names (`WindowDeck.swift:369`), which ignore it today.
+- **(c) With Remember markers off,** the override is **session-only**, as today: it lives in the marker document, which
+  is not read or written while Remember is off (MARKERS_PLAN §5.2).
+
+
+### 13.5 Stage 4's parts (scope only)
+
+- **Readers:**
+  - `udta` start timecode: a box read in `TimecodeReader`, beside the `tmcd` walk;
+  - XMP `xmpDM:startTimecode`: from Stage 3's XMP reader, with `timeFormat` mapped to rate and drop-frame;
+  - container timecode on the AVFoundation path (source 2).
+- **One precedence function** returning `TimecodeReader.Result` plus a **source**. It is called from every `tcInfo` site
+  in §13.2.
+- **The override (D-C17)** folded into the same function, last.
+- **UI:**
+  - the readout's source label;
+  - the Inspector row's source;
+  - the slot's override field when the TC is not from `tmcd`.
+- **Tests:** precedence (each source alone, each pair, override over all); the W1 Premiere MP4s and `.mov`s as probes;
+  `startTimecodeSeen` across the change.
