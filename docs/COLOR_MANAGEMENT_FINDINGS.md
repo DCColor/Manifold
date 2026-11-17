@@ -8503,6 +8503,170 @@ decision *"correct for PQ"* on the grounds that PQ was measured at the BT.2408 a
 The decision stands for PQ under this definition because 100 nits = 1.0 *is* the reference rendering, not because PQ lands at
 203.
 
+
+#### Levels on the W1 MP4s, and the levels fixtures — tags, Auto's resolution, regression check, 2026-11-17 (read-only, not committed; corrected the same day)
+
+**What happened.** Robbie reported that the W1 Resolve and Premiere H.264/HEVC MP4s (`~/Code/Manifold/fixtures/chapters/w1/`)
+looked washed out at Range = Auto and right at Legal. On the scopes the black floor was about 128 on Auto and about 64 on
+Legal, on a 10-bit scale.
+
+- The first reading of this section took the W1 ProRes `.mov`s as the level reference.
+- They are not one. Robbie had exported **every** W1 Resolve fixture with Deliver ▸ Data Levels = **Full**, the ProRes
+  included. He then used that ProRes as the source of the Premiere exports.
+- ProRes carries no range flag and is read as legal everywhere, so the W1 ProRes files hold full-range codes that every
+  reader takes as legal.
+- A clean set re-exported with Data Levels = Auto (`~/Code/Manifold/fixtures/h264-h265-levels/`, §1) is the reference
+  now. This section is written against it; the earlier conclusions were removed.
+
+**Tools,** all read-only (nothing modified, no build launched):
+
+- `/opt/homebrew/bin/ffmpeg -v trace -i` (the `colr` box);
+- `ffmpeg -bsf:v trace_headers` on the first frame, output to null (the SPS VUI);
+- `/opt/homebrew/bin/mediainfo`;
+- `signalstats` on decoded frames, no range conversion (code values). Frames 100 / 300 / 500 / 650; averages on an 8-bit
+  scale, low (YLOW), high (YHIGH), min and max in 10-bit codes;
+- a scratch Swift script, `~/Code/_scratch/manifold-range/fmtdesc.swift`. It makes the same
+  `CMFormatDescriptionGetExtension` calls the AVFoundation path makes, on the same `AVURLAsset` format description.
+
+##### 1. The reference: the levels fixtures exported with Data Levels = Auto (CONFIRMED)
+
+`~/Code/Manifold/fixtures/h264-h265-levels/`: the same timeline from Resolve and from Premiere (Premiere's source being the
+Auto-levels Resolve ProRes), 2026-11-17 14:04–14:07.
+
+| File | Codec | VUI `video_full_range_flag` | `colr` | AVFoundation `FullRangeVideo` | Avg luma | Low | High | Min | Max |
+|---|---|---|---|---|---|---|---|---|---|
+| `RESOLVE LEVELS_ProRes.mov` | ProRes 422 HQ 10-bit | — | `nclc` 1/1/1 | absent | 80.8 / 68.8 / 94.4 / 115.2 | 128 / 112 / 156 / 240 | 644 / 508 / 624 / 612 | 88 / 88 / 88 / 80 | 908 / 776 / 924 / 896 |
+| `RESOLVE LEVELS_H264.mp4` | H.264 High 8-bit | 0 | `nclx` 1/1/1 full 0 | 0 | 80.8 / 68.7 / 94.4 / 114.9 | 128 / 116 / 160 / 240 | 640 / 504 / 616 / 604 | 16 / 92 / 88 / 72 | 952 / 744 / 928 / 932 |
+| `RESOLVE LEVELS_H265.mp4` | HEVC Main 10 | 0 | `nclx` 1/1/1 full 0 | 0 | 80.8 / 68.9 / 94.4 / 115.1 | 129 / 115 / 159 / 242 | 640 / 503 / 615 / 606 | 55 / 92 / 89 / 67 | 928 / 734 / 931 / 918 |
+| `PREMIERE LEVELS_ProRes.mov` | ProRes 422 HQ 10-bit | — | `nclc` 1/1/1 | absent | 80.9 / 68.9 / 94.5 / 115.2 | 128 / 114 / 157 / 241 | 643 / 507 / 622 / 612 | 87 / 90 / 86 / 81 | 908 / 774 / 925 / 894 |
+| `PREMIERE LEVELS_H264.mp4` | H.264 Main 8-bit | 0 | none | 0 | 81.2 / 68.9 / 94.7 / 115.3 | 132 / 116 / 160 / 244 | 644 / 504 / 616 / 608 | 56 / 96 / 92 / 56 | 940 / 752 / 924 / 900 |
+| `PREMIERE LEVELS_H265.mp4` | HEVC Main 8-bit | 0 | none | 0 | 80.9 / 68.9 / 94.4 / 115.2 | 128 / 116 / 160 / 240 | 640 / 504 / 616 / 608 | 72 / 92 / 92 / 72 | 920 / 744 / 920 / 904 |
+
+- All six are BT.709 (primaries, transfer and matrix 1/1/1, in the VUI or `colr`). mediainfo agrees: Limited for the
+  MP4s, nothing for ProRes.
+- **Tags and data agree.** Every file is tagged limited (or, for ProRes, untagged, which means legal). The data sits in
+  legal range, apart from small compression overshoots in the MP4s. The six agree within 0.4 on the averages and within
+  a few codes on the low and high points.
+- `RESOLVE LEVELS_H264/H265.mp4` report a 30.10 s container duration, against 30.03 s for the other four. Their frames
+  line up with the others; why the container is longer is **UNKNOWN** (not examined).
+- So **with Auto, all six resolve to Legal and are shown correctly and identically** (§2).
+
+##### 2. What Manifold's Auto resolves (CONFIRMED by reading the code; per file from the same API call)
+
+**Path.** H.264 and HEVC in `.mp4`, and ProRes in `.mov`, take the **AVFoundation** path. libav decodes only DNxHR (`AVdh`,
+`AVdn`, `dnxh`, `dnxd`: `MediaInspector.requiresLibavDecode`, `Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift:259-265`)
+and MXF. So the libav `color_range` read in `beginLibavReading` (`FrameEngine.swift:3731`, `:3752`) never runs for these
+files.
+
+**The one tag read, and the order:**
+
+1. At load, from the video track's **first format description**:
+   `sourceRange = MediaInspector.sourceColorRange(for: fmt)`
+   (`Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift:3026`; the re-inspect path is `:1875`).
+2. `sourceColorRange` reads **only** `kCMFormatDescriptionExtension_FullRangeVideo` (`MediaInspector.swift:392-399`):
+   - true → `.full`;
+   - false → `.videoLegal`;
+   - absent, or not a Bool → `.untagged`.
+   Manifold never parses the `colr` box or the VUI itself. Which of the two AVFoundation turns into that extension, when
+   both exist, is AVFoundation's business; here they never disagree.
+3. `updateEffectiveRange` (`FrameEngine.swift:3632-3644`): Auto is full **only** for `.full`. `.videoLegal` and
+   `.untagged` both become legal.
+4. The shader gets that flag through `isFullRangeProvider` (`App/WindowDeck.swift:1163`, `App/MetalVideoRenderer.swift:35`):
+   - full → **passthrough**;
+   - legal → **expand** 64…940 to full.
+
+**Per file:**
+
+| Files | `FullRangeVideo` | `sourceRange` | Auto | Data | Result |
+|---|---|---|---|---|---|
+| Levels fixtures, all four MP4s | 0 | `.videoLegal` | expand | legal | correct |
+| Levels fixtures, both ProRes | absent | `.untagged` | expand | legal | correct |
+| W1 `resolve_chapters - h264/h265.mp4` (V1, Data Levels = Full) | 1 | `.full` | passthrough | **full** | correct (§3) |
+| W1 `resolve_chapters - h264/h265_V2.mp4`, `RESOLVE LEVELS_H264/H265.mp4` | 0 | `.videoLegal` | expand | legal | correct |
+| W1 `resolve_chapters - prores.mov` (Full export) | absent | `.untagged` | expand | **full** | **blacks crushed**: full codes expanded as legal |
+| W1 `premiere_chapters - h264/h265.mp4` (from that ProRes) | 0 | `.videoLegal` | expand | **full** | **blacks crushed**: the same codes, tagged limited |
+| W1 `premiere_chapters - prores.mov` | absent | `.untagged` | expand | **full** | **blacks crushed** |
+
+**Logs.** The resolved range and its provenance are **not logged**. The only readouts are the chain readout
+(`App/DisplayChainModel.swift:242`, "full" / "limited" / "range unknown") and the Inspector's Range row
+(`App/InspectorPanel.swift:23-25`, `VideoMetadata.colorRange` from the same function, `MediaInspector.swift:57`). So no
+launch was made: the brief allowed one only if logs carried the range.
+
+##### 3. The W1 files against the reference (CONFIRMED)
+
+**Tags.** In no W1 file do the bitstream and container disagree.
+
+| W1 file | VUI full flag | `colr` | AVFoundation `FullRangeVideo` |
+|---|---|---|---|
+| `resolve_chapters - h264.mp4`, `h265.mp4` (V1) | 1 | `nclx` 1/1/1 full 1 | 1 |
+| `resolve_chapters - h264_V2.mp4`, `h265_V2.mp4` | 0 | `nclx` 1/1/1 full 0 | 0 |
+| `premiere_chapters - h264.mp4`, `h265.mp4` | 0 | none | 0 |
+| `resolve_chapters - prores.mov`, `premiere_chapters - prores.mov` | — | `nclc` 1/1/1 | absent |
+
+**Data.** The V1 MP4s, both W1 ProRes files and the Premiere MP4s made from them all carry the **same codes**. Averages
+75.7 / 61.8 / 91.6 / 115.9, low points about 74–76 / 60 / 108–112 / 207–208.
+
+- That is the reference picture in **full-range codes**: 64 + 74 × 876/1023 = 127 against the reference's 128.
+- The **V2 MP4s** (2026-11-17 13:51, Data Levels no longer Full) and `RESOLVE LEVELS_H264/H265.mp4` in `w1/` carry the
+  reference's legal codes (averages 80.8 / 68.8 / 94.4 / 115.0, lows about 128 / 115 / 159 / 241), as they should.
+  They are correct exports.
+
+**What the screen shows.** As fractions of the signal range, low points:
+
+| | Frame 100 | 300 | 500 | 650 |
+|---|---|---|---|---|
+| Reference shown as legal | 7.3 % | 5.7 % | 10.6 % | 20.2 % |
+| V1 shown as full (Auto) | 7.4 % | 5.9 % | 10.9 % | 20.3 % |
+| V1 expanded as legal (Legal override) | 1.4 % | −0.5 % | 5.4 % | 16.4 % |
+
+- **Auto showed V1 correctly.** It matches the reference within 0.3 % of signal.
+- The Legal override crushed V1's blacks.
+- Robbie's "black at about 128 on Auto" is the picture's real low point (the reference's own YLOW is 128), not a lift.
+- "Correct at Legal" was judged against the W1 ProRes and Premiere files, which every reader shows with crushed blacks.
+
+##### 4. Regression check: `.build-run` (build 26) against HEAD (CONFIRMED by reading)
+
+- `.build-run`'s `Info.plist` says `CFBundleVersion` **26** (built 2026-11-15 13:36). **537726a is already build 27**
+  (`project.yml:459` at that commit). The last build-26 commit is `e8c4696` ("chore(release): 0.9.4"), the parent of the
+  bump `fbb67a8`. So both were compared with HEAD.
+- `sourceColorRange` (`MediaInspector.swift`) and `updateEffectiveRange` (`FrameEngine.swift`) have **identical bodies**
+  at `e8c4696`, at `537726a` and at HEAD (`git show`, compared function by function). The call at load is the same line
+  (`FrameEngine.swift:3020` at 537726a, `:3026` now).
+- `git diff 537726a HEAD` and `git diff e8c4696 HEAD`, searched for `isFullRange`, `sourceRange`, `updateEffectiveRange`,
+  `FullRangeVideo`, `rangeOverride`, `bufferColorRange`, `effectiveIsFullRange`, `color_range` and
+  `requiresLibavDecode`: **no code line**. The one hit is a line in `docs/CHAPTER_MARKERS_PLAN.md`.
+- `LibavFrameSource.swift` and `MXFDeclaredRange.swift` are unchanged since build 26.
+- This week's `MetalVideoRenderer.swift` and `PassthroughShader.metal` changes are the scopes (YRGB parade, graticules,
+  rgba16Float wording), not the range expansion.
+- **No change to range resolution this week.** Build 26 resolves these files the same way, by the code. It was not
+  launched to confirm.
+
+##### 5. QuickTime Player and Resolve with the same tags
+
+- **QuickTime Player** reads files through the same AVFoundation, whose `FullRangeVideo` is measured above for every
+  file. Apple's pipeline decodes a full-tagged H.264/HEVC as full and a limited one as legal, and has no range flag to
+  read on ProRes. So QuickTime is **expected** to show the reference set and V1 correctly, and the W1 ProRes and
+  Premiere files with crushed blacks, as Manifold does. **UNKNOWN until QuickTime Player is looked at**: it was not
+  launched.
+- **Resolve** writes the range flag to follow Deliver ▸ Data Levels: Full gave `nclx` full 1 and VUI 1 (V1), and the
+  default gave full 0 and VUI 0 (V2, the levels fixtures). That is CONFIRMED from these exports. How Resolve's Clip
+  Attributes ▸ Data Levels "Auto" reads the flag back is **UNKNOWN** (not launched).
+
+##### Conclusion
+
+**No Manifold defect.** Auto resolved every file from its tag (§2), and every H.264/HEVC tag matched its data:
+
+- V1 was full and tagged full;
+- V2, the Premiere-from-Auto files and the levels fixtures are legal and tagged legal.
+
+The files that look wrong are the W1 ProRes exports made with Data Levels = Full, and the Premiere MP4s made from them.
+- They carry full-range codes in a form every reader takes as legal: ProRes has no range flag, and Premiere tagged its
+  MP4s limited.
+- That is a fixture-making error, not a tagging bug in any app.
+- Use `~/Code/Manifold/fixtures/h264-h265-levels/` for level checks. The W1 files remain valid for chapters, but not
+  for levels.
+- Nothing changed in range resolution since build 26 (§4).
+
 ---
 
 ## 7. Open and unverified
