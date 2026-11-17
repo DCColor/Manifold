@@ -613,7 +613,7 @@ the entries at a spacing that is not a multiple of a frame or of the transport c
 
 ---
 
-## 11. Measurement build (built 2026-11-16; not soaked)
+## 11. Measurement build (built 2026-11-16; Stage 1 night 1 in §12)
 
 **Commit `3f05914`** (the measurement build's code; its docs are `d105e81`). **Candidate binary:** `.build-pullphase`, a plain Profile
 build, unsigned, written 2026-11-16 12:19:11, sha256 `fcb2a2edaa4c6a0d901db4cee874261f5a609c866695fac7782997d1ac31fd8f`.
@@ -854,3 +854,358 @@ The 2 missed deadlines in `rc-5994-sdi-2` correct nothing in §5: the three hold
 **Unknown going in:**
 - The log volume at `=2`: roughly 3× today's lines per pull, plus one `[TICKPHASE]` per frame. Inference: ~100 MB per hour at 59.94.
 - Whether that much stdout write perturbs anything. The timing check decides it.
+
+---
+
+## 12. Stage 1, night 1 (failed timing check)
+
+Run 2026-11-16, 19:35–23:10, by `~/Code/_scratch/manifold-cardpull-s1/soak.sh main`, candidate `3f05914` (sha256 checked by `need`).
+All five blocks ran to the end; guard clean before and after each and after the night. **The timing check failed on all five blocks**
+(`timing.report`), so by §11.6's rule the night's results do not count. This section is a read-only analysis of why, and of which
+findings stand regardless. Nothing was built, launched or written except this section. Host times are converted to wall clock from
+`mach` seconds; checked against `NSLog` timestamps in the same logs to within 0.06–0.3 s (the drain's lag).
+
+**The failures, as `timing-check.py` printed them:**
+
+| Block | Pacer median / p99 / max (ms) | Missed | Failed on |
+|---|---|---|---|
+| `pp-2398-cmp` | 13.91 / 13.92 / 27.81 | 3 | max > 14.01 + 0.5; missed > 0 |
+| `pp-gop25-sdi` | 13.34 / 13.35 / 26.68 | 6 | max > 13.42 + 0.5; missed > 0 |
+| `pp-2398-cmp-lst` | 13.91 / 13.92 / 27.81 | 3 | max; missed > 0 |
+| `pp-5994-sdi-lst` | 8.35 / 8.36 / 16.69 | 47 | missed > 2 |
+| `pp-5994-sdi-ms6` | 8.35 / 8.36 / 16.70 | 26 | missed > 2 |
+
+Every failing max is one missed deadline (≈ 2 P). Median and p99 passed everywhere; window late+dropped passed on blocks 1–2.
+
+### 12.1 The rig was not the 0.9.4 rig
+
+**Slot layout. The keys** (domain `com.graviton.manifold`): `manifold.scope.slot0`, `.slot1`, `.slot2` (`App/WindowChrome.swift:99-101`),
+read at window creation with fallbacks `waveform`, `parade`, `cie` (`:238-240`); also `showTray`, `manifold.scope.trayHeight`
+(`:98`, `:103`) and `manifold.markers.slotThumbnails` (`App/Markers/MarkersScopeView.swift:28`, default on). Written only when a slot is
+picked (`WindowChrome.swift:152-154`); `rc-soak.py` writes no defaults (`scripts/decklink-loopback/rc-soak.py:11`, `:16`).
+
+**Read with `defaults read` at 23:35 (nothing written):** `slot0 = yrgb`, `slot1 = meters`, `slot2 = meters`, `showTray = 1`,
+`trayHeight = 440.3203125`, `controlDisplayMode = overlay`; `manifold.markers.slotThumbnails` absent (so on). Plist last modified 22:52:52,
+during the ms6 block's launch.
+
+- **The soak binary has no YRGB scope.** CONFIRMED: `nm` finds 0 YRGB symbols in `.build-pullphase` (219 `WaveformScope`, 37
+  `MarkersScopeView`); `App/YRGBScope.swift` was written 17:40, the binary 12:19. A stored `yrgb` falls back to slot 0's default,
+  `waveform` (`WindowChrome.swift:238`; `App/ContentView.swift:20-21` documents the fallback).
+- **So Stage 1 ran Waveform | Audio Meters | Audio Meters, with no Markers slot.** CONFIRMED for the values as read; that they were
+  the same at 19:45 is UNKNOWN (inference: yes — the last session that picked slots is `~/Code/_scratch/manifold-scopes095/yrgb-perf2.log`,
+  last written 18:37, whose `[SCOPE-PERF]` lines open with Parade, Waveform and YRGB and later show `AudioMeterScopeView`; nothing in the
+  soak writes them).
+- **The hypothesis's layout, Waveform | Parade | YRGB, was the start of that 18:37 session, not the stored end state.**
+- **Markers slot NOT FOUND: explained.** CONFIRMED: no slot held `markers`, so `rc-soak-ax gear` found no gear (`rc-soak.py:129-131`),
+  and all 12 Regenerates were `no-gear`. Stage 1 therefore did *less* thumbnail work than 0.9.4, not more.
+- **0.9.4's layout: one slot was Markers** (CONFIRMED: "Markers slot open" in every 0.9.4 video block, 0.9.4 `soak.out`). **The other two
+  are UNKNOWN.** No log line names slot kinds, `[SCOPE-PERF]` was off on both nights (`App/ScopePerf.swift:19` needs
+  `MANIFOLD_SCOPE_PERF=1`), and no stash of the keys exists under `~/Code/_scratch` or `docs/`.
+
+**Signing and licence: a second rig difference, not in the hypothesis.** CONFIRMED:
+- The 0.9.4 candidate (`.build-rc094`) is Developer ID signed (TeamIdentifier `8UQ7MDM87B`); the Stage 1 candidate is ad-hoc, built with
+  `CODE_SIGNING_ALLOWED=NO` (§11.6).
+- Every Stage 1 launch: the licence keychain read took 7.2 s and returned −128, `[LICENSE] state: KEYCHAIN UNREADABLE`, twice per launch
+  (the second 20 s into the first Play, in every block; no missed deadline within 40 s of it). `rc-soak.py` denies that prompt (`:53-57`) at launch and every
+  30 s while SecurityAgent runs (`:196`). Use is still permitted (`App/LicenseManager.swift:530`). 0.9.4: `LICENSED (Standard)` in 0.46 s.
+- Whether SecurityAgent stayed alive during the blocks: UNKNOWN (not running at 23:36).
+
+**Display: the same on both nights, not a rig difference.** CONFIRMED from the `[LINK]` lines, 3 per log, in all 10 0.9.4 logs
+(7 blocks, 3 setups) and all 5 Stage 1 logs:
+- The window opens on display 5 `"LG TV SSCR2" (120.000 Hz)` (`window shown`; e.g. `rc-5994-sdi-1.log:10`, `:22`);
+- ~10 s later `rc-soak.py` moves it to display 3 `"ASUS PA147" (59.936 Hz)` (`window moved`; `rc-5994-sdi-1.log:70`). That is
+  before output starts (`[PACER] started`, `:79`), and no later `[LINK]` line follows in any block.
+- The move is `sh(AXT, str(pid), "place", title, "ASUS")` (`scripts/decklink-loopback/rc-soak.py:123`; `:229` in markers-setup), in the
+  driver since `94dc2de` (2026-11-14), before both nights.
+- So every timed block on both nights (0.9.4 and Stage 1) ran its window on the ASUS at 59.936 Hz. The saved window position plays no part.
+  Resolution: not logged (UNKNOWN from the logs).
+
+**Time:** 19:45–23:10 against 0.9.4's 23:00–06:08.
+
+### 12.2 Where the missed deadlines are, and what they coincide with
+
+A missed deadline is a pacer tick whose `tick()` ran past the next deadline (`App/OutputPacer.swift:131-136`); the next interval is 2 P.
+`[TICKPHASE]` is written for new-frame ticks only and carries that tick's interval and the previous tick's duration (§11.4), so a miss is
+pinned exactly when the tick after the gap chose a new frame.
+
+| | 23.976 / 25 blocks (12 misses) | 59.94 blocks (73 misses) |
+|---|---|---|
+| Pinned by `[TICKPHASE]` | 0 | 73 |
+| The tick that overran | a new-frame tick, by elimination (an overrun repeat tick would show as a 2 P interval on the next new-frame tick; none did) | a repeat tick (no new frame) in 72 of 73 |
+| Its duration | not recorded | 8.4–16.2 ms; that block's repeat ticks: median 0.007 / 0.178 ms, p99 2.49 / 2.73 ms |
+| `nextDrawable` max in the miss's window | 0.03 ms | ≤ 0.34 ms |
+
+What a repeat tick does at 59.94: serves a present the present gate deferred (`App/MetalVideoRenderer.swift:3481-3482`;
+`servePacedPresent`, `:4455-4485`: `makeCommandBuffer`, `nextDrawable`, `encodeDisplayStage`, `commit`). So **in every block the tick
+that overran is the tick that does the desktop present**. Only `nextDrawable` is timed, and it was fast; which call took the time is
+UNKNOWN.
+
+**The desktop present path behaved differently this night at 59.94** (`[PACER] desktop` lines, playing windows only):
+
+| | Windows with in-flight holds | Misses in those windows | Presented/s median |
+|---|---|---|---|
+| `pp-5994-sdi-lst` | 154 of 186 (83 %) | 45 of 47 | 56.9 |
+| `pp-5994-sdi-ms6` | 87 of 101 (86 %) | 25 of 26 | 59.4 |
+| 0.9.4 `rc-5994-sdi-1` | 120 of 356 (34 %) | 0 | 59.9 |
+| 0.9.4 `rc-5994-sdi-2` | 89 of 356 (25 %) | 1 of 2 | 59.9 |
+
+In-flight holds alone do not cause misses (0.9.4 had them without). At 23.976/25 neither night had any.
+
+**Render cost did not rise.** `[RENDER-PERF]` p99, Stage 1 against 0.9.4, same file and destination: draw 0.03–0.04 against 0.03–0.04 ms;
+render GPU 0.18–0.24 against 0.18–0.23 ms at 24/25, and 0.46 / 0.39 against 0.67 / 0.68 ms at 59.94 (lower).
+
+**Scope compute: UNKNOWN.** Not logged on either night. Scopes encode on their own queue, from the render's completion
+(`MetalVideoRenderer.swift:4218`, `:4906`), not on the pacer thread; they can reach the pacer only through GPU or compositor contention.
+Stage 1's effective layout had one GPU scope (Waveform) and two Audio Meters, which draw on their own timer (`App/ContentView.swift:23-25`);
+0.9.4 had 0–2 GPU scopes (UNKNOWN which).
+
+**The measurement build itself: not excluded.** Against it: the 59.94 overruns are on repeat ticks, which record nothing; the drain holds
+its lock only for a buffer swap (`App/CardPullPhaseLog.swift:98-102`). For it: `=2` writes 3.5–4.3× the 0.9.4 log volume (48–50 MB/h at
+24/25, 122–134 MB/h at 59.94, against 0.9.4's 14 and 31 MB/h and §11.6's ~100 MB/h inference) in one `print` per 100 ms (`:108`), while `[RENDER-PERF]` and
+`[PLAYBACK-STATS]` print from the tick thread (`MetalVideoRenderer.swift:4598`, `:1680`), and a 4 ms main-queue heartbeat runs only at
+`=2`. Neither side is measured.
+
+**Other processes: nothing logged. UNKNOWN.**
+
+**Time of day: no pattern.** The 59.94 misses run at 1–2 a minute through both blocks (22:21–22:51, 22:54–23:07). The 12 others:
+19:52, 20:11, 20:45, 20:58, 21:04, 21:07, 21:08, 21:28, 21:33, 21:50, 22:06, 22:18 — none within 5 min of 20:00. When the NAS backup
+actually ran: UNKNOWN. Spotlight: the fixtures' contents date from Nov 10 and Nov 15 (mtime), not today; their ctime changes at each
+launch. Whether Spotlight indexed the growing `.log` files: UNKNOWN.
+
+**Verdict on the cause: UNKNOWN.** The overruns are on the present path, at a time the present path was slower, under a window state that
+differed from 0.9.4 (tray contents, possibly tray height) and a build that differed (logging, signing). The data points at the window's
+presentation, not the pull or the logging hooks, but a run is needed to separate the two (§12.6).
+
+### 12.3 The three holds
+
+| Block, time | `[LATE-SWAP]` | Missed deadline | Pull before |
+|---|---|---|---|
+| `pp-gop25-sdi` 21:44:22.43, pts 1908.36 repeated | `crossing`, `held yes`, interval 13.333 ms | none within 0.2 s | `newest`, lead 8.73 ms < P 13.33 |
+| `pp-5994-sdi-lst` 22:37:44.97, pts 12.262 repeated | `pacer`, `held yes`, interval 16.684 ms | yes, pinned (the same tick) | `newest`, lead 7.68 ms < P 8.34 |
+| `pp-5994-sdi-lst` 22:43:26.58, pts 7.774 repeated | `pacer`, `held yes`, interval 16.675 ms | yes, pinned (the same tick) | `newest`, lead 7.59 ms < P 8.34 |
+
+- **One crossing, two pacer misses.** None is at a forced event.
+- **All three share the precondition of §4–§5:** the handed frame was the newest and its lead under P, so a swap one tick late meant
+  the card repeated. Each recovered on the next pull (`branch due`).
+- **New:** a missed pacer deadline is a second source of the one-tick-late swap. §5 knew only crossings. Option C (§7) removes crossings,
+  not these.
+
+`[PULLPHASE] summary` `holds` counts every `held`-branch pull, about one per Play (the Play's opening repeat). It is not the gate's
+hold count, which is `rc-soak-report.py`'s slot rule.
+
+### 12.4 Every natural `[LATE-SWAP]`, by class
+
+Joined to its `[TICKPHASE]` by pts and file order. "Near a miss": within ±2 ticks of a pinned miss, or in the `[RENDER-PERF]` second of an
+unpinned one. "Forced": within ±1 tick of a `[LATE-SWAP-TEST]` frame (listed for completeness, not natural).
+
+| Block | Away from misses | Near a miss | At a forced event |
+|---|---|---|---|
+| `pp-2398-cmp` | crossing 183 | 0 | – |
+| `pp-gop25-sdi` | crossing 47 | 0 | – |
+| `pp-2398-cmp-lst` | crossing 52 | 0 | main 1, other 6 |
+| `pp-5994-sdi-lst` | 0 | pacer 14 | main 5, other 3 |
+| `pp-5994-sdi-ms6` | crossing 210 | pacer 19 | render 9 |
+
+**Away from misses: 492 of 492 are crossings. Near misses: 33 of 33 are `pacer`. Natural `decode`, `render`, `main`, `other`: 0.**
+
+Crossing Plays: 4, 1, 1, 0, 3 per block. The summary's `crossings` field counts runs (18, 6, 9, 0, 50): one crossing is split into
+several runs as the 48-swap baseline catches up, so it over-counts.
+
+### 12.5 The forced swaps
+
+33 firings, 11 per block, not §9.3's ~245. §11.3's semantics fire all entries already passed as one event, and the transport's
+random seeks pass most entries at once ("236 / 193 / 113 earlier entries passed"). 6 are **catch-up** firings on a Play's first new frame
+(the pull before was the paused hold, lead ≈ 2 s; the prediction does not apply). 27 are **steady**, in only two Plays per block.
+
+| Block | Steady events | Pull before the forced frame | Prediction | Outcome | Lead at first take |
+|---|---|---|---|---|---|
+| `pp-2398-cmp-lst` (P 13.90) | 6 + 3 | lead 57.2–57.6 ms `behind 1`; 29.8–30.0 ms `newest` | no hold | no hold, 9/9 | 43.5–43.7; 15.8–16.1 ms |
+| `pp-5994-sdi-lst` (P 8.34) | 6 + 3 | 15.6–16.1 ms `newest`; 23.3–23.5 ms `newest` | no hold | no hold, 9/9 | 7.4–7.8; 15.4–15.5 ms |
+| `pp-5994-sdi-ms6` (6 ms) | 6 + 3 | 15.6–17.0 ms `newest`; 23.3–23.5 ms `newest` | no hold | no hold, 9/9 | 9.1–10.3; 15.9–16.0 ms |
+
+- **27 of 27 steady events match the prediction, all in its "no hold" half.** Every Play that got events had lead ≥ P (≥ 6 ms for
+  ms6), so the half that predicts a hold was never exercised. **P4 and P5 are untested, not passed.**
+- **The forced delay consumed what it should:** about P per event in ticks mode (13.6–14.0 ms; 8.1–8.4 ms), and 6.5–7.5 ms for ms6.
+- **No forced event was within ±2 ticks of a missed deadline.**
+- Window `late` +1 per firing (P4): not checked here.
+
+### 12.6 Against the predictions (§9.3, §11.6), and what survives
+
+| # | Result | Survives the perturbation? |
+|---|---|---|
+| P1 | Blocks 1–2: 230 of 230 late swaps `crossing`, none near a miss | **Yes.** Each is classified on its own evidence, away from any miss |
+| P2 | Crossing Plays 4 and 1 (within 0–6). Slope against **−ppm: 0 of 5. Against +ppm, the sign as logged: 5 of 5** within ±3 µs/s (9 of 9 over all blocks; 273 of 280 steady Plays). The prediction had the sign wrong; the mechanism (x drifts at the card's rate) holds | **Mechanism: yes. Counts: no** (rig-dependent) |
+| P3 | 1 hold in blocks 1–2, a crossing with exactly P3's shape | **Shape: yes. Count: no** |
+| P4 | Ticks mode: 18 of 18 steady events no hold, as predicted; 0 skips; the hold half untested | **Untested** |
+| P5 | ms6: 9 of 9 no hold, as predicted; the hold half untested | **Untested** |
+| P6 | 0 freezes, 0 renderer recoveries or near-misses, `dropped-records 0` in every summary; **timing check FAILED** | Buffer and gate counts: yes. "`=2` does not perturb": **not established** |
+| P7 | `queued` negative on 369,555 of 369,555 new-frame ticks | **Yes** |
+
+**Survives:** every natural late swap away from a missed deadline is a crossing (492/492); a crossing's drift is the card's rate; a hold
+needs a newest frame with lead under P and then a one-tick-late swap (3/3); every frame is queued before its tick; the forced switch
+delays by what it says; the measurement buffer never overflowed.
+
+**Does not survive:** that `=2` leaves timing unperturbed; all rates and counts (holds, crossings per block, late per hour, exposure);
+the 59.94 result of 0 crossings in `pp-5994-sdi-lst`; anything about P4/P5's hold half.
+
+### 12.7 Rerun
+
+**Needed: all five blocks.** All failed the timing check, and the forced blocks cannot test P4/P5's hold half as built. Robbie's
+decisions before the rerun:
+
+1. **Layout.** 0.9.4's other two slots are UNKNOWN, so they cannot be restored, only fixed from now on. Proposed: Waveform | Parade |
+   Markers. Waveform and Parade are the code defaults for slots 0 and 1, and Markers is needed for the gate's markers check. Record the
+   chosen values here and use them on every later night.
+2. **A same-night control**, because the 0.9.4 references were taken under an unknown layout: one 30-min `pp-5994-sdi` block with
+   `=1` (or the signed `.build-rc094`) under the restored layout, before the `=2` blocks. 59.94 is where the misses are. If the control
+   also misses deadlines, the rig is the cause; if it does not, the logging is. This adds a reference to criteria fixed before the run.
+3. **Signing:** sign the candidate as 0.9.4 was (no keychain prompt, `LICENSED`), or keep it ad-hoc and accept the difference.
+4. **Forced blocks:** with these semantics and random seeks, expect about 11 events per block in about 3 Plays. To exercise the hold half
+   needs events in Plays with lead < P: either a switch that re-arms its entries at each Play (a DEBUG-only code change) or many more
+   Plays.
+
+**Restore sequence (not executed).** Run with no Manifold build running. Every write is preceded, in the same `&&` chain, by a read that
+succeeded; the chain stops at the first failure.
+
+```zsh
+D=com.graviton.manifold; R=$HOME/Code/Manifold/Manifold
+ST=$HOME/Code/_scratch/manifold-cardpull-s1/prefs-stash-$(date +%Y%m%d-%H%M%S).txt
+$R/scripts/manifold-proc.sh guard \
+ && s0=$(defaults read $D manifold.scope.slot0) \
+ && s1=$(defaults read $D manifold.scope.slot1) \
+ && s2=$(defaults read $D manifold.scope.slot2) \
+ && st=$(defaults read $D showTray) \
+ && [[ -n $s0 && -n $s1 && -n $s2 && $st == 1 ]] \
+ && print -r -- "manifold.scope.slot0 $s0"$'\n'"manifold.scope.slot1 $s1"$'\n'"manifold.scope.slot2 $s2" > $ST \
+ && [[ $(wc -l < $ST) -eq 3 ]] \
+ && defaults write $D manifold.scope.slot0 -string waveform \
+ && defaults write $D manifold.scope.slot1 -string parade \
+ && defaults write $D manifold.scope.slot2 -string markers \
+ && [[ $(defaults read $D manifold.scope.slot0) == waveform ]] \
+ && [[ $(defaults read $D manifold.scope.slot1) == parade ]] \
+ && [[ $(defaults read $D manifold.scope.slot2) == markers ]] \
+ && echo "set; stash $ST"
+```
+
+To put the afternoon's values back after the rerun (`ST` = that stash file):
+
+```zsh
+D=com.graviton.manifold; R=$HOME/Code/Manifold/Manifold; ST=<stash file>
+$R/scripts/manifold-proc.sh guard \
+ && [[ -s $ST ]] \
+ && c0=$(defaults read $D manifold.scope.slot0) && c1=$(defaults read $D manifold.scope.slot1) && c2=$(defaults read $D manifold.scope.slot2) \
+ && o0=$(awk '$1=="manifold.scope.slot0"{print $2}' $ST) && o1=$(awk '$1=="manifold.scope.slot1"{print $2}' $ST) \
+ && o2=$(awk '$1=="manifold.scope.slot2"{print $2}' $ST) \
+ && [[ -n $c0 && -n $c1 && -n $c2 && -n $o0 && -n $o1 && -n $o2 ]] \
+ && defaults write $D manifold.scope.slot0 -string $o0 \
+ && defaults write $D manifold.scope.slot1 -string $o1 \
+ && defaults write $D manifold.scope.slot2 -string $o2 \
+ && [[ $(defaults read $D manifold.scope.slot0) == $o0 && $(defaults read $D manifold.scope.slot1) == $o1 \
+       && $(defaults read $D manifold.scope.slot2) == $o2 ]] \
+ && echo restored
+```
+
+`manifold.scope.trayHeight` (440.32 now; 0.9.4's UNKNOWN) and `controlDisplayMode` are left as they are.
+
+---
+
+## 13. Stage 1, night 2 (rerun; timing check passed)
+
+Run 2026-11-16 23:59 to 2026-11-17 03:45, by `~/Code/_scratch/manifold-cardpull-s1r/soak.sh main <stash>`, candidate `3f05914`
+(sha256 `fcb2a2ed…` checked by `need`). All four blocks ran to the end. The guard was clean before and after each block and at
+exit, and no zoom.us process was running at setup or before any block. **The timing check passed on all four blocks**
+(`timing.report`), with §11.6's criteria unchanged, so the night's results count. Rig state is recorded in `RIG.md` in that folder.
+
+### 13.1 Rig
+
+| | Night 1 (§12) | Night 2 |
+|---|---|---|
+| Slots | yrgb (→ Waveform) \| meters \| meters, no Markers (§12.1) | **Waveform \| Parade \| Markers**, set by §12.7's sequence; the earlier values stashed in `prefs-stash-20261116-235904.txt` and restored at exit (`soak.out`: "slots restored: yrgb \| meters \| meters", re-read afterwards) |
+| Signing | ad-hoc, licence prompt denied | ad-hoc, unchanged (CONTROL is the same binary) |
+| Zoom | **running, no windows** (Robbie) | closed; `ps -axo comm=` at setup and before each block (`zoomcheck`) |
+| Window display | ASUS PA147, 59.936 Hz (§12.1) | ASUS PA147, 59.936 Hz in all 4 blocks (`<label>.json` `window_display`, from `[LINK]`). `system_profiler` at each block start: ASUS PA147 **1920 × 550** @ 60.00 Hz; LG TV SSCR2 3840 × 2160 @ 120 Hz, main (`soak.out`) |
+| Markers | `no-gear` in all 12 Regenerates | Markers slot open in all 4 blocks; 21 Regenerates, all remade 5, none made while playing (MARKERS PASS, `soak.report:108`) |
+| Forced blocks | 3 | none |
+| Time | 19:45–23:10 | 00:09–03:45 (0.9.4: 23:00–06:08) |
+
+The ASUS is 1920 × 550, not 1920 × 1080 class. That was true on both earlier nights too (same panel, §12.1).
+
+Driver change for this night: `scripts/decklink-loopback/rc-soak.py` gained an opt-in `RC_EXPECT_DISPLAY` check after the window is
+placed. It logs the window's display, and if the window is on any other display it quits by PID and the block is skipped (exit 8).
+Unset, nothing changes. Uncommitted.
+
+### 13.2 The control against the logged blocks
+
+Read with `analyze.py` (same folder), which reproduces §12.2's figures from night 1's logs (154 of 186, 45 of 47, 56.9/s). Misses are
+summed from the `[PACER]` 10 s lines, which print at `=1` and `=2` alike. "In-flight" means playing 10 s windows whose paired
+`[PACER] desktop` line shows in-flight holds.
+
+| Block | Log | Min | Pacer median / p99 / max (ms) | Missed | Missed / h | Playing windows with in-flight holds | Presented/s median | Window late / dropped |
+|---|---|---|---|---|---|---|---|---|
+| `ctl-5994-sdi` **CONTROL** | `=1` | 30 | 8.35 / 8.36 / 8.45 | **0** | 0 | 37 of 186 (20 %) | 59.9 | 3 / 4 |
+| `pp-5994-sdi` | `=2` | 60 | 8.35 / 8.36 / 16.68 | **2** | 2 | 101 of 356 (28 %) | 59.9 | 15 / 6 |
+| `pp-2398-cmp` | `=2` | 60 | 13.91 / 13.92 / 13.98 | 0 | 0 | 0 | 24.0 | 21 / 3 |
+| `pp-gop25-sdi` | `=2` | 60 | 13.34 / 13.36 / 13.43 | 0 | 0 | 0 | 25.0 | 16 / 34 |
+| *0.9.4 `rc-5994-sdi-1` / `-2`* | `=1` | 60 | 8.35 / 8.36 / 8.46 · 16.68 | *0 / 2* | *0 / 2* | *120 / 89 of 356* | *59.9* | *11 / 12 · 10 / 11* |
+| *Night 1 `pp-5994-sdi-lst` / `-ms6`* | `=2` | 30 / 15 | 8.35 / 8.36 / 16.69 · 16.70 | *47 / 26* | *94 / 104* | *154 of 186 / 87 of 101* | *56.9 / 59.4* | *18 / 5 · 3 / 4* |
+
+**Against the criteria written before the run (`RIG.md`):**
+- CONTROL had 0 misses, and block 2 had 2 in 60 min, the same as 0.9.4's `rc-5994-sdi-2`. So the rig-cause branch ("CONTROL similar to
+  block 2") does not apply: both are at 0.9.4's level. The logging-cause branch ("CONTROL ~0 **and block 2 many**") does not apply either:
+  block 2 did not have many.
+- **Verdict: `=2` logging does not perturb the window's timing.** It ran at 2 misses an hour at 59.94 and 0 at 23.976 and 25, all
+  within the 0.9.4 references. **Night 1's 85 misses came from the rig, not the logging.** Night 2 changed several rig factors together:
+  the slots (Waveform | Parade | Markers instead of Waveform | Meters | Meters), Zoom closed, the time of night. So which of them was
+  the cause is UNKNOWN. Signing and display did not change between the nights.
+- Desktop presentation is back at 0.9.4's level: 59.9 presented/s, and in-flight holds in 20–28 % of playing windows at 59.94
+  (0.9.4: 25–34 %; night 1: 83–86 %).
+
+**The 2 misses in `pp-5994-sdi`**, both pinned by `[TICKPHASE]` (interval > 1.5 P):
+- `pp-5994-sdi.log:65390`, ~00:46:54: interval 16.673 ms, prev-tick 9.156 ms.
+- `:640229`, ~01:27:16: interval 16.674 ms, prev-tick 8.457 ms.
+
+The tick before each one overran, as on night 1. Neither produced a `[LATE-SWAP]` or a hold. Wall times are converted from host
+seconds using the `[ARBITER]` NSLog line against `[PULLPHASE] pull #0` (±0.5 s).
+
+### 13.3 Every late swap, by class (natural only; no forced events tonight)
+
+| Block | crossing | pacer | decode | render | main | other | Crossing Plays | `dropped-records` |
+|---|---|---|---|---|---|---|---|---|
+| `pp-5994-sdi` | 400 | 0 | 0 | 0 | 0 | 0 | 5 | 0 |
+| `pp-2398-cmp` | 240 | 0 | 0 | 0 | 0 | 0 | 5 | 0 |
+| `pp-gop25-sdi` | 178 | 0 | 0 | 0 | 0 | 0 | 4 | 0 |
+
+- **818 of 818 late swaps are crossings.** With 2 misses on the whole night there are no `pacer` swaps. CONTROL (`=1`) has no
+  `[LATE-SWAP]` lines.
+- The summaries' `crossings` field (85, 32, 24 runs) over-counts, as §12.4 explains.
+- **P2, slope against +ppm within ±3 µs/s: 13 of 14 crossing Plays.**
+  - 59.94 SDI and 25 SDI: 9 of 9, within 0.6 µs/s.
+  - 23.976 Computer: 4 of 5. All five sit about 2 µs/s below +ppm (−1.85 to −2.12), and one is 4.95 below. Night 1 did not show this
+    offset at 23.976 Computer. Why is UNKNOWN: it was not looked into tonight.
+- **P7:** `queued` was negative on 365,670 of 365,671 new-frame ticks. The one exception (`pp-5994-sdi.log:423519`, `queued +0.53 ms`)
+  is the first frame after a seek (`prev-to-due −670336 ms`), not steady play.
+
+### 13.4 The holds, by cause
+
+The gate counts 2 holds, both in `pp-2398-cmp` (`soak.report:37-39`). That is the GATE's FAIL line: 0 freezes, 0 unrecovered,
+0 skips. 0.9.4's gate counted its holds the same way. §5 and §12.3 describe these holds as expected cadence events, not defects.
+
+| Block, time (~) | Held pts | `[LATE-SWAP]` | Pull before (`branch next-by-band`) | Missed deadline |
+|---|---|---|---|---|
+| `pp-2398-cmp` 02:04:47 | 1650.273625 (`:125823`) | `:125825` **crossing**, prev-to-due −0.001 ms, interval 13.915 ms, `held yes` | `newest`, lead **6.18 ms** < P 13.90 | none (0 in the block) |
+| `pp-2398-cmp` 02:24:26 | 627.460167 (`:241316`) | `:241318` **crossing**, prev-to-due −0.000 ms, interval 13.903 ms, `held yes` | `newest`, lead **8.31 ms** < P 13.90 | none |
+
+- **Crossing 2, pacer 0.** Both have exactly P3's shape: a newest frame with lead under P, then a swap one tick late from a crossing.
+  The next pull recovers. Night 1's two pacer holds (§12.3) needed a missed deadline, and tonight had none near a hold.
+- P3's count (0–2 per block): 0, 2, 0. Within range.
+
+### 13.5 What this changes
+
+- **§12.2's open verdict is resolved in part:** the measurement build is cleared as the cause. Night 1's present-path overruns were a rig
+  state, and night 2 did not reproduce them. Of the factors night 2 changed, which one caused them is UNKNOWN (§13.2).
+- **Night 1's findings stand** (§12.6): crossings away from misses, drift at the card's rate, the hold precondition, P7. Night 2 also
+  gives counts that can be used: 4–5 crossing Plays per hour per block, and 0–2 holds per block, all crossings.
+- **Unchanged:** P4/P5's hold half is untested (no forced blocks). The "pacer" source of one-tick-late swaps (§12.3) exists, but needs
+  a missed deadline that lands on a newest frame with lead < P. Tonight's 2 misses did not.
+- **For later nights:** keep Waveform | Parade | Markers, Zoom closed, and the window display check. To find which rig factor caused
+  night 1, change one factor per block, for example by putting the Meters slots back for one 59.94 block with everything else the same.
