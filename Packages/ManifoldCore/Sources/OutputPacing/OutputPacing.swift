@@ -115,3 +115,250 @@ public enum WindowPresentTiming {
         return clock + lead
     }
 }
+
+// MARK: - Option C: the output pacer's phase held against the frame grid (docs/CARD_PULL_MARGIN.md §7 C)
+//
+// Under card lock the frames' due times run on the card's clock and the pacer ticks on the host's, so each new-frame tick
+// drifts against its frame's due time (about 12 µs/s on the build Mac). When a tick drifts across a due time, that frame and every
+// one after it render one tick late: a crossing, the only late-swap cause seen in the 0.9.3 and 0.9.4 gates and in Stage 1
+// (§5, §12.4, §13.3). Option C measures x = selectNow − chosenPts at each new-frame tick, sets a reference from the first eight
+// after a wake, a re-rate or a clock discontinuity, and moves the pacer's next deadline by at most 20 µs a tick so that x stays at
+// the reference. The pull, its margin and every clock are untouched; only when the pacer's ticks land changes.
+//
+// The app wires it behind `MANIFOLD_PACER_PHASE=1` (DEBUG); with it off, nothing here is called (`OutputPacer`).
+
+/// What the renderer's tick reports to the pacer after its selection, with `MANIFOLD_PACER_PHASE` on.
+public enum PacerPhaseSample: Equatable, Sendable {
+    /// Not playing at 1× on a matched file: paused, stepping, seeking, shuttling, a clock discontinuity, a live source, a tick
+    /// that was not the pacer's, or a rate mismatch. The phase is not followed, and the reference is dropped.
+    case inactive
+    /// Playing at 1× on a matched file. `x` = selectNow − chosenPts (seconds) on a tick that chose a new frame; nil otherwise.
+    case active(x: Double?)
+}
+
+public enum PacerPhase {
+    /// The most a deadline moves in one tick (§7 C step 3): covers drift up to about 1,400 ppm, and never moves a tick visibly.
+    public static let correctionClamp = 20e-6
+    /// The reference's distance from both edges of the tick (§7 C step 2): about 8× the dither width seen at a crossing.
+    public static let guardMargin = 0.5e-3
+    /// New-frame ticks in the reference median and in the running median (§7 C steps 2–3).
+    public static let window = 8
+    /// "Playing at 1×": the clock's rate between two ticks within this of 1. Shuttle speeds are far outside it; the clock's own
+    /// read jitter (a few µs over a tick of 4–14 ms) is far inside it. 13 of 192,154 consecutive new-frame pairs at 59.94 were
+    /// outside it in Stage 1 night 2 (`pp-5994-sdi.log`), each at a transport event.
+    public static let unitRateTolerance = 0.01
+
+    /// The pacer's next deadline, in mach ticks. `correction` is signed (mach ticks); 0 gives exactly `previous + step`, which
+    /// is the pacer's arithmetic with the switch off. Otherwise the arithmetic is signed and saturating: the deadline always
+    /// moves forward by at least one unit, whatever the correction, and never wraps past `UInt64.max`. So a correction can
+    /// never stop the ticks (§7 C, the risk against I11).
+    public static func nextDeadline(previous: UInt64, step: UInt64, correction: Int64) -> UInt64 {
+        if correction == 0 { return previous + step }
+        let (sum, overflow) = Int64(clamping: step).addingReportingOverflow(correction)
+        let delta = overflow ? (correction > 0 ? Int64.max : 1) : max(1, sum)
+        let (next, wrapped) = previous.addingReportingOverflow(UInt64(delta))
+        return wrapped ? UInt64.max : next
+    }
+
+    /// The correction (seconds) to add to the next deadline: clamp(−(phase − reference), ±`correctionClamp`). `phase` is x̄, the
+    /// running median of x expressed at the corrections applied so far (`PacerPhaseFollower`). Disabled, or either value
+    /// missing or not finite: 0.
+    public static func phaseCorrection(enabled: Bool, phase: Double?, reference: Double?) -> Double {
+        guard enabled, let phase, let reference, phase.isFinite, reference.isFinite else { return 0 }
+        return min(correctionClamp, max(-correctionClamp, -(phase - reference)))
+    }
+
+    /// How the guard moved the reference.
+    public enum Guard: String, Equatable, Sendable { case none, raised, lowered }
+
+    /// The reference x_ref from the first `window` new-frame ticks: their median, kept at least `guardMargin` inside both edges
+    /// of the tick [0, period). A median under 0.5 ms is raised to 0.5 ms (the ticks move later, the lead shrinks by ≤ 0.5 ms);
+    /// one over P − 0.5 ms is lowered to P − 0.5 ms (the ticks move earlier, the lead grows). A tick shorter than 1 ms (never a
+    /// pacer's: the pacer runs at ≤ 120 Hz on any real rate) takes its middle. Fewer than `window` values, or a bad period: nil.
+    public static func reference(firstTicks: [Double], period: Double) -> (value: Double, median: Double, guarded: Guard)? {
+        guard firstTicks.count >= window, period.isFinite, period > 0 else { return nil }
+        let m = median(Array(firstTicks.prefix(window)))
+        guard m.isFinite else { return nil }
+        let low = min(guardMargin, period / 2), high = max(period - guardMargin, period / 2)
+        if m < low { return (low, m, .raised) }
+        if m > high { return (high, m, .lowered) }
+        return (m, m, .none)
+    }
+
+    /// The median (the mean of the middle two for an even count). Empty: NaN.
+    public static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return .nan }
+        let s = values.sorted(), n = s.count
+        return n % 2 == 1 ? s[n / 2] : (s[n / 2 - 1] + s[n / 2]) / 2
+    }
+
+    /// The card pull's matched-rate test, verbatim (`MetalVideoRenderer.deckLinkPullSlotLocked`, `let matched = …`). Option C is
+    /// active only where the pull's half-frame band is: a source frame equal to the card frame within 1e-4 of it.
+    public static func isMatched(sourceFrame: Double, cardFrame: Double) -> Bool {
+        sourceFrame > 0 && abs(sourceFrame - cardFrame) < cardFrame * 1e-4
+    }
+
+    /// Whether the clock ran at 1× since the previous reading (both on the host clock, seconds): a positive host interval of at
+    /// most 0.1 s and a rate within `unitRateTolerance` of 1. False with no previous reading or a non-finite value.
+    public static func isUnitRate(clock: Double, host: Double, previous: (clock: Double, host: Double)?) -> Bool {
+        guard let previous, clock.isFinite, host.isFinite, previous.clock.isFinite, previous.host.isFinite else { return false }
+        let dt = host - previous.host
+        guard dt > 0, dt <= 0.1 else { return false }
+        return abs((clock - previous.clock) / dt - 1) <= unitRateTolerance
+    }
+}
+
+/// |x − x_ref| in 1 µs bins up to 10 ms (one overflow bin above), for a p50, a p99 and the exact maximum. Fixed size, reset in
+/// place: no allocation after init, so the pacer thread can keep it.
+public struct PhaseDeviationStats {
+    public static let binWidth = 1e-6
+    public static let binCount = 10_000
+    private var bins = [UInt32](repeating: 0, count: PhaseDeviationStats.binCount + 1)
+    public private(set) var count = 0
+    public private(set) var maximum = 0.0
+
+    public init() {}
+
+    public mutating func add(_ v: Double) {
+        guard v.isFinite, v >= 0 else { return }
+        bins[min(Int(v / Self.binWidth), Self.binCount)] &+= 1
+        count += 1
+        maximum = max(maximum, v)
+    }
+
+    public mutating func reset() {
+        for i in bins.indices { bins[i] = 0 }
+        count = 0; maximum = 0
+    }
+
+    /// The value at or below which `fraction` of the samples lie, to the bin's upper edge (1 µs); the overflow bin reports the
+    /// exact maximum. NaN with no samples.
+    public func quantile(_ fraction: Double) -> Double {
+        guard count > 0 else { return .nan }
+        let target = max(1, Int((Double(count) * fraction).rounded(.up)))
+        var seen = 0
+        for (i, n) in bins.enumerated() {
+            seen += Int(n)
+            if seen >= target { return i == Self.binCount ? maximum : min(Double(i + 1) * Self.binWidth, maximum) }
+        }
+        return maximum
+    }
+}
+
+/// Option C's state on the pacer thread: the reference, the last eight x, and the corrections applied. One value per pacer.
+///
+/// x̄ is the median of the last eight x, each re-expressed at the corrections applied since it was taken: a sample taken before a
+/// correction c read c less than the same phase reads now. So a correction is counted once, not again at every tick until the
+/// median has caught up with it (which, at a median of eight, would overshoot by up to four times and ring). With that, applying
+/// c = clamp(−(x̄ − x_ref), ±20 µs) at every tick, new frame or not, as §7 C step 3 says, settles in one step when unclamped.
+public struct PacerPhaseFollower {
+    /// Counters over a reporting window, and over the whole run.
+    public struct Counts: Equatable, Sendable {
+        public var newFrameTicks = 0, inactiveTicks = 0, outliers = 0, corrections = 0, clampHits = 0, references = 0, guards = 0
+        public var net = 0.0
+        public init() {}
+    }
+
+    public enum Event: Equatable, Sendable {
+        /// The reference was set: its value, the median it came from, and the guard.
+        case referenceSet(reference: Double, median: Double, guarded: PacerPhase.Guard)
+    }
+
+    /// Seconds per deadline unit (one mach tick in the app).
+    public let quantum: Double
+    public private(set) var reference: Double?
+    /// The corrections applied since the reference was set, in seconds (whole quanta).
+    public private(set) var applied = 0.0
+    public private(set) var window = Counts()
+    public private(set) var run = Counts()
+    public private(set) var windowDeviation = PhaseDeviationStats()
+    public private(set) var runDeviation = PhaseDeviationStats()
+    private var firsts: [Double] = []
+    private var recent: [Double] = []      // x − applied at the time of each sample: a ring of `PacerPhase.window`
+    private var recentNext = 0
+
+    public init(quantum: Double) {
+        self.quantum = quantum
+        firsts.reserveCapacity(PacerPhase.window)
+        recent.reserveCapacity(PacerPhase.window)
+    }
+
+    /// Drop the reference: the next eight new-frame ticks set a new one. At a wake, a re-rate, and every inactive tick.
+    public mutating func reset() {
+        reference = nil; applied = 0
+        firsts.removeAll(keepingCapacity: true); recent.removeAll(keepingCapacity: true); recentNext = 0
+    }
+
+    /// One pacer tick, after the renderer's selection. Returns the correction for the next deadline, in quanta, and an event.
+    public mutating func tick(_ sample: PacerPhaseSample, period: Double) -> (correction: Int64, event: Event?) {
+        guard case .active(let x) = sample else {
+            window.inactiveTicks += 1; run.inactiveTicks += 1
+            if reference != nil || !firsts.isEmpty { reset() }
+            return (0, nil)
+        }
+        var event: Event?
+        if let x {
+            window.newFrameTicks += 1; run.newFrameTicks += 1
+            if !(x >= 0 && x < period) {
+                // A frame a tick or more late (a decode, a missed deadline) or a clock oddity: not the tick's phase.
+                window.outliers += 1; run.outliers += 1
+            } else if let reference {
+                if recent.count < PacerPhase.window { recent.append(x - applied) } else { recent[recentNext] = x - applied }
+                recentNext = (recentNext + 1) % PacerPhase.window
+                windowDeviation.add(abs(x - reference)); runDeviation.add(abs(x - reference))
+            } else {
+                firsts.append(x)
+                if firsts.count == PacerPhase.window, let r = PacerPhase.reference(firstTicks: firsts, period: period) {
+                    reference = r.value; applied = 0
+                    recent.removeAll(keepingCapacity: true); recent.append(contentsOf: firsts); recentNext = 0
+                    firsts.removeAll(keepingCapacity: true)
+                    window.references += 1; run.references += 1
+                    if r.guarded != .none { window.guards += 1; run.guards += 1 }
+                    event = .referenceSet(reference: r.value, median: r.median, guarded: r.guarded)
+                }
+            }
+        }
+        guard let reference, recent.count == PacerPhase.window, quantum > 0 else { return (0, event) }
+        let phase = Self.median(ofRing: recent) + applied
+        let c = PacerPhase.phaseCorrection(enabled: true, phase: phase, reference: reference)
+        if abs(phase - reference) > PacerPhase.correctionClamp { window.clampHits += 1; run.clampHits += 1 }
+        let q = Int64((c / quantum).rounded())
+        if q != 0 {
+            let s = Double(q) * quantum
+            applied += s
+            window.corrections += 1; run.corrections += 1; window.net += s; run.net += s
+        }
+        return (q, event)
+    }
+
+    /// The median of the ring (at most `PacerPhase.window` values) without allocating: an insertion sort in a stack buffer, as
+    /// this runs on the pacer's real-time thread at every tick. Equal to `PacerPhase.median` (tested).
+    static func median(ofRing values: [Double]) -> Double {
+        let n = values.count
+        guard n > 0 else { return .nan }
+        return withUnsafeTemporaryAllocation(of: Double.self, capacity: n) { buf in
+            for i in 0..<n {
+                var j = i
+                let v = values[i]
+                while j > 0, buf[j - 1] > v { buf[j] = buf[j - 1]; j -= 1 }
+                buf[j] = v
+            }
+            return n % 2 == 1 ? buf[n / 2] : (buf[n / 2 - 1] + buf[n / 2]) / 2
+        }
+    }
+
+    /// The window's line (after "[PACER-PHASE] "), and the window reset. `run: true` gives the whole run's line instead.
+    public mutating func report(run whole: Bool = false, seconds: Double = 10) -> String {
+        let c = whole ? run : window, d = whole ? runDeviation : windowDeviation
+        let dev = d.count > 0
+            ? String(format: "|x − x_ref| p50 %.3f p99 %.3f max %.3f ms (n=%d)", d.quantile(0.5) * 1000, d.quantile(0.99) * 1000,
+                     d.maximum * 1000, d.count)
+            : "|x − x_ref| n=0"
+        let line = String(format: "%@: new-frame ticks %d · inactive ticks %d · outliers %d · %@ · corrections applied %d (net %+.3f ms) · "
+                          + "clamp hits %d · references set %d (guard %d)",
+                          whole ? "run" : String(format: "%.0f s", seconds), c.newFrameTicks, c.inactiveTicks, c.outliers, dev,
+                          c.corrections, c.net * 1000, c.clampHits, c.references, c.guards)
+        if !whole { window = Counts(); windowDeviation.reset() }
+        return line
+    }
+}

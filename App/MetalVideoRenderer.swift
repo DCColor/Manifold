@@ -546,6 +546,15 @@ final class MetalVideoRenderer {
         }
     }()
     private var deckLinkSlipShift = 0.0
+    /// Option C (docs/CARD_PULL_MARGIN.md §7 C), `MANIFOLD_PACER_PHASE=1`: the output pacer holds its new-frame ticks' phase against
+    /// the frames' due times. Read once, here. Off (unset, any other value, and always in Release): the pacer is made without a
+    /// phase sample, so its loop runs `deadline += step` as before, and nothing below is computed.
+    static let pacerPhaseEnabled = ProcessInfo.processInfo.environment["MANIFOLD_PACER_PHASE"] == "1"
+    /// Option C: what this tick's selection saw, for the pacer to take right after the tick (the same thread: the pacer calls
+    /// `displayTick` synchronously). Tick thread only.
+    private var pacerPhaseSample: PacerPhaseSample = .inactive
+    #else
+    static let pacerPhaseEnabled = false
     #endif
     private var deckLinkConverting = false             // one-in-flight gate (push path)
     private var deckLinkActive = false                 // only convert while DeckLink output is running
@@ -3402,20 +3411,43 @@ final class MetalVideoRenderer {
         }
         let mode = String(format: "%@ %.3f fps · source %@", size.map { "\($0.w)x\($0.h)" } ?? "?", card > 0 ? 1 / card : 0,
                           source > 0 ? String(format: "%.3f fps", 1 / source) : "rate unknown")
+        #if DEBUG
+        if Self.pacerPhaseEnabled {   // option C: the pull's matched test, from the same reading of the two rates
+            let matched = PacerPhase.isMatched(sourceFrame: source, cardFrame: card)
+            linkQueue.async { [weak self] in
+                self?.startPacerOnQueue(timing.period, k: timing.ticksPerFrame, mode: mode, reason: reason, phaseMatched: matched)
+            }
+            return
+        }
+        #endif
         linkQueue.async { [weak self] in self?.startPacerOnQueue(timing.period, k: timing.ticksPerFrame, mode: mode, reason: reason) }
     }
 
     /// `linkQueue`. Stop the link (it waits for a tick in flight), then start the pacer in the link's idle state.
-    private func startPacerOnQueue(_ period: Double, k: Int, mode: String, reason: String) {
+    /// `phaseMatched`: option C only (`MANIFOLD_PACER_PHASE=1`); nil with the switch off, and then the pacer is made and re-rated
+    /// exactly as before.
+    private func startPacerOnQueue(_ period: Double, k: Int, mode: String, reason: String, phaseMatched: Bool? = nil) {
         let line = String(format: "%@ · P %.2f ms (k %d, %.2f Hz)", mode, period * 1000, k, 1 / period)
         if let pacer = outputPacer {
-            pacer.setPeriod(period)
+            if let phaseMatched { pacer.setPeriod(period, phaseMatched: phaseMatched) } else { pacer.setPeriod(period) }
             print("[PACER] re-rated for \(line) · \(reason)")
+            if let phaseMatched { Self.logPacerPhaseArmed(matched: phaseMatched) }
             return
         }
         if let link = displayLink { Self.setRunning(link, false) }
         setPacerPresents(active: true)
-        let pacer = OutputPacer(period: period, label: mode) { [weak self] in self?.displayTick() }
+        let pacer: OutputPacer
+        #if DEBUG
+        if let phaseMatched {
+            pacer = OutputPacer(period: period, label: mode, phaseSample: { [weak self] in self?.takePacerPhaseSample() ?? .inactive },
+                                phaseMatched: phaseMatched) { [weak self] in self?.displayTick() }
+            Self.logPacerPhaseArmed(matched: phaseMatched)
+        } else {
+            pacer = OutputPacer(period: period, label: mode) { [weak self] in self?.displayTick() }
+        }
+        #else
+        pacer = OutputPacer(period: period, label: mode) { [weak self] in self?.displayTick() }
+        #endif
         outputPacer = pacer
         idleLock.lock(); let stopped = idleStopped; if !stopped { lastTickAt = CACurrentMediaTime() }; idleLock.unlock()
         #if DEBUG
@@ -3436,6 +3468,38 @@ final class MetalVideoRenderer {
         print("[PACER] stopped (\(reason)) — \(summary) · link back on display \(display.map(String.init) ?? "none")")
         if !stopped { ensureRunningOnQueue(resuming: true) }
     }
+
+    // MARK: - Option C: the pacer's phase against the frame grid (docs/CARD_PULL_MARGIN.md §7 C; `MANIFOLD_PACER_PHASE=1`)
+
+    /// Called only with the switch on, at each pacer start and re-rate.
+    private static func logPacerPhaseArmed(matched: Bool) {
+        print("[PACER-PHASE] armed · card and source rates " + (matched ? "matched: the phase is followed while playing at 1×"
+                                                                : "not matched: inactive (the pacer as with the switch off)"))
+    }
+
+    #if DEBUG
+    /// The pacer's thread, right after `displayTick` returned on it: this tick's sample, and the slot cleared, so a tick that did
+    /// not reach the selection (an off-clock present, no clock) reads as inactive.
+    private func takePacerPhaseSample() -> PacerPhaseSample {
+        let s = pacerPhaseSample
+        pacerPhaseSample = .inactive
+        return s
+    }
+
+    /// Tick thread, after the selection, switch on only. Active only on a pacer tick (no glass time), playing (the pause provider
+    /// says false; nil is paused), the clock at 1× since the previous tick (so not stepping, seeking, shuttling or wrapping), no
+    /// live-clock hold, and a file source: every live route installs one of `onDisplayTick` (NDI, HLS), `onDepthSample`,
+    /// `presentationHoldFloor` or `onQueueOverflow` (SRT, WHEP, RTMP and the synthetic source), and the file route none. The
+    /// rate-mismatch test is the pacer's (`phaseMatched`). x = selectNow − chosenPts for a tick that chose a new frame.
+    private func pacerPhaseSampleNow(selectNow: Double, clock: Double, clockHost: Double, previous: (clock: Double, host: Double)?,
+                                     newFramePts: Double?, held: Bool) -> PacerPhaseSample {
+        guard tickGlassHost == nil, !held, isPausedProvider?() == false,
+              onDisplayTick == nil, onDepthSample == nil, presentationHoldFloor == nil, onQueueOverflow == nil,
+              PacerPhase.isUnitRate(clock: clock, host: clockHost, previous: previous)
+        else { return .inactive }
+        return .active(x: newFramePts.map { selectNow - $0 })
+    }
+    #endif
 
     // MARK: - Per-refresh presentation
 
@@ -3689,6 +3753,9 @@ final class MetalVideoRenderer {
         let selectNow = WindowPresentTiming.selectionTime(clock: now, clockHost: clockHost,
                                                           glassHost: pacerPresentsOn ? nil : tickGlassHost,
                                                           previous: lastClockReading)
+        #if DEBUG
+        let pacerPhasePrevious = Self.pacerPhaseEnabled ? lastClockReading : nil   // option C's 1× test
+        #endif
         lastClockReading = (now, clockHost)
         // The selection's limit: `selectNow`, except while the DEBUG forced-late-swap switch withholds a frame (`lateSwapLimitLocked`).
         #if DEBUG
@@ -3786,6 +3853,12 @@ final class MetalVideoRenderer {
         let guardCount = frameQueue.count, guardMax = maxQueued
         queueLock.unlock()
         if chosen != nil { onQueueRoom?() }
+        #if DEBUG
+        if Self.pacerPhaseEnabled {   // option C: what this selection saw, for the pacer right after the tick
+            pacerPhaseSample = pacerPhaseSampleNow(selectNow: selectNow, clock: now, clockHost: clockHost, previous: pacerPhasePrevious,
+                                                   newFramePts: chosen != nil ? chosenPts : nil, held: holdFloor != nil)
+        }
+        #endif
         if queueFullAhead, let oldest {
             if freezeGuardSince == nil { freezeGuardSince = now }
             if let since = freezeGuardSince, now - since >= 0.5, !freezeGuardReported {
