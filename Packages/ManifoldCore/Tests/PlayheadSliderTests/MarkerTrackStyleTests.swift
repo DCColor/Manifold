@@ -2,8 +2,9 @@ import XCTest
 import AppKit
 @testable import PlayheadSlider
 
-/// The chapter flag style (docs/CHAPTER_MARKERS_PLAN.md §4.1, §6.4; Stage 2): `.outline` draws a 1 pt stroke with no fill
-/// and NO BAND; a filled flag at the same x is drawn over it and takes the click; filled flags draw as before.
+/// The file-marker flag style (docs/CHAPTER_MARKERS_PLAN.md §4.1, §6.4; Stage 2, band in Stage 3): `.outline` draws a 1 pt
+/// stroke with no fill, and a band only when given a span (D-C16), lighter than a filled marker's; a filled flag at the
+/// same x is drawn over it and takes the click; filled flags draw as before.
 @MainActor
 final class MarkerTrackStyleTests: XCTestCase {
     private var windows: [NSWindow] = []
@@ -61,15 +62,29 @@ final class MarkerTrackStyleTests: XCTestCase {
         return NSPoint(x: s.centreX(for: value), y: top + MarkerTrackView.flagHeight * 0.3)
     }
 
-    func testOutlineHasNoBand() {
-        // An outlined chapter whose stated span is 0.2…0.6 draws exactly as one with no span: no band.
+    func testOutlineBandOnlyWithASpanAndLighterThanAFilledOne() {
+        // D-C16 (Stage 3): the app gives a file marker a span only when the file STATES its duration. Given one, the
+        // outline draws a band in its color; given none (end == start), nothing beyond the flag.
         let spanned = scrubber([TrackMarker(start: 0.2, end: 0.6, color: red, label: "", style: .outline)])
         let point = scrubber([TrackMarker(start: 0.2, end: 0.2, color: red, label: "", style: .outline)])
-        XCTAssertEqual(bytes(render(spanned)), bytes(render(point)))
-        // A filled marker with the same span does draw one (so the comparison above can fail).
+        let none = scrubber([])
+        XCTAssertNotEqual(bytes(render(spanned)), bytes(render(point)), "a span draws a band")
         let filled = scrubber([TrackMarker(start: 0.2, end: 0.6, color: red, label: "")])
-        let filledPoint = scrubber([TrackMarker(start: 0.2, end: 0.2, color: red, label: "")])
-        XCTAssertNotEqual(bytes(render(filled)), bytes(render(filledPoint)))
+        // In the band's middle, away from the flag: the outline's band moves the bar's pixel toward red by less than a
+        // filled marker's band does (0.3 against 0.55 alpha).
+        let bar = spanned.markerBarRect
+        let p = NSPoint(x: spanned.centreX(for: 0.4), y: bar.minY - 0.5)
+        let base = pixel(render(none), none, p)
+        let outlineBand = pixel(render(spanned), spanned, p)
+        let filledBand = pixel(render(filled), filled, p)
+        let pointBand = pixel(render(point), point, p)
+        XCTAssertEqual(pointBand, base, "no span: the bar is untouched there")
+        // All four channels: over a transparent backdrop the unpremultiplied color is the band's own and only alpha
+        // tells the two bands apart.
+        let shift = { (a: [CGFloat]) in (0..<4).map { abs(a[$0] - base[$0]) }.reduce(0, +) }
+        XCTAssertGreaterThan(shift(outlineBand), 0, "the outline's band is drawn")
+        XCTAssertLessThan(shift(outlineBand), shift(filledBand), "and lighter than a user marker's")
+        XCTAssertLessThan(TrackMarker.outlineBandAlpha, TrackMarker.filledBandAlpha)
     }
 
     func testOutlineHasNoFillButIsDrawn() {

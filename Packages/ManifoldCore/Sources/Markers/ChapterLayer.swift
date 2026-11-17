@@ -1,5 +1,7 @@
 //
-//  ChapterLayer.swift — the read-only chapter layer beside a file's markers (docs/CHAPTER_MARKERS_PLAN.md §4.1, Stage 2).
+//  ChapterLayer.swift — the read-only "File markers" layer beside a file's markers (docs/CHAPTER_MARKERS_PLAN.md §4.1,
+//  Stage 2; renamed and given XMP's Chapter and Comment items in Stage 3, Robbie 2026-11-17). Its items are still called
+//  chapters in code (`MappedChapter`); the UI calls them "file markers" and each row and tooltip names its kind.
 //
 //  Pure: what the Markers slot, the Markers window, the timeline strip, ⇧↑/⇧↓ and the thumbnailer are given, from the
 //  markers, the file's mapped chapters and the view settings. `MarkerModel` (App) calls it; the tests call it directly.
@@ -100,8 +102,8 @@ public enum ChapterLayer {
         return out
     }
 
-    /// "12 markers · 8 chapters"; "3 of 12 markers · 8 chapters" with a filter. The chapters part only when the file has
-    /// unconverted chapters.
+    /// "12 markers · 8 from file"; "3 of 12 markers · 8 from file" with a filter. The second part only when the file has
+    /// unconverted file markers (Robbie, 2026-11-17).
     public static func countLabel(markersShown: Int, markersTotal: Int, chaptersShown: Int, chaptersTotal: Int) -> String {
         func part(_ shown: Int, _ total: Int, _ one: String, _ many: String) -> String {
             let noun = total == 1 ? one : many
@@ -109,7 +111,7 @@ public enum ChapterLayer {
         }
         let m = part(markersShown, markersTotal, "marker", "markers")
         guard chaptersTotal > 0 else { return m }
-        return m + " · " + part(chaptersShown, chaptersTotal, "chapter", "chapters")
+        return m + " · " + part(chaptersShown, chaptersTotal, "from file", "from file")
     }
 
     /// The frames ⇧↑/⇧↓ stop on.
@@ -122,11 +124,23 @@ public enum ChapterLayer {
         ChapterMapping.thumbnailFrames(markers: markers, chapters: chapters)
     }
 
-    /// A chapter row's tooltip (Robbie, 2026-11-17): "Chapter · 01:00:10:00 · <title>" (the title left out when empty),
-    /// then "Chapter from the file · Convert to edit". `timecode` is the row's label. Local UI only; never logged.
+    /// A file marker's tooltip on the timeline flag (Stage 3, Robbie 2026-11-17): "Chapter · 01:00:10:00 · <title>" or
+    /// "Comment · … · <title>" (the title left out when empty); a Comment adds a second line, the FIRST non-blank line of
+    /// its comment (never the whole comment). Local UI only; never logged.
+    public static func flagToolTip(_ c: MappedChapter, timecode: String) -> String {
+        var out = c.title.isEmpty ? "\(c.kind.label) · \(timecode)" : "\(c.kind.label) · \(timecode) · \(c.title)"
+        if c.kind == .comment, let line = firstLine(c.comment) { out += "\n" + line }
+        return out
+    }
+
+    /// A file marker's row tooltip: `flagToolTip`, then "From the file · Convert to edit". `timecode` is the row's label.
     public static func rowToolTip(_ c: MappedChapter, timecode: String) -> String {
-        let first = c.title.isEmpty ? "\(c.kind.label) · \(timecode)" : "\(c.kind.label) · \(timecode) · \(c.title)"
-        return first + "\n\(c.kind.label) from the file · Convert to edit"
+        flagToolTip(c, timecode: timecode) + "\nFrom the file · Convert to edit"
+    }
+
+    /// The first non-blank line, trimmed; nil when there is none.
+    static func firstLine(_ s: String) -> String? {
+        s.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
     }
 
     /// A marker row's tooltip (Robbie, 2026-11-17): "<color> · <timecode> · <name>" (the name left out when empty); then,
@@ -134,9 +148,7 @@ public enum ChapterLayer {
     /// ("<first line> · kw1, kw2", or the keywords alone without notes). Local UI only; never logged.
     public static func rowToolTip(_ m: Marker, timecode: String) -> String {
         var out = m.name.isEmpty ? "\(m.color.name) · \(timecode)" : "\(m.color.name) · \(timecode) · \(m.name)"
-        let firstNote = m.notes.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty }
+        let firstNote = firstLine(m.notes)
         let second = [firstNote, m.keywords.isEmpty ? nil : m.keywords.joined(separator: ", ")]
             .compactMap { $0 }.joined(separator: " · ")
         if !second.isEmpty { out += "\n" + second }
@@ -146,7 +158,7 @@ public enum ChapterLayer {
     /// The notice after Convert. Counts and words only.
     public static func convertNotice(_ r: ChapterMapping.ConvertResult) -> String {
         let n = r.added.count
-        var s = n == 0 ? "No chapters converted." : "Converted \(n) \(n == 1 ? "chapter" : "chapters") to markers."
+        var s = n == 0 ? "No file markers converted." : "Converted \(n) file \(n == 1 ? "marker" : "markers") to markers."
         var skips: [String] = []
         if r.occupied > 0 { skips.append("\(r.occupied) skipped: another marker starts on \(r.occupied == 1 ? "its frame" : "their frames")") }
         if r.identical > 0 { skips.append("\(r.identical) already \(r.identical == 1 ? "a marker" : "markers")") }

@@ -542,10 +542,11 @@ final class PlayheadLineView: NSView {
 
 /// One marker as the track draws it.
 public struct TrackMarker: Equatable {
-    /// How the flag is drawn. `.filled`: a user marker, filled in its colour, with a band over its span. `.outline`: an
-    /// embedded chapter (docs/CHAPTER_MARKERS_PLAN.md §4.1, D-C13): a 1 pt stroke in `color`, no fill and NO BAND (D-C16:
-    /// only a stated duration gets a band, from Stage 3). Outlines are drawn first, so a filled flag at the same x is on
-    /// top, and a click there takes the filled one.
+    /// How the flag is drawn. `.filled`: a user marker, filled in its color, with a band over its span. `.outline`: a
+    /// file marker (docs/CHAPTER_MARKERS_PLAN.md §4.1, D-C13): a 1 pt stroke in `color`, no fill, and a band only when the
+    /// caller gives it a span, at `outlineBandAlpha`, lighter than a user marker's (D-C16: only a duration the file STATES
+    /// gets one; the app passes `end == start` for every other item). Outlines are drawn first, so a filled flag at the
+    /// same x is on top, and a click there takes the filled one.
     public enum Style: Equatable { case filled, outline }
 
     /// Value (seconds) of its first frame, and of the end of its last frame.
@@ -562,6 +563,10 @@ public struct TrackMarker: Equatable {
 
     /// The neutral an outlined flag is drawn in when its item has no colour of its own (white at 85%, §4.1).
     public static let neutralOutline = NSColor.white.withAlphaComponent(0.85)
+
+    /// A user marker's band alpha, and a file marker's lighter one (D-C16, chosen in Stage 3).
+    public static let filledBandAlpha: CGFloat = 0.55
+    public static let outlineBandAlpha: CGFloat = 0.3
 }
 
 /// Draws each marker as a small flag in its colour just above the bar, and a translucent band over the bar's top edge
@@ -630,8 +635,16 @@ final class MarkerTrackView: NSView, NSViewToolTipOwner {
         guard let s = scrubber, !s.markers.isEmpty else { return }
         let bar = s.markerBarRect
         let top = flagTop
-        // Outlines (chapters) first, so a filled flag at the same x is drawn over them.
+        // Outlines (file markers) first, so a filled flag at the same x is drawn over them. A stated span's band is
+        // lighter than a user marker's (D-C16).
         for (m, x) in zip(s.markers, flagXs) where m.style == .outline {
+            if m.end > m.start {
+                let x1 = s.centreX(for: m.end)
+                if x1 - x >= 1 {
+                    m.color.withAlphaComponent(TrackMarker.outlineBandAlpha).setFill()
+                    NSRect(x: x, y: bar.minY - 1, width: x1 - x, height: 2).fill()
+                }
+            }
             let path = flagPath(x: x, top: top)
             m.color.setStroke()
             path.lineWidth = 1
@@ -641,7 +654,7 @@ final class MarkerTrackView: NSView, NSViewToolTipOwner {
             if m.end > m.start {
                 let x1 = s.centreX(for: m.end)
                 if x1 - x >= 1 {
-                    m.color.withAlphaComponent(0.55).setFill()
+                    m.color.withAlphaComponent(TrackMarker.filledBandAlpha).setFill()
                     NSRect(x: x, y: bar.minY - 1, width: x1 - x, height: 2).fill()
                 }
             }

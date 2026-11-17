@@ -48,16 +48,29 @@ public enum MarkerLog {
 
     public static func remember(_ on: Bool) -> String { "[MARKERS] remember between sessions: \(on ? "on" : "off")" }
 
-    /// The file's embedded chapters (docs/CHAPTER_MARKERS_PLAN.md §4.1): counts only, never a title.
+    /// The file's markers on the layer, chapters (libav) and XMP items together (docs/CHAPTER_MARKERS_PLAN.md §4.1, §12):
+    /// counts only, never a title. `duplicates`: chapter-track chapters shown as their XMP Chapter instead.
     public static func chapters(_ r: ChapterMapping.Result, readMs: Int) -> String {
-        "[MARKERS] chapters n=\(r.chapters.count) dropped-past-end=\(r.droppedPastEnd) dropped-before-start=\(r.droppedBeforeStart) "
-            + "unreadable=\(r.droppedUnreadable) reader=libav read=\(readMs)ms"
+        let chapters = r.chapters.filter { $0.kind == .chapter }.count
+        return "[MARKERS] chapters n=\(r.chapters.count) chapter=\(chapters) comment=\(r.chapters.count - chapters) "
+            + "dropped-past-end=\(r.droppedPastEnd) dropped-before-start=\(r.droppedBeforeStart) "
+            + "unreadable=\(r.droppedUnreadable) duplicates=\(r.duplicates) reader=libav+xmp read=\(readMs)ms"
+    }
+
+    /// The file's XMP markers (docs/CHAPTER_MARKERS_PLAN.md §12, Stage 3): the packet's status and size, and counts per
+    /// kind, shown and skipped. Fixed words and numbers only: never a name, comment, GUID or type string from the file.
+    public static func xmp(_ r: XMPMarkers.Result, readMs: Int) -> String {
+        let k = r.skipped
+        return "[MARKERS] xmp status=\(r.status.rawValue) where=\(r.location?.rawValue ?? "-") bytes=\(r.packetBytes) "
+            + "tracks=\(r.tracks) chapter=\(r.chapters) comment=\(r.comments) unreadable=\(r.unreadable) "
+            + "skipped=\(k.total) segmentation=\(k.segmentation) weblink=\(k.weblink) flvcuepoint=\(k.flvCuePoint) "
+            + "cue=\(k.cue) index=\(k.index) other=\(k.other) read=\(readMs)ms"
     }
 
     /// The file's chapters could not be read at all (open failed): no chapters, not an error the user sees.
     public static func chaptersUnreadable() -> String { "[MARKERS] chapters: file unreadable by libav" }
 
-    /// Convert to Markers (docs/CHAPTER_MARKERS_PLAN.md §4.1): counts only, never a title.
+    /// Convert to Markers (docs/CHAPTER_MARKERS_PLAN.md §4.1): file markers of either kind; counts only, never a title.
     public static func convertedChapters(_ r: ChapterMapping.ConvertResult) -> String {
         "[MARKERS] convert chapters added=\(r.added.count) identical=\(r.identical) occupied=\(r.occupied) "
             + "already-converted=\(r.alreadyConverted)"

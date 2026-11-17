@@ -75,13 +75,13 @@ final class ChapterLayerTests: XCTestCase {
 
     func testCountLabel() {
         XCTAssertEqual(ChapterLayer.countLabel(markersShown: 12, markersTotal: 12, chaptersShown: 8, chaptersTotal: 8),
-                       "12 markers · 8 chapters")
+                       "12 markers · 8 from file")
         XCTAssertEqual(ChapterLayer.countLabel(markersShown: 3, markersTotal: 12, chaptersShown: 0, chaptersTotal: 8),
-                       "3 of 12 markers · 0 of 8 chapters")
+                       "3 of 12 markers · 0 of 8 from file")
         XCTAssertEqual(ChapterLayer.countLabel(markersShown: 1, markersTotal: 1, chaptersShown: 1, chaptersTotal: 1),
-                       "1 marker · 1 chapter")
+                       "1 marker · 1 from file")
         XCTAssertEqual(ChapterLayer.countLabel(markersShown: 0, markersTotal: 0, chaptersShown: 0, chaptersTotal: 0),
-                       "0 markers", "no chapters part on a file without them")
+                       "0 markers", "no file-marker part on a file without them")
     }
 
     // MARK: Navigation union (D-C6)
@@ -151,9 +151,24 @@ final class ChapterLayerTests: XCTestCase {
 
     func testRowToolTipIsTimecodeAndTitleThenTheReadOnlyLine() {
         XCTAssertEqual(ChapterLayer.rowToolTip(ch(0, 240, "Second"), timecode: "01:00:10:00"),
-                       "Chapter · 01:00:10:00 · Second\nChapter from the file · Convert to edit")
+                       "Chapter · 01:00:10:00 · Second\nFrom the file · Convert to edit")
         XCTAssertEqual(ChapterLayer.rowToolTip(ch(0, 0), timecode: "01:00:00:00"),
-                       "Chapter · 01:00:00:00\nChapter from the file · Convert to edit", "an empty title is left out")
+                       "Chapter · 01:00:00:00\nFrom the file · Convert to edit", "an empty title is left out")
+    }
+
+    /// Stage 3: rows and flags keep the kind; a Comment's second line is the FIRST non-blank line of its comment, never
+    /// the rest. A Chapter's comment is not shown (it still becomes the notes on Convert).
+    func testCommentToolTipsCarryTheFirstCommentLine() {
+        let comment = MappedChapter(fileIndex: 0, frame: 186, duration: 96, title: "Flare", source: .xmp, kind: .comment,
+                                    comment: "\n  check the flare  \nsecond line")
+        XCTAssertEqual(ChapterLayer.flagToolTip(comment, timecode: "01:00:07:18"), "Comment · 01:00:07:18 · Flare\ncheck the flare")
+        XCTAssertEqual(ChapterLayer.rowToolTip(comment, timecode: "01:00:07:18"),
+                       "Comment · 01:00:07:18 · Flare\ncheck the flare\nFrom the file · Convert to edit")
+        XCTAssertFalse(ChapterLayer.rowToolTip(comment, timecode: "").contains("second line"))
+        let bare = MappedChapter(fileIndex: 1, frame: 0, duration: 1, title: "", source: .xmp, kind: .comment)
+        XCTAssertEqual(ChapterLayer.flagToolTip(bare, timecode: "00:00:00:00"), "Comment · 00:00:00:00", "no comment: one line")
+        let chapter = MappedChapter(fileIndex: 2, frame: 197, duration: 1, title: "Act", source: .xmp, comment: "words")
+        XCTAssertEqual(ChapterLayer.flagToolTip(chapter, timecode: "00:00:08:05"), "Chapter · 00:00:08:05 · Act")
     }
 
     func testMarkerRowToolTip() {
@@ -183,8 +198,8 @@ final class ChapterLayerTests: XCTestCase {
         let r = ChapterMapping.convert(items, into: existing)
         XCTAssertEqual(r.added.count, 1)
         XCTAssertEqual(ChapterLayer.convertNotice(r),
-                       "Converted 1 chapter to markers. 1 skipped: another marker starts on its frame; 1 already a marker.")
-        XCTAssertEqual(ChapterLayer.convertNotice(ChapterMapping.convert([], into: [])), "No chapters converted.")
+                       "Converted 1 file marker to markers. 1 skipped: another marker starts on its frame; 1 already a marker.")
+        XCTAssertEqual(ChapterLayer.convertNotice(ChapterMapping.convert([], into: [])), "No file markers converted.")
     }
 
     func testConvertThenRestoreIsTheUndo() {

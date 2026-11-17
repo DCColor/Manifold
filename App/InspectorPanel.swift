@@ -587,7 +587,7 @@ private struct InspectorChaptersRow: View {
     @ObservedObject var model: MarkerModel
 
     var body: some View {
-        let n = model.chapters.count, past = model.chaptersPastEnd
+        let n = model.chapterCount, past = model.chaptersPastEnd
         if n > 0 || past > 0 {
             Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
             MetadataRow(label: "Chapters", value: past > 0 ? "\(n) · \(past) after the end" : "\(n)")

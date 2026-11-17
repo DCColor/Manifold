@@ -14,6 +14,10 @@
 //  written to the store, so they show with Remember markers off too. Their titles are the file's content: logged as
 //  counts only (`MarkerLog.chapters`). The layer's rules are `ChapterLayer`'s.
 //
+//  XMP MARKERS (Stage 3, §12): Premiere's `xmpDM:markers`, Chapter and Comment types only, read by `XMPMarkers` in the
+//  same detached task as the libav read, under the same token, and mapped with the chapters onto ONE layer, shown as
+//  "File markers". Names, comments and GUIDs are never logged: `MarkerLog.xmp` takes counts.
+//
 //  ⚠️ THE FRAME A MARKER GOES ON (D2). Playing: the frame the renderer last put on screen (`presentedPTS`), which can
 //  trail the playhead by the render queue's depth (WindowDeck.frameName's note). Paused: the playhead, which is that
 //  frame, and which is right at once after a step or a seek, before the renderer has drawn.
@@ -59,7 +63,8 @@ final class MarkerModel: ObservableObject {
     /// The file's embedded chapters on the frame index, all of them (converted ones included), in frame order. Empty
     /// until the read and the mapping are both done. Never stored.
     @Published private(set) var chapters: [MappedChapter] = []
-    /// Chapters the file states that start after its last frame (dropped, never clamped; §3.1). For the Inspector.
+    /// Chapters (of the chapter kind) the file states that start after its last frame (dropped, never clamped; §3.1).
+    /// For the Inspector.
     @Published private(set) var chaptersPastEnd = 0
     /// The "chapters can't be edited" note, on this marker's player window (`MarkerEditorHost`), for this chapter.
     @Published var chapterNote: MappedChapter?
@@ -82,9 +87,12 @@ final class MarkerModel: ObservableObject {
     private var feed = ThumbnailFeed()
     /// The start-timecode check (`checkStartTimecode`) has not run for this load: it needs the rate and timecode.
     private var startCheckPending = false
-    /// The chapters as the file states them (nil: not read yet, or unreadable), and how long the read took.
+    /// The chapters as the file states them (nil: not read yet, or unreadable by libav), and how long the read took.
     private var fileChapters: ChapterReader.Result?
     private var chapterReadMs = 0
+    /// The file's XMP Chapter and Comment markers (Stage 3), and whether the read (libav and XMP) has finished.
+    private var xmpItems: [FileChapter] = []
+    private var fileMarkersRead = false
     /// What the current `chapters` were mapped with, so a repeat publish of the metadata maps nothing again.
     private var chapterMapKey: ChapterMapKey?
     /// The "chapters start after the end" notice has been shown for this load.
@@ -148,6 +156,8 @@ final class MarkerModel: ObservableObject {
         chapters = []
         chaptersPastEnd = 0
         fileChapters = nil
+        xmpItems = []
+        fileMarkersRead = false
         chapterMapKey = nil
         pastEndNoticeShown = false
         chapterRetry?.cancel()
@@ -159,12 +169,18 @@ final class MarkerModel: ObservableObject {
         let store = self.store
         let remember = MarkerSettings.remember()
         persisting = remember
-        // The file's chapters, beside the fingerprint (§2.4): a private libav open, read and close, never playback's.
+        // The file's chapters, beside the fingerprint (§2.4): a private libav open, read and close, never playback's;
+        // then its XMP markers (§12, Stage 3): box headers and the packet only, never the media data.
         Task.detached(priority: .userInitiated) {
             let t0 = Date()
             let read = try? ChapterReader.read(url: url)
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
-            await MainActor.run { [weak self] in self?.finishChapterRead(token: token, read: read, ms: ms) }
+            let t1 = Date()
+            let xmp = XMPMarkers.read(url: url)
+            let xmpMs = Int(Date().timeIntervalSince(t1) * 1000)
+            await MainActor.run { [weak self] in
+                self?.finishChapterRead(token: token, read: read, ms: ms, xmp: xmp, xmpMs: xmpMs)
+            }
         }
         Task.detached(priority: .userInitiated) {
             let t0 = Date()
@@ -236,14 +252,15 @@ final class MarkerModel: ObservableObject {
         let origin: ChapterTime
     }
 
-    private func finishChapterRead(token: UUID, read: ChapterReader.Result?, ms: Int) {
+    private func finishChapterRead(token: UUID, read: ChapterReader.Result?, ms: Int, xmp: XMPMarkers.Result, xmpMs: Int) {
         guard token == loadToken else { return }
-        guard let read else {
-            NSLog("%@", MarkerLog.chaptersUnreadable())
-            return
-        }
+        if read == nil { NSLog("%@", MarkerLog.chaptersUnreadable()) }
+        // One counts-only line whenever the file has XMP or its boxes could not be walked; nothing for a file without.
+        if xmp.status != .none { NSLog("%@", MarkerLog.xmp(xmp, readMs: xmpMs)) }
         fileChapters = read
-        chapterReadMs = ms
+        chapterReadMs = ms + xmpMs
+        xmpItems = xmp.items
+        fileMarkersRead = true
         mapChapters()
     }
 
@@ -252,13 +269,16 @@ final class MarkerModel: ObservableObject {
     /// file's frame 0 is its first video frame, so the video stream's `start_time` comes off; an AVFoundation-played
     /// file's frame 0 is the asset's time 0, so nothing does. With `start_time` 0, as on every real file seen, the two
     /// agree and the path is not needed.
+    /// XMP items take no origin (they count from the first frame, §12.6); `ChapterMapping.map` knows.
     private func mapChapters() {
-        guard let read = fileChapters, let engine, let basis, engine.duration > 0 else { return }
+        guard fileMarkersRead, let engine, let basis, engine.duration > 0 else { return }
+        let videoStart = fileChapters?.videoStart ?? .zero
+        let items = (fileChapters?.chapters ?? []) + xmpItems
         let origin: ChapterTime
-        if read.videoStart.value == 0 {
+        if videoStart.value == 0 {
             origin = .zero
         } else if let libav = engine.frameRouteUsesLibav {
-            origin = libav ? read.videoStart : .zero
+            origin = libav ? videoStart : .zero
         } else {
             retryChapterMapping()   // the route is set later in the same load
             return
@@ -266,14 +286,14 @@ final class MarkerModel: ObservableObject {
         let key = ChapterMapKey(rate: basis.rate, lastFrame: lastFrame, origin: origin)
         guard key != chapterMapKey else { return }
         chapterMapKey = key
-        let r = ChapterMapping.map(read.chapters, origin: origin, rate: basis.rate, lastFrame: lastFrame)
+        let r = ChapterMapping.map(items, origin: origin, rate: basis.rate, lastFrame: lastFrame)
         chapters = r.chapters
-        chaptersPastEnd = r.droppedPastEnd
-        if !read.chapters.isEmpty { NSLog("%@", MarkerLog.chapters(r, readMs: chapterReadMs)) }
+        chaptersPastEnd = r.chaptersPastEnd
+        if !items.isEmpty { NSLog("%@", MarkerLog.chapters(r, readMs: chapterReadMs)) }
         if r.droppedPastEnd > 0, !pastEndNoticeShown {
             pastEndNoticeShown = true
             let n = r.droppedPastEnd
-            show(n == 1 ? "1 chapter starts after the end of the file." : "\(n) chapters start after the end of the file.")
+            show(n == 1 ? "1 file marker starts after the end of the file." : "\(n) file markers start after the end of the file.")
         }
         if state == .ready { syncThumbnails(ifChanged: true) }
     }
@@ -312,7 +332,10 @@ final class MarkerModel: ObservableObject {
     /// Markers and visible chapters interleaved by frame, for the lists.
     var listRows: [MarkerListRow] { ChapterLayer.rows(markers: visibleMarkers, chapters: visibleChapters) }
 
-    /// "12 markers · 8 chapters" (the Markers window's header).
+    /// The Inspector's Chapters row: file markers of the chapter kind (de-duplicated), not Comments.
+    var chapterCount: Int { chapters.filter { $0.kind == .chapter }.count }
+
+    /// "12 markers · 8 from file" (the Markers window's header).
     var countLabel: String {
         ChapterLayer.countLabel(markersShown: visibleMarkers.count, markersTotal: markers.count,
                                 chaptersShown: visibleChapters.count,
@@ -321,21 +344,22 @@ final class MarkerModel: ObservableObject {
 
     func go(to chapter: MappedChapter) { go(toFrame: chapter.frame) }
 
-    /// Convert to Marker (a row or the selection) and Convert All Chapters to Markers: D-C4 Blue + keyword "chapter",
-    /// D-C8 the chapter's duration, D-C14 stable ids skipped, through the import merge rule. One undo step.
+    /// Convert to Marker (a row or the selection) and Convert All File Markers to Markers: the item's color through the
+    /// D-C13 table (else D-C4 Blue), its kind's keyword, its comment as notes, its duration (D-C8), D-C14 stable ids
+    /// skipped, through the import merge rule. One undo step.
     func convert(_ items: [MappedChapter]) {
         guard isActive, state == .ready, !items.isEmpty else { NSSound.beep(); return }
         let r = ChapterMapping.convert(items, into: markers)
         if !r.added.isEmpty {
             revealMarkers()
-            apply(markers + r.added, action: items.count == 1 ? "Convert Chapter to Marker" : "Convert Chapters to Markers",
+            apply(markers + r.added, action: items.count == 1 ? "Convert File Marker to Marker" : "Convert File Markers to Markers",
                   log: .convert)
         }
         NSLog("%@", MarkerLog.convertedChapters(r))
         show(ChapterLayer.convertNotice(r))
     }
 
-    /// Mark ▸ Convert All Chapters to Markers: every chapter not converted yet, shown or not.
+    /// Mark ▸ Convert All File Markers to Markers: every file marker not converted yet, shown or not.
     func convertAllChapters() { convert(unconvertedChapters) }
 
     // MARK: What the window is showing

@@ -15,9 +15,16 @@
 //  its chapter times to milliseconds BEFORE writing them in 1/24000 (CHAPTER_MARKERS_PLAN §11.3.1): 58056 against frame
 //  58's 58058 is two ticks short. A truly mid-frame chapter moves only if it is within 1 ms (or one tick) of the next frame.
 //
-//  THE LAYER'S ITEMS (Stage 2, 2026-11-17). Each item says where it came from (`source`: a chapter track, a Nero `chpl`,
-//  or, from Stage 3, Premiere's XMP markers), what it is (`kind`), and optionally a colour, a STATED duration and a stable
-//  id. Stage 2 fills them from libav's chapters only: chapter kind, no colour, no stated duration, no id.
+//  THE LAYER'S ITEMS ("file markers"). Each item says where it came from (`source`: a chapter track, a Nero `chpl`, or
+//  Premiere's XMP markers), what it is (`kind`: Chapter or Comment), and optionally a color, a STATED duration, a stable
+//  id and a comment. libav's chapters (Stage 2) are chapters with none of those; XMP items (Stage 3, `XMPMarkers`) can
+//  carry all of them.
+//
+//  XMP ITEMS (Stage 3, 2026-11-17): their start is a whole frame count at the track's rate, from the file's first frame
+//  (§12.6), so they take NO origin and NO tolerance: the frame is the exact floor of start × file rate, which is the
+//  start itself when the rates match (§12.4.5). DE-DUPLICATION: Premiere's `.mov` carries its Chapter markers both in the
+//  chapter track and in XMP, to the frame (§11.3); a chapter-track or `chpl` chapter on the frame of an XMP Chapter is
+//  left out (counted as `duplicates`), and the XMP one, which has a color and an id, is shown.
 //
 //  ⚠️ PRIVACY (§5.1, MARKERS_PLAN): chapter titles are the file's content, often a client's. Nothing here logs; callers
 //  log through `MarkerLog.chapters`, which takes counts only.
@@ -68,26 +75,33 @@ public enum EmbeddedMarkerSource: String, Equatable, Sendable {
     case chapterTrack
     /// A Nero `moov/udta/chpl` list.
     case chpl
-    /// Premiere's `xmpDM:markers` (Stage 3; nothing produces it yet).
+    /// Premiere's `xmpDM:markers` (Stage 3, `XMPMarkers`).
     case xmp
 }
 
-/// What an embedded item is. Chapter tracks and `chpl` carry chapters only; Premiere's XMP types all four (§12, D-C12).
+/// What an embedded item is. Chapter tracks and `chpl` carry chapters only. Of Premiere's XMP types only Chapter and
+/// Comment are shown (Robbie, 2026-11-17, superseding D-C12); the rest are skipped and counted by `XMPMarkers`.
 public enum EmbeddedMarkerKind: String, CaseIterable, Equatable, Sendable {
-    case chapter, comment, segmentation, weblink
+    case chapter, comment
 
     /// The word the tooltip and the list lead with.
     public var label: String {
         switch self {
         case .chapter: return "Chapter"
         case .comment: return "Comment"
-        case .segmentation: return "Segmentation"
-        case .weblink: return "Web Link"
         }
     }
 
-    /// The keyword a converted item gets (D-C4 for chapters; §12.4.3 for the XMP types).
+    /// The keyword a converted item gets (D-C4 for chapters; "comment" for comments).
     public var keyword: String { rawValue }
+
+    /// The row's SF Symbol in place of a color swatch.
+    public var symbolName: String {
+        switch self {
+        case .chapter: return "book.closed"
+        case .comment: return "text.bubble"
+        }
+    }
 }
 
 /// An item's own colour, sRGB (D-C13: XMP markers carry one; chapter tracks and `chpl` never do).
@@ -113,13 +127,15 @@ public struct FileChapter: Equatable, Sendable {
     /// A duration the file STATES for the item (XMP `xmpDM:duration`, Stage 3), as opposed to a chapter's implied run to
     /// the next one. Only a stated duration gets a band (D-C16). Nil for chapter tracks and `chpl`.
     public var statedDuration: ChapterTime?
-    /// A stable id the file gives the item (XMP `marker_guid`, Stage 3), so a repeat Convert skips it (D-C14). Nil for
-    /// chapter tracks and `chpl`.
+    /// A stable id the file gives the item (XMP `xmpDM:guid`, else its `marker_guid` param), so a repeat Convert skips it
+    /// (D-C14). Nil for chapter tracks and `chpl`.
     public var stableID: String?
+    /// The item's comment (XMP `xmpDM:comment`), as stated: may hold line breaks. Empty for chapter tracks and `chpl`.
+    public var comment: String
 
     public init(start: ChapterTime, end: ChapterTime?, title: String, source: EmbeddedMarkerSource = .chapterTrack,
                 kind: EmbeddedMarkerKind = .chapter, color: EmbeddedColor? = nil, statedDuration: ChapterTime? = nil,
-                stableID: String? = nil) {
+                stableID: String? = nil, comment: String = "") {
         self.start = start
         self.end = end
         self.title = title
@@ -128,6 +144,7 @@ public struct FileChapter: Equatable, Sendable {
         self.color = color
         self.statedDuration = statedDuration
         self.stableID = stableID
+        self.comment = comment
     }
 }
 
@@ -147,10 +164,12 @@ public struct MappedChapter: Equatable, Identifiable, Sendable {
     /// Frames, when the file states a duration (D-C16: only these get a band). Nil for chapters.
     public var statedDuration: Int?
     public var stableID: String?
+    /// As stated (line breaks kept): the converted marker's notes, and a Comment's second tooltip line.
+    public var comment: String
 
     public init(fileIndex: Int, frame: Int, duration: Int, title: String, source: EmbeddedMarkerSource = .chapterTrack,
                 kind: EmbeddedMarkerKind = .chapter, color: EmbeddedColor? = nil, statedDuration: Int? = nil,
-                stableID: String? = nil) {
+                stableID: String? = nil, comment: String = "") {
         self.fileIndex = fileIndex
         self.frame = frame
         self.duration = max(duration, 1)
@@ -160,6 +179,7 @@ public struct MappedChapter: Equatable, Identifiable, Sendable {
         self.color = color
         self.statedDuration = statedDuration.map { max($0, 1) }
         self.stableID = stableID
+        self.comment = comment
     }
 
     public var id: Int { fileIndex }
@@ -177,6 +197,10 @@ public enum ChapterMapping {
         public var droppedBeforeStart: Int
         /// Start or rate unusable (a zero time base).
         public var droppedUnreadable: Int
+        /// Chapter-track or `chpl` chapters left out because an XMP Chapter is on the same frame (shown instead).
+        public var duplicates: Int = 0
+        /// Of `droppedPastEnd`, the chapters (for the Inspector's Chapters row).
+        public var chaptersPastEnd: Int = 0
 
         public var dropped: Int { droppedPastEnd + droppedBeforeStart + droppedUnreadable }
     }
@@ -204,7 +228,10 @@ public enum ChapterMapping {
         return frame(of: time, origin: origin, rateNum: r.num, rateDen: r.den)
     }
 
-    public static func frame(of time: ChapterTime, origin: ChapterTime = .zero, rateNum: Int64, rateDen: Int64) -> Int? {
+    /// `tolerant: false` is the exact floor, for XMP's whole frame counts (§12.4.5): a count at one rate rescaled to
+    /// another names the frame showing at that time, with no writer's rounding to allow for.
+    public static func frame(of time: ChapterTime, origin: ChapterTime = .zero, rateNum: Int64, rateDen: Int64,
+                             tolerant: Bool = true) -> Int? {
         guard time.den != 0, time.num != 0, origin.den != 0, rateNum > 0, rateDen > 0 else { return nil }
         // Normalise signs so every denominator is positive.
         let (tv, tn, td) = normalised(time)
@@ -219,7 +246,7 @@ public enum ChapterMapping {
         // 1 ms in frames: rN/(1000·rD) = td·od·rN / denominator.
         let millisecond = Int128(td) * Int128(od) * rN
         // D-C7a: the larger of the two, capped at half a frame.
-        let tolerance = min(max(tick, millisecond), denominator / 2)
+        let tolerance = tolerant ? min(max(tick, millisecond), denominator / 2) : 0
         let q = floorDiv(numerator + tolerance, denominator)
         guard q >= Int128(Int.min), q <= Int128(Int.max) else { return nil }
         return Int(q)
@@ -245,6 +272,8 @@ public enum ChapterMapping {
     ///   item with no stated duration is one frame, as a marker (§12.4.4). Clamped to the file's end. Duration =
     ///   end − start, at least 1.
     /// - Sorted by frame; ties keep file order. Titles made single-line; empty stays empty.
+    /// - XMP items take no origin and no tolerance (see the header); a chapter-track or `chpl` chapter on an XMP
+    ///   Chapter's frame is left out and counted in `duplicates`.
     public static func map(_ chapters: [FileChapter], origin: ChapterTime = .zero, rate: Double, lastFrame: Int) -> Result {
         var result = Result(chapters: [], droppedPastEnd: 0, droppedBeforeStart: 0, droppedUnreadable: 0)
         guard let r = exactRate(rate) else {
@@ -254,18 +283,20 @@ public enum ChapterMapping {
         struct Placed { let index: Int; let start: Int; let statedEnd: Int?; let stated: Bool; let source: FileChapter }
         var placed: [Placed] = []
         for (i, c) in chapters.enumerated() {
-            guard let s = frame(of: c.start, origin: origin, rateNum: r.num, rateDen: r.den) else {
+            let xmp = c.source == .xmp
+            let o = xmp ? ChapterTime.zero : origin
+            guard let s = frame(of: c.start, origin: o, rateNum: r.num, rateDen: r.den, tolerant: !xmp) else {
                 result.droppedUnreadable += 1
                 continue
             }
             var e: Int?
             var stated = false
             if let d = c.statedDuration, let endTime = c.start.adding(d), d.value > 0,
-               let ef = frame(of: endTime, origin: origin, rateNum: r.num, rateDen: r.den) {
+               let ef = frame(of: endTime, origin: o, rateNum: r.num, rateDen: r.den, tolerant: !xmp) {
                 e = max(ef, s + 1)
                 stated = true
             } else if c.kind == .chapter, let end = c.end,
-                      let ef = frame(of: end, origin: origin, rateNum: r.num, rateDen: r.den), ef > s,
+                      let ef = frame(of: end, origin: o, rateNum: r.num, rateDen: r.den, tolerant: !xmp), ef > s,
                       end.seconds > c.start.seconds {
                 e = ef
             } else if c.kind != .chapter {
@@ -275,8 +306,18 @@ public enum ChapterMapping {
         }
         placed.sort { ($0.start, $0.index) < ($1.start, $1.index) }
         let fileEnd = lastFrame + 1
+        // The frames of XMP Chapters: a chapter-track or `chpl` chapter there is the same chapter (see the header).
+        let xmpChapterFrames = Set(placed.filter { $0.source.source == .xmp && $0.source.kind == .chapter }.map { max($0.start, 0) })
         for (k, p) in placed.enumerated() {
-            if p.start > lastFrame { result.droppedPastEnd += 1; continue }
+            if p.start > lastFrame {
+                result.droppedPastEnd += 1
+                if p.source.kind == .chapter { result.chaptersPastEnd += 1 }
+                continue
+            }
+            if p.source.source != .xmp, p.source.kind == .chapter, xmpChapterFrames.contains(max(p.start, 0)) {
+                result.duplicates += 1
+                continue
+            }
             // The next CHAPTER on a later frame: a comment between two chapters does not cut the first one short.
             let next = placed[(k + 1)...].first { $0.start > p.start && $0.source.kind == .chapter }?.start
             let end = min(p.statedEnd ?? next ?? fileEnd, fileEnd)
@@ -286,7 +327,7 @@ public enum ChapterMapping {
             result.chapters.append(MappedChapter(fileIndex: p.index, frame: start, duration: end - start,
                                                  title: Marker.singleLine(c.title), source: c.source, kind: c.kind,
                                                  color: c.color, statedDuration: p.stated ? end - start : nil,
-                                                 stableID: c.stableID))
+                                                 stableID: c.stableID, comment: c.comment))
         }
         return result
     }
@@ -320,18 +361,20 @@ public enum ChapterMapping {
         public var occupied: Int { merge.occupied }
     }
 
-    /// Convert to Markers (D-C4, D-C8, D-C14): Blue, the kind's keyword ("chapter" for chapter-track and `chpl` items), the
-    /// item's duration, its stable id when it has one, through the import merge rule, so an item on a frame that already
-    /// holds a different marker is skipped and counted, and one identical to a marker there merges (D19,
-    /// `ResolveEDL.merge`). An item whose stable id a marker already carries is skipped first.
-    /// (Stage 3 maps an XMP item's own colour through the D-C13 table; every Stage 2 item has none, so Blue.)
+    /// Convert to Markers (D-C4, D-C8, D-C13, D-C14): the item's own color through Premiere's 8→16 table
+    /// (`PremiereMarkerColor`), else Blue; the kind's keyword ("chapter" or "comment"); name = its title; notes = its
+    /// comment; the item's duration (stated, else D-C8's run for a chapter, 1 frame for a comment); its stable id when it
+    /// has one. Through the import merge rule, so an item on a frame that already holds a different marker is skipped and
+    /// counted, and one identical to a marker there merges (D19, `ResolveEDL.merge`). An item whose stable id a marker
+    /// already carries is skipped first.
     public static func convert(_ chapters: [MappedChapter], into existing: [Marker], created: Date = Date()) -> ConvertResult {
         var skipped = 0
         var incoming: [Marker] = []
         for c in chapters {
             if let id = c.stableID, existing.contains(where: { $0.embeddedID == id }) { skipped += 1; continue }
-            incoming.append(Marker(frame: c.frame, duration: c.duration, name: c.title, keywords: [c.kind.keyword],
-                                   color: .blue, created: created, embeddedID: c.stableID))
+            incoming.append(Marker(frame: c.frame, duration: c.duration, name: c.title, notes: c.comment,
+                                   keywords: [c.kind.keyword], color: PremiereMarkerColor.markerColor(for: c.color),
+                                   created: created, embeddedID: c.stableID))
         }
         return ConvertResult(merge: ResolveEDL.merge(incoming, into: existing), alreadyConverted: skipped)
     }

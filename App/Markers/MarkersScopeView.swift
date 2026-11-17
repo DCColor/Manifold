@@ -62,7 +62,7 @@ struct MarkersScopeView: View {
         var s = n == shown ? " · \(n)" : " · \(shown) of \(n)"
         if showChapters {
             let c = model.unconvertedChapters.count, cs = model.visibleChapters.count
-            if c > 0 { s += c == cs ? " · \(c) ch" : " · \(cs) of \(c) ch" }
+            if c > 0 { s += c == cs ? " · \(c) from file" : " · \(cs) of \(c) from file" }
         }
         return s
     }
@@ -113,8 +113,8 @@ struct MarkerNotice: View {
     }
 }
 
-/// The 16 colours and the Chapters chip as filter toggles; none chosen shows all. With any chosen, markers show only in
-/// the colours chosen and chapters only with the chip (docs/CHAPTER_MARKERS_PLAN.md §4.1).
+/// The 16 colors and the From File chip as filter toggles; none chosen shows all. With any chosen, markers show only in
+/// the colors chosen and file markers only with the chip (docs/CHAPTER_MARKERS_PLAN.md §4.1; renamed in Stage 3).
 ///
 /// ⚠️ LAID OUT TO BE MEASURED WHOLE (Stage 2 attended check, 2026-11-17: the chip's border was clipped at the bottom in
 /// the gear popover). A popover sizes itself from its content's ideal height, so: the swatches are a plain `Grid`, not a
@@ -162,7 +162,7 @@ struct MarkerColorFilter: View {
         Button {
             model.chapterFilter.toggle()
         } label: {
-            Label("Chapters", systemImage: "book.closed")
+            Label("From File", systemImage: "doc.text")
                 .labelStyle(.titleAndIcon)
                 .font(.caption)
                 .imageScale(.small)
@@ -175,8 +175,8 @@ struct MarkerColorFilter: View {
                 .fixedSize()
         }
         .buttonStyle(.plain)
-        .help("Chapters embedded in the file")
-        .accessibilityLabel("Chapters")
+        .help("Markers embedded in the file: chapters and comments")
+        .accessibilityLabel("From File")
         .accessibilityAddTraits(model.chapterFilter ? .isSelected : [])
     }
 }
@@ -339,12 +339,12 @@ struct MarkerListBody: View {
             }
             if picked.count == 1 {
                 Button("Edit…") { model.showChapterNote(c) }
-                Button("Go to Chapter") { model.go(to: c) }
+                Button("Go to \(c.kind.label)") { model.go(to: c) }
             }
-            Button(picked.count == 1 ? "Convert to Marker" : "Convert \(picked.count) Chapters to Markers") {
+            Button(picked.count == 1 ? "Convert to Marker" : "Convert \(picked.count) File Markers to Markers") {
                 model.convert(picked); selection.subtract(picked.map { .chapter($0.fileIndex) })
             }
-            Button("Convert All Chapters to Markers") { model.convertAllChapters(); selection = [] }
+            Button("Convert All File Markers to Markers") { model.convertAllChapters(); selection = [] }
                 .disabled(model.unconvertedChapters.isEmpty)
             Divider()
             Button(picked.count == 1 ? "Regenerate Thumbnail" : "Regenerate \(picked.count) Thumbnails") {
@@ -378,7 +378,7 @@ struct MarkerListBody: View {
         }
     }
 
-    /// The chapter's own colour when it has one (Stage 3's XMP items), else the list's secondary.
+    /// The file marker's own color when it has one (XMP items, D-C13), else the list's secondary.
     private func chapterTint(_ c: MappedChapter, slot: Bool) -> Color {
         if let k = c.color { return Color(.sRGB, red: Double(k.red) / 255, green: Double(k.green) / 255, blue: Double(k.blue) / 255) }
         return slot ? .white.opacity(0.75) : .secondary
@@ -390,7 +390,7 @@ struct MarkerListBody: View {
             Text(label(c.frame))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.85))
-            Image(systemName: "book.closed")
+            Image(systemName: c.kind.symbolName)
                 .font(.system(size: 8))
                 .foregroundStyle(chapterTint(c, slot: true))
                 .frame(width: 8, height: 8)
@@ -413,7 +413,7 @@ struct MarkerListBody: View {
             mono(label(c.lastFrame)).frame(width: MarkerWindowColumns.tc, alignment: .leading)
             mono(chapterDuration(c)).frame(width: MarkerWindowColumns.tc, alignment: .leading)
             HStack(spacing: 5) {
-                Image(systemName: "book.closed").foregroundStyle(chapterTint(c, slot: false)).frame(width: 10, height: 10)
+                Image(systemName: c.kind.symbolName).foregroundStyle(chapterTint(c, slot: false)).frame(width: 10, height: 10)
                 Text(c.kind.label).foregroundStyle(.secondary)
             }
             .frame(width: MarkerWindowColumns.color, alignment: .leading)

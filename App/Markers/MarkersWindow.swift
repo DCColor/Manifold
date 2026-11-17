@@ -77,7 +77,7 @@ private struct MarkersWindowContent: View {
             MarkerNotice(model: model)
         }
         .navigationTitle(model.fileName.isEmpty ? "Markers" : "Markers — \(model.fileName)")
-        // The header count (docs/CHAPTER_MARKERS_PLAN.md §4.1): "12 markers · 8 chapters".
+        // The header count (docs/CHAPTER_MARKERS_PLAN.md §4.1): "12 markers · 8 from file".
         .navigationSubtitle(model.isActive && showMarkers ? model.countLabel : "")
         .toolbar {
             // Text buttons, not icons (Robbie, 2026-11-15): the download and share glyphs read as Download and as Share

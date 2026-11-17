@@ -213,8 +213,11 @@ final class ChapterMappingTests: XCTestCase {
         XCTAssertEqual(c.source, .chapterTrack)
         XCTAssertEqual(c.kind, .chapter)
         XCTAssertNil(c.color); XCTAssertNil(c.statedDuration); XCTAssertNil(c.stableID)
-        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.label), ["Chapter", "Comment", "Segmentation", "Web Link"])
-        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.keyword), ["chapter", "comment", "segmentation", "weblink"])
+        XCTAssertEqual(c.comment, "")
+        // Stage 3 (Robbie, 2026-11-17, superseding D-C12): Chapter and Comment only.
+        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.label), ["Chapter", "Comment"])
+        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.keyword), ["chapter", "comment"])
+        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.symbolName), ["book.closed", "text.bubble"])
     }
 
     func testChapterTimeAddingIsExact() {
@@ -269,14 +272,14 @@ final class ChapterMappingTests: XCTestCase {
 
     func testConvertSkipsStableIDsAlreadyConvertedAndCarriesTheID() {
         let items = [MappedChapter(fileIndex: 0, frame: 10, duration: 5, title: "a", source: .xmp, kind: .comment, stableID: "g-1"),
-                     MappedChapter(fileIndex: 1, frame: 20, duration: 5, title: "b", source: .xmp, kind: .weblink, stableID: "g-2")]
+                     MappedChapter(fileIndex: 1, frame: 20, duration: 5, title: "b", source: .xmp, kind: .comment, stableID: "g-2")]
         // g-1 was converted before and the marker has since been moved and renamed: still skipped (D-C14).
         let existing = [Marker(frame: 99, name: "renamed", embeddedID: "g-1")]
         let r = ChapterMapping.convert(items, into: existing)
         XCTAssertEqual(r.alreadyConverted, 1)
         XCTAssertEqual(r.added.map(\.name), ["b"])
         XCTAssertEqual(r.added.first?.embeddedID, "g-2")
-        XCTAssertEqual(r.added.first?.keywords, ["weblink"], "the kind's keyword")
+        XCTAssertEqual(r.added.first?.keywords, ["comment"], "the kind's keyword")
         // Converting the result again adds nothing.
         let again = ChapterMapping.convert(items, into: existing + r.added)
         XCTAssertEqual(again.added.count, 0)
@@ -348,6 +351,7 @@ final class ChapterMappingTests: XCTestCase {
         XCTAssertFalse(MarkerLog.convertedChapters(conv).contains(sentinel))
         XCTAssertEqual(MarkerLog.convertedChapters(conv), "[MARKERS] convert chapters added=1 identical=0 occupied=0 already-converted=0")
         XCTAssertFalse(ChapterLayer.convertNotice(conv).contains(sentinel))
-        XCTAssertEqual(lines[0], "[MARKERS] chapters n=1 dropped-past-end=1 dropped-before-start=0 unreadable=0 reader=libav read=4ms")
+        XCTAssertEqual(lines[0], "[MARKERS] chapters n=1 chapter=1 comment=0 dropped-past-end=1 dropped-before-start=0 "
+                       + "unreadable=0 duplicates=0 reader=libav+xmp read=4ms")
     }
 }
