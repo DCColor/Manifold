@@ -6,12 +6,75 @@ import XCTest
 /// finish first, the engine's metadata (the rate) lands after.
 final class ThumbnailFeedTests: XCTestCase {
     private let stored: Set<Int> = [11508, 34526, 57542, 80559, 103575]   // five markers, frame numbers at 59.94
+    private let file = URL(fileURLWithPath: "/tmp/premiere_chapters - prores.mov")
 
     /// What the thumbnailer would start next, from the feed it was last given.
     private func next(_ feed: ThumbnailFeed, made: Set<Int> = [], givenUp: Set<Int> = [], inFlight: Int? = nil,
-                      shown: Bool = true, playing: Bool = false) -> Int? {
+                      shown: Bool = true, playing: Bool = false, ready: Bool = true) -> Int? {
         ThumbnailQueue.next(wanted: feed.frames, made: made, givenUp: givenUp, rate: feed.rate, inFlight: inFlight,
-                            shown: shown, playing: playing)
+                            shown: shown, playing: playing, decoderReady: ready)
+    }
+
+    private func waiting(_ feed: ThumbnailFeed, made: Set<Int> = [], ready: Bool) -> Bool {
+        ThumbnailQueue.waitingForDecoder(wanted: feed.frames, made: made, givenUp: [], rate: feed.rate, inFlight: nil,
+                                         shown: true, playing: false, decoderReady: ready)
+    }
+
+    // MARK: Chapters mapped after the first sync (Stage 2 attended check, 2026-11-17)
+
+    /// `premiere_chapters - prores.mov` opened for the first time: no markers stored, so `finishLoad` syncs an empty set;
+    /// the chapters are mapped after (when the rate and length land) and reach the thumbnailer BEFORE the engine has set
+    /// the decoder route. They must still all be made, without Regenerate, once the route is known.
+    func testChaptersMappedAfterTheFirstSyncAndBeforeTheRouteStillGetThumbnails() {
+        var feed = ThumbnailFeed()
+        // finishLoad: no markers, no chapters yet (the rate may or may not be in).
+        feed.update(frames: ChapterLayer.thumbnailFrames(markers: [], chapters: []), rate: nil)
+        XCTAssertNil(next(feed))
+        // The rate and length land: the chapters are mapped, and the model syncs the union.
+        let chapters = [101, 280, 532].enumerated().map { MappedChapter(fileIndex: $0.offset, frame: $0.element, duration: 1, title: "") }
+        let rate = 24000.0 / 1001
+        XCTAssertTrue(feed.update(frames: ChapterLayer.thumbnailFrames(markers: [], chapters: chapters), rate: rate),
+                      "the thumbnailer is told about the chapter frames")
+        // The decoder route is not set yet: nothing starts (the first build started one and dropped it) ...
+        var wait = DecoderWait(file: file)
+        XCTAssertNil(next(feed, ready: false))
+        XCTAssertTrue(waiting(feed, ready: false), "... the thumbnailer holds the work back ...")
+        wait.wait()
+        // ... until the engine reports the route decided for this file: that event starts it, no timer.
+        XCTAssertTrue(wait.decided(file))
+        XCTAssertFalse(wait.waiting)
+        XCTAssertFalse(waiting(feed, ready: true))
+        var made: Set<Int> = []
+        while let f = next(feed, made: made, ready: true) { made.insert(f) }
+        XCTAssertEqual(made, [101, 280, 532])
+        // A repeat of the event (the route reinstalled after a tag rewrite) starts nothing more.
+        XCTAssertFalse(wait.decided(file))
+    }
+
+    func testADecoderEventForAnotherFileDoesNothing() {
+        let other = URL(fileURLWithPath: "/tmp/other file.mov")
+        var wait = DecoderWait(file: file)
+        wait.wait()
+        XCTAssertFalse(wait.decided(other), "another file's route (a stale load, or another window's engine)")
+        XCTAssertTrue(wait.waiting, "still waiting for its own")
+        // The window moved on to another file: the old file's late event does nothing either.
+        wait.reset(file: other)
+        wait.wait()
+        XCTAssertFalse(wait.decided(file))
+        XCTAssertTrue(wait.decided(other))
+        // Nothing waiting: even its own file's event starts nothing.
+        var idle = DecoderWait(file: file)
+        XCTAssertFalse(idle.decided(file))
+    }
+
+    func testNothingWaitsForTheRouteWhenThereIsNothingToMake() {
+        var feed = ThumbnailFeed()
+        feed.update(frames: [10], rate: 25)
+        XCTAssertFalse(waiting(feed, made: [10], ready: false), "all made")
+        XCTAssertFalse(ThumbnailQueue.waitingForDecoder(wanted: [10], made: [], givenUp: [], rate: 25, inFlight: nil,
+                                                        shown: false, playing: false, decoderReady: false), "not shown")
+        XCTAssertFalse(ThumbnailQueue.waitingForDecoder(wanted: [10], made: [], givenUp: [], rate: 0, inFlight: nil,
+                                                        shown: true, playing: false, decoderReady: false), "no rate yet")
     }
 
     func testStoredMarkersLoadedBeforeTheRateAreRequestedOnceItArrives() {

@@ -7,6 +7,8 @@
 //    · ⌘-click: adds or removes it from the selection, no jump; ⇧-click: selects the range, no jump;
 //    · double-click: opens the editor;
 //    · ⌫: deletes the selection (one undo step); the context menu edits, recolours, goes to, deletes.
+//  CHAPTER ROWS (docs/CHAPTER_MARKERS_PLAN.md §4.1, Stage 2): the file's embedded chapters, interleaved by time, with a
+//  book symbol for a swatch. Not editable: double-click jumps, ⌫ skips them, and the context menu converts them.
 //  A plain `List(selection:)` cannot jump on a click of an already-selected row, so the rows read the click themselves
 //  (`NSApp.currentEvent`'s modifiers and click count, at mouse-up, so a click jumps at once rather than after the
 //  double-click interval).
@@ -57,8 +59,15 @@ struct MarkersScopeView: View {
     private var headerSuffix: String {
         guard model.isActive else { return "" }
         let n = model.markers.count, shown = model.visibleMarkers.count
-        return n == shown ? " · \(n)" : " · \(shown) of \(n)"
+        var s = n == shown ? " · \(n)" : " · \(shown) of \(n)"
+        if showChapters {
+            let c = model.unconvertedChapters.count, cs = model.visibleChapters.count
+            if c > 0 { s += c == cs ? " · \(c) ch" : " · \(cs) of \(c) ch" }
+        }
+        return s
     }
+
+    @AppStorage(MarkerSettings.showChaptersKey) private var showChapters = true
 
     private func label(_ f: Int) -> String { model.basis?.label(f) ?? "—" }
 
@@ -75,8 +84,8 @@ struct MarkersScopeView: View {
         ScopeGearSectionHeader("Show", isFirst: true)
         Toggle("Thumbnails", isOn: $showThumbnails)
         Button("Regenerate Thumbnails") { model.regenerateThumbnails() }
-            .disabled(!model.isActive || model.markers.isEmpty)
-            .help("Make this file's marker thumbnails again (not while playing)")
+            .disabled(!model.isActive || (model.markers.isEmpty && model.chapters.isEmpty))
+            .help("Make this file's marker and chapter thumbnails again (not while playing)")
         MarkerColorFilter(model: model)
         ScopeGearSectionHeader("Markers")
         Button("Import Markers…") { model.presentImport() }.disabled(!model.isActive)
@@ -104,28 +113,71 @@ struct MarkerNotice: View {
     }
 }
 
-/// The 16 colours as filter toggles; none chosen shows all.
+/// The 16 colours and the Chapters chip as filter toggles; none chosen shows all. With any chosen, markers show only in
+/// the colours chosen and chapters only with the chip (docs/CHAPTER_MARKERS_PLAN.md §4.1).
+///
+/// ⚠️ LAID OUT TO BE MEASURED WHOLE (Stage 2 attended check, 2026-11-17: the chip's border was clipped at the bottom in
+/// the gear popover). A popover sizes itself from its content's ideal height, so: the swatches are a plain `Grid`, not a
+/// `LazyVGrid` (a lazy grid's height is an estimate in a fitting-size pass); the chip is `fixedSize` so it is never
+/// compressed, its border is inset (`strokeBorder`) inside its own padding, and it has room above and below; its text is
+/// the `.caption` style, so it grows with the system text size instead of being clipped at a fixed point size.
 struct MarkerColorFilter: View {
     @ObservedObject var model: MarkerModel
+    private static let rows: [[MarkerColor]] = stride(from: 0, to: MarkerColor.allCases.count, by: 8).map {
+        Array(MarkerColor.allCases[$0..<min($0 + 8, MarkerColor.allCases.count)])
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Colors").font(.caption).foregroundStyle(.secondary)
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(20), spacing: 4), count: 8), spacing: 4) {
-                ForEach(MarkerColor.allCases) { c in
-                    Button {
-                        if model.colorFilter.contains(c) { model.colorFilter.remove(c) } else { model.colorFilter.insert(c) }
-                    } label: {
-                        Circle().fill(c.swatch).frame(width: 14, height: 14)
-                            .opacity(model.colorFilter.isEmpty || model.colorFilter.contains(c) ? 1 : 0.25)
-                            .overlay(Circle().strokeBorder(Color.primary, lineWidth: model.colorFilter.contains(c) ? 1.5 : 0))
+            Grid(alignment: .leading, horizontalSpacing: 4, verticalSpacing: 4) {
+                ForEach(Self.rows.indices, id: \.self) { r in
+                    GridRow {
+                        ForEach(Self.rows[r]) { c in swatch(c) }
                     }
-                    .buttonStyle(.plain)
-                    .help(c.name)
-                    .accessibilityLabel(c.name)
                 }
             }
-            Button("Show All Colors") { model.colorFilter = [] }.disabled(model.colorFilter.isEmpty)
+            chaptersChip
+                .padding(.vertical, 2)
+            Button("Show All") { model.colorFilter = []; model.chapterFilter = false }.disabled(!model.filter.isActive)
         }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func swatch(_ c: MarkerColor) -> some View {
+        Button {
+            if model.colorFilter.contains(c) { model.colorFilter.remove(c) } else { model.colorFilter.insert(c) }
+        } label: {
+            Circle().fill(c.swatch).frame(width: 14, height: 14)
+                .opacity(model.colorFilter.isEmpty || model.colorFilter.contains(c) ? 1 : 0.25)
+                .overlay(Circle().strokeBorder(Color.primary, lineWidth: model.colorFilter.contains(c) ? 1.5 : 0))
+                .frame(width: 20, height: 20)
+        }
+        .buttonStyle(.plain)
+        .help(c.name)
+        .accessibilityLabel(c.name)
+    }
+
+    private var chaptersChip: some View {
+        Button {
+            model.chapterFilter.toggle()
+        } label: {
+            Label("Chapters", systemImage: "book.closed")
+                .labelStyle(.titleAndIcon)
+                .font(.caption)
+                .imageScale(.small)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .opacity(!model.filter.isActive || model.chapterFilter ? 1 : 0.4)
+                .background(Capsule().strokeBorder(Color.primary.opacity(model.chapterFilter ? 1 : 0.6),
+                                                   lineWidth: model.chapterFilter ? 1.5 : 0.75))
+                .contentShape(Capsule())
+                .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .help("Chapters embedded in the file")
+        .accessibilityLabel("Chapters")
+        .accessibilityAddTraits(model.chapterFilter ? .isSelected : [])
     }
 }
 
@@ -141,10 +193,12 @@ struct MarkerListBody: View {
     let style: Style
     let showThumbnails: Bool
 
-    @State private var selection: Set<UUID> = []
-    @State private var anchor: UUID?
-    /// View ▸ Show Markers: off, the list says so and shows nothing; nothing is deleted.
+    @State private var selection: Set<MarkerListRow.ID> = []
+    @State private var anchor: MarkerListRow.ID?
+    /// View ▸ Show Markers: off, the list says so and shows nothing; nothing is deleted. It hides chapters too.
     @AppStorage(MarkerSettings.showKey) private var showMarkers = true
+    /// View ▸ Show Chapters: read here so the rows follow it (`MarkerModel.visibleChapters` reads the same key).
+    @AppStorage(MarkerSettings.showChaptersKey) private var showChapters = true
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -155,8 +209,8 @@ struct MarkerListBody: View {
         case .ready:
             if !model.isActive { empty("Markers are for video files.") }
             else if !showMarkers { empty(hiddenHint) }
-            else if model.markers.isEmpty { empty(addHint) }
-            else if model.visibleMarkers.isEmpty { empty("No markers in the colors chosen.") }
+            else if model.markers.isEmpty && (!showChapters || model.unconvertedChapters.isEmpty) { empty(addHint) }
+            else if model.listRows.isEmpty { empty("Nothing in the filter chosen.") }
             else { list }
         }
     }
@@ -183,20 +237,21 @@ struct MarkerListBody: View {
     private var thumbsOn: Bool { style == .window || showThumbnails }
 
     private var list: some View {
-        let shown = model.visibleMarkers
+        let shown = model.listRows
         let current = shown.last { $0.frame <= engine.currentFrame }?.id
         return VStack(spacing: 0) {
             if style == .window { MarkerWindowHeader() }
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(shown) { m in
-                        row(m)
+                    ForEach(shown) { r in
+                        row(r)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(background(m, isCurrent: m.id == current))
+                            .background(background(r.id, isCurrent: r.id == current))
                             .contentShape(Rectangle())
-                            .onTapGesture { click(m, in: shown) }
-                            .contextMenu { contextItems(for: m) }
+                            .onTapGesture { click(r, in: shown) }
+                            .contextMenu { contextItems(for: r, in: shown) }
+                            .overlay { if case .chapter(let c) = r { RowToolTip(text: chapterHelp(c)) } }
                     }
                 }
             }
@@ -205,59 +260,96 @@ struct MarkerListBody: View {
         .focusEffectDisabled()
         .focused($focused)
         .onDeleteCommand { deleteSelection() }
+        // ⇧M on a selected chapter shows the read-only note (`MarkerModel.editMarkerAtPlayhead`).
+        .onChange(of: selection) { _, sel in
+            if sel.count == 1, case .chapter(let i)? = sel.first { model.selectedChapter = i } else { model.selectedChapter = nil }
+        }
         .onAppear { if thumbsOn { model.thumbnails.want(true) } }
         .onDisappear { if thumbsOn { model.thumbnails.want(false) } }
         .onChange(of: thumbsOn) { _, on in model.thumbnails.want(on) }
     }
 
-    private func background(_ m: Marker, isCurrent: Bool) -> Color {
-        if selection.contains(m.id) { return Color.accentColor.opacity(0.35) }
+    private func background(_ id: MarkerListRow.ID, isCurrent: Bool) -> Color {
+        if selection.contains(id) { return Color.accentColor.opacity(0.35) }
         if isCurrent { return (style == .slot ? Color.white : Color.primary).opacity(0.07) }
         return .clear
     }
 
     // MARK: Clicks (D7, see the header)
 
-    private func click(_ m: Marker, in shown: [Marker]) {
+    private func click(_ r: MarkerListRow, in shown: [MarkerListRow]) {
         focused = true
         let event = NSApp.currentEvent
         let flags = event?.modifierFlags ?? []
         if (event?.clickCount ?? 1) >= 2 {
-            selection = [m.id]; anchor = m.id
-            model.openEditor(m)
+            selection = [r.id]; anchor = r.id
+            switch r {
+            case .marker(let m): model.openEditor(m)
+            case .chapter(let c):
+                // Not editable: a double-click jumps first, then says so and offers Convert.
+                model.go(to: c)
+                model.showChapterNote(c)
+            }
         } else if flags.contains(.command) {
-            if selection.contains(m.id) { selection.remove(m.id) } else { selection.insert(m.id) }
-            anchor = m.id
+            if selection.contains(r.id) { selection.remove(r.id) } else { selection.insert(r.id) }
+            anchor = r.id
         } else if flags.contains(.shift), let a = anchor, let i = shown.firstIndex(where: { $0.id == a }),
-                  let j = shown.firstIndex(where: { $0.id == m.id }) {
+                  let j = shown.firstIndex(where: { $0.id == r.id }) {
             selection = Set(shown[min(i, j)...max(i, j)].map(\.id))
         } else {
-            selection = [m.id]; anchor = m.id
-            model.go(to: m)
+            selection = [r.id]; anchor = r.id
+            model.go(toFrame: r.frame)
         }
+    }
+
+    /// The selected markers' ids. Chapter rows are skipped (⌫ never touches them).
+    private func markerIDs(_ ids: Set<MarkerListRow.ID>) -> Set<UUID> {
+        Set(ids.compactMap { if case .marker(let u) = $0 { return u } else { return nil } })
     }
 
     private func deleteSelection() {
-        model.delete(selection)
-        selection = []
+        let ids = markerIDs(selection)
+        model.delete(ids)
+        selection = selection.filter { if case .marker = $0 { return false } else { return true } }
     }
 
     @ViewBuilder
-    private func contextItems(for m: Marker) -> some View {
-        let ids = selection.contains(m.id) ? selection : [m.id]
-        if ids.count == 1 {
-            Button("Edit…") { model.openEditor(m) }
-            Button("Go to Marker") { model.go(to: m) }
-        }
-        Menu("Color") {
-            ForEach(MarkerColor.allCases) { c in Button(c.name) { model.setColor(c, for: ids) } }
-        }
-        Button(ids.count == 1 ? "Regenerate Thumbnail" : "Regenerate \(ids.count) Thumbnails") {
-            model.regenerateThumbnails(ids)
-        }
-        Divider()
-        Button(ids.count == 1 ? "Delete Marker" : "Delete \(ids.count) Markers") {
-            model.delete(ids); selection.subtract(ids)
+    private func contextItems(for r: MarkerListRow, in shown: [MarkerListRow]) -> some View {
+        let chosen = selection.contains(r.id) ? selection : [r.id]
+        switch r {
+        case .marker(let m):
+            let ids = markerIDs(chosen)
+            if ids.count == 1 {
+                Button("Edit…") { model.openEditor(m) }
+                Button("Go to Marker") { model.go(to: m) }
+            }
+            Menu("Color") {
+                ForEach(MarkerColor.allCases) { c in Button(c.name) { model.setColor(c, for: ids) } }
+            }
+            Button(ids.count == 1 ? "Regenerate Thumbnail" : "Regenerate \(ids.count) Thumbnails") {
+                model.regenerateThumbnails(ids)
+            }
+            Divider()
+            Button(ids.count == 1 ? "Delete Marker" : "Delete \(ids.count) Markers") {
+                model.delete(ids); selection.subtract(ids.map { .marker($0) })
+            }
+        case .chapter(let c):
+            let picked: [MappedChapter] = shown.compactMap {
+                if case .chapter(let x) = $0, chosen.contains($0.id) { return x } else { return nil }
+            }
+            if picked.count == 1 {
+                Button("Edit…") { model.showChapterNote(c) }
+                Button("Go to Chapter") { model.go(to: c) }
+            }
+            Button(picked.count == 1 ? "Convert to Marker" : "Convert \(picked.count) Chapters to Markers") {
+                model.convert(picked); selection.subtract(picked.map { .chapter($0.fileIndex) })
+            }
+            Button("Convert All Chapters to Markers") { model.convertAllChapters(); selection = [] }
+                .disabled(model.unconvertedChapters.isEmpty)
+            Divider()
+            Button(picked.count == 1 ? "Regenerate Thumbnail" : "Regenerate \(picked.count) Thumbnails") {
+                model.regenerateThumbnails(frames: Set(picked.map(\.frame)))
+            }
         }
     }
 
@@ -267,11 +359,67 @@ struct MarkerListBody: View {
     private func durationText(_ m: Marker) -> String { model.basis?.durationLabel(m.duration) ?? "" }
 
     @ViewBuilder
-    private func row(_ m: Marker) -> some View {
-        switch style {
-        case .slot: slotRow(m)
-        case .window: windowRow(m)
+    private func row(_ r: MarkerListRow) -> some View {
+        switch (r, style) {
+        case (.marker(let m), .slot): slotRow(m)
+        case (.marker(let m), .window): windowRow(m)
+        case (.chapter(let c), .slot): chapterSlotRow(c)
+        case (.chapter(let c), .window): chapterWindowRow(c)
         }
+    }
+
+    private func chapterDuration(_ c: MappedChapter) -> String { model.basis?.durationLabel(c.duration) ?? "" }
+
+    /// The chapter row's tooltip (`ChapterLayer.rowToolTip`), shown by `RowToolTip`, not `.help` (see there).
+    private func chapterHelp(_ c: MappedChapter) -> String { ChapterLayer.rowToolTip(c, timecode: label(c.frame)) }
+
+    /// The chapter's own colour when it has one (Stage 3's XMP items), else the list's secondary.
+    private func chapterTint(_ c: MappedChapter, slot: Bool) -> Color {
+        if let k = c.color { return Color(.sRGB, red: Double(k.red) / 255, green: Double(k.green) / 255, blue: Double(k.blue) / 255) }
+        return slot ? .white.opacity(0.75) : .secondary
+    }
+
+    private func chapterSlotRow(_ c: MappedChapter) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            if showThumbnails { MarkerThumb(thumbnails: model.thumbnails, frame: c.frame, height: 32) }
+            Text(label(c.frame))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.85))
+            Image(systemName: "book.closed")
+                .font(.system(size: 8))
+                .foregroundStyle(chapterTint(c, slot: true))
+                .frame(width: 8, height: 8)
+            Text(c.title.isEmpty ? "—" : c.title)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(c.title.isEmpty ? 0.35 : 0.75))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text(chapterDuration(c))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+    }
+
+    private func chapterWindowRow(_ c: MappedChapter) -> some View {
+        HStack(alignment: .top, spacing: MarkerWindowColumns.spacing) {
+            MarkerThumb(thumbnails: model.thumbnails, frame: c.frame, height: 54)
+                .frame(width: MarkerWindowColumns.thumb, alignment: .leading)
+            mono(label(c.frame)).frame(width: MarkerWindowColumns.tc, alignment: .leading)
+            mono(label(c.lastFrame)).frame(width: MarkerWindowColumns.tc, alignment: .leading)
+            mono(chapterDuration(c)).frame(width: MarkerWindowColumns.tc, alignment: .leading)
+            HStack(spacing: 5) {
+                Image(systemName: "book.closed").foregroundStyle(chapterTint(c, slot: false)).frame(width: 10, height: 10)
+                Text(c.kind.label).foregroundStyle(.secondary)
+            }
+            .frame(width: MarkerWindowColumns.color, alignment: .leading)
+            Text(c.title.isEmpty ? "—" : c.title)
+                .foregroundStyle(.secondary)
+                .frame(width: MarkerWindowColumns.name, alignment: .leading)
+            Text("").frame(maxWidth: .infinity, alignment: .leading)
+            Text("").frame(width: MarkerWindowColumns.keywords, alignment: .leading)
+        }
+        .font(.system(size: 12))
+        .padding(.vertical, 3)
     }
 
     private func slotRow(_ m: Marker) -> some View {
@@ -400,6 +548,45 @@ struct StartOverrideField: View {
             }
             if invalid { Text("Not a timecode at this rate.").font(.caption).foregroundStyle(.red) }
             Text("The transport readout is unchanged.").font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// An AppKit tooltip over a list row (Stage 2 attended check, 2026-11-17: a chapter row in the Markers slot showed no
+/// tooltip at all, while the timeline flag's, an AppKit tooltip, worked).
+///
+/// WHY NOT `.help`. The rows had `.help`, and it never showed. The cause is not measured. The likely ones are both in
+/// this list: SwiftUI re-registers its tooltips when the list redraws, and the list observes the engine (the playhead
+/// row) and the model, so the tooltip delay can keep restarting; and the row's `.onTapGesture` and `.contextMenu` wrap
+/// it. This view sidesteps both: its `toolTip` is set only when the text changes, and AppKit owns the timing.
+///
+/// CLICKS PASS THROUGH. It answers hit-testing only outside mouse clicks, drags and scrolls (for the tooltip manager on
+/// a mouse move), so a click, a double-click, a right-click or a scroll reaches the row exactly as before.
+struct RowToolTip: NSViewRepresentable {
+    let text: String
+
+    func makeNSView(context: Context) -> ToolTipView {
+        let v = ToolTipView()
+        v.toolTip = text
+        return v
+    }
+
+    func updateNSView(_ v: ToolTipView, context: Context) {
+        if v.toolTip != text { v.toolTip = text }
+    }
+
+    final class ToolTipView: NSView {
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            switch NSApp.currentEvent?.type {
+            case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+                 .otherMouseDown, .otherMouseUp, .otherMouseDragged, .scrollWheel, .pressure, .swipe, .magnify,
+                 .smartMagnify, .rotate, .gesture, .beginGesture, .endGesture:
+                return nil
+            default:
+                return super.hitTest(point)
+            }
         }
     }
 }

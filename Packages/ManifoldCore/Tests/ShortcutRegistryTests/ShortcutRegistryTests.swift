@@ -154,6 +154,22 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertEqual(r.chord(for: .showMarkers), old)
     }
 
+    /// The chapter layer's two menu items (docs/CHAPTER_MARKERS_PLAN.md §4.1, Stage 2): no default keys, assignable, in
+    /// View and Mark.
+    func testChapterItemsHaveNoDefaultKeysAndTheirMenus() {
+        let r = registry(debug: false)
+        for (id, title, menu) in [(ShortcutID.showChapters, "Show Chapters", "View"),
+                                  (.convertAllChapters, "Convert All Chapters to Markers", "Mark")] {
+            let def = r.definition(id)
+            XCTAssertEqual(def.title, title)
+            XCTAssertNil(def.defaultChord, "\(id)")
+            XCTAssertNil(r.chord(for: id), "\(id)")
+            XCTAssertTrue(def.rebindable, "\(id)")
+            XCTAssertEqual(def.dispatch, .menu, "\(id)")
+            XCTAssertEqual(MenuKeyAudit.menuHomes[id], menu, "\(id)")
+        }
+    }
+
     func testRemovedKeysAreFree() {
         let r = registry(debug: false)
         // Not I: freed from the inspector for Mark In, which holds it since 2026-11-15 (docs/MARKERS_PLAN.md D1).

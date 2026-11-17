@@ -12,6 +12,9 @@ struct InspectorPanel: View {
     @ObservedObject var engine: FrameEngine
     /// This window's chrome, for the Window View row (interlaced I4).
     @ObservedObject var chrome: WindowChrome
+    /// This window's markers, for the Chapters row: the same libav reader and mapping the Markers list uses, on every
+    /// route (docs/CHAPTER_MARKERS_PLAN.md §2.5). Observed by that row alone, so a marker edit does not redraw the panel.
+    let markers: MarkerModel
 
     /// Range as displayed: the file's tag, annotated when the user is asserting
     /// an override (honest that it's an assertion, not read from the file).
@@ -178,10 +181,7 @@ struct InspectorPanel: View {
                     }
                 }
 
-                if !m.chapters.isEmpty {
-                    Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    MetadataRow(label: "Markers", value: "\(m.chapters.count)")
-                }
+                InspectorChaptersRow(model: markers)
 
                 fileSection(m)
             } else {
@@ -577,5 +577,20 @@ private struct AudioTrackRow: View {
             }
         }
         .padding(.vertical, 3)
+    }
+}
+
+/// The file's embedded chapters, counted (renamed from "Markers", which named real markers once they existed;
+/// docs/CHAPTER_MARKERS_PLAN.md §0). Hidden when the file has none. Chapters starting after the file's end are dropped
+/// from the list and said here.
+private struct InspectorChaptersRow: View {
+    @ObservedObject var model: MarkerModel
+
+    var body: some View {
+        let n = model.chapters.count, past = model.chaptersPastEnd
+        if n > 0 || past > 0 {
+            Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
+            MetadataRow(label: "Chapters", value: past > 0 ? "\(n) · \(past) after the end" : "\(n)")
+        }
     }
 }

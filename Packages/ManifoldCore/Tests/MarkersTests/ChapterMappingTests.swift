@@ -2,7 +2,7 @@ import XCTest
 @testable import Markers
 import SMPTETimecode
 
-/// Embedded chapters on the marker frame index (docs/CHAPTER_MARKERS_PLAN.md §3, D-C4, D-C6, D-C7, D-C8). Pure: the times
+/// Embedded chapters on the marker frame index (docs/CHAPTER_MARKERS_PLAN.md §3, D-C4, D-C6, D-C7/D-C7a, D-C8, D-C14). Pure: the times
 /// below are what a container states, as `ChapterReader` hands them over.
 final class ChapterMappingTests: XCTestCase {
 
@@ -71,16 +71,29 @@ final class ChapterMappingTests: XCTestCase {
     /// Real-app values (CHAPTER_MARKERS_PLAN §11, W1, 2026-11-16; times only). Premiere's chapter track is frame-exact in
     /// 1/24000. Resolve's is 1/24000 too, but its times were first rounded to MILLISECONDS (its own chpl says 2.419 /
     /// 10.594 / 22.731 s), so a value can sit two ticks before the frame it was made on: 58056 against frame 58's 58058.
-    /// Under D-C7 as decided (one tick of the container's own base) that chapter lands on 57. Pinned here so a change of
-    /// rule (the §8 amendment) is a deliberate one.
-    func testRealAppTicksUnderDC7() {
+    /// Under D-C7 (one tick of the container's own base) that chapter landed on 57; D-C7a (max(tick, 1 ms), decided
+    /// 2026-11-17) puts it on 58. This test pinned 57 until then (Stage 1), so the change is a deliberate one.
+    func testRealAppTicksUnderDC7a() {
         func t(_ v: Int64) -> ChapterTime { ChapterTime(value: v, num: 1, den: 24000) }
         // Premiere ProRes .mov: 101, 280, 532 exactly (and its XMP markers say the same frames).
         XCTAssertEqual([101_101, 280_280, 532_532].map { ChapterMapping.frame(of: t($0), rate: Self.r2398) }, [101, 280, 532])
-        // Resolve: 58056 (2 ticks short of 58) → 57; 254256 (2 over 254) → 254; 545544 (1 short of 545) → 545.
-        XCTAssertEqual([58_056, 254_256, 545_544].map { ChapterMapping.frame(of: t($0), rate: Self.r2398) }, [57, 254, 545])
-        // The same chapters as Resolve's chpl states them (100 ns): 2.419 s → 57 as well; one 100 ns tick is no help.
-        XCTAssertEqual(ChapterMapping.frame(of: ChapterTime(value: 24_190_000, num: 1, den: 10_000_000), rate: Self.r2398), 57)
+        // Resolve: 58056 (2 ticks short of 58) → 58; 254256 (2 over 254) → 254; 545544 (1 short of 545) → 545.
+        XCTAssertEqual([58_056, 254_256, 545_544].map { ChapterMapping.frame(of: t($0), rate: Self.r2398) }, [58, 254, 545])
+        // The same chapters as Resolve's chpl states them (100 ns): 2.419 s is 0.08 ms short of frame 58 → 58.
+        XCTAssertEqual(ChapterMapping.frame(of: ChapterTime(value: 24_190_000, num: 1, den: 10_000_000), rate: Self.r2398), 58)
+    }
+
+    /// D-C7a: the tolerance is max(one tick, 1 ms), still capped at half a frame.
+    func testDC7aMillisecondTolerance() {
+        func ns100(_ v: Int64) -> ChapterTime { ChapterTime(value: v, num: 1, den: 10_000_000) }
+        // Frame 240 at 23.976 starts at 10.010 s exactly. 0.9 ms short → 240; 1.1 ms short → 239 (genuinely mid-frame).
+        XCTAssertEqual(ChapterMapping.frame(of: ns100(100_091_000), rate: Self.r2398), 240)
+        XCTAssertEqual(ChapterMapping.frame(of: ns100(100_089_000), rate: Self.r2398), 239)
+        // In a coarse base the tick is the larger: 1/100 s at 25 fps is ¼ frame, so 1.99 s (49.75) → 50.
+        XCTAssertEqual(ChapterMapping.frame(of: ChapterTime(value: 199, num: 1, den: 100), rate: 25), 50)
+        // At a high rate 1 ms can pass half a frame (1000 fps: 1 ms is a frame): capped at ½, so 4.4 ms → 4, 4.6 → 5.
+        XCTAssertEqual(ChapterMapping.frame(of: ns100(44_000), rate: 1000), 4)
+        XCTAssertEqual(ChapterMapping.frame(of: ns100(46_000), rate: 1000), 5)
     }
 
     func testToleranceIsCappedAtHalfAFrame() {
@@ -166,6 +179,55 @@ final class ChapterMappingTests: XCTestCase {
         XCTAssertEqual(r.chapters.map(\.title), ["", "two lines"])
     }
 
+    // MARK: The layer's fields (Stage 2; filled from chapter tracks and chpl now, XMP in Stage 3)
+
+    func testMappingCarriesSourceKindColorStatedDurationAndID() {
+        let orange = EmbeddedColor(red: 0xE9, green: 0x6F, blue: 0x24)
+        let r = ChapterMapping.map([
+            FileChapter(start: ms(0), end: ms(4_000), title: "track", source: .chapterTrack),
+            FileChapter(start: ms(1_000), end: nil, title: "comment", source: .xmp, kind: .comment, color: orange,
+                        stableID: "g-1"),
+            FileChapter(start: ms(2_000), end: nil, title: "ranged", source: .xmp, kind: .comment,
+                        statedDuration: ChapterTime(value: 24, num: 1, den: 25)),
+            FileChapter(start: ms(3_000), end: nil, title: "chpl", source: .chpl),
+        ], rate: 25, lastFrame: 249)
+        XCTAssertEqual(r.chapters.map(\.source), [.chapterTrack, .xmp, .xmp, .chpl])
+        XCTAssertEqual(r.chapters.map(\.kind), [.chapter, .comment, .comment, .chapter])
+        XCTAssertEqual(r.chapters[1].color, orange)
+        XCTAssertNil(r.chapters[0].color, "chapter tracks carry no colour: drawn neutral (D-C13)")
+        XCTAssertEqual(r.chapters.map(\.stableID), [nil, "g-1", nil, nil])
+        // A stated duration is used as stated and marked, so it gets a band (D-C16); a chapter's implied run is not.
+        XCTAssertEqual(r.chapters[2].duration, 24)
+        XCTAssertEqual(r.chapters[2].statedDuration, 24)
+        XCTAssertNil(r.chapters[0].statedDuration)
+        XCTAssertNil(r.chapters[3].statedDuration)
+        // A non-chapter item with no duration is one frame (§12.4.4); it does not cut the chapter before it short, and
+        // the chapter with no end runs to the next CHAPTER (or the file's end).
+        XCTAssertEqual(r.chapters[1].duration, 1)
+        XCTAssertEqual(r.chapters[0].duration, 100, "its stated end, 4 s")
+        XCTAssertEqual(r.chapters[3].duration, 250 - 75)
+    }
+
+    func testDefaultsAreAChapterTrackChapterWithNothingElse() {
+        let c = FileChapter(start: ms(0), end: nil, title: "")
+        XCTAssertEqual(c.source, .chapterTrack)
+        XCTAssertEqual(c.kind, .chapter)
+        XCTAssertNil(c.color); XCTAssertNil(c.statedDuration); XCTAssertNil(c.stableID)
+        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.label), ["Chapter", "Comment", "Segmentation", "Web Link"])
+        XCTAssertEqual(EmbeddedMarkerKind.allCases.map(\.keyword), ["chapter", "comment", "segmentation", "weblink"])
+    }
+
+    func testChapterTimeAddingIsExact() {
+        XCTAssertEqual(ChapterTime(value: 186, num: 1001, den: 24000).adding(ChapterTime(value: 96, num: 1001, den: 24000)),
+                       ChapterTime(value: 282, num: 1001, den: 24000))
+        // Mixed bases: 1 s (1/1000) + 2 frames at 1/25 = 1.08 s = 27/25.
+        let sum = ChapterTime(value: 1000, num: 1, den: 1000).adding(ChapterTime(value: 2, num: 1, den: 25))
+        XCTAssertEqual(sum?.seconds ?? 0, 1.08, accuracy: 1e-12)
+        XCTAssertEqual(sum, ChapterTime(value: 27, num: 1, den: 25))
+        XCTAssertNil(ChapterTime(value: 1, num: 1, den: 0).adding(.zero))
+        XCTAssertNil(ChapterTime(value: .max, num: 1, den: 1).adding(ChapterTime(value: 1, num: 1, den: 1)))
+    }
+
     // MARK: Timecode labels come from TimecodeBasis
 
     func testLabelsThroughTimecodeBasis() {
@@ -203,6 +265,43 @@ final class ChapterMappingTests: XCTestCase {
         XCTAssertEqual(m.color, .blue)
         XCTAssertEqual(m.keywords, ["chapter"])
         XCTAssertEqual(m.notes, "")
+    }
+
+    func testConvertSkipsStableIDsAlreadyConvertedAndCarriesTheID() {
+        let items = [MappedChapter(fileIndex: 0, frame: 10, duration: 5, title: "a", source: .xmp, kind: .comment, stableID: "g-1"),
+                     MappedChapter(fileIndex: 1, frame: 20, duration: 5, title: "b", source: .xmp, kind: .weblink, stableID: "g-2")]
+        // g-1 was converted before and the marker has since been moved and renamed: still skipped (D-C14).
+        let existing = [Marker(frame: 99, name: "renamed", embeddedID: "g-1")]
+        let r = ChapterMapping.convert(items, into: existing)
+        XCTAssertEqual(r.alreadyConverted, 1)
+        XCTAssertEqual(r.added.map(\.name), ["b"])
+        XCTAssertEqual(r.added.first?.embeddedID, "g-2")
+        XCTAssertEqual(r.added.first?.keywords, ["weblink"], "the kind's keyword")
+        // Converting the result again adds nothing.
+        let again = ChapterMapping.convert(items, into: existing + r.added)
+        XCTAssertEqual(again.added.count, 0)
+        XCTAssertEqual(again.alreadyConverted, 2)
+    }
+
+    func testConvertedChapterTrackChaptersMergeOnARepeatConvert() {
+        // No id: the second Convert meets the first one's marker (same frame, name, empty notes) and merges.
+        let items = [MappedChapter(fileIndex: 0, frame: 0, duration: 240, title: "Opening")]
+        let first = ChapterMapping.convert(items, into: [])
+        XCTAssertNil(first.added.first?.embeddedID)
+        let second = ChapterMapping.convert(items, into: first.added)
+        XCTAssertEqual(second.added.count, 0)
+        XCTAssertEqual(second.identical, 1)
+        XCTAssertEqual(second.alreadyConverted, 0)
+    }
+
+    func testSuppressionByStableIDFollowsAMovedMarker() {
+        let item = MappedChapter(fileIndex: 0, frame: 10, duration: 1, title: "c", source: .xmp, kind: .comment, stableID: "g-9")
+        XCTAssertFalse(ChapterMapping.isConverted(item, markers: [Marker(frame: 10, name: "other")]))
+        XCTAssertTrue(ChapterMapping.isConverted(item, markers: [Marker(frame: 500, name: "moved", embeddedID: "g-9")]))
+        // Without an id only the same-frame, same-name rule applies.
+        let plain = MappedChapter(fileIndex: 1, frame: 10, duration: 1, title: "c")
+        XCTAssertFalse(ChapterMapping.isConverted(plain, markers: [Marker(frame: 500, name: "c")]))
+        XCTAssertTrue(ChapterMapping.isConverted(plain, markers: [Marker(frame: 10, name: "c")]))
     }
 
     func testConvertedChaptersAreNotShownTwice() {
@@ -245,6 +344,10 @@ final class ChapterMappingTests: XCTestCase {
         let r = ChapterMapping.map([chapter(ms(0), nil, sentinel), chapter(ms(99_000), nil, sentinel)], rate: 25, lastFrame: 99)
         let lines = [MarkerLog.chapters(r, readMs: 4), MarkerLog.chaptersUnreadable()]
         for l in lines { XCTAssertFalse(l.contains(sentinel)) }
+        let conv = ChapterMapping.convert([MappedChapter(fileIndex: 0, frame: 0, duration: 1, title: sentinel)], into: [])
+        XCTAssertFalse(MarkerLog.convertedChapters(conv).contains(sentinel))
+        XCTAssertEqual(MarkerLog.convertedChapters(conv), "[MARKERS] convert chapters added=1 identical=0 occupied=0 already-converted=0")
+        XCTAssertFalse(ChapterLayer.convertNotice(conv).contains(sentinel))
         XCTAssertEqual(lines[0], "[MARKERS] chapters n=1 dropped-past-end=1 dropped-before-start=0 unreadable=0 reader=libav read=4ms")
     }
 }

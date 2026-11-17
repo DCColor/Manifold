@@ -25,9 +25,15 @@ public struct Marker: Codable, Identifiable, Equatable, Sendable {
     public var color: MarkerColor
     public var created: Date
     public var modified: Date
+    /// The stable id of the embedded item this marker was converted from (D-C14, docs/CHAPTER_MARKERS_PLAN.md §12.5:
+    /// Premiere's `marker_guid`, from Stage 3), so a second Convert skips it. Nil for every other marker, and for one
+    /// converted from a chapter track or `chpl`, which carry no id. Optional and omitted from the JSON when nil, so the
+    /// stored document is unchanged for every marker without one, and an older build reading one with it ignores it.
+    public var embeddedID: String?
 
     public init(id: UUID = UUID(), frame: Int, duration: Int = 1, name: String = "", notes: String = "",
-                keywords: [String] = [], color: MarkerColor = .defaultColor, created: Date = Date(), modified: Date? = nil) {
+                keywords: [String] = [], color: MarkerColor = .defaultColor, created: Date = Date(), modified: Date? = nil,
+                embeddedID: String? = nil) {
         self.id = id
         self.frame = max(frame, 0)
         self.duration = max(duration, 1)
@@ -37,6 +43,7 @@ public struct Marker: Codable, Identifiable, Equatable, Sendable {
         self.color = color
         self.created = created
         self.modified = modified ?? created
+        self.embeddedID = embeddedID
     }
 
     /// The last frame the marker covers.

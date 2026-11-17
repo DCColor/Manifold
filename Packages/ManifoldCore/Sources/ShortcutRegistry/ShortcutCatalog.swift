@@ -37,6 +37,8 @@ public enum ShortcutID: String, CaseIterable, Sendable {
     case editMarker = "mark.editMarker"
     case showMarkerList = "mark.showMarkerList"
     case showMarkers = "view.showMarkers"
+    case showChapters = "view.showChapters"
+    case convertAllChapters = "mark.convertAllChapters"
     case previousMarker = "mark.previousMarker"
     case nextMarker = "mark.nextMarker"
     case markIn = "mark.in"
@@ -286,6 +288,9 @@ public enum ShortcutCatalog {
         .init(.markIn, "Mark In", .mark, .fileTransport, .menu, .char("i")),
         .init(.markOut, "Mark Out", .mark, .fileTransport, .menu, .char("o")),
         .init(.clearInOut, "Clear In and Out", .mark, .fileTransport, .menu, .char("x", [.option])),
+        // The file's embedded chapters into markers (docs/CHAPTER_MARKERS_PLAN.md §4.1, D-C4): Blue, keyword "chapter",
+        // through the import merge rule, one undo step. NO DEFAULT KEY (Stage 2 brief, Robbie 2026-11-17).
+        .init(.convertAllChapters, "Convert All Chapters to Markers", .mark, .fileTransport, .menu, nil),
 
         // ── Timecode entry (fixed: typing a timecode is not a shortcut) ────────────────────────
         .init(.timecodeOpen, "Type a Timecode (+ or − for relative)", .timecode, .window, .fixed, nil,
@@ -313,6 +318,9 @@ public enum ShortcutCatalog {
         // contents, deletes nothing. NO DEFAULT KEY (Robbie, 2026-11-15, replacing ⇧⌥⌘M the same day); assignable in the
         // Keyboard Shortcuts window.
         .init(.showMarkers, "Show Markers", .view, .app, .menu, nil),
+        // View ▸ Show Chapters (D-C3, docs/CHAPTER_MARKERS_PLAN.md §4.1): app-wide and remembered, default on; hides the
+        // file's embedded chapters alone. Show Markers off hides them too. NO DEFAULT KEY.
+        .init(.showChapters, "Show Chapters", .view, .app, .menu, nil),
         // ⌃⌘F rides along as a fixed alias: the system item reads fn-F now and no longer answers ⌃⌘F (§8, item 3).
         .init(.fullScreen, "Enter or Exit Full Screen", .view, .window, .key, .char("f", cmd),
               fixedChords: [.char("f", [.control, .command])],

@@ -1325,7 +1325,7 @@ struct ContentView: View {
         .clipped()
         .overlay(alignment: .topTrailing) {
             if showInspector && engine.hasMedia {
-                InspectorPanel(metadata: engine.metadata, engine: engine, chrome: chrome)
+                InspectorPanel(metadata: engine.metadata, engine: engine, chrome: chrome, markers: deck.markers)
                     .padding(16)
                     .transition(.opacity)
             }
@@ -1768,7 +1768,8 @@ struct ContentView: View {
             .nextMarker: DeckShortcut(enabled: { playhead() && deck.markers.isActive }) {
                 deck.markers.goToNeighbour(forward: true)
             },
-            .editMarker: DeckShortcut(enabled: { deck.markers.isActive && !deck.markers.markers.isEmpty }) {
+            // ⇧M: also on a selected chapter, which shows the "can't be edited" note instead (CHAPTER_MARKERS_PLAN §14.5).
+            .editMarker: DeckShortcut(enabled: { deck.markers.isActive && (!deck.markers.markers.isEmpty || deck.markers.selectedChapter != nil) }) {
                 deck.markers.editMarkerAtPlayhead()
             },
             .markIn: DeckShortcut(enabled: { deck.markers.isActive }) { deck.markers.markIn() },
@@ -1779,6 +1780,10 @@ struct ContentView: View {
             },
             .exportMarkers: DeckShortcut(enabled: { deck.markers.isActive && !deck.markers.markers.isEmpty }) {
                 MarkerFileIO.export(from: deck.markers, window: deck.window)
+            },
+            // The file's embedded chapters into markers (docs/CHAPTER_MARKERS_PLAN.md §4.1): one undo step.
+            .convertAllChapters: DeckShortcut(enabled: { deck.markers.isActive && !deck.markers.unconvertedChapters.isEmpty }) {
+                deck.markers.convertAllChapters()
             },
             // View
             .inspector: DeckShortcut { showInspector.toggle() },

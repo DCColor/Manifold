@@ -542,16 +542,26 @@ final class PlayheadLineView: NSView {
 
 /// One marker as the track draws it.
 public struct TrackMarker: Equatable {
+    /// How the flag is drawn. `.filled`: a user marker, filled in its colour, with a band over its span. `.outline`: an
+    /// embedded chapter (docs/CHAPTER_MARKERS_PLAN.md §4.1, D-C13): a 1 pt stroke in `color`, no fill and NO BAND (D-C16:
+    /// only a stated duration gets a band, from Stage 3). Outlines are drawn first, so a filled flag at the same x is on
+    /// top, and a click there takes the filled one.
+    public enum Style: Equatable { case filled, outline }
+
     /// Value (seconds) of its first frame, and of the end of its last frame.
     public var start: Double
     public var end: Double
     public var color: NSColor
     /// The tooltip: timecode and name.
     public var label: String
+    public var style: Style
 
-    public init(start: Double, end: Double, color: NSColor, label: String) {
-        self.start = start; self.end = end; self.color = color; self.label = label
+    public init(start: Double, end: Double, color: NSColor, label: String, style: Style = .filled) {
+        self.start = start; self.end = end; self.color = color; self.label = label; self.style = style
     }
+
+    /// The neutral an outlined flag is drawn in when its item has no colour of its own (white at 85%, §4.1).
+    public static let neutralOutline = NSColor.white.withAlphaComponent(0.85)
 }
 
 /// Draws each marker as a small flag in its colour just above the bar, and a translucent band over the bar's top edge
@@ -597,7 +607,13 @@ final class MarkerTrackView: NSView, NSViewToolTipOwner {
         let top = flagTop
         guard point.y >= top - 1, point.y <= top + Self.flagHeight + 1 else { return nil }
         let near = flagXs.enumerated().filter { abs($0.element - point.x) <= Self.flagWidth / 2 + Self.hitSlop }
-        return near.min { abs($0.element - point.x) < abs($1.element - point.x) }?.offset
+        // Nearest first; at the same distance a filled flag (a user marker, drawn on top) wins over an outline.
+        let markers = scrubber?.markers ?? []
+        func outline(_ i: Int) -> Bool { markers.indices.contains(i) && markers[i].style == .outline }
+        return near.min {
+            let a = abs($0.element - point.x), b = abs($1.element - point.x)
+            return a != b ? a < b : (!outline($0.offset) && outline($1.offset))
+        }?.offset
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -614,7 +630,14 @@ final class MarkerTrackView: NSView, NSViewToolTipOwner {
         guard let s = scrubber, !s.markers.isEmpty else { return }
         let bar = s.markerBarRect
         let top = flagTop
-        for (m, x) in zip(s.markers, flagXs) {
+        // Outlines (chapters) first, so a filled flag at the same x is drawn over them.
+        for (m, x) in zip(s.markers, flagXs) where m.style == .outline {
+            let path = flagPath(x: x, top: top)
+            m.color.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+        }
+        for (m, x) in zip(s.markers, flagXs) where m.style == .filled {
             if m.end > m.start {
                 let x1 = s.centreX(for: m.end)
                 if x1 - x >= 1 {
@@ -637,5 +660,18 @@ final class MarkerTrackView: NSView, NSViewToolTipOwner {
             path.lineWidth = 0.5
             path.stroke()
         }
+    }
+
+    /// The same flag shape the filled branch builds inline (kept inline there so a filled flag draws exactly as before).
+    private func flagPath(x: CGFloat, top: CGFloat) -> NSBezierPath {
+        let path = NSBezierPath()
+        let w = Self.flagWidth, h = Self.flagHeight
+        path.move(to: NSPoint(x: x - w / 2, y: top))
+        path.line(to: NSPoint(x: x + w / 2, y: top))
+        path.line(to: NSPoint(x: x + w / 2, y: top + h * 0.55))
+        path.line(to: NSPoint(x: x, y: top + h))
+        path.line(to: NSPoint(x: x - w / 2, y: top + h * 0.55))
+        path.close()
+        return path
     }
 }

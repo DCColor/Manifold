@@ -75,7 +75,6 @@ public enum MediaInspector {
         CaptionPresenceLog.emit(meta.textTracks, source: url.lastPathComponent)
         let tc = TimecodeReader.readStartTimecode(url: url)
         meta.startTimecode = tc?.timecode
-        meta.chapters = await chapters(for: asset)
 
         if let createdItem = (try? await asset.load(.creationDate)) ?? nil,
            let dateValue = (try? await createdItem.load(.dateValue)) ?? nil {
@@ -291,7 +290,7 @@ public enum MediaInspector {
     /// ── WHY THIS EXISTS SEPARATELY FROM `metadata(for:url:)` ───────────────────────────────
     ///
     /// `metadata` is the full inspection — its own track load, frame rate, data rate, a second
-    /// open of the file through libav for HDR10, audio tracks, text tracks, timecode, chapters,
+    /// open of the file through libav for HDR10, audio tracks, text tracks, timecode,
     /// common metadata — and it is `await`ed by nobody on the load path. The three numbers the
     /// DISPLAY needs are a pure read of one format description the loader has already loaded for
     /// its range determination, and they must be available BEFORE the first frame is presented,
@@ -397,27 +396,6 @@ public enum MediaInspector {
         }
         guard let isFull = raw as? Bool else { return .untagged }
         return isFull ? .full : .videoLegal
-    }
-
-    /// Read chapter markers (title + start time) from the asset, if any.
-    private static func chapters(for asset: AVURLAsset) async -> [ChapterMarker] {
-        let locales = (try? await asset.load(.availableChapterLocales)) ?? []
-        let locale = locales.first ?? Locale.current
-        guard let groups = try? await asset.loadChapterMetadataGroups(
-            withTitleLocale: locale, containingItemsWithCommonKeys: []
-        ) else { return [] }
-
-        var result: [ChapterMarker] = []
-        for group in groups {
-            let time = group.timeRange.start.seconds
-            var title = "Chapter"
-            if let titleItem = group.items.first(where: { $0.commonKey == .commonKeyTitle }),
-               let value = (try? await titleItem.load(.stringValue)) ?? nil {
-                title = value
-            }
-            result.append(ChapterMarker(time: time.isFinite ? time : 0, title: title))
-        }
-        return result
     }
 
     private static func audioTracks(for asset: AVURLAsset) async -> [AudioTrackInfo] {

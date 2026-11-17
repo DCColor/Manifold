@@ -52,6 +52,9 @@ final class MarkerThumbnailer: ObservableObject {
     private var demand = 0
     private var token = UUID()
     private var playing: AnyCancellable?
+    /// Work held back for the engine's decoder route, for this file (`DecoderWait`), and the engine's event for it.
+    private var decoderWait = DecoderWait()
+    private var routeDecided: AnyCancellable?
     /// The disk cache is used: the file's markers are remembered (`MarkerModel.persisting`), and the preference is still on.
     private var persistDisk = false
     private var usesDisk: Bool { persistDisk && MarkerSettings.remember() }
@@ -69,6 +72,16 @@ final class MarkerThumbnailer: ObservableObject {
         }
         persistDisk = persist
         token = UUID()
+        // The route event, for THIS file and THIS token: a stale file's event, or one after the next reset, does nothing.
+        decoderWait.reset(file: engine?.currentURL)
+        let t = token
+        routeDecided = engine?.frameRouteDecided.receive(on: DispatchQueue.main)
+            .sink { [weak self] url in
+                MainActor.assumeIsolated {
+                    guard let self, self.token == t, self.decoderWait.decided(url) else { return }
+                    self.pump()
+                }
+            }
         producer?.close()
         producer = nil
         inFlight = nil
@@ -117,9 +130,18 @@ final class MarkerThumbnailer: ObservableObject {
     }
 
     private func pump() {
-        guard let fp = fingerprint, let engine,
-              let frame = ThumbnailQueue.next(wanted: wanted, made: Set(images.keys), givenUp: attempts.givenUp, rate: rate,
-                                              inFlight: inFlight, shown: demand > 0, playing: engine.isPlaying) else { return }
+        guard let fp = fingerprint, let engine else { return }
+        let ready = engine.frameRouteUsesLibav != nil
+        let made = Set(images.keys)
+        if ThumbnailQueue.waitingForDecoder(wanted: wanted, made: made, givenUp: attempts.givenUp, rate: rate,
+                                            inFlight: inFlight, shown: demand > 0, playing: engine.isPlaying,
+                                            decoderReady: ready) {
+            decoderWait.wait()   // started by `frameRouteDecided` for this file
+            return
+        }
+        guard let frame = ThumbnailQueue.next(wanted: wanted, made: made, givenUp: attempts.givenUp, rate: rate,
+                                              inFlight: inFlight, shown: demand > 0, playing: engine.isPlaying,
+                                              decoderReady: ready) else { return }
         inFlight = frame
         let t = token, c = cache
         let disk = usesDisk
@@ -137,8 +159,12 @@ final class MarkerThumbnailer: ObservableObject {
     }
 
     private func decode(_ frame: Int) {
-        guard let engine, !engine.isPlaying, let url = engine.currentURL, let libav = engine.frameRouteUsesLibav else {
-            inFlight = nil; return
+        guard let engine, !engine.isPlaying, let url = engine.currentURL else { inFlight = nil; return }
+        guard let libav = engine.frameRouteUsesLibav else {
+            // Not reached through `pump` (it waits for the route), kept so a dropped frame is always asked for again.
+            inFlight = nil
+            decoderWait.wait()
+            return
         }
         let t = token, fp = usesDisk ? fingerprint : nil, c = cache, rate = self.rate
         if !libav {

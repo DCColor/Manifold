@@ -209,6 +209,7 @@ struct MarkerEditorHost: View {
 
     var body: some View {
         Color.clear
+            .background(ChapterNoteHost(model: model))
             .sheet(item: Binding(get: { model.editorMarker }, set: { if $0 == nil { model.cancelEditor() } })) { marker in
                 if let basis = model.basis {
                     MarkerEditorSheet(model: model, marker: marker, basis: basis, isNew: model.editorIsNew)
@@ -220,30 +221,82 @@ struct MarkerEditorHost: View {
     }
 }
 
-/// The transport scrubber with this window's markers on it (docs/MARKERS_PLAN.md §4.3). Observes the markers so the
-/// flags follow every change; everything else is `TransportScrubber`'s, unchanged.
+/// Chapters are read-only (docs/CHAPTER_MARKERS_PLAN.md §4.1; Robbie, 2026-11-17): Edit on one says so and offers
+/// Convert. A window-modal alert on the player window (a sheet, as the marker editor is), from double-click, ⇧M and the
+/// row menu's Edit…. Its own background view, because two presentations on one view are unreliable in SwiftUI.
+private struct ChapterNoteHost: View {
+    @ObservedObject var model: MarkerModel
+
+    var body: some View {
+        Color.clear
+            .alert("Chapters are part of the file and can't be edited in Manifold.",
+                   isPresented: Binding(get: { model.chapterNote != nil }, set: { if !$0 { model.chapterNote = nil } })) {
+                Button("Convert to Marker") { model.convertFromNote() }
+                    .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) { model.chapterNote = nil }
+            } message: {
+                Text("Convert to a marker to edit it.")
+            }
+    }
+}
+
+/// The transport scrubber with this window's markers on it (docs/MARKERS_PLAN.md §4.3), and the file's embedded chapters
+/// as outlined flags (docs/CHAPTER_MARKERS_PLAN.md §4.1). Observes the markers so the flags follow every change;
+/// everything else is `TransportScrubber`'s, unchanged.
 struct MarkedTransportScrubber: View {
     @ObservedObject var markers: MarkerModel
-    /// View ▸ Show Markers: off hides the flags, deletes nothing.
+    /// View ▸ Show Markers: off hides the flags (chapters' too), deletes nothing.
     @AppStorage(MarkerSettings.showKey) private var showMarkers = true
+    /// View ▸ Show Chapters: off hides the chapters' flags alone.
+    @AppStorage(MarkerSettings.showChaptersKey) private var showChapters = true
     var value: Double
     var range: ClosedRange<Double>
     var onChange: (Double) -> Void
     var onEditingChanged: (Bool) -> Void
 
     var body: some View {
+        let flags = self.flags
         TransportScrubber(value: value, range: range, onChange: onChange, onEditingChanged: onEditingChanged,
-                          markers: trackMarkers, onMarkerClicked: { i in
-                              let shown = showMarkers && markers.isActive ? markers.markers : []
-                              if shown.indices.contains(i) { markers.go(to: shown[i]) }
+                          markers: flags.map(\.track), onMarkerClicked: { i in
+                              if flags.indices.contains(i) { markers.go(toFrame: flags[i].frame) }
                           })
     }
 
-    private var trackMarkers: [TrackMarker] {
+    /// One flag and the frame a click on it goes to.
+    private struct Flag { let track: TrackMarker; let frame: Int }
+
+    /// Chapters first (one outlined flag per frame, every title on it in its tooltip, §3.1), then the markers (filled),
+    /// so a marker on a chapter's frame is drawn over it and takes the click (`MarkerTrackView`). With no chapters the
+    /// markers' flags are exactly as before.
+    private var flags: [Flag] {
         guard showMarkers, markers.isActive, let b = markers.basis, b.rate > 0 else { return [] }
-        return markers.markers.map { m in
-            TrackMarker(start: Double(m.frame) / b.rate, end: Double(m.lastFrame + 1) / b.rate, color: m.color.nsColor,
-                        label: m.name.isEmpty ? b.label(m.frame) : "\(b.label(m.frame))  \(m.name)")
+        var out: [Flag] = []
+        if showChapters {
+            var byFrame: [(frame: Int, items: [MappedChapter])] = []
+            // Unconverted chapters, not filtered: the strip shows every marker whatever the list's filter, so chapters too.
+            for c in markers.unconvertedChapters {
+                if let last = byFrame.last, last.frame == c.frame { byFrame[byFrame.count - 1].items.append(c) }
+                else { byFrame.append((c.frame, [c])) }
+            }
+            for group in byFrame {
+                let first = group.items[0]
+                // "<Kind> · <timecode> · <title>", one line per item on the frame. Tooltips are local UI; never logged.
+                let label = group.items.map { c in
+                    c.title.isEmpty ? "\(c.kind.label) · \(b.label(c.frame))" : "\(c.kind.label) · \(b.label(c.frame)) · \(c.title)"
+                }.joined(separator: "\n")
+                let color = first.color.map { NSColor(srgbRed: CGFloat($0.red) / 255, green: CGFloat($0.green) / 255,
+                                                      blue: CGFloat($0.blue) / 255, alpha: 1) } ?? TrackMarker.neutralOutline
+                out.append(Flag(track: TrackMarker(start: Double(first.frame) / b.rate, end: Double(first.frame) / b.rate,
+                                                   color: color, label: label, style: .outline),
+                                frame: first.frame))
+            }
         }
+        for m in markers.markers {
+            out.append(Flag(track: TrackMarker(start: Double(m.frame) / b.rate, end: Double(m.lastFrame + 1) / b.rate,
+                                               color: m.color.nsColor,
+                                               label: m.name.isEmpty ? b.label(m.frame) : "\(b.label(m.frame))  \(m.name)"),
+                            frame: m.frame))
+        }
+        return out
     }
 }

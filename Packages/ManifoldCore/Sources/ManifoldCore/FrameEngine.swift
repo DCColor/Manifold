@@ -244,7 +244,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The layer colorspace used to be derived from `metadata`, through SwiftUI's
     /// `.onChange(of: engine.metadata)`. That is late twice over: `metadata` is produced by a
     /// detached inspection Task that the load path never awaits (it re-opens the file through
-    /// libav for HDR10, and reads audio tracks, text tracks, timecode, chapters and common
+    /// libav for HDR10, and reads audio tracks, text tracks, timecode and common
     /// metadata), and even once it lands, `.onChange` runs a SwiftUI update pass later. Frames
     /// meanwhile flow from `beginReading`. MEASURED: on a 24-track master the first frame was
     /// presented with NO colorspace on the layer, 5 launches out of 5 — and because a
@@ -2611,6 +2611,11 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         return r.useLibav
     }
 
+    /// Sent with the file's URL the moment `frameRouteUsesLibav` becomes known for it (`installScrubProducer`), so the
+    /// marker thumbnailer can start work it held back for the route (docs/CHAPTER_MARKERS_PLAN.md §14.6). A subject, not
+    /// `@Published`: nothing redraws. Only tells; changes nothing in decode, playback or the pull.
+    public let frameRouteDecided = PassthroughSubject<URL, Never>()
+
     /// The pixel format playback and scrub decode this file to (the file's chroma, Stage 3b S2).
     public var decodePixelFormat: OSType { videoPixelFormat }
 
@@ -2636,6 +2641,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let token = scrubToken.next()
 
         guard let url else { return }
+        frameRouteDecided.send(url)   // `scrubRoute` is set above: the route is known from here
 
         // ── TWO PRODUCERS, ONE DESTINATION. THIS BRANCH IS THE WHOLE SELECTION. ───────────────
         //
@@ -3344,7 +3350,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// color) are read from libav in `beginLibavReading` (gated on `videoTrack == nil`).
     /// A `.mov` whose video track AVFoundation cannot see (`ContainerSlackRoute`): the MXF shape — libav
     /// demuxes and supplies the video facts — with ProRes decoded by VideoToolbox, and AVFoundation still
-    /// reading what it can (creation date, creator, software, chapters, captions) for the inspector.
+    /// reading what it can (creation date, creator, software, captions) for the inspector. (Chapters come from
+    /// the libav chapter reader on every route: docs/CHAPTER_MARKERS_PLAN.md §2.5, `MarkerModel`.)
     private func loadContainerSlackRoute(url: URL, metadataAsset: AVURLAsset, sampleEntry: FourCharCode,
                                          autoplay: Bool) async {
         self.hasMedia = true
@@ -3382,7 +3389,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 meta.creationDate = av.creationDate
                 meta.creator = av.creator
                 meta.software = av.software
-                meta.chapters = av.chapters
                 if meta.textTracks.isEmpty { meta.textTracks = av.textTracks }
                 if meta.startTimecode == nil { meta.startTimecode = av.startTimecode }
                 self.metadata = meta
@@ -3793,7 +3799,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 if videoTrack == nil {
                     applyLibavMetadata(info, url: url)
                     applyLibavTextTracks(url: url)
-                    // A routed .mov: AVFoundation still reads the rest (chapters, creation date, captions).
+                    // A routed .mov: AVFoundation still reads the rest (creation date, captions).
                     if containerSlackRoute { mergeContainerRouteMetadata(url: url) }
                 }
                 // The libav path's frame grid, from the decoder's own timeline: before the arm below, so the first

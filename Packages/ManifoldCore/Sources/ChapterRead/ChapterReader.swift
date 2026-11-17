@@ -67,9 +67,18 @@ public enum ChapterReader {
                 if let e = av_dict_get(ch.pointee.metadata, "title", nil, 0), let v = e.pointee.value {
                     title = String(cString: v)
                 }
-                chapters.append(FileChapter(start: start, end: end, title: title))
+                chapters.append(FileChapter(start: start, end: end, title: title, source: source(timeBase: tb)))
             }
         }
         return Result(chapters: chapters, videoStart: videoStart, hasVideo: hasVideo)
+    }
+
+    /// Which form a libav chapter came from. libav does not say; its mov demuxer gives `chpl` chapters a 1/10 000 000 time
+    /// base (100 ns, the box's unit) and chapter-track chapters the track's own (1/1000 from ffmpeg, 1/24000 from Resolve
+    /// and Premiere), and with both forms present it lists the track's (CHAPTER_MARKERS_PLAN §11.2). So this is an
+    /// INFERENCE from the time base: a chapter track whose timescale is 10 000 000 would read as `chpl`. It labels
+    /// provenance only; both are chapters and behave the same.
+    static func source(timeBase tb: AVRational) -> EmbeddedMarkerSource {
+        tb.num == 1 && tb.den == 10_000_000 ? .chpl : .chapterTrack
     }
 }

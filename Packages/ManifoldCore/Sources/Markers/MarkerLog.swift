@@ -25,7 +25,7 @@ public enum MarkerLog {
 
     public static func changed(count: Int, action: Action) -> String { "[MARKERS] \(action.rawValue) n=\(count)" }
 
-    public enum Action: String, Sendable { case add, edit, delete, undo, startOverride = "start-override" }
+    public enum Action: String, Sendable { case add, edit, delete, undo, startOverride = "start-override", convert }
 
     public static func exported(_ format: Format, report: ResolveEDL.ExportReport) -> String {
         "[MARKERS] export \(format.rawValue) n=\(report.markers) multi-line=\(report.multiLineNotes) blank-lines-dropped=\(report.droppedBlankLines) "
@@ -56,4 +56,10 @@ public enum MarkerLog {
 
     /// The file's chapters could not be read at all (open failed): no chapters, not an error the user sees.
     public static func chaptersUnreadable() -> String { "[MARKERS] chapters: file unreadable by libav" }
+
+    /// Convert to Markers (docs/CHAPTER_MARKERS_PLAN.md §4.1): counts only, never a title.
+    public static func convertedChapters(_ r: ChapterMapping.ConvertResult) -> String {
+        "[MARKERS] convert chapters added=\(r.added.count) identical=\(r.identical) occupied=\(r.occupied) "
+            + "already-converted=\(r.alreadyConverted)"
+    }
 }

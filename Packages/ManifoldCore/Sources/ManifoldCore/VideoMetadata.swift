@@ -5,11 +5,6 @@ import PictureGeometry
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
 import AudioFileInfo      // BroadcastWaveInfo — the Inspector's BWF rows
 
-public struct ChapterMarker: Equatable, Sendable {
-    public var time: Double
-    public var title: String
-}
-
 /// Whether an audio track's layout name came from a real declaration, a marked
 /// inference from channel count, or is an honest unknown.
 public enum LayoutConfidence: Equatable, Sendable {
@@ -417,7 +412,6 @@ public struct VideoMetadata: Equatable, Sendable {
     }
 
     public var startTimecode: String?
-    public var chapters: [ChapterMarker] = []
     public var audioTracks: [AudioTrackInfo] = []
     /// What a WAV's own chunks state about its timing (`bext`, iXML), or nil for any other file. Inspector only.
     public var broadcastWave: BroadcastWaveInfo?

@@ -13,6 +13,7 @@ import SwiftUI
 import Combine
 import ManifoldCore
 import ShortcutRegistry
+import Markers
 
 enum MarkersWindowScene {
     static let windowID = "markers"
@@ -66,6 +67,9 @@ private struct MarkersWindowContent: View {
     @ObservedObject var engine: FrameEngine
     let deck: WindowDeck
     @State private var filterOpen = false
+    /// Read so the header count follows View ▸ Show Markers and Show Chapters.
+    @AppStorage(MarkerSettings.showKey) private var showMarkers = true
+    @AppStorage(MarkerSettings.showChaptersKey) private var showChapters = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,12 +77,14 @@ private struct MarkersWindowContent: View {
             MarkerNotice(model: model)
         }
         .navigationTitle(model.fileName.isEmpty ? "Markers" : "Markers — \(model.fileName)")
+        // The header count (docs/CHAPTER_MARKERS_PLAN.md §4.1): "12 markers · 8 chapters".
+        .navigationSubtitle(model.isActive && showMarkers ? model.countLabel : "")
         .toolbar {
             // Text buttons, not icons (Robbie, 2026-11-15): the download and share glyphs read as Download and as Share
             // Frame. The filter stays an icon.
             ToolbarItem {
                 Button { filterOpen.toggle() } label: {
-                    Label("Filter by Color", systemImage: model.colorFilter.isEmpty
+                    Label("Filter by Color", systemImage: !model.filter.isActive
                           ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
                 }
                 .help("Filter by Color")
@@ -88,8 +94,8 @@ private struct MarkersWindowContent: View {
             }
             ToolbarItem {
                 Button("Regenerate Thumbnails") { model.regenerateThumbnails() }
-                    .help("Make this file's marker thumbnails again (not while playing)")
-                    .disabled(!model.isActive || model.markers.isEmpty)
+                    .help("Make this file's marker and chapter thumbnails again (not while playing)")
+                    .disabled(!model.isActive || (model.markers.isEmpty && model.chapters.isEmpty))
             }
             ToolbarItem {
                 Button("Import…") { model.presentImport() }

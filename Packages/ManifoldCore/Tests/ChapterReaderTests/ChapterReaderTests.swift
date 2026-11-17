@@ -17,6 +17,8 @@ import Markers
 ///  - r-offgrid.mp4   23.976 with B-frames (edit list, media time 2002), 1/1000 chapters off frames, zero length, past the end (F4).
 ///  - r-unicode.mp4   25 fps, a long non-ASCII title and one holding = ; # \ (F6).
 ///  - r-offset.mp4    25 fps, the video delayed 1 s with -itsoffset (an empty edit): libav's video start_time is 1 s.
+///  - r-chap0.mov     r-track.mov with its video tref `chap` target set to track ID 0 (2026-11-17, a 4-byte patch of a
+///                    copy, same size), as Premiere writes in a comment-only ProRes .mov (§12.6).
 final class ChapterReaderTests: XCTestCase {
 
     private func fixture(_ name: String) throws -> URL {
@@ -50,6 +52,20 @@ final class ChapterReaderTests: XCTestCase {
         let mapped = ChapterMapping.map(r.chapters, origin: r.videoStart, rate: 24000.0 / 1001, lastFrame: 71)
         XCTAssertEqual(mapped.chapters.map(\.frame), [0, 24, 49], "the tick tolerance puts 2.044 s on frame 49")
         XCTAssertEqual(mapped.chapters.map(\.duration), [24, 25, 23])
+        XCTAssertEqual(Set(r.chapters.map(\.source)), [.chapterTrack], "1/1000: the chapter track")
+        await crossCheck(url, libav: r)
+    }
+
+    // MARK: A chap tref pointing at track ID 0 (Premiere's comment-only .mov)
+
+    func testChapReferenceToTrackZeroGivesNoChaptersAndNoError() async throws {
+        let url = try fixture("r-chap0.mov")
+        let r = try ChapterReader.read(url: url)   // no throw
+        XCTAssertEqual(r.chapters.count, 0)
+        XCTAssertTrue(r.hasVideo)
+        let mapped = ChapterMapping.map(r.chapters, origin: r.videoStart, rate: 24000.0 / 1001, lastFrame: 71)
+        XCTAssertEqual(mapped.chapters.count, 0)
+        XCTAssertEqual(mapped.dropped, 0)
         await crossCheck(url, libav: r)
     }
 
@@ -63,6 +79,7 @@ final class ChapterReaderTests: XCTestCase {
         XCTAssertEqual(seconds(r.chapters), [0, 1, 2.04])
         let mapped = ChapterMapping.map(r.chapters, origin: r.videoStart, rate: 25, lastFrame: 74)
         XCTAssertEqual(mapped.chapters.map(\.frame), [0, 25, 51])
+        XCTAssertEqual(Set(r.chapters.map(\.source)), [.chpl], "100 ns: the Nero list")
         await crossCheck(url, libav: r)
     }
 
@@ -75,6 +92,10 @@ final class ChapterReaderTests: XCTestCase {
         let mapped = ChapterMapping.map(r.chapters, origin: r.videoStart, rate: 25, lastFrame: 74)
         XCTAssertEqual(mapped.chapters.map(\.frame), [0, 25, 51])
         XCTAssertEqual(mapped.chapters.map(\.duration), [25, 26, 24])
+        XCTAssertEqual(Set(r.chapters.map(\.source)), [.chapterTrack], "with both forms libav lists the track's")
+        XCTAssertEqual(Set(mapped.chapters.map(\.kind)), [.chapter])
+        XCTAssertTrue(mapped.chapters.allSatisfy { $0.color == nil && $0.statedDuration == nil && $0.stableID == nil },
+                      "Stage 2: no colour, no stated duration, no id from libav")
         await crossCheck(url, libav: r)
     }
 

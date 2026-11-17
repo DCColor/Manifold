@@ -8,6 +8,12 @@
 //  ⚠️ PRIVACY (§5.1). Names, notes and keywords are the user's content: this file logs ONLY through `MarkerLog`, whose
 //  functions take numbers. Never `NSLog` a marker, a file name or a path here.
 //
+//  EMBEDDED CHAPTERS (docs/CHAPTER_MARKERS_PLAN.md §4.1, Stage 2, Option A / D-C1): a second, READ-ONLY list beside the
+//  markers. Read from the FILE through libav (`ChapterReader`, D-C2) off the main thread on every open, beside the
+//  fingerprint and under the same `loadToken`; mapped onto the frame index once the rate and length are known; never
+//  written to the store, so they show with Remember markers off too. Their titles are the file's content: logged as
+//  counts only (`MarkerLog.chapters`). The layer's rules are `ChapterLayer`'s.
+//
 //  ⚠️ THE FRAME A MARKER GOES ON (D2). Playing: the frame the renderer last put on screen (`presentedPTS`), which can
 //  trail the playhead by the render queue's depth (WindowDeck.frameName's note). Paused: the playhead, which is that
 //  frame, and which is right at once after a step or a seek, before the renderer has drawn.
@@ -17,6 +23,7 @@ import AppKit
 import Combine
 import ManifoldCore
 import Markers
+import ChapterRead
 import SMPTETimecode
 import UniformTypeIdentifiers
 
@@ -45,8 +52,20 @@ final class MarkerModel: ObservableObject {
     @Published private(set) var editorIsNew = false
     /// A short line after an export or import, shown in the Markers slot. Counts and words only.
     @Published var notice: String?
-    /// Which colours the list shows. Empty = all.
+    /// Which colours the list shows. Empty (and no Chapters chip) = all.
     @Published var colorFilter: Set<MarkerColor> = []
+    /// The filter row's Chapters chip: with any filter chosen, chapters show only when this is on (§4.1).
+    @Published var chapterFilter = false
+    /// The file's embedded chapters on the frame index, all of them (converted ones included), in frame order. Empty
+    /// until the read and the mapping are both done. Never stored.
+    @Published private(set) var chapters: [MappedChapter] = []
+    /// Chapters the file states that start after its last frame (dropped, never clamped; §3.1). For the Inspector.
+    @Published private(set) var chaptersPastEnd = 0
+    /// The "chapters can't be edited" note, on this marker's player window (`MarkerEditorHost`), for this chapter.
+    @Published var chapterNote: MappedChapter?
+    /// The one chapter selected in a Markers list (slot or window, whichever changed last), so ⇧M on it shows the note.
+    /// Nil when the selection is anything else.
+    var selectedChapter: Int?
 
     /// Thumbnails of the markers' frames (§4.4), for the slot and the Markers window.
     let thumbnails = MarkerThumbnailer()
@@ -63,6 +82,14 @@ final class MarkerModel: ObservableObject {
     private var feed = ThumbnailFeed()
     /// The start-timecode check (`checkStartTimecode`) has not run for this load: it needs the rate and timecode.
     private var startCheckPending = false
+    /// The chapters as the file states them (nil: not read yet, or unreadable), and how long the read took.
+    private var fileChapters: ChapterReader.Result?
+    private var chapterReadMs = 0
+    /// What the current `chapters` were mapped with, so a repeat publish of the metadata maps nothing again.
+    private var chapterMapKey: ChapterMapKey?
+    /// The "chapters start after the end" notice has been shown for this load.
+    private var pastEndNoticeShown = false
+    private var chapterRetry: Task<Void, Never>?
 
     /// This file's markers are read from and written to the store: Remember markers between sessions was on when the
     /// file opened (§5.2). Off, they live in memory for as long as the file is open. Saving also asks the preference
@@ -95,6 +122,12 @@ final class MarkerModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.metadataChanged() } }
             .store(in: &cancellables)
+        // The file's length, for the chapters' last frame (§3.1: past the end is dropped); it can land after both.
+        engine.$duration
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.mapChapters() } }
+            .store(in: &cancellables)
     }
 
     private func fileChanged(_ url: URL?) {
@@ -110,6 +143,15 @@ final class MarkerModel: ObservableObject {
         outPoint = nil
         editorMarker = nil
         notice = nil
+        chapterNote = nil
+        selectedChapter = nil
+        chapters = []
+        chaptersPastEnd = 0
+        fileChapters = nil
+        chapterMapKey = nil
+        pastEndNoticeShown = false
+        chapterRetry?.cancel()
+        chapterRetry = nil
         thumbnails.reset(engine: engine, fingerprint: nil)
         guard let url, let engine, engine.mediaKind == .video else { state = .none; return }
         state = .loading
@@ -117,6 +159,13 @@ final class MarkerModel: ObservableObject {
         let store = self.store
         let remember = MarkerSettings.remember()
         persisting = remember
+        // The file's chapters, beside the fingerprint (§2.4): a private libav open, read and close, never playback's.
+        Task.detached(priority: .userInitiated) {
+            let t0 = Date()
+            let read = try? ChapterReader.read(url: url)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            await MainActor.run { [weak self] in self?.finishChapterRead(token: token, read: read, ms: ms) }
+        }
         Task.detached(priority: .userInitiated) {
             let t0 = Date()
             let fp = FileFingerprint.compute(url: url)
@@ -163,6 +212,7 @@ final class MarkerModel: ObservableObject {
     /// loaded (`ThumbnailFeed`'s note): the thumbnailer and the start-timecode check get it now. A repeat changes nothing.
     private func metadataChanged() {
         objectWillChange.send()
+        mapChapters()
         guard state == .ready else { return }
         syncThumbnails(ifChanged: true)
         checkStartTimecode()
@@ -177,6 +227,116 @@ final class MarkerModel: ObservableObject {
             show("This file’s start timecode now reads \(basis.label(0)); its markers were made at \(seen). They stay on the same frames.")
         }
     }
+
+    // MARK: Chapters (docs/CHAPTER_MARKERS_PLAN.md §4.1)
+
+    private struct ChapterMapKey: Equatable {
+        let rate: Double
+        let lastFrame: Int
+        let origin: ChapterTime
+    }
+
+    private func finishChapterRead(token: UUID, read: ChapterReader.Result?, ms: Int) {
+        guard token == loadToken else { return }
+        guard let read else {
+            NSLog("%@", MarkerLog.chaptersUnreadable())
+            return
+        }
+        fileChapters = read
+        chapterReadMs = ms
+        mapChapters()
+    }
+
+    /// Places the file's chapters on the frame index once the rate and the length are known (they can land after the
+    /// read), and again whenever either changes. The origin follows the PLAYBACK PATH (D-C10, §11.4): a libav-played
+    /// file's frame 0 is its first video frame, so the video stream's `start_time` comes off; an AVFoundation-played
+    /// file's frame 0 is the asset's time 0, so nothing does. With `start_time` 0, as on every real file seen, the two
+    /// agree and the path is not needed.
+    private func mapChapters() {
+        guard let read = fileChapters, let engine, let basis, engine.duration > 0 else { return }
+        let origin: ChapterTime
+        if read.videoStart.value == 0 {
+            origin = .zero
+        } else if let libav = engine.frameRouteUsesLibav {
+            origin = libav ? read.videoStart : .zero
+        } else {
+            retryChapterMapping()   // the route is set later in the same load
+            return
+        }
+        let key = ChapterMapKey(rate: basis.rate, lastFrame: lastFrame, origin: origin)
+        guard key != chapterMapKey else { return }
+        chapterMapKey = key
+        let r = ChapterMapping.map(read.chapters, origin: origin, rate: basis.rate, lastFrame: lastFrame)
+        chapters = r.chapters
+        chaptersPastEnd = r.droppedPastEnd
+        if !read.chapters.isEmpty { NSLog("%@", MarkerLog.chapters(r, readMs: chapterReadMs)) }
+        if r.droppedPastEnd > 0, !pastEndNoticeShown {
+            pastEndNoticeShown = true
+            let n = r.droppedPastEnd
+            show(n == 1 ? "1 chapter starts after the end of the file." : "\(n) chapters start after the end of the file.")
+        }
+        if state == .ready { syncThumbnails(ifChanged: true) }
+    }
+
+    /// The playback route is not known yet (only matters for a file whose video starts after 0): ask again shortly,
+    /// for at most five seconds, under this load's token.
+    private func retryChapterMapping() {
+        guard chapterRetry == nil else { return }
+        let token = loadToken
+        chapterRetry = Task { [weak self] in
+            for _ in 0..<25 {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled, let self, self.loadToken == token else { return }
+                if self.engine?.frameRouteUsesLibav != nil {
+                    self.chapterRetry = nil
+                    self.mapChapters()
+                    return
+                }
+            }
+            self?.chapterRetry = nil
+        }
+    }
+
+    /// The filter as `ChapterLayer` takes it.
+    var filter: MarkerFilter { MarkerFilter(colors: colorFilter, chapters: chapterFilter) }
+
+    /// Chapters not shown as a marker of their own yet (§3.3, D-C14).
+    var unconvertedChapters: [MappedChapter] { ChapterMapping.unconverted(chapters, markers: markers) }
+
+    /// The chapters the lists and the strip show: unconverted, View ▸ Show Chapters on, through the filter. (View ▸ Show
+    /// Markers is the views' check, as for markers.)
+    var visibleChapters: [MappedChapter] {
+        ChapterLayer.visibleChapters(chapters, markers: markers, filter: filter, showChapters: MarkerSettings.showChapters())
+    }
+
+    /// Markers and visible chapters interleaved by frame, for the lists.
+    var listRows: [MarkerListRow] { ChapterLayer.rows(markers: visibleMarkers, chapters: visibleChapters) }
+
+    /// "12 markers · 8 chapters" (the Markers window's header).
+    var countLabel: String {
+        ChapterLayer.countLabel(markersShown: visibleMarkers.count, markersTotal: markers.count,
+                                chaptersShown: visibleChapters.count,
+                                chaptersTotal: MarkerSettings.showChapters() ? unconvertedChapters.count : 0)
+    }
+
+    func go(to chapter: MappedChapter) { go(toFrame: chapter.frame) }
+
+    /// Convert to Marker (a row or the selection) and Convert All Chapters to Markers: D-C4 Blue + keyword "chapter",
+    /// D-C8 the chapter's duration, D-C14 stable ids skipped, through the import merge rule. One undo step.
+    func convert(_ items: [MappedChapter]) {
+        guard isActive, state == .ready, !items.isEmpty else { NSSound.beep(); return }
+        let r = ChapterMapping.convert(items, into: markers)
+        if !r.added.isEmpty {
+            revealMarkers()
+            apply(markers + r.added, action: items.count == 1 ? "Convert Chapter to Marker" : "Convert Chapters to Markers",
+                  log: .convert)
+        }
+        NSLog("%@", MarkerLog.convertedChapters(r))
+        show(ChapterLayer.convertNotice(r))
+    }
+
+    /// Mark ▸ Convert All Chapters to Markers: every chapter not converted yet, shown or not.
+    func convertAllChapters() { convert(unconvertedChapters) }
 
     // MARK: What the window is showing
 
@@ -220,9 +380,7 @@ final class MarkerModel: ObservableObject {
         return markers.last { $0.frame <= f && f <= $0.lastFrame }
     }
 
-    var visibleMarkers: [Marker] {
-        colorFilter.isEmpty ? markers : markers.filter { colorFilter.contains($0.color) }
-    }
+    var visibleMarkers: [Marker] { ChapterLayer.visibleMarkers(markers, filter: filter) }
 
     // MARK: Adding
 
@@ -264,10 +422,29 @@ final class MarkerModel: ObservableObject {
 
     /// Mark ▸ Edit Marker… (⇧M): the marker starting at the playhead, else the nearest one starting before it.
     func editMarkerAtPlayhead() {
+        // A chapter selected in a list: it can't be edited, so say so (and offer Convert) rather than opening a marker.
+        if isActive, let i = selectedChapter, let c = visibleChapters.first(where: { $0.fileIndex == i }) {
+            showChapterNote(c)
+            return
+        }
         guard isActive, let f = engine?.currentFrame, let m = MarkerRules.markerToEdit(at: f, in: markers) else {
             NSSound.beep(); return
         }
         openEditor(m)
+    }
+
+    /// Edit on a chapter (double-click after the jump, ⇧M with it selected, the row menu's Edit…): the read-only note,
+    /// on the player window, brought forward from the Markers window as the editor is.
+    func showChapterNote(_ chapter: MappedChapter) {
+        chapterNote = chapter
+        if let w = deck?.window, !w.isKeyWindow { w.makeKeyAndOrderFront(nil) }
+    }
+
+    /// The note's Convert: that chapter alone, one undo step.
+    func convertFromNote() {
+        guard let c = chapterNote else { return }
+        chapterNote = nil
+        convert([c])
     }
 
     // MARK: Editing
@@ -344,16 +521,19 @@ final class MarkerModel: ObservableObject {
 
     /// Double-click in the list, a flag on the timeline, ⇧↑/⇧↓. The quarter-frame landing every typed seek uses
     /// (`TransportKeyMonitor.commit`).
-    func go(to marker: Marker) {
+    func go(to marker: Marker) { go(toFrame: marker.frame) }
+
+    func go(toFrame frame: Int) {
         guard let deck, deck.transportKeys?.canMovePlayhead == true else { NSSound.beep(); return }
-        deck.transportKeys?.seek(toFrame: marker.frame)
+        deck.transportKeys?.seek(toFrame: frame)
     }
 
+    /// ⇧↑/⇧↓: the visible markers' and visible chapters' frames together, each once (D-C6).
     func goToNeighbour(forward: Bool) {
         guard isActive, let f = engine?.currentFrame else { NSSound.beep(); return }
-        let target = forward ? visibleMarkers.first { $0.frame > f } : visibleMarkers.last { $0.frame < f }
-        guard let target else { NSSound.beep(); return }
-        go(to: target)
+        let stops = ChapterLayer.navigationFrames(visibleMarkers: visibleMarkers, visibleChapters: visibleChapters)
+        guard let target = ChapterMapping.neighbour(of: f, forward: forward, in: stops) else { NSSound.beep(); return }
+        go(toFrame: target)
     }
 
     // MARK: Start timecode override (D6)
@@ -394,7 +574,11 @@ final class MarkerModel: ObservableObject {
 
     /// Regenerate Thumbnails (gear, toolbar: nil = every marker) or Regenerate Thumbnail (row menu).
     func regenerateThumbnails(_ ids: Set<UUID>? = nil) {
-        let frames = ids.map { ids in Set(markers.filter { ids.contains($0.id) }.map(\.frame)) }
+        regenerateThumbnails(frames: ids.map { ids in Set(markers.filter { ids.contains($0.id) }.map(\.frame)) })
+    }
+
+    /// These frames' thumbnails (a chapter row's Regenerate Thumbnail), or every one when nil.
+    func regenerateThumbnails(frames: Set<Int>?) {
         if state == .ready { syncThumbnails(ifChanged: true) }   // with the current rate (`ThumbnailFeed`'s note)
         let n = thumbnails.regenerate(frames)
         NSLog("%@", MarkerLog.regenerate(thumbnails: n))
@@ -439,10 +623,12 @@ final class MarkerModel: ObservableObject {
         NSLog("%@", MarkerLog.changed(count: markers.count, action: log))
     }
 
-    /// The thumbnailer gets the markers' frames and the file's current rate. Always after a load or a change (as before);
-    /// `ifChanged` (metadata, Regenerate) only when the frames or the rate differ from what it was last given.
+    /// The thumbnailer gets the markers' AND the chapters' frames (§4.1: the union, so deleting a marker never deletes a
+    /// chapter's thumbnail on the same frame) and the file's current rate. Always after a load or a change (as before);
+    /// `ifChanged` (metadata, Regenerate, chapters mapped) only when the frames or the rate differ from what it was last
+    /// given.
     private func syncThumbnails(ifChanged: Bool = false) {
-        let changed = feed.update(frames: Set(markers.map(\.frame)), rate: basis?.rate)
+        let changed = feed.update(frames: ChapterLayer.thumbnailFrames(markers: markers, chapters: chapters), rate: basis?.rate)
         guard changed || !ifChanged else { return }
         thumbnails.sync(frames: feed.frames, rate: feed.rate)
     }
