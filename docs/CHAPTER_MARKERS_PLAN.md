@@ -1,6 +1,7 @@
 # Embedded chapters shown as markers: plan (0.9.5)
 
-Status: **Stage 1 built (2026-11-16): fixtures, the libav reader, the pure mapping and their tests. No UI.** Decisions
+Status: **Stage 2 built (2026-11-17): the chapter UI, Option A's read-only layer (§14). Attended check pending.** Stage 1
+(2026-11-16): fixtures, the libav reader, the pure mapping and their tests. Decisions
 recorded in §8; measurements on the fixtures and on Resolve's and Premiere's own files in §11. The audit below (§0–§7, §9)
 is the plan as first written the same day. Where §11 settles one of its UNKNOWNs, §11 says so.
 
@@ -676,8 +677,8 @@ All as recommended.
 
 | # | Question | Recommended |
 |---|---|---|
-| D-C7a | Resolve rounds its chapter times to **milliseconds** before writing them in 1/24000, so one of its four chapters sits two ticks before its frame and D-C7 puts it on the frame before (§11.3) | Tolerance = **max(one tick, 1 ms)**, still capped at half a frame. It catches every quantized value seen (Resolve, ffmpeg, Flip) and moves a genuinely mid-frame chapter only if it is within 1 ms of the next frame. `testRealAppTicksUnderDC7` pins today's answer (57) so the change is deliberate |
-| D-C10 | The origin to subtract (§11.4) | **The playback path's own frame 0:** the video `start_time` for a libav-played file, 0 for an AVFoundation-played one. Stage 2 passes it from `FrameEngine` |
+| D-C7a (**applied in Stage 2**, as recommended) | Resolve rounds its chapter times to **milliseconds** before writing them in 1/24000, so one of its four chapters sits two ticks before its frame and D-C7 puts it on the frame before (§11.3) | Tolerance = **max(one tick, 1 ms)**, still capped at half a frame. It catches every quantized value seen (Resolve, ffmpeg, Flip) and moves a genuinely mid-frame chapter only if it is within 1 ms of the next frame. `testRealAppTicksUnderDC7` pins today's answer (57) so the change is deliberate |
+| D-C10 (**applied in Stage 2**, as recommended) | The origin to subtract (§11.4) | **The playback path's own frame 0:** the video `start_time` for a libav-played file, 0 for an AVFoundation-played one. Stage 2 passes it from `FrameEngine` |
 | D-C11 | Premiere MP4s carry their chapters **only as XMP** (§11.5) | Bring XMP forward: either into 0.9.5 (Manifold first, Flip after) or keep D-C9 and say in the release notes that Premiere MP4 chapters do not show |
 
 ---
@@ -1247,8 +1248,9 @@ ProRes export: `FileType` MOV, `MajorBrand` "Apple QuickTime (.MOV/QT)", ProRes 
   - ffmpeg lists no chapters, so libav reads 0. The reader was not run (no build).
   - Premiere evidently writes the chapter text track only when there are **Chapter**-type markers
     (`premiere_chapters - prores.mov` has one, §11.3), and leaves an empty `chap` reference otherwise.
-  - Whether AVFoundation tolerates a `chap` reference to track 0 without error is **UNKNOWN** (not run). The libav reader
-    is unaffected.
+  - Whether AVFoundation tolerates a `chap` reference to track 0 without error was **UNKNOWN** (not run). **Settled in
+    Stage 2 (2026-11-17): it does.** On this file and on `r-chap0.mov` (a 4-byte patch of `r-track.mov`, §14) both libav
+    and AVFoundation return 0 chapters and no error (`testProbe`, `testChapReferenceToTrackZeroGivesNoChaptersAndNoError`).
 - **XMP: `udta/XMP_`**, as in Premiere's other `.mov`.
   - One **Comment** marker, `startTime` **186**, `duration` **96**, frames at `f24000s1001`. That is the same marker as
     the MP4s, in the same units.
@@ -1392,3 +1394,235 @@ These were **D-C17**.
   - the slot's override field when the TC is not from `tmcd`.
 - **Tests:** precedence (each source alone, each pair, override over all); the W1 Premiere MP4s and `.mov`s as probes;
   `startTimecodeSeen` across the change.
+
+---
+
+## 14. Stage 2 as built (2026-11-17)
+
+The chapter UI, Option A (D-C1), on top of Stage 1. Decisions applied: D-C1 to D-C17 as recorded, with D-C7a and D-C10 as
+recommended in §8. Not attended yet; not committed.
+
+### 14.1 What it does
+
+- **Read:** `MarkerModel.fileChanged` starts `ChapterReader.read` in a detached task beside the fingerprint, under the
+  same `loadToken`. The mapping waits for the rate (`basis`) and the length (`engine.duration`), and is redone when
+  either changes. Chapters are published as `MarkerModel.chapters`, never written to the store, so they show with
+  Remember markers off too.
+- **Origin (D-C10):** `start_time` 0 (every real file seen): origin 0, whatever the path. Otherwise the video
+  `start_time` on a libav-played file (`FrameEngine.frameRouteUsesLibav`), 0 on an AVFoundation one. If the route is not
+  set yet, the mapping is retried every 200 ms for at most 5 s.
+- **Rounding (D-C7a):** `ChapterMapping.frame` tolerance = min(max(one tick, 1 ms), ½ frame). Resolve's 58056/24000 now
+  lands on 58 (`testRealAppTicksUnderDC7a`; it pinned 57 under D-C7).
+- **The layer's items:** `FileChapter` and `MappedChapter` carry `source` (`chapterTrack`, `chpl`, `xmp`), `kind`
+  (`chapter`, `comment`, `segmentation`, `weblink`), an optional `color`, an optional **stated** duration and an optional
+  `stableID`. Stage 2 fills them from libav: kind chapter, no color, no stated duration, no id. The source is
+  **inferred from the time base** (1/10 000 000 → `chpl`, else chapter track; `ChapterReader.source`), because libav does
+  not say. A non-chapter item without a stated duration is 1 frame and does not end the chapter before it (§12.4.4).
+  No XMP code.
+- **Inspector:** the row is "Chapters", fed from `MarkerModel.chapters` (the same reader, every route), hidden at 0, and
+  says "n · m after the end" when chapters were dropped. `MediaInspector.chapters(for:)`, its call, the container-route
+  merge of it, `VideoMetadata.chapters` and `ChapterMarker` are **removed**: the AVFoundation cross-check lives in
+  `ChapterReaderTests` only.
+- **Timeline strip:** `TrackMarker.style` `.filled | .outline`. An outline is a 1 pt stroke in the item's color, else
+  `TrackMarker.neutralOutline` (white 85%), with no fill and no band (D-C13, D-C16). Outlines are drawn first; a filled
+  flag on the same x is drawn over them and takes the click. One outlined flag per frame, every item on it in the tooltip
+  ("Chapter · 01:00:10:00 · <title>", title left out when empty). A click jumps. The strip, like the markers on it,
+  ignores the list's filter.
+- **Lists:** `ChapterLayer.rows` interleaves markers and chapters by frame (marker first on a shared frame). Chapter rows
+  show `book.closed` instead of a swatch, the kind ("Chapter") in the window's Color column, are not editable,
+  double-click jumps, ⌫ skips them. Context menu: Go to Chapter, Convert to Marker / Convert n Chapters to Markers, Convert
+  All Chapters to Markers, Regenerate Thumbnail. The window's subtitle is the count ("12 markers · 8 chapters"); the
+  slot's header suffix adds " · 8 ch". The filter popover has a **Chapters** chip; "Show All Colors" became "Show All".
+- **Convert (D-C4, D-C8, D-C14):** `ChapterMapping.convert` → `ConvertResult` (the merge counts plus
+  `alreadyConverted`). Blue, the kind's keyword ("chapter"), the item's duration, its `stableID` into the new
+  `Marker.embeddedID` (optional, omitted from the JSON when nil). Items whose id a marker already carries are skipped;
+  the rest go through `ResolveEDL.merge`. One undo step ("Convert Chapter(s) to Marker(s)"); Convert turns Show Markers
+  back on, as adding does; a notice gives the counts.
+- **Suppression (§3.3, D-C14):** `ChapterMapping.isConverted`: a marker carries the item's id, or the item's frame holds
+  a marker with the same name. Chapter-track and `chpl` chapters have no id, so only the second rule applies to them.
+- **Menus:** View ▸ Show Chapters (default on, no key; `manifold.markers.showChapters`), Mark ▸ Convert All Chapters to
+  Markers (no key). Both in `ShortcutCatalog` and `MenuKeyAudit.menuHomes`. Show Markers off hides both.
+- **Navigation (D-C6):** ⇧↑/⇧↓ walk `ChapterLayer.navigationFrames` (visible markers ∪ visible chapters, each frame once).
+  ⇧M still uses `MarkerRules.markerToEdit` (markers only). Like markers, chapters stay navigable while Show Markers is
+  off; Show Chapters off removes them.
+- **Thumbnails:** `syncThumbnails` hands the thumbnailer `ChapterLayer.thumbnailFrames` (every marker's and every
+  chapter's frame, filters and Show settings aside), so deleting a marker keeps a chapter's thumbnail. No cache version
+  change.
+- **Log:** `MarkerLog.chapters` once per distinct mapping (counts only), `chaptersUnreadable`, and the new
+  `convertedChapters`. "n chapters start after the end of the file" is shown once per load.
+
+### 14.2 Files
+
+| File | Change |
+|---|---|
+| `Packages/ManifoldCore/Sources/Markers/ChapterMapping.swift` | D-C7a; `EmbeddedMarkerSource`, `EmbeddedMarkerKind`, `EmbeddedColor`; the new fields; `ChapterTime.adding`; stated durations; `isConverted`; `ConvertResult`; D-C14 in `convert` |
+| `Packages/ManifoldCore/Sources/Markers/ChapterLayer.swift` | **New.** `MarkerFilter`, `MarkerListRow`, visibility, rows, count label, navigation and thumbnail unions, Convert notice |
+| `Packages/ManifoldCore/Sources/Markers/Marker.swift` | `embeddedID` (optional) |
+| `Packages/ManifoldCore/Sources/Markers/MarkerLog.swift` | `Action.convert`, `convertedChapters` |
+| `Packages/ManifoldCore/Sources/Markers/MarkerSettings.swift` | `showChaptersKey`, `showChapters()` |
+| `Packages/ManifoldCore/Sources/ChapterRead/ChapterReader.swift` | `source(timeBase:)` |
+| `Packages/ManifoldCore/Sources/PlayheadSlider/PlayheadSlider.swift` | `TrackMarker.Style`, `neutralOutline`; outline pass; filled wins a tie on click |
+| `Packages/ManifoldCore/Sources/ShortcutRegistry/ShortcutCatalog.swift`, `MenuKeyAudit.swift` | `.showChapters`, `.convertAllChapters` |
+| `Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift`, `VideoMetadata.swift`, `FrameEngine.swift` | AVFoundation chapter read removed (and comments) |
+| `App/Markers/MarkerModel.swift` | read, mapping, origin, visibility, Convert, navigation and thumbnail unions |
+| `App/Markers/MarkersScopeView.swift`, `MarkersWindow.swift` | chapter rows, selection by row id, context menu, chip, counts |
+| `App/Markers/MarkerEditorSheet.swift` (`MarkedTransportScrubber`) | outlined chapter flags |
+| `App/Markers/MarkCommands.swift`, `App/ContentView.swift`, `App/InspectorPanel.swift` | Show Chapters, Convert All handler, Inspector row |
+| `project.yml` | the app links `ChapterRead` |
+| Tests | `ChapterMappingTests` (+7, one renamed), `ChapterLayerTests` (**new**, 14), `ChapterReaderTests` (+1, and `Fixtures/r-chap0.mov`), `PlayheadSliderTests/MarkerTrackStyleTests` (**new**, 6), `ShortcutRegistryTests` (+1) |
+| `docs/PRIVACY_AUDIT.md` §2, `docs/MARKERS_PLAN.md` | a Logging line; a pointer here |
+
+### 14.3 Results (2026-11-17)
+
+- **`swift test`:** 1203 tests in 38 bundles, 0 failures, 1 skipped (the opt-in probe). Before: 1174 in 38, 0 failures,
+  1 skipped. +29.
+- **Warnings:** none from new or changed package or test files. Recompiling ManifoldCore (comment edits in
+  `FrameEngine.swift`) printed 3 warnings at `FrameEngine.swift:321`, `:5501`, `:5504` and 2 in `LibavAudioSource.swift`,
+  lines and files this stage did not change.
+- **App:** Profile into `.build-cc`, **BUILD SUCCEEDED**. The 19 App-file warnings are identical to the 2026-11-15
+  build's (`~/Code/_scratch/manifold-fixcheck-build.log`); the 5 above are the extra ones.
+- **Probe** on `w1/` (read-only): `premiere_ranged_tc1h - prores.mov` 0 chapters, no error, in libav and AVFoundation;
+  `resolve_chapters - prores.mov` frames 0, 58, 254, 545; `premiere_chapters - prores.mov` 101, 280, 532.
+
+### 14.4 UNKNOWN
+
+- Undo is covered by `MarkerModel.apply` (the same path as every marker edit) and a pure test of the restore. The app
+  itself has no test target; the attended check covers it.
+- Whether the outlined flag reads clearly against the bar on the LG at 2× (attended).
+- A file whose video `start_time` ≠ 0 played on the AVFoundation path: the frame of its first picture is still the §11.4
+  engine question.
+
+### 14.5 Fixes from the attended check (Robbie, 2026-11-17)
+
+1. **No chapter thumbnails on a first open** (`w1/premiere_chapters - prores.mov`; Regenerate made them, and later opens
+   read them from the cache).
+   - **Cause, from the code (inferred, not traced):** with no markers stored, the chapters are mapped and synced to the
+     thumbnailer before the engine installs the file's decoder route (`installScrubProducer`, later in the same load).
+     `MarkerThumbnailer.decode` found `frameRouteUsesLibav == nil`, dropped the frame and never asked again.
+   - **Fix:** `ThumbnailQueue.next` starts nothing until the route is known (`decoderReady`); the held-back work starts
+     on the engine's route event (§14.6). The first version of this fix polled every 200 ms for up to 30 s; §14.6
+     replaced that.
+   - **Tests:** `ThumbnailFeedTests.testChaptersMappedAfterTheFirstSyncAndBeforeTheRouteStillGetThumbnails` and
+     `testNothingWaitsForTheRouteWhenThereIsNothingToMake`.
+2. **The Chapters chip's border was clipped at the bottom** in the gear popover.
+   - Swatches are now a plain `Grid` (not `LazyVGrid`) and the filter's stack is `fixedSize` vertically, so the popover
+     measures it whole.
+   - The chip is `fixedSize`, has 2 pt above and below, and its border is inset in its own padding. It uses `.caption`
+     text, which follows the system text size.
+   - The root cause is **UNKNOWN**: this removes every likely one at once.
+3. **Chapters are explicitly read-only.**
+   - Double-click a chapter row (it jumps first), ⇧M with exactly one chapter selected in a list, or Edit… in a chapter
+     row's menu: a window-modal alert on the player window. It reads "Chapters are part of the file and can't be edited in
+     Manifold." / "Convert to a marker to edit it." and offers **Convert to Marker** (that chapter, one undo step) or
+     **Cancel**.
+   - The chapter row's tooltip adds "Chapter from the file · Convert to edit".
+   - No new shortcuts. ⇧M is enabled when the file has markers or a chapter is selected.
+
+### 14.6 Second round (Robbie, 2026-11-17)
+
+1. **No tooltip on a chapter row in the Markers slot** (the timeline flag's worked).
+   - The rows did have `.help` (`MarkersScopeView.swift`, `chapterSlotRow` and `chapterWindowRow`), as marker rows do.
+   - Why it never showed is **UNKNOWN** (not measured). The likely causes are both in that list:
+     - SwiftUI re-registers its tooltips as the list redraws, and the list observes the engine and the model;
+     - the row's `.onTapGesture`/`.contextMenu` wrap it.
+   - Marker rows use the same `.help` in the same list, so they are **probably missing their tooltip too**. Not changed
+     (Robbie: report, don't fix).
+   - **Fix:** chapter rows in the slot and the window get `RowToolTip`, an AppKit `toolTip` view over the whole row, set
+     only when its text changes. It answers hit-testing only outside clicks, drags and scrolls, so clicks, double-clicks,
+     right-clicks and scrolling reach the row as before.
+   - The text is `ChapterLayer.rowToolTip`: "Chapter · <timecode> · <title>" (title left out when empty), then "Chapter
+     from the file · Convert to edit".
+   - The inner `.help` on the book symbol and the rows' own `.help` are removed.
+2. **The thumbnailer's polling is replaced by an event.**
+   - `FrameEngine.frameRouteDecided` (a `PassthroughSubject<URL, Never>`, not `@Published`) is sent in
+     `installScrubProducer` right after `scrubRoute` is set: the moment `frameRouteUsesLibav` becomes known for that file.
+   - `MarkerThumbnailer` subscribes on each `reset`, with that reset's token. `DecoderWait` holds the work back when
+     `ThumbnailQueue.waitingForDecoder` says so, and starts it only on an event for its own file while something waits.
+   - No timers. Decode, playback and the pull are unchanged; the engine only tells.
+   - **Tests:** `ThumbnailFeedTests.testChaptersMappedAfterTheFirstSyncAndBeforeTheRouteStillGetThumbnails` (adapted to the
+     event) and `testADecoderEventForAnotherFileDoesNothing`.
+
+---
+
+## 15. Plan only: a "Chapter list" export (Robbie, 2026-11-17)
+
+Not built. A fourth and fifth choice in Export Markers… (`App/Markers/MarkerFileIO.swift:18-25`, today Resolve EDL, CSV
+and Plain Text), written from **markers**, beside the existing three. It is the reverse of this plan's reader: Manifold's
+markers out as chapters, for ffmpeg (and so Flip) or for a YouTube description.
+
+### 15.1 Formats
+
+1. **ffmpeg metadata (`.ffmeta`)**, the same text Flip and the §5 fixtures use:
+
+   ```
+   ;FFMETADATA1
+   [CHAPTER]
+   TIMEBASE=1001/24000
+   START=240
+   END=721
+   title=Second
+   ```
+
+   - `TIMEBASE` is the file's exact frame duration (`ChapterMapping.exactRate`, inverted: 1001/24000, 1/25, 1001/30000), so
+     `START` is the marker's frame and nothing is rounded.
+   - Titles are escaped as ffmetadata requires: `=`, `;`, `#`, `\` and a line break each get a backslash (Flip's reader
+     skips that step, §9.3; Manifold's own reader is the libav API and needs none).
+   - UTF-8, LF, no BOM.
+   - It muxes with `ffmpeg -i in.mov -i list.ffmeta -map 0 -map_chapters 1 -c copy out.mov`. Read back through
+     `ChapterReader`, it gives the same frames (exact base, D-C7a). That is the round-trip test.
+2. **YouTube description (`.txt`)**, one line per chapter:
+
+   ```
+   0:00 Opening
+   0:10 Second
+   1:02:31 Last
+   ```
+
+   - `M:SS` under an hour, `H:MM:SS` from an hour on, one space, then the title.
+   - YouTube's own rules, as commonly stated: the first line must be 0:00, at least three lines, each chapter at least
+     10 s long. These are **UNKNOWN** until checked against YouTube's current help page at build time.
+   - Manifold doesn't enforce them silently. The export writes what the markers say and, when a rule is broken, adds one
+     notice line after the export ("No marker at 0:00: YouTube needs one", "2 chapters under 10 s"), counts only.
+
+### 15.2 Which markers
+
+- **All the file's markers**, in time order, as the CSV and text exports take them (`model.markers`). Recommended:
+  **not** the list's filter. An option "Only the markers shown" can come later if asked.
+- **Chapters are not included** (D-C5). Convert them first, as for the other formats.
+- **Name → title.** Notes and keywords are dropped: neither format has a place for them that ffmpeg's muxer or YouTube
+  reads.
+- **Empty names (D3):** ffmetadata keeps `title=` empty, as Flip does. A YouTube line needs text, so **decision for
+  Robbie (D-C18):** fall back to the marker's timecode label, or to "Chapter n", or skip the marker and count it.
+  Recommended: the timecode label, so nothing is lost.
+- **Duration (ffmetadata `END`):** a ranged marker (`duration > 1`) ends after its last frame. A point marker runs to the
+  next marker's frame, and the last one to the file's end. That is §3.2's chapter rule, so a re-read gives the same
+  durations. YouTube has no ends.
+- Two markers can't share a frame (D19). In YouTube's whole seconds two markers can share a second: the later one is
+  written anyway, and the notice counts it ("1 chapter shares a second with the one before").
+
+### 15.3 Time: elapsed, never timecode
+
+- Both formats are **elapsed time from the file's first frame**, not source timecode. A chapter list is about the
+  playing video (YouTube's player, or ffmpeg's stream times), whatever the file's `tmcd` says.
+  - So the start timecode, drop-frame and the D6/D-C17 override do not apply. A file starting at 01:00:00:00 exports its
+    first-frame marker as `0:00` / `START=0`.
+  - The text export's header line already shows the start timecode for anyone matching them up.
+- **ffmetadata:** exact, in frames (above).
+- **YouTube:** frame `f` is `f × den / num` seconds, **floored** to the whole second, so the timestamp never points after
+  the marker's frame. At 23.976, frame 241 (10.05 s) writes `0:10`. This is the same floor as D-C7, in the other
+  direction.
+
+### 15.4 Size and where
+
+- `Packages/ManifoldCore/Sources/Markers/MarkerChapterExport.swift` (**new**, pure): `MarkerFFMetadata.export` and
+  `MarkerYouTube.export(…) -> (text, report)`, beside `MarkerTextExport.swift`. About 120 lines.
+- `MarkerFileIO.Format`: two cases, "Chapter List — ffmpeg (.ffmeta)" and "Chapter List — YouTube (.txt)". About 30 lines.
+- `MarkerLog.exported(_:count:)` with two new `Format` words (counts only; no title is logged).
+- Tests, about 120 lines:
+  - exact `START`/`END` at 23.976, 25 and 29.97;
+  - escaping (F6's reserved title);
+  - the ffmetadata → `ffmpeg -map_chapters` → `ChapterReader` round trip, on a fixture made once as in §5;
+  - the YouTube floor, `M:SS`/`H:MM:SS`, the rule notices and the empty-name fallback;
+  - a sentinel test that `MarkerLog` holds no title.
+- **About half a day.** No store or schema change.
+- Embedding the chapters into the media itself is **not** this. That is "Send markers to Flip" (`docs/ROADMAP_IDEAS.md`).

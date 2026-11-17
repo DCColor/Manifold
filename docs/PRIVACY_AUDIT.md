@@ -231,6 +231,14 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 - **Markers (2026-11-15):** logged only through `MarkerLog` (Packages/ManifoldCore/Sources/Markers), whose functions
   take numbers: counts, durations and fixed words. No marker name, note, keyword, file name or path reaches the log, so
   none reaches a diagnostics export (`MarkerFilesTests.testLogLinesHoldNoUserText`).
+- **Embedded chapters (2026-11-17, `docs/CHAPTER_MARKERS_PLAN.md` Stage 2):** a file's chapter titles are its content,
+  often a client's. They are read from the file on every open and shown, never stored in `Markers/` and never logged.
+  The log gets counts only, through `MarkerLog`: `[MARKERS] chapters n=… dropped-past-end=… dropped-before-start=…
+  unreadable=… reader=libav read=…ms`, `[MARKERS] chapters: file unreadable by libav`, and `[MARKERS] convert chapters
+  added=… identical=… occupied=… already-converted=…` (`ChapterMappingTests.testChaptersLogLineHoldsNoTitle`, a sentinel
+  test). Nothing new is stored by this stage, so no §1 row: a converted chapter is an ordinary marker (§1's Markers row).
+  `Marker.embeddedID` is new and optional; it stays empty until Stage 3 converts Premiere XMP markers, whose
+  `marker_guid` it will hold.
 - **Still logged in full (not in P1's list):**
   - the SRT host and port (`SRTClient.swift:490`, `SRTSession.m:580`);
   - the WHEP endpoint host (path withheld);

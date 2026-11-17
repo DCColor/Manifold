@@ -289,6 +289,22 @@ What: make the marker duration band on the timeline strip slightly thicker, if t
 
 Size guess: small.
 
+## Send markers to Flip
+Status: idea (Robbie, 2026-11-17)
+Version: later, after the Chapter list export (`docs/CHAPTER_MARKERS_PLAN.md` §15)
+
+What: hand a file's markers to Flip, which writes them into the file as embedded chapters (Flip already writes chapters
+by a stream-copy remux, `~/Code/Flip/Flip/electron/ffmpeg.js:493-519`), so a review's markers travel inside the media.
+Manifold never rewrites media itself.
+
+Open questions:
+- how the two apps hand over: the ffmetadata list from §15, a file Flip opens, or a URL scheme;
+- Flip's escaping gap on write (`CHAPTER_MARKERS_PLAN.md` §9.3) must be fixed first, or titles with `=`, `;`, `#`, `\` change;
+- whether notes, colors and keywords should travel as XMP markers (Stage 3's reader, in reverse) rather than plain chapters.
+
+Depends on: the Chapter list export; a Flip change.
+Size guess: medium (both apps).
+
 ## Social Reframes with Export
 Status: idea (2026-10-06)
 Version: 1.5?

@@ -12,6 +12,10 @@ time; round-trips into Resolve without retyping). The keys were reserved in `doc
 Each section gives a **recommendation** first and **alternatives** after it. The decisions I need from you are collected
 in §9.
 
+**Embedded chapters** (a file's own chapter track or `chpl`, shown beside its markers as a read-only layer, with Convert
+to Markers): `docs/CHAPTER_MARKERS_PLAN.md`. Stage 2 (2026-11-17) adds them to the timeline strip, the Markers slot and
+window, ⇧↑/⇧↓ and the thumbnailer; the store, the editor and the exporters are unchanged.
+
 ---
 
 ## 0. What the reference files show
