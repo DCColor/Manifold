@@ -129,6 +129,20 @@ public enum ChapterLayer {
         return first + "\n\(c.kind.label) from the file · Convert to edit"
     }
 
+    /// A marker row's tooltip (Robbie, 2026-11-17): "<color> · <timecode> · <name>" (the name left out when empty); then,
+    /// when there are any, a second line with the notes' FIRST non-blank line (never the full notes) and the keywords
+    /// ("<first line> · kw1, kw2", or the keywords alone without notes). Local UI only; never logged.
+    public static func rowToolTip(_ m: Marker, timecode: String) -> String {
+        var out = m.name.isEmpty ? "\(m.color.name) · \(timecode)" : "\(m.color.name) · \(timecode) · \(m.name)"
+        let firstNote = m.notes.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+        let second = [firstNote, m.keywords.isEmpty ? nil : m.keywords.joined(separator: ", ")]
+            .compactMap { $0 }.joined(separator: " · ")
+        if !second.isEmpty { out += "\n" + second }
+        return out
+    }
+
     /// The notice after Convert. Counts and words only.
     public static func convertNotice(_ r: ChapterMapping.ConvertResult) -> String {
         let n = r.added.count

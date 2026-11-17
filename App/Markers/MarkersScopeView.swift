@@ -251,7 +251,7 @@ struct MarkerListBody: View {
                             .contentShape(Rectangle())
                             .onTapGesture { click(r, in: shown) }
                             .contextMenu { contextItems(for: r, in: shown) }
-                            .overlay { if case .chapter(let c) = r { RowToolTip(text: chapterHelp(c)) } }
+                            .overlay { RowToolTip(text: rowHelp(r)) }
                     }
                 }
             }
@@ -370,8 +370,13 @@ struct MarkerListBody: View {
 
     private func chapterDuration(_ c: MappedChapter) -> String { model.basis?.durationLabel(c.duration) ?? "" }
 
-    /// The chapter row's tooltip (`ChapterLayer.rowToolTip`), shown by `RowToolTip`, not `.help` (see there).
-    private func chapterHelp(_ c: MappedChapter) -> String { ChapterLayer.rowToolTip(c, timecode: label(c.frame)) }
+    /// Every row's tooltip (`ChapterLayer.rowToolTip`), shown by `RowToolTip`, not `.help` (see there).
+    private func rowHelp(_ r: MarkerListRow) -> String {
+        switch r {
+        case .marker(let m): return ChapterLayer.rowToolTip(m, timecode: label(m.frame))
+        case .chapter(let c): return ChapterLayer.rowToolTip(c, timecode: label(c.frame))
+        }
+    }
 
     /// The chapter's own colour when it has one (Stage 3's XMP items), else the list's secondary.
     private func chapterTint(_ c: MappedChapter, slot: Bool) -> Color {
@@ -428,7 +433,7 @@ struct MarkerListBody: View {
             Text(label(m.frame))
                 .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.85))
-            Circle().fill(m.color.swatch).frame(width: 8, height: 8).help(m.color.name)
+            Circle().fill(m.color.swatch).frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text(m.name.isEmpty ? "—" : m.name)
                     .font(.system(size: 11))
@@ -443,7 +448,6 @@ struct MarkerListBody: View {
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.5))
         }
-        .help(m.notes.isEmpty ? m.name : m.notes)
     }
 
     private func windowRow(_ m: Marker) -> some View {
@@ -552,8 +556,8 @@ struct StartOverrideField: View {
     }
 }
 
-/// An AppKit tooltip over a list row (Stage 2 attended check, 2026-11-17: a chapter row in the Markers slot showed no
-/// tooltip at all, while the timeline flag's, an AppKit tooltip, worked).
+/// An AppKit tooltip over a list row, marker or chapter (Stage 2 attended checks, 2026-11-17: neither kind of row in the
+/// Markers slot showed its `.help` tooltip, while the timeline flag's, an AppKit tooltip, worked).
 ///
 /// WHY NOT `.help`. The rows had `.help`, and it never showed. The cause is not measured. The likely ones are both in
 /// this list: SwiftUI re-registers its tooltips when the list redraws, and the list observes the engine (the playhead

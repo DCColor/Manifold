@@ -156,6 +156,25 @@ final class ChapterLayerTests: XCTestCase {
                        "Chapter · 01:00:00:00\nChapter from the file · Convert to edit", "an empty title is left out")
     }
 
+    func testMarkerRowToolTip() {
+        XCTAssertEqual(ChapterLayer.rowToolTip(Marker(frame: 0, name: "Fix flare", color: .red), timecode: "01:00:02:10"),
+                       "Red · 01:00:02:10 · Fix flare", "no notes, no keywords: one line")
+        XCTAssertEqual(ChapterLayer.rowToolTip(Marker(frame: 0, color: .blue), timecode: "01:00:00:00"),
+                       "Blue · 01:00:00:00", "an empty name is left out")
+        // The notes' first non-blank line only, never the rest; then the keywords.
+        let m = Marker(frame: 0, name: "Grade", notes: "\n  warmer skin  \nsecond line\nthird", keywords: ["vfx", "review"],
+                       color: .green)
+        XCTAssertEqual(ChapterLayer.rowToolTip(m, timecode: "00:00:10:00"),
+                       "Green · 00:00:10:00 · Grade\nwarmer skin · vfx, review")
+        XCTAssertFalse(ChapterLayer.rowToolTip(m, timecode: "").contains("second line"))
+        // Keywords without notes: the keywords alone.
+        XCTAssertEqual(ChapterLayer.rowToolTip(Marker(frame: 0, keywords: ["chapter"], color: .blue), timecode: "00:00:00:00"),
+                       "Blue · 00:00:00:00\nchapter")
+        // Notes without keywords.
+        XCTAssertEqual(ChapterLayer.rowToolTip(Marker(frame: 0, notes: "one", color: .cream), timecode: "00:00:00:00"),
+                       "Cream · 00:00:00:00\none")
+    }
+
     // MARK: Convert and its notice
 
     func testConvertNoticeCounts() {
