@@ -681,3 +681,41 @@ cols.parade 192, cols.yrgb 128):
   - its conditions: the GPU self-check (§1.6, item 2), and before and after readings on every scope, alone and
     together;
   - the open question of whether all scopes need one shared queue.
+
+**Does window playback drop frames under heavy scopes? Measured 2026-11-17 at UHD 59.94.**
+
+**Verdict: no user-visible cost.** With Waveform | YRGB Parade | Parade open, the window dropped 0 frames and showed 0
+late per minute, both with output off and with SDI output on at 2160p59.94. That matches the Markers | Meters | Meters
+control. With output on, the pacer missed 1 deadline in 90 s and the card reported 0 late and 0 dropped.
+
+Setup:
+
+- **Clip:** `~/Code/Manifold/fixtures/scopes/perf_motion_2160p5994_100s.mov`. ProRes 422 HQ, 3840×2160, 59.94 fps,
+  about 1.85 Gb/s: a moving `testsrc2` pattern with grain. The ffmpeg command is in that folder's README.
+- **Build:** `.build-cc` Profile, built 13:23 that day, before `0622df1` (Premiere XMP markers, which does not touch
+  scopes or playback). Signed, Team ID 8UQ7MDM87B.
+- **Environment:** `MANIFOLD_SCOPE_PERF=1` and `MANIFOLD_PLAYBACK_STATS=1`.
+- **Window:** on the LG, whose display link runs at 120 Hz. The tray was open at height 440.
+- **Each run:** 90 s from the start, scripted with `MANIFOLD_DEBUG_TRANSPORT`.
+- **Output-on run:** output started 6 s before Play. The mode was Follow source → 2160p59.94, and the pacer ran at
+  k 2, 119.88 Hz.
+
+| Run (90 s) | Window dropped / min | Window late / min | `[PACER]` missed | gpu.wf | gpu.yrgb | gpu.parade |
+|---|---|---|---|---|---|---|
+| Control: Markers \| Meters \| Meters, output off | 0 | 0 | – | – | – | – |
+| Waveform \| YRGB \| Parade, output off | 0 | 0 | – | 0.59 ms | 4.76 ms | 2.77 ms |
+| Waveform \| YRGB \| Parade, SDI 2160p59.94 | 0 | 0 | 1 (see below) | 1.70 ms | 4.49 ms | 2.50 ms |
+
+- **GPU figures:** per-update means, weighted by n, over the 90 s of play. Each scope updated on every frame: about
+  5,380 updates. Columns were wf 640, parade 192 and yrgb 128.
+- **Presented frames:** the window presented every frame through the last stats line. That line came at pts 89.9 with
+  output off and pts 89.2 with output on. The tail before Pause is not printed, so the presented totals differ (5,389
+  against 5,344) with no frame missing.
+- **The one missed deadline:** it fell in the first 10 s pacer window. That window spans the 6.1 s before Play and the
+  first 3.9 s after it, so whether it came before or after Play is UNKNOWN. That window's longest interval was 16.68 ms
+  (one tick). The other 8 windows missed 0, with a longest interval of 8.36 ms. The card counted 0 late and 0 dropped
+  over 5,853 completed frames.
+- **gpu.wf with output on:** it rises from 0.59 to 1.70 ms. This fits the span being wall-clock on a GPU shared with
+  the SDI conversion; it is not the waveform's own work.
+- **Against the 24p readings above** (0.8 / 3.7 / 7.1 ms): these figures are lower. The clip and the frame rate
+  differ, so the two sets are not directly comparable.
