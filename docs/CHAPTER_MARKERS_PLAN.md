@@ -1542,6 +1542,18 @@ recommended in §8. Not attended yet; not committed.
    - **Tests:** `ThumbnailFeedTests.testChaptersMappedAfterTheFirstSyncAndBeforeTheRouteStillGetThumbnails` (adapted to the
      event) and `testADecoderEventForAnotherFileDoesNothing`.
 
+### 14.7 Marker rows get the same tooltip (Robbie, 2026-11-17)
+
+- Attended: marker rows showed no tooltip either, confirming §14.6's guess that `.help` fails in this list for every row.
+- Marker rows in the slot and the window now get `RowToolTip` too. Their `.help` (the row's, and the swatch's colour
+  name) is removed.
+- The text is `ChapterLayer.rowToolTip(_: Marker, timecode:)`:
+  - line 1: "<color> · <timecode> · <name>", the name left out when empty;
+  - line 2, only when there is something to show: the notes' first non-blank line, then " · " and the keywords (joined
+    with ", "); or the keywords alone when there are no notes. Never the full notes.
+- The thumbnail's own "no preview" `.help` (`MarkerThumb`) is untouched. It sits under the row's tooltip view, so it
+  probably never shows either (**UNKNOWN**, not hovered).
+
 ---
 
 ## 15. Plan only: a "Chapter list" export (Robbie, 2026-11-17)
