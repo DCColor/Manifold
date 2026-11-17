@@ -63,6 +63,9 @@ let package = Package(
         // (docs/MARKERS_PLAN.md). Leaf targets so `swift test` reaches them; Markers is linked by the APP target.
         .library(name: "SMPTETimecode", targets: ["SMPTETimecode"]),
         .library(name: "Markers", targets: ["Markers"]),
+        // A file's embedded chapters through the vendored libav (docs/CHAPTER_MARKERS_PLAN.md §2.5). Not linked by the app yet
+        // (Stage 1: reader, mapping and tests only).
+        .library(name: "ChapterRead", targets: ["ChapterRead"]),
         // One exact frame of an AVFoundation file, for marker thumbnails (docs/MARKERS_PLAN.md §4.4). Linked by the APP target.
         .library(name: "FrameGrab", targets: ["FrameGrab"]),
         // Linked by the APP target directly (project.yml): every shortcut's default, the user's overrides, and the one
@@ -609,6 +612,33 @@ let package = Package(
             name: "LibavFrameRequestTests",
             dependencies: ["CFFmpeg", "FrameGrab"],
             path: "Tests/LibavFrameRequestTests",
+            resources: [.copy("Fixtures")],
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", ffmpegInclude])
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-L", ffmpegLib, "-lavformat", "-lavcodec", "-lavutil",
+                              "-Xlinker", "-rpath", "-Xlinker", ffmpegLib])
+            ]
+        ),
+        // Embedded chapters (docs/CHAPTER_MARKERS_PLAN.md): the libav reader, a leaf target so a test can link it with real
+        // libav (no test target links ManifoldCore). Headers as ManifoldCore's; the app supplies the dylibs when it links it.
+        .target(
+            name: "ChapterRead",
+            dependencies: ["CFFmpeg", "Markers"],
+            path: "Sources/ChapterRead",
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+                .unsafeFlags(["-Xcc", "-I", "-Xcc", ffmpegInclude])
+            ]
+        ),
+        // The reader on small fixtures made once with /opt/homebrew/bin/ffmpeg (CHAPTER_MARKERS_PLAN §11), each also read
+        // with AVFoundation as the cross-check (D-C2). Links the vendored shared libav as LibavFrameRequestTests does.
+        .testTarget(
+            name: "ChapterReaderTests",
+            dependencies: ["ChapterRead", "Markers", "CFFmpeg"],
+            path: "Tests/ChapterReaderTests",
             resources: [.copy("Fixtures")],
             swiftSettings: [
                 .swiftLanguageMode(.v5),

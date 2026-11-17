@@ -47,4 +47,13 @@ public enum MarkerLog {
     public static func deletedAllStored(documents: Int) -> String { "[MARKERS] deleted all stored markers: documents=\(documents)" }
 
     public static func remember(_ on: Bool) -> String { "[MARKERS] remember between sessions: \(on ? "on" : "off")" }
+
+    /// The file's embedded chapters (docs/CHAPTER_MARKERS_PLAN.md §4.1): counts only, never a title.
+    public static func chapters(_ r: ChapterMapping.Result, readMs: Int) -> String {
+        "[MARKERS] chapters n=\(r.chapters.count) dropped-past-end=\(r.droppedPastEnd) dropped-before-start=\(r.droppedBeforeStart) "
+            + "unreadable=\(r.droppedUnreadable) reader=libav read=\(readMs)ms"
+    }
+
+    /// The file's chapters could not be read at all (open failed): no chapters, not an error the user sees.
+    public static func chaptersUnreadable() -> String { "[MARKERS] chapters: file unreadable by libav" }
 }
