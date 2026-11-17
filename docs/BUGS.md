@@ -1819,6 +1819,54 @@ Night 2's CONTROL block (`MANIFOLD_DECKLINK_CADENCE_LOG=1`) had 0 misses and its
 logging is cleared (§13.2). **Which rig factor caused night 1's misses is UNKNOWN.** Zoom, the slots and the time of night all
 changed between the nights.
 
+**Leads (read-only, 2026-11-17).**
+
+*Lead 1. The pacer thread's scheduling.*
+- **CONFIRMED: user-interactive QoS plus a Mach real-time (time-constraint) policy.**
+  - `thread.qualityOfService = .userInteractive` (`App/OutputPacer.swift:70`).
+  - On the pacer thread itself, at its first tick and at every rate change (`:146`), `applyTimeConstraint` sets
+    `THREAD_TIME_CONSTRAINT_POLICY` (`:116-127`): period = P, computation = P/2, constraint = P, preemptible.
+  - At 59.94 that is a 4.17 ms computation budget inside an 8.34 ms period.
+- **CONFIRMED: the policy was not refused on any night.** A refusal prints `[PACER] ⚠️ time-constraint policy refused` (`:129`). That line
+  appears 0 times in the 0.9.4, night 1 and night 2 logs, across 16 pacer starts (7 + 5 + 4).
+- So the pacer was not left at a low priority on night 1. Its misses are time spent inside the tick: the repeat tick's deferred
+  present (`CARD_PULL_MARGIN.md` §12.2). The overrunning ticks took 8.4–16.2 ms, two to four times the 4.17 ms budget.
+- **UNKNOWN:** whether the kernel demoted the thread from real-time for running past its budget. Nothing logs the thread's policy
+  after it is set.
+
+*Lead 2. The audio meters' redraw, and where it lands.*
+- **CONFIRMED: the meters run on their own timer, not the render.** `AudioMeterModel` ticks on a main-run-loop `Timer` at 30 Hz
+  (`App/AudioMeterScope.swift:196`, `:248-252`, in `.common` mode, so it runs during resizes and menu tracking too).
+- **CONFIRMED by code: while playing with audio, every tick publishes.** `apply` writes `channels[i]` (`:411-429`), and `channels` is
+  `@Published` (`:128`). `AudioMeterScopeView` observes the model (`:453-454`), so its body (a `GeometryReader`, the bars, and the
+  graticule `Canvas` at `:756`) is invalidated about 30 times a second. Paused, the bars decay over about 2 s, then the status guard
+  stops the publishes (`:394-403`).
+- **UNKNOWN: the rate the meters actually redrew at on either night.** `MANIFOLD_SCOPE_PERF` was off on both nights (§12.2). With
+  it on, `pub.meter` and `body.AudioMeterScopeView` are counted (`:257`, `:511`).
+- **CONFIRMED by code: night 1's two meter slots were two views on one model.** Each window has one `AudioMeterModel`
+  (`App/ContentView.swift:299`), so both views were invalidated on every publish.
+- **CONFIRMED: the same meter code ran on all three nights.** `AudioMeterScope.swift` was last modified 2026-11-04, before every
+  binary.
+- **CONFIRMED: the meters and the video are in the same window and the same layer tree.**
+  - The video is `MetalSurfaceView`, whose `NSView` hosts the renderer's `CAMetalLayer` as its own layer
+    (`App/MetalSurfaceView.swift:11-16`), inside `ContentView` (`:1232`).
+  - The tray is at `:600`, and the meter view at `:1539`.
+- **CONFIRMED: the video's present is transactional.**
+  - `presentsWithTransaction = true` (`App/MetalVideoRenderer.swift:1261`).
+  - Every present, including the pacer's deferred present (`servePacedPresent` → `presentDrawable`, `:4559`), runs on the tick thread
+    as `waitUntilScheduled()`, then `CATransaction.begin` / `drawable.present()` / `CATransaction.commit` (`:4719-4743`).
+  - So night 1's ~30 Hz main-thread SwiftUI commits for two meter views went into the same window's layer tree as the pacer thread's
+    present commits.
+- **UNKNOWN: whether the two contend.** This is inference only. Core Animation's commit serialization, or the window server, could
+  make a repeat tick's `waitUntilScheduled` or `commit` take 8–16 ms.
+- **CONFIRMED: the overrunning present is untimed.** `[RENDER-PERF] presMs` covers only the main render's present. `servePacedPresent`
+  records nothing, which is why §12.2 could time only `nextDrawable`.
+- **CONFIRMED: on the timed path, the present did not get slower.** `presMs` max at 59.94 SDI: night 1 3.46 / 3.75 ms, night 2
+  3.42 / 3.65 ms, 0.9.4 4.16 / 3.86 ms.
+- **To separate the leads in the one-factor blocks:**
+  - run the Meters block with `MANIFOLD_SCOPE_PERF=1`;
+  - in a measurement build, time `servePacedPresent`'s `waitUntilScheduled` and `CATransaction.commit` separately.
+
 **Next step:** one-factor blocks, after option C (`CARD_PULL_MARGIN.md` §7 C). Run night 2's rig with exactly one change per block:
 Zoom open (no windows), or the Meters slots put back, at 59.94 SDI, where the misses concentrated. Option C removes crossings,
 not these. If a factor reproduces the misses, the present path under it needs its own investigation.
