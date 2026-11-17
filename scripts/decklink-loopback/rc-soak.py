@@ -121,6 +121,16 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
     deny_licence_prompt()
     sh(PROC, "open", str(pid), fixture); time.sleep(3.5)
     sh(AXT, str(pid), "place", title, "ASUS"); time.sleep(1.5)
+    # Optional (RC_EXPECT_DISPLAY=<name>): the window's display before output starts, from the app's last [LINK] line. Logged and
+    # saved; on any other display the block is skipped (quit by PID, exit 8) and the night goes on. Unset: nothing here runs.
+    want = os.environ.get("RC_EXPECT_DISPLAY")
+    if want:
+        links = re.findall(r'^\[LINK\] window \d+ → display \d+ "([^"]+)" \(([\d.]+) Hz\) · ([^·]+)', open(log, errors="replace").read(), re.M)
+        name, hz, how = links[-1] if links else (None, None, None)
+        save(window_display=name, window_display_hz=hz, window_display_how=how and how.strip())
+        say(f"window display: {name} at {hz} Hz ({how and how.strip()})")
+        if name != want:
+            say(f"window is not on {want}: block skipped"); quit_build("wrong-display"); sys.exit(8)
     menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
     txt = open(log, errors="replace").read()
     if "DeckLink: output start —" not in txt: say("output did not start"); quit_build("no-output"); sys.exit(4)
