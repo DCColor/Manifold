@@ -1794,6 +1794,37 @@ grid, behind its own switch) and an overnight A/B, per `CARD_PULL_MARGIN.md` §8
 
 ---
 
+## ☐ Rig-dependent pacer misses cause holds (CARD_PULL_MARGIN §12–§13) (found 2026-11-17)
+
+**Severity: potentially real-world.** Users run Zoom, and the cause is not known.
+
+**What happens.** A missed output-pacer deadline is a second source of the one-tick-late swap. Until now the only known source
+was a crossing (the entry above). When a missed deadline lands on a Play whose handed frame is the newest, with a swap-to-pull
+lead under one pacer tick, the card repeats the frame. That is a hold of one slot, recovered on the next pull
+(`CARD_PULL_MARGIN.md` §12.3). The tick that overran was, in every pinned case, a repeat tick serving the desktop present
+(§12.2). Which call inside it took the time is UNKNOWN: only `nextDrawable` is timed, and it was fast.
+
+**The two nights** (same binary: the card-pull measurement build, `3f05914`, ad-hoc signed; window on the ASUS PA147 at
+59.936 Hz on both):
+
+| | Night 1, 2026-11-16 (§12) | Night 2, 2026-11-17 (§13) |
+|---|---|---|
+| Missed pacer deadlines | **85** (73 at 59.94, 12 at 23.976/25) | **2** (both at 59.94) |
+| Holds caused by a missed deadline (`[LATE-SWAP] pacer`, `held yes`) | **2** | **0** |
+| Zoom | running, no windows | closed |
+| Scope slots | `yrgb` (→ Waveform in that binary) \| Meters \| Meters | Waveform \| Parade \| Markers |
+| Timing check (§11.6) | failed, all 5 blocks | passed, all 4 blocks |
+
+Night 2's CONTROL block (`MANIFOLD_DECKLINK_CADENCE_LOG=1`) had 0 misses and its `=2` block 2, the same as the 0.9.4 gate. So the
+logging is cleared (§13.2). **Which rig factor caused night 1's misses is UNKNOWN.** Zoom, the slots and the time of night all
+changed between the nights.
+
+**Next step:** one-factor blocks, after option C (`CARD_PULL_MARGIN.md` §7 C). Run night 2's rig with exactly one change per block:
+Zoom open (no windows), or the Meters slots put back, at 59.94 SDI, where the misses concentrated. Option C removes crossings,
+not these. If a factor reproduces the misses, the present path under it needs its own investigation.
+
+---
+
 ## ☐ AFTER 0.9.4: American English in log lines (Robbie, 2026-11-15)
 
 `fbb735a` made every user-facing string American, and `scripts/check-us-spelling.py` now runs in `release-mac.sh`'s

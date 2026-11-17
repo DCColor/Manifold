@@ -1209,3 +1209,99 @@ The gate counts 2 holds, both in `pp-2398-cmp` (`soak.report:37-39`). That is th
   a missed deadline that lands on a newest frame with lead < P. Tonight's 2 misses did not.
 - **For later nights:** keep Waveform | Parade | Markers, Zoom closed, and the window display check. To find which rig factor caused
   night 1, change one factor per block, for example by putting the Meters slots back for one 59.94 block with everything else the same.
+
+---
+
+## 14. Option C, built behind `MANIFOLD_PACER_PHASE` (2026-11-17; A/B night written, not run)
+
+Built in the working tree on `fb553d3` (uncommitted). Candidate: `.build-pacerphase`, Profile, ad-hoc linker-signed, written 2026-11-17
+11:52, sha256 `86eceab65975c90ee824a95c563efc3c2af21936ca5d89e97bcfc189897aac65`. No file under `App/`, `Packages/ManifoldCore/Sources/`
+or `project.yml` is newer than it. Nothing was launched.
+
+### 14.1 What was built
+
+| File | What |
+|---|---|
+| `Packages/ManifoldCore/Sources/OutputPacing/OutputPacing.swift` | `PacerPhaseSample`; `PacerPhase.nextDeadline(previous:step:correction:)` (signed, saturating; 0 → `previous + step`), `phaseCorrection(enabled:phase:reference:)` (clamp ±20 µs), `reference(firstTicks:period:)` (median of 8, 0.5 ms guard at both edges), `isMatched` (the pull's test, verbatim), `isUnitRate` (±1 %); `PhaseDeviationStats`; `PacerPhaseFollower` (the state, the logging text) |
+| `Packages/ManifoldCore/Tests/OutputPacingTests/PacerPhaseTests.swift` (new) | 20 tests |
+| `App/OutputPacer.swift` | An optional `phaseSample` closure (nil with the switch off), `setPeriod(_:phaseMatched:)`, `followPhase`, the `[PACER-PHASE]` lines |
+| `App/MetalVideoRenderer.swift` | `pacerPhaseEnabled` (`static let`, `:552`, `false` in Release `:557`); the sample after the selection (`:3757`, `:3857`); `takePacerPhaseSample`/`pacerPhaseSampleNow` (`:3483-3501`); the pacer made with or without the closure (`:3413-3449`) |
+| `scripts/decklink-loopback/rc-soak.py` | `MANIFOLD_PACER_PHASE=1` allowed in `env`; a `nooutput` keyword (output never started) |
+
+**How it runs (switch on).**
+- The pacer calls `displayTick` synchronously. The renderer leaves a sample for the pacer to take right after the tick returns, on
+  the same thread: `.active(x: selectNow − chosenPts)`, `.active(x: nil)` (no new frame), or `.inactive`.
+- **Inactive** when any of these holds:
+  - it is not a pacer tick (`tickGlassHost` set);
+  - a live-clock hold is in place;
+  - the pause provider does not say false;
+  - the clock's rate since the previous tick is outside 1 ± 1 % (step, seek, shuttle, wrap, discontinuity);
+  - a live route is installed: every live route installs one of `onDisplayTick`, `onDepthSample`, `presentationHoldFloor` or
+    `onQueueOverflow`, and the file route none;
+  - the rates are mismatched (`PacerPhase.isMatched`, computed in `schedulePacer` from the same read of the two rates, and handed to
+    the pacer at start and re-rate).
+- An inactive tick drops the reference. A wake or a re-rate drops it too (the pacer's `resumed`).
+- x outside [0, P) is counted as an outlier and not used.
+
+**One deviation from §7 C's text, and why.** x̄ is the median of the last eight x, each re-expressed at the corrections applied since
+it was taken (`PacerPhaseFollower.tick`). Taken literally, a correction applied at every tick would be applied again at each tick until
+the median of eight caught up with it: an overshoot of up to about four times, and ringing. With the re-expression the formula
+c = clamp(−(x̄ − x_ref), ±20 µs) is unchanged, applied at every tick as §7 C says, and a step settles without overshoot
+(`testAStepIsCorrectedWithoutOvershootOrRinging`). 10 h of 23.976 at −11.7 ppm stays within 5 µs of x_ref
+(`testDriftNeverCrossesADueTime`).
+
+**Logging (switch on only):**
+- `[PACER-PHASE] armed · …matched…` at each pacer start and re-rate.
+- `[PACER-PHASE] reference set · x_ref … · median … · guard none|applied (…) · P …`.
+- Every 10 s: `new-frame ticks · inactive ticks · outliers · |x − x_ref| p50 p99 max · corrections applied (net) · clamp hits ·
+  references set (guard)`.
+- A `run:` line of the same counts at pacer stop.
+
+### 14.2 Proof the switch-off path is unchanged
+
+**Code.** With `MANIFOLD_PACER_PHASE` unset, any other value, or in Release:
+- **The pacer.** It is made without a closure (`MetalVideoRenderer.swift:3446`; Release `:3449`), so `phaseSample` is nil.
+  - Per tick, the loop does one nil test (`OutputPacer.swift:159`), then `deadline += step` (`:162`), the same statement as before.
+    The missed-deadline arithmetic after it (`:164-168`) is untouched.
+  - Outside the tick: one nil test in the resume path (`:143`, only on a wake or re-rate) and one at thread exit (`:171`).
+  - At init, two stores and one nil test (`:64-66`). `setPeriod(_:)` is unchanged (`:87-89`); re-rate calls it, not the new overload
+    (`MetalVideoRenderer.swift:3432`).
+- **The renderer's tick.** Two reads of the same `static let` (`:3757`, `:3857`). Both are in the window's selection, which is not a
+  protected path; the `nil` and the sample computation behind them do not run.
+- **`schedulePacer`.** One read of the same `static let` (`:3415`).
+- **No protected path is edited.**
+  - File times: `FrameEngine.swift` (card lock 1a/1b, Stage 2, slips and re-anchor, the watchdog) 2026-11-15 18:00;
+    `DeckLinkBridge.mm` (1c) 2026-11-15 13:26; `FileFrameSource.swift` and `LibavFrameSource.swift` (decode pumps) 2026-11-08.
+  - In `MetalVideoRenderer.swift` the edits are at `:550-557`, `:3413-3501`, `:3757` and `:3857`. `noteDeckLinkTick` (`:5486`),
+    `deckLinkPullMarginLocked` and `deckLinkPullSlotLocked` (`:6014`, its `matched` at `:6067`) are not among them.
+- The files changed today are exactly these four: `OutputPacer.swift`, `MetalVideoRenderer.swift`, `OutputPacing.swift` and
+  `PacerPhaseTests.swift` (`find -newer`).
+
+**Tests.** `nextDeadline(p, s, 0) == p + s` across the range; `phaseCorrection(enabled: false, …) == 0`. Boundaries:
+- underflow (a correction of a whole step or `Int64.min` still moves forward one unit);
+- saturation at `UInt64.max`;
+- the clamp at both signs, and exactly at ±20 µs;
+- the guard at both edges and just inside and outside them;
+- sign.
+
+**Counts.**
+- `swift test`: before 1,154 tests in 38 bundles, 0 failures, 1 skipped, 0 warnings; after 1,174 (the 20 new), 0 failures, 1 skipped,
+  0 warnings.
+- Profile build, clean: before 63 warning lines, after 63. With line numbers stripped the sets are identical except the AppIntents
+  line's timestamp. No warning names a changed file's new code. Logs: `~/Code/_scratch/manifold-pacerphase-ab/build-logs/`.
+
+**Not built:** Release. It does not link for the pre-existing `DeckLinkBridge.mm` reason (§11.5, `BUGS.md`). Every new reference is
+inside `#if DEBUG` or is defined in both configurations (`pacerPhaseEnabled`, `logPacerPhaseArmed`). That is a code-level statement,
+not a compile.
+
+**Behavioral identity (§7 C (b))** is the A/B night's: the off-blocks' 0 `[PACER-PHASE]` lines and their gate and pacer counts.
+
+### 14.3 The A/B night (written, not run)
+
+`~/Code/_scratch/manifold-pacerphase-ab/`: `RIG.md` (rig, blocks, and the criteria, written before any run), `common.sh`, `soak.sh`,
+`ab-check.py`.
+- **Blocks:** 23.976 Computer off/on, 25p SDI on/off, 59.94 SDI off/on, 60 min each, `=2` throughout. Then three 20-min identity
+  blocks with the switch on: WAV to SDI, 25p on 1080p59.94, and output off.
+- **Duration:** about 7 h 20 min.
+- **Not judged on two identity blocks:** the gate's holds and skips are defined only at a matched rate with output on
+  (`rc-soak-report.py:4`), so they are not judged on the rate-mismatch block or the output-off block (`RIG.md`, criterion 1).
