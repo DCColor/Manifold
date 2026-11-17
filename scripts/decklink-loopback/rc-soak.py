@@ -78,9 +78,10 @@ class Freeze:
         elif l.startswith("[TRANSPORT] done"): s.done = True
     def still(s): return s.playing and s.host and s.host - max(s.moved, s.play + GRACE) >= STILL
 
-# The card-pull measurement build (docs/CARD_PULL_MARGIN.md, *Measurement build*): the only variables `env NAME=VALUE` may add.
-# Neither changes the card lock, Stage 2, the recovery paths or the audio routing; without `env` nothing here changes.
-EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None}
+# The card-pull measurement build (docs/CARD_PULL_MARGIN.md, *Measurement build*) and option C's A/B (§7 C, MANIFOLD_PACER_PHASE):
+# the only variables `env NAME=VALUE` may add. None changes the card lock, Stage 2, the recovery paths or the audio routing (option C
+# moves the output pacer's deadlines by at most 20 µs a tick, and only while it is on); without `env` nothing here changes.
+EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"1"}}
 
 def parse_extra_env(items):
     out = {}
@@ -92,7 +93,7 @@ def parse_extra_env(items):
         out[name] = value
     return out
 
-def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env=None):
+def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env=None, output=True):
     guard()
     if resolve_running(): say("Resolve is running: stopping"); sys.exit(4)
     os.makedirs(OUT, exist_ok=True); log = f"{OUT}/{label}.log"; title = os.path.basename(fixture)
@@ -102,7 +103,7 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
     env = {k2: v for k2, v in os.environ.items() if not k2.startswith("MANIFOLD_")}
     env.update(MANIFOLD_DEBUG_TRANSPORT=steps, MANIFOLD_DECKLINK_CADENCE_LOG="1", MANIFOLD_PLAYBACK_STATS="1")
     if extra_env: env.update(extra_env)
-    meta = dict(label=label, app=app, fixture=fixture, length=length, mode=mode, dest=dest, minutes=minutes, cycles=k, seed=seed,
+    meta = dict(label=label, output=output, app=app, fixture=fixture, length=length, mode=mode, dest=dest, minutes=minutes, cycles=k, seed=seed,
                 env=sorted(x for x in env if x.startswith("MANIFOLD_")), began=datetime.datetime.now().isoformat(timespec="seconds"), freezes=[])
     if extra_env: meta["extra_env"] = {k2: (v if k2 == "MANIFOLD_DECKLINK_CADENCE_LOG" else f"{len(v.split(','))} entries") for k2, v in extra_env.items()}
     if markers: fp = fingerprint(fixture); meta.update(markers_expected=markers, fingerprint=fp[:16], regens=[], latedrop=[])
@@ -131,10 +132,13 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
         say(f"window display: {name} at {hz} Hz ({how and how.strip()})")
         if name != want:
             say(f"window is not on {want}: block skipped"); quit_build("wrong-display"); sys.exit(8)
-    menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
+    # `nooutput` (option C's identity block): DeckLink output is never started, so the window's display link ticks, not the pacer.
+    if output: menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
     txt = open(log, errors="replace").read()
-    if "DeckLink: output start —" not in txt: say("output did not start"); quit_build("no-output"); sys.exit(4)
-    if f"restored manual output mode {mode}" not in txt: say(f"the output mode {mode} was not applied"); quit_build("no-mode"); sys.exit(4)
+    if not output:
+        if "DeckLink: output start —" in txt: say("output started in a nooutput block"); quit_build("output-on"); sys.exit(4)
+    elif "DeckLink: output start —" not in txt: say("output did not start"); quit_build("no-output"); sys.exit(4)
+    elif f"restored manual output mode {mode}" not in txt: say(f"the output mode {mode} was not applied"); quit_build("no-mode"); sys.exit(4)
     if markers:
         m = re.findall(r"\[MARKERS\] loaded n=(\d+)", txt); slot = sh(AXS, str(pid), "gear")
         save(markers_loaded=int(m[-1]) if m else None, markers_slot=slot.returncode == 0, thumbs_at_start=len(thumbs(fp)))
@@ -208,7 +212,7 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
     if regen is not None:   # ended while tracking: keep what was seen
         meta["regens"].append({k2: v for k2, v in regen.items() if k2 not in ("mono", "w0", "offset")} | dict(note="block ended while tracking"))
     time.sleep(3)
-    menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
+    if output: menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
     menu(pid, "File", "Close All"); time.sleep(1.5)
     quit_build("STOP" if os.path.exists(f"{OUT}/STOP") else "done" if d.done else "budget"); say(f"{label}: done")
 
@@ -274,15 +278,17 @@ def markers_setup(app, fixture, length, label, n):
 if __name__ == "__main__":
     a = sys.argv[1:]
     extra = {}
-    if a and a[0] == "block" and "env" in a:   # rc-soak.py block … [markers <n>] env NAME=VALUE …
+    if a and a[0] == "block" and "env" in a:   # rc-soak.py block … [markers <n>] [nooutput] env NAME=VALUE …
         i = a.index("env"); extra = parse_extra_env(a[i + 1:]); a = a[:i]
+    output = not (a and a[0] == "block" and a[-1] == "nooutput")
+    if not output: a = a[:-1]
     if a and a[0] == "block" and len(a) in (8, 10):
         assert os.path.isfile(a[1]) and os.path.isfile(a[2]) and a[5] in ("sdi", "computer") and (len(a) == 8 or a[8] == "markers")
-        block(a[1], a[2], float(a[3]), a[4], a[5], a[6], float(a[7]), int(a[9]) if len(a) == 10 else 0, extra)
+        block(a[1], a[2], float(a[3]), a[4], a[5], a[6], float(a[7]), int(a[9]) if len(a) == 10 else 0, extra, output)
     elif a and a[0] == "markers-setup" and len(a) == 6:
         assert os.path.isfile(a[1]) and os.path.isfile(a[2])
         markers_setup(a[1], a[2], float(a[3]), a[4], int(a[5]))
     elif a and a[0] == "report":
         os.execvp(sys.executable, [sys.executable, f"{HERE}/rc-soak-report.py"] + a[1:])
-    else: sys.exit("rc-soak.py block <app> <fixture> <length s> <mode> <sdi|computer> <label> <minutes> [markers <n>] [env NAME=VALUE …] | "
+    else: sys.exit("rc-soak.py block <app> <fixture> <length s> <mode> <sdi|computer> <label> <minutes> [markers <n>] [nooutput] [env NAME=VALUE …] | "
                   "markers-setup <app> <fixture> <length s> <label> <n> | report <dir> <label>...")
