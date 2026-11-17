@@ -239,6 +239,16 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   test). Nothing new is stored by this stage, so no §1 row: a converted chapter is an ordinary marker (§1's Markers row).
   `Marker.embeddedID` is new and optional; it stays empty until Stage 3 converts Premiere XMP markers, whose
   `marker_guid` it will hold.
+- **Premiere XMP markers (2026-11-17, `docs/CHAPTER_MARKERS_PLAN.md` Stage 3, §16):** a file's XMP marker names,
+  comments and GUIDs are its content. They are read from the file on every open (Chapter and Comment types only) and
+  shown, never stored in `Markers/` unless the user converts one, and never logged. The log gets counts and fixed words
+  only, through `MarkerLog.xmp`: `[MARKERS] xmp status=… where=… bytes=… tracks=… chapter=… comment=… unreadable=…
+  skipped=… segmentation=… weblink=… flvcuepoint=… cue=… index=… other=… read=…ms`. The file's own type strings are
+  bucketed into those fixed words, never printed (`XMPMarkersTests.testXMPLogLineHoldsCountsOnly`, a sentinel test). The
+  chapters line gains `chapter=`, `comment=` and `duplicates=` counts. A converted XMP marker is an ordinary marker
+  (§1's Markers row): its notes hold the XMP comment, and `Marker.embeddedID` holds the marker's GUID (D-C14), so a
+  second Convert skips it. That is a file-supplied identifier stored in the marker document, alongside the name and
+  notes the same row already covers.
 - **Still logged in full (not in P1's list):**
   - the SRT host and port (`SRTClient.swift:490`, `SRTSession.m:580`);
   - the WHEP endpoint host (path withheld);
