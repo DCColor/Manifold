@@ -492,13 +492,18 @@ Version: unscheduled (not 0.9.5)
 
 Performance. Measured on UHD 24p (DEBUG, `MANIFOLD_SCOPE_PERF=1`), with column counts cols.wf 640, cols.parade 192 and cols.yrgb 128:
 
-| Layout | gpu.wf | gpu.parade | gpu.yrgb |
-|---|---|---|---|
-| Waveform \| YRGB \| Parade | ≈ 0.8 ms | ≈ 3.7 ms | ≈ 7.1 ms (7.4 before concurrent dispatch) |
-| YRGB \| Meters \| Meters | – | – | ≈ 1.8 ms |
+| Layout | Clip | gpu.wf | gpu.parade | gpu.yrgb |
+|---|---|---|---|---|
+| Waveform \| YRGB \| Parade | `HDR TEST.mov`: UHD 23.976 ProRes 4444, PQ, tagged limited | ≈ 0.8 ms | ≈ 3.7 ms | ≈ 7.1 ms (7.4 before concurrent dispatch) |
+| YRGB \| Meters \| Meters | BPI Instacart: UHD 23.976 SDR Rec. 709 | – | – | ≈ 1.8 ms |
 
 - **Queue contention.** Most of the three-scope figure is contention: every scope commits to one shared scope queue,
   and `gpuEndTime − gpuStartTime` counts time spent sharing the GPU with the other scopes' buffers as the scope's own.
+  **Indicative only (2026-11-18):** the two rows above are different clips, so the alone-versus-together ratio (about a
+  quarter) mixes contention with content. The authoritative result is the single-file UHD 59.94 run on
+  `perf_motion_2160p5994_100s.mov` (ProRes 422 HQ): no frame drops, gpu.yrgb ≈ 4.5–4.8 ms with three scopes
+  (docs/SCOPES_095_PLAN.md, "Does window playback drop frames under heavy scopes?"). A fair re-measure uses that one
+  file, YRGB alone and with three scopes.
 - **Atomics.** The remaining per-scope cost is device atomics serializing at narrow columns. Each pixel ends in an
   `atomic_fetch_add` at `hist[row·cols + bucket]`. With few columns, neighboring pixels land on the same address
   (at 128 columns, 30 source pixels per bucket at UHD) (docs/SCOPES_095_PLAN.md, "As implemented: YRGB follow-up").
@@ -509,8 +514,8 @@ stays the same.
 
 Conditions:
 - The GPU self-check (docs/SCOPES_095_PLAN.md §1.6, item 2) is built first, and it shows identical histograms.
-- Before and after readings are taken on every scope, alone and with the others open. Wide columns on noisy content
-  may cost more.
+- Before and after readings are taken on every scope, alone and with the others open, all on one file
+  (`perf_motion_2160p5994_100s.mov`). Wide columns on noisy content may cost more.
 
 Also worth considering: whether all scopes need one shared queue, or whether each scope should get its own queue or
 its own timing measure. One shared queue is what makes the three-scope readings overlap.

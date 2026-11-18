@@ -590,7 +590,8 @@ same preference and the same look; and the GPU cost needs explaining.
 
 ### GPU cost
 
-**Measured** (UHD 24p, slots Waveform | YRGB | Parade):
+**Measured** (UHD 24p, slots Waveform | YRGB | Parade; clip `HDR TEST.mov`: UHD 23.976 ProRes 4444, PQ, tagged
+limited; `~/Code/_scratch/manifold-scopes095/yrgb.log`):
 
 | Field | Reading |
 |---|---|
@@ -665,13 +666,19 @@ same preference and the same look; and the GPU cost needs explaining.
 **Re-measured after concurrent dispatch** (Robbie, 2026-11-16, UHD 24p, `MANIFOLD_SCOPE_PERF=1`; cols.wf 640,
 cols.parade 192, cols.yrgb 128):
 
-| Layout | gpu.wf | gpu.parade | gpu.yrgb |
-|---|---|---|---|
-| Waveform \| YRGB \| Parade | ≈ 0.8 ms | ≈ 3.7 ms | ≈ 7.1 ms (7.4 before concurrent dispatch) |
-| YRGB \| Meters \| Meters | – | – | ≈ 1.8 ms |
+| Layout | Clip | gpu.wf | gpu.parade | gpu.yrgb |
+|---|---|---|---|---|
+| Waveform \| YRGB \| Parade | `HDR TEST.mov`: UHD 23.976 ProRes 4444, PQ, tagged limited | ≈ 0.8 ms | ≈ 3.7 ms | ≈ 7.1 ms (7.4 before concurrent dispatch) |
+| YRGB \| Meters \| Meters | BPI Instacart: UHD 23.976 SDR Rec. 709 | – | – | ≈ 1.8 ms |
+
+Both rows are from `~/Code/_scratch/manifold-scopes095/yrgb-perf2.log`.
 
 - **Queue contention.** Alone, YRGB costs about a quarter of its three-scope figure, so most of that figure is
   contention on the one shared scope queue. `gpuEndTime − gpuStartTime` counts that time as the scope's own.
+  **Indicative only (2026-11-18):** the two rows are different clips (above), so "about a quarter" mixes contention
+  with content. The authoritative result is the single-file UHD 59.94 run below (`perf_motion_2160p5994_100s.mov`): no
+  frame drops, gpu.yrgb ≈ 4.5–4.8 ms with three scopes. A fair alone-versus-together figure needs that one file measured
+  both ways (`docs/ROADMAP_IDEAS.md`, "Scopes: SIMD-aggregated histogram atomics").
 - **Atomics.** The rest of each scope's cost is atomics serializing at narrow columns. At 128 columns, 30 UHD pixels
   share a bucket, against 6 for the waveform's 640.
 - **Concurrent dispatch** saved about 0.3 ms in the three-scope layout.
@@ -717,5 +724,5 @@ Setup:
   over 5,853 completed frames.
 - **gpu.wf with output on:** it rises from 0.59 to 1.70 ms. This fits the span being wall-clock on a GPU shared with
   the SDI conversion; it is not the waveform's own work.
-- **Against the 24p readings above** (0.8 / 3.7 / 7.1 ms): these figures are lower. The clip and the frame rate
-  differ, so the two sets are not directly comparable.
+- **Against the 24p readings above** (0.8 / 3.7 / 7.1 ms, on `HDR TEST.mov`): these figures are lower. The clip and
+  the frame rate differ, so the two sets are not directly comparable.
