@@ -16,10 +16,11 @@
 #include <chrono>
 #include <mutex>
 #include <unistd.h>
+// Unconditional: m_handedLock (os_unfair_lock) is production code. Under #if DEBUG it broke the Release compile (docs/BUGS.md).
+#include <os/lock.h>
 
 #if DEBUG
 #include <mach/mach_time.h>
-#include <os/lock.h>
 // [CARDCLOCK] (MANIFOLD_CARDCLOCK_LOG=1; DEBUG; pre-ship removal, docs/BUGS.md; docs/CARD_CLOCK_FINDINGS.md). Measurement only, reads
 // nothing but status. Once a second from the completion callback: the completed-frame count, the host time, the frame's completion
 // timestamp (the SDK: locked to the system clock) and the output's hardware reference clock (the SDK: locked to the rate the hardware
