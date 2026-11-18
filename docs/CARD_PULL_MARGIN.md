@@ -1212,7 +1212,7 @@ The gate counts 2 holds, both in `pp-2398-cmp` (`soak.report:37-39`). That is th
 
 ---
 
-## 14. Option C, built behind `MANIFOLD_PACER_PHASE` (2026-11-17; A/B night written, not run)
+## 14. Option C, built behind `MANIFOLD_PACER_PHASE` (2026-11-17; A/B night run, §15; establishment guard added 2026-11-18, §14.4)
 
 Built in the working tree on `fb553d3` (uncommitted). Candidate: `.build-pacerphase`, Profile, ad-hoc linker-signed, written 2026-11-17
 11:52, sha256 `86eceab65975c90ee824a95c563efc3c2af21936ca5d89e97bcfc189897aac65`. No file under `App/`, `Packages/ManifoldCore/Sources/`
@@ -1296,7 +1296,7 @@ not a compile.
 
 **Behavioral identity (§7 C (b))** is the A/B night's: the off-blocks' 0 `[PACER-PHASE]` lines and their gate and pacer counts.
 
-### 14.3 The A/B night (written, not run)
+### 14.3 The A/B night (run 2026-11-17/18; results in §15)
 
 `~/Code/_scratch/manifold-pacerphase-ab/`: `RIG.md` (rig, blocks, and the criteria, written before any run), `common.sh`, `soak.sh`,
 `ab-check.py`.
@@ -1305,3 +1305,293 @@ not a compile.
 - **Duration:** about 7 h 20 min.
 - **Not judged on two identity blocks:** the gate's holds and skips are defined only at a matched rate with output on
   (`rc-soak-report.py:4`), so they are not judged on the rate-mismatch block or the output-off block (`RIG.md`, criterion 1).
+
+### 14.4 The establishment guard (2026-11-18; built, not run)
+
+Option C was committed after the night as `3413a6e`. This change is in the working tree on HEAD `a6f541c`, uncommitted.
+
+**Why.** After a loop wrap in `ab-5994-sdi-on`, the 8 ticks that set x_ref sat on the due time (x ≈ 8.336 ms at P 8.3417 ms).
+Until x_ref is set, nothing moves the ticks, so they dithered across the due time and produced 4 crossings (§15.3). The guard
+applied to x_ref only once the eighth tick set it.
+
+**What.** `PacerPhase.establishmentCorrection(x:period:)`, a pure function in `OutputPacing.swift`.
+- It runs at every new-frame tick from the first one after a wake, a re-rate, a wrap or a discontinuity (anything that drops the
+  reference) until x_ref is set.
+- **x < 0.5 ms → moved later, to 0.5 ms. x > P − 0.5 ms → moved earlier, to P − 0.5 ms.** This is the same rule and the same edges
+  as the reference's guard (`reference(firstTicks:period:)`).
+- The move is made in **one step, at most 0.5 ms**. It is not clamped to 20 µs: at 20 µs a tick, 0.5 ms takes 25 ticks, which is
+  longer than the 8-frame window being protected.
+- **Dead band:** no move within 20 µs past either edge (x in [0.48, 0.5) ms, or in (P − 0.5, P − 0.48] ms). So a phase that has
+  settled on an edge is not moved again by its own jitter. Such a phase is still ≥ 0.48 ms from a due time.
+- Outliers (x outside [0, P)), a non-finite x and a bad period all give 0.
+
+**The follower** (`PacerPhaseFollower.tick`, establishing branch):
+- Each first sample is stored as x − (the moves applied so far), the same convention as the follow's ring. At the eighth sample the
+  median is taken of the eight re-expressed at the current moves, so x_ref is the median of the phase *as moved*, not of the raw first
+  sample. The A/B wrap gives x_ref ≈ P − 0.5 ms, not a median that still includes 8.336 ms.
+- **`applied` is one continuous total** from the reference's drop: the establishment moves, then the follow's corrections. Only
+  `reset()` restarts it (a wake, a re-rate, any inactive tick); setting x_ref does not.
+  - The first build restarted it at 0 when x_ref was set, as §14.1's follower did. In the app that was only bookkeeping: the deadline
+    did not move back, and the follow's phase (ring median + `applied`) stayed correct.
+  - But `applied` is the follower's public total, and `testAWrapOnADueTimeIsMovedOffItAtTheFirstTick` models the phase as
+    u + `applied`. There the restart read as a 0.497 ms jump back onto the due time, and the follow then walked x down at its 20 µs
+    clamp (8.3405 → 7.9635 ms). That test failed in Robbie's first `swift test`. A line-for-line Python replay reproduced its x values
+    exactly; with the total kept continuous, the replay and the test pass.
+- **The first move's direction is locked for its establishment.** x near 0 and x near P are both on a due time, one each side of
+  it, and both trigger the guard. After a first move (say earlier, from x near P), a later sample read on the other side of the due
+  time (x near 0, which alone would move later) is not moved back across it. A further sample on the first side still moves, the
+  same way. `reset()` and setting x_ref clear the lock. Without it the guard could fight itself across the wrap, but only if a
+  sample jumped 0.48 ms or more after a move. That never happened in the test or on the A/B night.
+- Moves are counted apart from the follow's corrections (`Counts.nudges`, `nudgeNet`), so "corrections applied" keeps its meaning.
+- After x_ref is set, nothing has changed: the follow, its 20 µs clamp and the re-expression are as in §14.1.
+
+**Logging (switch on only):**
+- A new event line: `[PACER-PHASE] establishment guard · x … ms within 0.5 ms of a due time · moved ±… ms · P … ms`
+  (`OutputPacer.followPhase`).
+- The 10 s and `run:` lines end with `· establishment nudges N (net ±… ms)`. `ab-check.py`'s `run:` regex still matches, and it now
+  reads the nudges too.
+
+**Switch-off path: unchanged.**
+- The new function is called only from `PacerPhaseFollower.tick`.
+- The new log line is inside `followPhase`.
+- Both run only with `phaseSample` set. That is `MANIFOLD_PACER_PHASE=1`, DEBUG.
+- §14.2's switch-off sites (`OutputPacer.swift` nil tests, `deadline += step`, `MetalVideoRenderer.swift`) are not edited.
+- Files changed: `OutputPacing.swift`, `OutputPacer.swift` (a header comment and the log line), `PacerPhaseTests.swift`.
+
+**Tests** (`PacerPhaseTests.swift`, 26 now, 6 of them new):
+- `testEstablishmentCorrectionAtTheEdgesAndInside`:
+  - x = 0 → +0.5 ms;
+  - x = P − 1 ns, and the A/B night's 8.336 ms → moved to P − 0.5 ms;
+  - normal phases (1, 4, 7.5 ms) and both dead bands → 0, with 21 µs past each edge → moved;
+  - outliers, NaN, ∞ and bad periods → 0;
+  - the 23.976 P.
+- `testAWrapOnADueTimeIsMovedOffItAtTheFirstTick`: the A/B wrap with ±10 µs jitter straddling the due time. There is 1 move, at the
+  first tick. After it, no x is within 0.4 ms of a due time. x_ref is within 15 µs of P − 0.5 ms.
+- `testAPhaseOnTheDueTimeFromAfterIsMovedLater`: x = 0 → +0.5 ms once. x_ref = 0.5 ms. 0 follow corrections.
+- `testANormalPhaseIsUntouchedWhileEstablishing`: 0 moves, and x_ref is the plain median of the eight, as before.
+- `testTheFirstMovesDirectionIsLockedForItsEstablishment`:
+  - after a move earlier from x = 8.339 ms, a sample at x = 2 µs is not moved and gives no event;
+  - a further sample at 8.339 ms moves earlier again (2 moves, no x_ref yet);
+  - the mirror: after a move later from x = 2 µs, a sample at 8.339 ms is not moved;
+  - after an inactive tick the next establishment moves earlier again.
+- `testEveryRestartGuardsItsOwnEstablishment`: an inactive tick drops x_ref and the moves. The next establishment is guarded afresh.
+  Outliers while establishing do not move anything.
+- **Changed:**
+  - `testNothingHappensWithoutEightNewFrames` now uses x = 4 ms. Its old x = 0.1 ms is now moved by design.
+  - `testReferenceEventAndGuardMovesTheTicksLaterInClampedSteps` now uses x = 0.49 ms (the dead band: no move; x_ref raised; one
+    10 µs follow step), plus a 0.3 ms step after x_ref that is closed in clamped steps.
+  - `testDeviationStatsAndReport` checks the line's new suffix.
+
+**`swift test`** (run by Robbie; this session's permission classifier refuses it):
+- **Run 1** (5 new tests): 1 failure, `testAWrapOnADueTimeIsMovedOffItAtTheFirstTick`. The cause is the `applied` restart above.
+- **Run 2** (after the fix): passed, with no failures reported. Its totals were not passed on, so they are UNKNOWN here.
+- **Run 3** (after the direction-lock test): **1,270 tests, 0 failed, 2 skipped.** That is the suite's 1,264 before this change (after
+  the marker / Premiere work; §14.2's 1,174 is stale) plus the 6 new tests. Which tests are skipped is not recorded here; 2 skipped
+  against §14.2's 1 is not explained by this change, which adds no skip.
+
+**Build.**
+- `.build-pacerphase-2`, Profile, `CODE_SIGNING_ALLOWED=NO`, ARCHS arm64: **BUILD SUCCEEDED** (this compiles `OutputPacing`'s
+  sources, not its tests).
+- sha256 `5fdb90a44e782738b4d9812c07b3cd034ec5cf7e9d8353471f36f6152ac6e6a2`, the rebuild after the `applied` and direction-lock fix
+  (the first build was `00bf0585…`). The direction-lock test is test-only, so it does not change the app binary.
+- The first build (clean): 63 warning lines, the same count as §14.2's. None names `OutputPacing.swift` or `OutputPacer.swift` (they name ContentView,
+  DeckLinkService, FrameEngine, FrameShare, InterpretationLUT, LibavAudioSource, LicenseManager, MetalVideoRenderer,
+  SyntheticLiveSource, WindowSizer).
+- The set differs from §14.2's list in some `AVSampleBufferAudioRenderer` Sendable lines. HEAD has moved since `fb553d3`, and those
+  lines come from files not changed here.
+- The rebuild was incremental and recompiled `OutputPacing.swift` and the app target. It printed 53 warning lines (only those of the
+  recompiled files), none in `OutputPacing.swift` or `OutputPacer.swift` (`profile-build-fix1.log`).
+- Logs: `~/Code/_scratch/manifold-pacerphase-ab/build-logs-2/`. Nothing was launched.
+
+**Risks, against §7 C:**
+- One pacer interval moves by up to 0.5 ms (at 59.94, one tick of about 7.84 ms instead of 8.34 ms). §7 C's 20 µs clamp was chosen so
+  a tick "never moves visibly". This is a single step, once per establishment, and only when the phase is within 0.5 ms of a due time.
+  Its effect on the window's present path ("two waiting presents above 61 Hz", `6581dcd`) is UNKNOWN. Watch it in the next A/B.
+- Moving later at x ≈ 0 shrinks the card's lead by up to 0.5 ms right after Play or a wrap. That is §7 C's guard risk (`:442-444`),
+  now taken at the first tick instead of after 8 frames.
+
+---
+
+## 15. Option C A/B night (run 2026-11-17/18): **FAIL**
+
+Started by hand at 20:37 on 2026-11-17 (`soak.sh main`). The first block began at 20:49:54 and the last ended at 03:58:46, and
+`ENDED` was written at 03:58. All 9 blocks ran to the end (`"ended": "done"` in every `<label>.json`) and none was skipped. Analysed
+2026-11-18 with `ab-check.py` against `RIG.md`'s criteria, which were written before the run. Re-running it on the logs gives output
+byte-identical to the night's own `ab.report`. Paths below are relative to `~/Code/_scratch/manifold-pacerphase-ab/`. Host times are
+converted to wall times through each block's `<label>.defout` (host, UTC) pair, to about ±1 s.
+
+**Verdict: FAIL.** 6 criteria failed (`ab.report`, "== criteria"). Criterion 3 was met: 483 off-block crossings, against 5 needed.
+So the night is not inconclusive.
+
+### 15.1 Rig
+
+- **Checked before every block: passed 9 of 9** (`rig.log`, one entry per block, 20:49:53 to 03:38:04). Each entry shows:
+  - zoom.us none, capture closed, default output Scarlett (also in each `<label>.defout`);
+  - sha256 `86eceab65975c90e…` ok;
+  - slots `waveform | parade | markers`;
+  - `RC_EXPECT_DISPLAY` ASUS PA147;
+  - signing `flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`;
+  - displays: ASUS PA147 1920 × 550 @ 60 Hz, LG TV SSCR2 3840 × 2160 @ 120 Hz.
+- **Window display:** ASUS PA147 at 59.936 Hz in all 9 blocks (`<label>.json` `window_display`, `window_display_hz`).
+- **`MANIFOLD_PACER_PHASE`:** the `.json` files show `"1 entries"`. That is `rc-soak.py:108` redacting the value, not the value
+  itself. The on-blocks' `[PACER-PHASE] armed` lines confirm the switch was on, and the off-blocks have 0 `[PACER-PHASE]` lines.
+- **Slots restored: yes.** Read on 2026-11-18, `com.graviton.manifold` `manifold.scope.slot0/1/2` are `yrgb | meters | markers`.
+  That is exactly the stash `prefs-stash-20261117-203721.txt`. `restore()` is the only thing in the night that writes those keys, and
+  it writes them only after its own `manifold-proc.sh guard` passes. So the guard was also clean at exit.
+- **Not on file:** `soak.out` does not exist. The night was started by hand without a redirect, so `soak.sh`'s stdout went to the
+  terminal. That stdout held the `guardp` "after" results, the idle-gate lines, the `setslots` line and the `restore` lines. Their text
+  is therefore UNKNOWN.
+  - Each "after" guard is implied: a guard trip exits 2 before the next block (`soak.sh` `blk`), and all 9 blocks ran.
+  - The last "after" guard (block 9) is UNKNOWN (inference: clean, because the restore's guard passed moments later).
+  - For later nights: `soak.sh main > soak.out 2>&1`.
+
+### 15.2 Per block
+
+Crossings are `[LATE-SWAP] class crossing`. Holds and skips are the gate's counts (`soak.report`).
+
+| # | Block | Crossings | All `[LATE-SWAP]` by class | Holds | Skips | Freezes | Renderer recov. / near-miss | Window late / dropped | Markers |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `ab-2398-cmp-off` | **128** | crossing 128 | 0 | 0 | 0 | 0 / 0 | 11 / 3 | PASS |
+| 2 | `ab-2398-cmp-on` | **0** | — | 0 | 0 | 0 | 0 / 0 | 16 / 4 | PASS |
+| 3 | `ab-gop25-sdi-on` | **0** | — | 0 | 0 | 0 | 0 / 0 | 18 / 25 | PASS |
+| 4 | `ab-gop25-sdi-off` | **89** | crossing 89 (1 held) | 1 | 0 | 0 | 0 / 0 | 23 / 26 | PASS |
+| 5 | `ab-5994-sdi-off` | **266** | crossing 266, pacer 41 (0 held) | 1 | 0 | 0 | 0 / 0 | 19 / 6 | PASS |
+| 6 | `ab-5994-sdi-on` | **4** | pacer 36 (5 held), render 18, decode 4, crossing 4 | **28** | **4** | 0 | **1** / 0 | 15 / 31 | PASS |
+| 7 | `id-ao48-sdi-on` | 0 | — | 0 | 0 | 0 | 0 / 0 | 0 / 0 (no video) | (none) |
+| 8 | `id-gop25-at-5994-on` | 662 | other 6723, render 2925, main 810, crossing 662 | 37568 (not judged) | 26881 (not judged) | 0 | 0 / 0 | 12 / 7 | **FAIL** |
+| 9 | `id-5994-nooutput-on` | 0 | — | 0 (not judged) | 0 (not judged) | 0 | 0 / 0 | 1 / 78 | PASS |
+| | **Off (1, 4, 5)** | **483** | | 2 | 0 | 0 | **0** / 0 | | |
+| | **On (2, 3, 6)** | **4** | | 28 | 4 | 0 | **1** / 0 | | |
+| | **Night** | | | 37598 | 26885 | **0** | 1 / 0 | 115 / 180 | 1 failing |
+
+**Pacer** (`[PACER] stopped … intervals over the run`). P is computed from the `[PACER] started` line's rates and k (criterion 7).
+
+| # | Block | P (ms) | n | Median | p99 | Max | Missed deadlines | Playing 10 s windows with in-flight holds | Presented/s median | Crit. 7 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2398 off | 13.9028 | 245526 | 13.91 | 13.92 | 27.81 | 2 | 0 of 357 | 24.0 | PASS |
+| 2 | 2398 on | 13.9028 | 245532 | 13.91 | 13.92 | 27.80 | 3 | 0 of 357 | 24.0 | PASS |
+| 3 | gop25 on | 13.3333 | 256194 | 13.34 | 13.36 | 26.67 | 10 | 0 of 357 | 25.0 | PASS |
+| 4 | gop25 off | 13.3333 | 256209 | 13.34 | 13.36 | 13.42 | 0 | 0 of 357 | 25.0 | PASS |
+| 5 | 5994 off | 8.3417 | 409177 | 8.35 | 8.36 | 16.70 | **91** | **275 of 357** | 58.8 | PASS |
+| 6 | 5994 on | 8.3417 | 409175 | 8.35 | 8.36 | 25.02 | **100** | **270 of 357** | 53.9 | PASS |
+| 7 | ao48 (id) | 8.3417 | 135526 | 8.35 | 8.36 | 8.43 | 0 | — | — | PASS |
+| 8 | gop25 @ 59.94 (id) | 8.3417 | 136519 | 8.35 | 8.36 | 16.70 | 21 | 1 of 119 | 25.0 | PASS |
+| 9 | no output (id) | — | no pacer | | | | | | | n/a |
+
+The in-flight and presented/s columns use §13.2's method: the `[PACER] desktop` 10 s lines with rendered > 0. The misses on the
+59.94 blocks are spread evenly through each hour (per 10 min: off 16, 19, 10, 12, 14, 20; on 16, 19, 16, 15, 16, 18).
+
+**`[PACER-PHASE]` on the on-blocks** (`run:` line):
+
+| Block | \|x − x_ref\| p50 / p99 / max (ms) | n | Corrections applied (net) | Clamp hits | References set (guard) | Crit. 6 |
+|---|---|---|---|---|---|---|
+| 2398 on (`:357587`) | 0.005 / **0.042** / 0.370 | 79335 | 58595 (+42.765 ms) | 230 | 132 (15) | PASS |
+| gop25 on (`:372208`) | 0.005 / **0.075** / 0.419 | 82856 | 59231 (+35.060 ms) | 1026 | 126 (9) | PASS |
+| 5994 on (`:864572`) | 0.004 / **0.018** / 0.435 | 199947 | 144637 (+32.264 ms) | 227 | 130 (12) | PASS |
+
+**Identity blocks:**
+- **7 `id-ao48-sdi-on`:** armed "not matched: inactive". Corrections applied 0 in the run line (`:78350`) and 0 summed over the 10 s
+  lines. References 0, inactive ticks 135547.
+- **8 `id-gop25-at-5994-on`:** armed "not matched: inactive". Corrections applied 0 in the run line (`:222530`) and 0 summed over the
+  10 s lines. References 0, inactive ticks 136555.
+- **9 `id-5994-nooutput-on`:** 0 `[PACER-PHASE]` lines and no `[PACER]` run line.
+- **Criterion 9 (switch off prints nothing):** 0 `[PACER-PHASE]` lines on blocks 1, 4 and 5.
+
+### 15.3 The holds, by cause
+
+| Block, time (~) | Holds / skips | Cause | Evidence |
+|---|---|---|---|
+| `ab-gop25-sdi-off` 00:32:30 | 1 / 0 | **Crossing**, the late window frame repeated once: the gate's named exception | `:238890` (swapAgo 46 ms), `:238906` `class crossing … held yes` |
+| `ab-5994-sdi-off` 01:25:39 | 1 / 0 | **Missed pacer tick, with no `[LATE-SWAP]` line printed** | See the note below this table |
+| `ab-5994-sdi-on` 02:02:33 | **23 / 4** | **Pacing-renderer stall** (AVFoundation), recovered | See the note below this table |
+| `ab-5994-sdi-on` 02:17:23, 02:22:23, 02:23:02, 02:40:32, 02:50:17 | 5 / 0 | **Missed pacer tick**, each a `[LATE-SWAP] class pacer … held yes`, interval 16.68–16.70 ms | `:308288`, `:378964`, `:388664`, `:638078`, `:776624` |
+| `id-gop25-at-5994-on` | 37568 / 26881 | 25p on 59.94: the expected cadence, not judged (criterion 1) | — |
+
+- **The `ab-5994-sdi-off` hold.** `[TICKPHASE]` `:441628`: interval 16.679 ms, prev-tick 10.842 ms, `ring none`. The swap landed at
+  host .870130, 4 µs after the pull at .870126 (`:441473-441474`). In mechanism it is a late window frame repeated once. With no
+  `[LATE-SWAP]` line it is not the named exception as criterion 1 defines it, so `ab-check.py` fails this block's gate. Why no
+  `[LATE-SWAP]` line was printed is UNKNOWN (inference: the `ring none` tick).
+- **The `ab-5994-sdi-on` stall.**
+  - `[RENDERER-RECOVER] attempt 1` `:96749`: no pump callback for 0.538 s, renderer status 1, `ready false`.
+  - The picture moved again 46 ms after the re-arm, 0.393 s after the stall began (`:96772`).
+  - Then 4 `class decode` late swaps (`:96778-96787`). Window dropped/late 9 + 18 (`ab-5994-sdi-on.json` `latedrop`).
+  - The 4 skips (+9, +5, +9, +4 frames) are the catch-up.
+  - The pacer's ticks continued throughout. Whether option C contributed is UNKNOWN. §7 C names no path from tick timing to the
+    pacing renderer. One stall in one block cannot separate the switch from chance.
+
+**The 4 on-block crossings** (`ab-5994-sdi-on.log:118094-118103`) held nothing. All four are in one cluster just after a loop wrap
+(~02:04:03):
+- The first 8 new-frame ticks after the wrap sat at x ≈ 8.336 ms, at the due time (P 8.34).
+- `[PACER-PHASE] reference set` (`:118063`) then applied the guard: x_ref 7.842 ms, "lowered to P − 0.5 ms".
+- The 4 crossings are in that reference window, before any correction. 18 `class render` late swaps follow (`:118106-118193`). In
+  them x steps from 8.12 down to 7.84 ms and then holds there: the follow at the clamp, walking to x_ref.
+- So option C leaves the phase unguarded until x_ref is set, and a Play or wrap whose phase lands on a due time crosses during those
+  ticks. CONFIRMED by these lines. §7 C's risk list covered the guard moving ticks later at Play (`:442-444`), not this case.
+
+**The block 8 markers failure** (`soak.report:178`, `id-gop25-at-5994-on.json` `regens[0]`). Of the 5 remade thumbnails, 1 counts as
+made while playing. It was made at host 365728.241, 3.6 ms before that Regenerate's Pause at 365728.2446. That is a near tie. Criterion
+1 exempts block 8 only from holds and skips, so this fails its gate.
+
+### 15.4 Against the criteria
+
+| # | Criterion | Result |
+|---|---|---|
+| 1 | 0.9.4 gate on every block | **FAIL on 3 blocks:** 5 (1 hold, no `[LATE-SWAP]`), 6 (28 holds, 4 skips), 8 (markers). PASS on 1, 2, 3, 4 (named exception), 7, 9 |
+| 2 | On-blocks: 0 crossings, 0 holds | PASS on 2 and 3. **FAIL on 6** (4 crossings, 28 holds) |
+| 3 | Off-blocks ≥ 5 crossings | **Met: 483** (128 + 89 + 266) |
+| 4 | Renderer recoveries + near-misses, on ≤ off | **FAIL:** on 1, off 0 |
+| 5 | 0 freezes, 0 skips | Freezes 0 everywhere. **FAIL:** 4 skips on block 6 |
+| 6 | \|x − x_ref\| p99 ≤ 0.1 ms on 2, 3, 6 | PASS: 0.042, 0.075, 0.018 |
+| 7 | Pacer median P ± 0.01, p99 ≤ P + 0.05 | PASS on all 8 blocks with output |
+| 8 | Identity: 0 corrections; block 9 no pacer | PASS |
+| 9 | Switch off prints nothing | PASS |
+
+### 15.5 What this shows (not part of the verdict)
+
+- **At 23.976 Computer and 25p SDI, option C did what it claims.** Crossings went from 128 and 89 to 0 and 0. Holds were 0, and
+  |x − x_ref| p99 was 0.042 and 0.075 ms. The 25p on-block's 10 misses (against 0 off), and its max interval of 26.67 ms, produced no
+  late swap. Its 1026 clamp hits are about 4× the other on-blocks'. Why is UNKNOWN.
+- **The 59.94 pair ran under a degraded present path on both sides.** Misses were 91 off and 100 on, against night 2's 2 (§13.2).
+  In-flight holds were in 77 % and 76 % of playing windows (night 2: 28 %, night 1: 83 %), and there were pacer late swaps (41, 36)
+  where night 2 had none. Every rig item checked was the same as night 2's, so the cause is UNKNOWN. The 25p and 23.976 blocks on the
+  same night had 0 in-flight windows. Presented/s on the on-block was 53.9, against 58.8 off. Whether that gap comes from option C or
+  from the rig state is UNKNOWN.
+- **The failures, by origin:**
+  1. one pacing-renderer stall, cause UNKNOWN (23 holds, 4 skips, the recovery behind criterion 4);
+  2. 5 holds from missed pacer ticks in the degraded 59.94 state. Off had 41 pacer late swaps and none held; on had 36 and 5 held.
+     Why is UNKNOWN;
+  3. 4 crossings in the reference window after a wrap: a gap in option C itself (§15.3);
+  4. one unclassified miss hold on an off-block;
+  5. one markers near-tie on an identity block.
+- **Open:**
+  - Guard the phase during the reference window. **Built 2026-11-18, not run: §14.4.**
+  - Find what degraded the 59.94 present path tonight.
+  - Repeat the 59.94 pair under night 2's present-path state before the comparison is read.
+  - Have `[LATE-SWAP]` print for a `ring none` tick.
+
+### 15.6 The same night, by cause (`ab-check.py` as updated 2026-11-18)
+
+`ab-check.py` now classifies every gate hold and skip by cause. The night's copy is kept as `ab-check-20261117.py`. The classes are:
+- **renderer stall:** within a `[RENDERER-RECOVER]` stall's stated span, plus 0.5 s;
+- **the `[LATE-SWAP]` class:** the held frame's successor has a `held yes` swap;
+- **pacer (no `[LATE-SWAP]`):** no swap line, but the successor's `[TICKPHASE]` interval is over 1.5 P;
+- **unclassified:** none of the above.
+
+The script then prints two verdicts. The pre-registered one is unchanged; re-run, its output differs from the night's `ab.report`
+only in the verdict line's label. The second judges option C on crossings and crossing-caused holds. On this night the classes match
+§15.3's hand count exactly:
+
+| Block | Crossing | Pacer (`[LATE-SWAP]`) | Pacer (no `[LATE-SWAP]`) | Renderer stall | Unclassified |
+|---|---|---|---|---|---|
+| `ab-gop25-sdi-off` | 1 hold | | | | |
+| `ab-5994-sdi-off` | | | 1 hold | | |
+| `ab-5994-sdi-on` | | 5 holds | | 23 holds, 4 skips | |
+| every other block where defined | | | | | none |
+
+- **Option C, judged by cause:** on-blocks 0 crossings and 0 crossing-caused holds or skips; 0 freezes; criteria 6–9; and criterion 3
+  for inconclusive.
+- **Reported, not judged in this verdict:** non-crossing holds and skips, markers, and criterion 4 (renderer recoveries and
+  near-misses).
+- **Result: FAIL, on 1 criterion:** `ab-5994-sdi-on`'s 4 crossings. They caused no holds, and they are what §14.4 addresses.
+- **The pre-registered verdict stays FAIL** (6 criteria). The by-cause verdict does not replace it. It is the reading to take into the
+  next night's criteria, which must be written before that night runs.
