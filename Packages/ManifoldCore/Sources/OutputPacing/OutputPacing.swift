@@ -123,7 +123,8 @@ public enum WindowPresentTiming {
 // one after it render one tick late: a crossing, the only late-swap cause seen in the 0.9.3 and 0.9.4 gates and in Stage 1
 // (§5, §12.4, §13.3). Option C measures x = selectNow − chosenPts at each new-frame tick, sets a reference from the first eight
 // after a wake, a re-rate or a clock discontinuity, and moves the pacer's next deadline by at most 20 µs a tick so that x stays at
-// the reference. The pull, its margin and every clock are untouched; only when the pacer's ticks land changes.
+// the reference. While the reference is being set, a phase within 0.5 ms of a due time is moved off it at once, by at most 0.5 ms
+// (the establishment guard, §15.3). The pull, its margin and every clock are untouched; only when the pacer's ticks land changes.
 //
 // The app wires it behind `MANIFOLD_PACER_PHASE=1` (DEBUG); with it off, nothing here is called (`OutputPacer`).
 
@@ -183,6 +184,22 @@ public enum PacerPhase {
         if m < low { return (low, m, .raised) }
         if m > high { return (high, m, .lowered) }
         return (m, m, .none)
+    }
+
+    /// The establishment guard (CARD_PULL_MARGIN.md §15.3, §14.4): the correction (seconds) for a new-frame tick while the
+    /// reference is still being set. Until the eighth new-frame tick sets x_ref nothing else moves the ticks, so a Play or a
+    /// wrap whose phase lands on a due time (x near 0 or near P) would sit there, dithering across it, for those eight frames
+    /// (the 4 crossings after a wrap in the A/B night). So a phase inside the guard band at either edge is moved at once to that
+    /// edge, by the same rule the reference's guard applies: x < 0.5 ms → later, to 0.5 ms; x > P − 0.5 ms → earlier, to
+    /// P − 0.5 ms. The move is at most `guardMargin`, in one step (the follow's 20 µs clamp would take 25 ticks, longer than the
+    /// window it protects). A dead band of `correctionClamp` past each edge keeps a phase settled on the edge from being moved
+    /// again by its own jitter. x outside [0, P) (an outlier), x not finite, or a bad period: 0.
+    public static func establishmentCorrection(x: Double, period: Double) -> Double {
+        guard x.isFinite, period.isFinite, period > 0, x >= 0, x < period else { return 0 }
+        let low = min(guardMargin, period / 2), high = max(period - guardMargin, period / 2)
+        if x < low - correctionClamp { return low - x }
+        if x > high + correctionClamp { return high - x }
+        return 0
     }
 
     /// The median (the mean of the middle two for an even count). Empty: NaN.
@@ -256,18 +273,24 @@ public struct PacerPhaseFollower {
     public struct Counts: Equatable, Sendable {
         public var newFrameTicks = 0, inactiveTicks = 0, outliers = 0, corrections = 0, clampHits = 0, references = 0, guards = 0
         public var net = 0.0
+        /// Establishment-guard moves (`PacerPhase.establishmentCorrection`), counted apart from the follow's corrections.
+        public var nudges = 0
+        public var nudgeNet = 0.0
         public init() {}
     }
 
     public enum Event: Equatable, Sendable {
         /// The reference was set: its value, the median it came from, and the guard.
         case referenceSet(reference: Double, median: Double, guarded: PacerPhase.Guard)
+        /// Before the reference: a phase inside the guard band was moved to its edge. x as measured, and the move (seconds).
+        case establishmentNudge(x: Double, moved: Double)
     }
 
     /// Seconds per deadline unit (one mach tick in the app).
     public let quantum: Double
     public private(set) var reference: Double?
-    /// The corrections applied since the reference was set, in seconds (whole quanta).
+    /// Every deadline move since the reference was last dropped, in seconds (whole quanta): the establishment moves, then the
+    /// follow's corrections, as one continuous total. Restarted only by `reset()`.
     public private(set) var applied = 0.0
     public private(set) var window = Counts()
     public private(set) var run = Counts()
@@ -276,6 +299,7 @@ public struct PacerPhaseFollower {
     private var firsts: [Double] = []
     private var recent: [Double] = []      // x − applied at the time of each sample: a ring of `PacerPhase.window`
     private var recentNext = 0
+    private var establishDirection = 0     // the first establishment move's sign (−1 earlier, +1 later); 0 before one
 
     public init(quantum: Double) {
         self.quantum = quantum
@@ -285,7 +309,7 @@ public struct PacerPhaseFollower {
 
     /// Drop the reference: the next eight new-frame ticks set a new one. At a wake, a re-rate, and every inactive tick.
     public mutating func reset() {
-        reference = nil; applied = 0
+        reference = nil; applied = 0; establishDirection = 0
         firsts.removeAll(keepingCapacity: true); recent.removeAll(keepingCapacity: true); recentNext = 0
     }
 
@@ -307,14 +331,38 @@ public struct PacerPhaseFollower {
                 recentNext = (recentNext + 1) % PacerPhase.window
                 windowDeviation.add(abs(x - reference)); runDeviation.add(abs(x - reference))
             } else {
-                firsts.append(x)
-                if firsts.count == PacerPhase.window, let r = PacerPhase.reference(firstTicks: firsts, period: period) {
-                    reference = r.value; applied = 0
-                    recent.removeAll(keepingCapacity: true); recent.append(contentsOf: firsts); recentNext = 0
-                    firsts.removeAll(keepingCapacity: true)
-                    window.references += 1; run.references += 1
-                    if r.guarded != .none { window.guards += 1; run.guards += 1 }
-                    event = .referenceSet(reference: r.value, median: r.median, guarded: r.guarded)
+                // Establishing. Each sample is kept at the moves applied before it (x − applied), the same convention as
+                // `recent`, so the reference is the median of the phase as it stands after those moves. `applied` is NOT
+                // restarted when the reference is set: it is one continuous total from the reference's drop, so the
+                // establishment moves and the follow's corrections are one account (a restart at the reference read as the
+                // phase jumping back onto the due time; CARD_PULL_MARGIN.md §14.4).
+                firsts.append(x - applied)
+                if firsts.count == PacerPhase.window {
+                    for i in firsts.indices { firsts[i] += applied }   // the phase now, for the median
+                    let r = PacerPhase.reference(firstTicks: firsts, period: period)
+                    for i in firsts.indices { firsts[i] -= applied }   // back to the ring's convention
+                    if let r {
+                        reference = r.value; establishDirection = 0
+                        recent.removeAll(keepingCapacity: true); recent.append(contentsOf: firsts); recentNext = 0
+                        firsts.removeAll(keepingCapacity: true)
+                        window.references += 1; run.references += 1
+                        if r.guarded != .none { window.guards += 1; run.guards += 1 }
+                        event = .referenceSet(reference: r.value, median: r.median, guarded: r.guarded)
+                    }
+                }
+                if reference == nil {
+                    // The establishment guard: no tick sits on a due time while the reference is being set.
+                    // x near 0 and x near P are both on a due time, one each side of it. The first move's direction is
+                    // latched for this establishment: a later sample read on the other side of the due time is not moved
+                    // back across it, so the guard never fights itself across the wrap.
+                    let c = PacerPhase.establishmentCorrection(x: x, period: period)
+                    let q = quantum > 0 ? Int64((c / quantum).rounded()) : 0
+                    guard q != 0, establishDirection == 0 || (q > 0) == (establishDirection > 0) else { return (0, event) }
+                    establishDirection = q > 0 ? 1 : -1
+                    let s = Double(q) * quantum
+                    applied += s
+                    window.nudges += 1; run.nudges += 1; window.nudgeNet += s; run.nudgeNet += s
+                    return (q, .establishmentNudge(x: x, moved: s))
                 }
             }
         }
@@ -355,9 +403,9 @@ public struct PacerPhaseFollower {
                      d.maximum * 1000, d.count)
             : "|x − x_ref| n=0"
         let line = String(format: "%@: new-frame ticks %d · inactive ticks %d · outliers %d · %@ · corrections applied %d (net %+.3f ms) · "
-                          + "clamp hits %d · references set %d (guard %d)",
+                          + "clamp hits %d · references set %d (guard %d) · establishment nudges %d (net %+.3f ms)",
                           whole ? "run" : String(format: "%.0f s", seconds), c.newFrameTicks, c.inactiveTicks, c.outliers, dev,
-                          c.corrections, c.net * 1000, c.clampHits, c.references, c.guards)
+                          c.corrections, c.net * 1000, c.clampHits, c.references, c.guards, c.nudges, c.nudgeNet * 1000)
         if !whole { window = Counts(); windowDeviation.reset() }
         return line
     }

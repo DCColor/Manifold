@@ -20,7 +20,8 @@
 //
 //  OPTION C (docs/CARD_PULL_MARGIN.md §7 C; `MANIFOLD_PACER_PHASE=1`, DEBUG, default off). With `phaseSample` set, after each
 //  tick the pacer asks the renderer what its selection saw and moves the next deadline by at most 20 µs, so the new-frame
-//  ticks keep their phase against the frames' due times (`PacerPhaseFollower`). With `phaseSample` nil (the switch off, and
+//  ticks keep their phase against the frames' due times (`PacerPhaseFollower`). Before the reference is set, a phase within
+//  0.5 ms of a due time is moved off it in one step of at most 0.5 ms (the establishment guard). With `phaseSample` nil (the switch off, and
 //  always in Release) the loop's deadline arithmetic is `deadline += step`, as before; the switch costs one nil test a tick.
 //
 
@@ -183,6 +184,9 @@ final class OutputPacer: @unchecked Sendable {
                          ref * 1000, PacerPhase.window, median * 1000,
                          guarded == .none ? "none" : guarded == .raised ? "applied (raised to 0.5 ms)" : "applied (lowered to P − 0.5 ms)",
                          p * 1000))
+        } else if case .establishmentNudge(let x, let moved)? = event {
+            print(String(format: "[PACER-PHASE] establishment guard · x %.3f ms within %.1f ms of a due time · moved %+.3f ms · P %.2f ms",
+                         x * 1000, PacerPhase.guardMargin * 1000, moved * 1000, p * 1000))
         }
         let now = CACurrentMediaTime()
         if phaseWindowStart == 0 { phaseWindowStart = now }

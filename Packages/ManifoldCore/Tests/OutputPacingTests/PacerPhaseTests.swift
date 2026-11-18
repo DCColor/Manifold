@@ -141,31 +141,175 @@ final class PacerPhaseTests: XCTestCase {
     }
 
     func testNothingHappensWithoutEightNewFrames() {
+        // A phase well inside the tick: the establishment guard has nothing to do, and the follow waits for eight new frames.
         var f = PacerPhaseFollower(quantum: quantum)
-        for _ in 0..<7 { XCTAssertEqual(f.tick(.active(x: 0.0001), period: 0.0139).correction, 0) }
+        for _ in 0..<7 { XCTAssertEqual(f.tick(.active(x: 0.004), period: 0.0139).correction, 0) }
         for _ in 0..<20 { XCTAssertEqual(f.tick(.active(x: nil), period: 0.0139).correction, 0) }
         XCTAssertNil(f.reference)
         XCTAssertEqual(f.run.corrections, 0)
     }
 
     func testReferenceEventAndGuardMovesTheTicksLaterInClampedSteps() {
+        // A phase inside the establishment guard's dead band (0.49 ms: within 20 µs of the 0.5 ms edge) is not moved while
+        // establishing; the reference's guard raises x_ref to 0.5 ms and the follow closes the 10 µs in clamped steps.
         var f = PacerPhaseFollower(quantum: quantum)
         var event: PacerPhaseFollower.Event?
         var first: Int64 = 0
         for i in 0..<8 {
-            let r = f.tick(.active(x: 0.0002), period: 0.0139)
+            let r = f.tick(.active(x: 0.00049), period: 0.0139)
+            if i < 7 { XCTAssertEqual(r.correction, 0) }
             if i == 7 { event = r.event; first = r.correction }
         }
-        XCTAssertEqual(event, .referenceSet(reference: 0.0005, median: 0.0002, guarded: .raised))
-        // 0.3 ms to go: +20 µs (the clamp, rounded to a mach tick), later.
-        XCTAssertEqual(Double(first) * quantum, 20e-6, accuracy: quantum)
-        XCTAssertEqual(f.run.clampHits, 1)
-        // Repeat ticks (no new frame) keep stepping until the remainder is gone: 15 steps of 20 µs in all, then nothing.
-        var steps = 1
-        for _ in 0..<40 { if f.tick(.active(x: nil), period: 0.0139).correction != 0 { steps += 1 } }
-        XCTAssertEqual(steps, 15)
-        XCTAssertEqual(f.applied, 0.0003, accuracy: 2 * quantum)
+        XCTAssertEqual(event, .referenceSet(reference: 0.0005, median: 0.00049, guarded: .raised))
+        XCTAssertEqual(f.run.nudges, 0)
+        XCTAssertEqual(Double(first) * quantum, 10e-6, accuracy: quantum)   // under the clamp: one step, later
+        for _ in 0..<10 { XCTAssertEqual(f.tick(.active(x: nil), period: 0.0139).correction, 0) }
+        XCTAssertEqual(f.applied, 10e-6, accuracy: quantum)
         XCTAssertEqual(f.run.guards, 1)
+        // The follow's clamp still governs after the reference: a phase 0.3 ms early of x_ref takes 15 steps of 20 µs.
+        var g = PacerPhaseFollower(quantum: quantum)
+        for _ in 0..<8 { _ = g.tick(.active(x: 0.004), period: 0.0139) }
+        var steps = 0
+        for _ in 0..<8 { if g.tick(.active(x: 0.0037 + g.applied), period: 0.0139).correction != 0 { steps += 1 } }
+        for _ in 0..<60 { if g.tick(.active(x: nil), period: 0.0139).correction != 0 { steps += 1 } }
+        XCTAssertGreaterThanOrEqual(g.run.clampHits, 1)
+        XCTAssertEqual(g.applied, 0.0003, accuracy: 2 * quantum)
+        XCTAssertLessThanOrEqual(steps, 16)
+    }
+
+    // MARK: the establishment guard (CARD_PULL_MARGIN.md §15.3)
+
+    private let p5994 = 1001.0 / 60000 / 2   // 59.94 at k 2: P 8.3417 ms
+
+    func testEstablishmentCorrectionAtTheEdgesAndInside() {
+        let p = p5994, low = PacerPhase.guardMargin, high = p5994 - PacerPhase.guardMargin
+        // On a due time from either side: moved to the edge, in one step of at most the margin.
+        XCTAssertEqual(PacerPhase.establishmentCorrection(x: 0, period: p), low, accuracy: 1e-12)            // later
+        XCTAssertEqual(PacerPhase.establishmentCorrection(x: 1e-6, period: p), low - 1e-6, accuracy: 1e-12)
+        XCTAssertEqual(PacerPhase.establishmentCorrection(x: p - 1e-9, period: p), high - (p - 1e-9), accuracy: 1e-12)   // earlier
+        XCTAssertEqual(PacerPhase.establishmentCorrection(x: 0.008336, period: p), high - 0.008336, accuracy: 1e-12)    // the A/B wrap
+        XCTAssertLessThanOrEqual(abs(PacerPhase.establishmentCorrection(x: p - 1e-12, period: p)), PacerPhase.guardMargin)
+        // Normal phases, and the dead band of one clamp past each edge: nothing.
+        for x in [0.001, 0.004, 0.0075, low, low - 19e-6, high, high + 19e-6] {
+            XCTAssertEqual(PacerPhase.establishmentCorrection(x: x, period: p), 0, "x \(x)")
+        }
+        XCTAssertGreaterThan(PacerPhase.establishmentCorrection(x: low - 21e-6, period: p), 0)
+        XCTAssertLessThan(PacerPhase.establishmentCorrection(x: high + 21e-6, period: p), 0)
+        // Outliers, bad values, bad periods: nothing.
+        for x in [-1e-6, p, p + 0.001, .nan, .infinity] { XCTAssertEqual(PacerPhase.establishmentCorrection(x: x, period: p), 0) }
+        for q in [0.0, -p, .nan, .infinity] { XCTAssertEqual(PacerPhase.establishmentCorrection(x: 0, period: q), 0) }
+        // The other rates' P: the same margin.
+        XCTAssertEqual(PacerPhase.establishmentCorrection(x: 0.0139 - 5e-6, period: 1001.0 / 24000 / 3),
+                       1001.0 / 24000 / 3 - low - (0.0139 - 5e-6), accuracy: 1e-12)
+    }
+
+    func testAWrapOnADueTimeIsMovedOffItAtTheFirstTick() {
+        // The A/B night's wrap (§15.3): the phase after the wrap sat at x ≈ 8.336 ms, 5.7 µs before the next due time, with
+        // ±10 µs of read jitter, so the samples straddle the due time (some read just under P, some just over 0). Model the
+        // tick's true offset t from the frame grid; x = t mod P. The first tick is moved earlier to P − 0.5 ms in one step;
+        // after it no tick is within 0.4 ms of a due time, and the reference is set at the phase as moved.
+        let p = p5994
+        var f = PacerPhaseFollower(quantum: quantum)
+        let jitter: [Double] = [3e-6, -8e-6, 9e-6, -2e-6, 7e-6, -10e-6, 1e-6, 6e-6, -4e-6, 10e-6]
+        var events: [PacerPhaseFollower.Event] = []
+        var xs: [Double] = []
+        for n in 0..<40 {
+            let t = 0.008336 + f.applied + jitter[n % jitter.count]
+            let x = t.truncatingRemainder(dividingBy: p) + (t < 0 ? p : 0)
+            xs.append(x)
+            let r = f.tick(.active(x: x), period: p)
+            if let e = r.event { events.append(e) }
+            _ = f.tick(.active(x: nil), period: p)   // k 2: one repeat tick per frame
+        }
+        guard case .establishmentNudge(let x0, let moved)? = events.first else { return XCTFail("\(events)") }
+        XCTAssertEqual(x0, 0.008339, accuracy: 1e-9)
+        XCTAssertEqual(moved, (p - PacerPhase.guardMargin) - 0.008339, accuracy: quantum)
+        XCTAssertEqual(f.run.nudges, 1)
+        for x in xs.dropFirst() { XCTAssertTrue(x > 0.0004 && x < p - 0.0004, "x \(x)") }
+        guard case .referenceSet(let ref, let median, _)? = events.last else { return XCTFail("\(events)") }
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(ref, p - PacerPhase.guardMargin, accuracy: 15e-6)   // the moved phase, not the raw first sample
+        XCTAssertEqual(median, p - PacerPhase.guardMargin, accuracy: 15e-6)
+    }
+
+    func testAPhaseOnTheDueTimeFromAfterIsMovedLater() {
+        // x = 0: the tick on the due time from after it. Moved 0.5 ms later at once; the reference is then 0.5 ms, unguarded or
+        // raised by at most a quantum.
+        let p = p5994
+        var f = PacerPhaseFollower(quantum: quantum)
+        var first: Int64 = 0
+        for n in 0..<8 {
+            let r = f.tick(.active(x: 0 + f.applied), period: p)
+            if n == 0 { first = r.correction; XCTAssertEqual(r.event, .establishmentNudge(x: 0, moved: Double(r.correction) * quantum)) }
+            else if n < 7 { XCTAssertEqual(r.correction, 0) }
+        }
+        XCTAssertEqual(Double(first) * quantum, PacerPhase.guardMargin, accuracy: quantum)
+        XCTAssertEqual(f.reference ?? .nan, PacerPhase.guardMargin, accuracy: quantum)
+        XCTAssertEqual(f.run.nudges, 1)
+        XCTAssertEqual(f.run.nudgeNet, PacerPhase.guardMargin, accuracy: quantum)
+        XCTAssertEqual(f.run.corrections, 0)   // the nudge is not a follow correction
+    }
+
+    func testANormalPhaseIsUntouchedWhileEstablishing() {
+        // A phase inside the tick: exactly the previous behaviour. No move, the reference is the plain median of the eight.
+        var f = PacerPhaseFollower(quantum: quantum)
+        let samples = [0.0041, 0.0040, 0.0042, 0.0039, 0.0040, 0.0041, 0.0040, 0.0043]
+        var event: PacerPhaseFollower.Event?
+        for x in samples { let r = f.tick(.active(x: x), period: p5994); XCTAssertEqual(r.correction == 0 || r.event != nil, true); event = r.event ?? event }
+        XCTAssertEqual(event, .referenceSet(reference: PacerPhase.median(samples), median: PacerPhase.median(samples), guarded: .none))
+        XCTAssertEqual(f.run.nudges, 0)
+        XCTAssertEqual(f.run.nudgeNet, 0)
+    }
+
+    func testTheFirstMovesDirectionIsLockedForItsEstablishment() {
+        // x near P and x near 0 are both on a due time, one each side of it. After a first move earlier (x near P), a sample
+        // read just after the due time (x near 0, which alone would move later) is not moved back across it; a further sample
+        // on the first side still moves, the same way. And the mirror case. A restart clears the lock.
+        let p = p5994
+        var f = PacerPhaseFollower(quantum: quantum)
+        XCTAssertLessThan(f.tick(.active(x: 0.008339), period: p).correction, 0)
+        let across = f.tick(.active(x: 2e-6), period: p)
+        XCTAssertEqual(across.correction, 0)
+        XCTAssertNil(across.event)
+        let same = f.tick(.active(x: 0.008339), period: p)
+        XCTAssertLessThan(same.correction, 0)
+        guard case .establishmentNudge? = same.event else { return XCTFail("\(String(describing: same.event))") }
+        XCTAssertEqual(f.run.nudges, 2)
+        XCTAssertNil(f.reference)
+
+        var g = PacerPhaseFollower(quantum: quantum)
+        XCTAssertGreaterThan(g.tick(.active(x: 2e-6), period: p).correction, 0)
+        XCTAssertEqual(g.tick(.active(x: 0.008339), period: p).correction, 0)
+        XCTAssertEqual(g.run.nudges, 1)
+        // A restart drops the lock: the next establishment may move either way.
+        _ = g.tick(.inactive, period: p)
+        XCTAssertLessThan(g.tick(.active(x: 0.008339), period: p).correction, 0)
+        XCTAssertEqual(g.run.nudges, 2)
+    }
+
+    func testEveryRestartGuardsItsOwnEstablishment() {
+        // A wrap or a seek (an inactive tick) drops the reference; the next establishment is guarded afresh, from zero moves.
+        let p = p5994
+        var f = PacerPhaseFollower(quantum: quantum)
+        var u = 0.004
+        for _ in 0..<8 { _ = f.tick(.active(x: u + f.applied), period: p) }
+        XCTAssertNotNil(f.reference)
+        _ = f.tick(.inactive, period: p)
+        XCTAssertNil(f.reference)
+        XCTAssertEqual(f.applied, 0)
+        u = p - 2e-6   // the wrap lands on a due time
+        let r = f.tick(.active(x: u + f.applied), period: p)
+        guard case .establishmentNudge? = r.event else { return XCTFail("\(String(describing: r.event))") }
+        XCTAssertLessThan(r.correction, 0)
+        for _ in 0..<7 { _ = f.tick(.active(x: u + f.applied), period: p) }
+        XCTAssertEqual(f.reference ?? .nan, p - PacerPhase.guardMargin, accuracy: 2 * quantum)
+        XCTAssertEqual(f.run.nudges, 1)
+        XCTAssertEqual(f.run.references, 2)
+        // An outlier while establishing is not phase: no move.
+        _ = f.tick(.inactive, period: p)
+        XCTAssertEqual(f.tick(.active(x: p + 0.001), period: p).correction, 0)
+        XCTAssertEqual(f.tick(.active(x: -0.001), period: p).correction, 0)
+        XCTAssertEqual(f.run.nudges, 1)
     }
 
     func testAStepIsCorrectedWithoutOvershootOrRinging() {
@@ -246,7 +390,7 @@ final class PacerPhaseTests: XCTestCase {
         _ = f.tick(.inactive, period: 0.0139)
         let line = f.report()
         XCTAssertTrue(line.hasPrefix("10 s: new-frame ticks 9 · inactive ticks 1 · outliers 0 · |x − x_ref| p50 0.001"), line)
-        XCTAssertTrue(line.contains("references set 1 (guard 0)"), line)
+        XCTAssertTrue(line.contains("references set 1 (guard 0) · establishment nudges 0 (net +0.000 ms)"), line)
         XCTAssertEqual(f.window, PacerPhaseFollower.Counts())   // the window is reset by its report
         XCTAssertTrue(f.report(run: true).hasPrefix("run: new-frame ticks 9 · inactive ticks 1"))
     }
