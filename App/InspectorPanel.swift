@@ -5,6 +5,7 @@ import PictureGeometry   // the Orientation row (docs/BUGS.md, iPhone clips, 202
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
 import AudioFileInfo      // AudioCardText — the audio-only rows
 import StillImageInfo     // a still's rows
+import Markers            // StartTimecodeSource — the Start TC row's source (CHAPTER_MARKERS_PLAN §13)
 
 /// A floating, translucent panel showing the loaded clip's technical metadata.
 struct InspectorPanel: View {
@@ -128,7 +129,11 @@ struct InspectorPanel: View {
                 if chrome.fieldViewOffered {
                     MetadataRow(label: "Window View", value: chrome.fieldView.inspectorText(chrome.fieldOrder))
                 }
-                if let tc = m.startTimecode {
+                // The engine's start timecode, the one the transport readout shows (CHAPTER_MARKERS_PLAN §13): its value
+                // and, when it is not a tmcd track, its source. The metadata string is the fallback.
+                if let tc = engine.tcInfo {
+                    MetadataRow(label: "Start TC", value: tc.source.inspectorNote.map { "\(tc.timecode) · \($0)" } ?? tc.timecode)
+                } else if let tc = m.startTimecode {
                     MetadataRow(label: "Start TC", value: tc)
                 }
                 MetadataRow(label: "Data Rate", value: m.videoDataRateString)

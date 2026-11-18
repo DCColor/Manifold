@@ -4,6 +4,7 @@ import AudioToolbox
 import AudioFileInfo      // BroadcastWaveReader — the Inspector's BWF rows (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §5.2)
 import ColorimetryModel   // ColorimetryTable — the CICP names (colour S3)
 import PictureGeometry    // the track matrix as one of eight (docs/BUGS.md, iPhone clips, 2026-10-29)
+import Markers            // StartTimecodePrecedence — the start-timecode sources (CHAPTER_MARKERS_PLAN §13)
 
 /// Engine-agnostic asset inspection: reads "what a file IS" (metadata, timecode,
 /// display size) independent of how it's played. Shared by AVPlayerEngine and
@@ -73,6 +74,8 @@ public enum MediaInspector {
         meta.textTracks = await textTracks(for: asset)
         // Same line the libav/ANC reader emits, so an MXF and a .mov of one master agree.
         CaptionPresenceLog.emit(meta.textTracks, source: url.lastPathComponent)
+        // The tmcd track's only. The Inspector's row shows the engine's timecode and its source instead
+        // (`FrameEngine.tcInfo`, CHAPTER_MARKERS_PLAN §13), falling back to this string.
         let tc = TimecodeReader.readStartTimecode(url: url)
         meta.startTimecode = tc?.timecode
 
@@ -215,9 +218,33 @@ public enum MediaInspector {
         return .declared(width: w, height: h, hOffset: hOff, vOffset: vOff)
     }
 
-    /// Read the start-timecode info for the file (nil if no TC track).
-    public static func timecode(for url: URL) -> TimecodeReader.Result? {
-        TimecodeReader.readStartTimecode(url: url)
+    /// The file's start timecode and its source, the per-file override aside: THE one precedence
+    /// (docs/CHAPTER_MARKERS_PLAN.md §13, `StartTimecodePrecedence`) — a `tmcd` track, else the container's timecode
+    /// (`containerTimecode`, libav's string, read at `fps`; the libav path passes it), else QuickTime user data, else XMP.
+    /// Nil when the file has none. Every `FrameEngine` site that sets the timecode calls this.
+    ///
+    /// The AVFoundation path passes no container timecode: for a `.mov` / `.mp4`, libav's `timecode` metadata is the
+    /// `tmcd` track's (measured 2026-11-18 on `w1/`: none for the Premiere MP4s, which carry only user data and XMP;
+    /// the ProRes `.mov`'s equals its `tmcd`), so opening libav there would add nothing to source 1.
+    ///
+    /// Sources 3 and 4 are read only when 1 and 2 are absent (box headers and two small payloads; never for an MXF). One
+    /// counts-only log line when either was present.
+    public static func timecode(for url: URL, containerTimecode: String? = nil, fps: Double = 0) -> TimecodeReader.Result? {
+        var c = StartTimecodePrecedence.Candidates()
+        c.tmcd = TimecodeReader.readStartTimecode(url: url)?.startTimecode
+        c.container = containerTimecode.flatMap { TimecodeReader.parse(timecode: $0, fps: fps)?.startTimecode }
+        var metadata: StartTimecodeMetadata.Result?
+        if c.needsMetadata {
+            let m = StartTimecodeMetadata.read(url: url)
+            c.userData = m.userData
+            c.xmp = m.xmp
+            metadata = m
+        }
+        let file = StartTimecodePrecedence.file(c)
+        if let m = metadata, m.userDataPresent || m.xmpPresent {
+            NSLog("%@", StartTimecodeLog.line(source: file?.source, metadata: m))
+        }
+        return file.map(TimecodeReader.Result.init)
     }
 
     /// Map the track's FourCC codec code to a friendly name (seeded from Flip's

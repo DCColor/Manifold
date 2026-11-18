@@ -3,6 +3,7 @@ import AppKit
 import ManifoldCore
 import ShortcutRegistry
 import SMPTETimecode
+import Markers   // StartTimecodeSource — the footnote names a timecode that is not a tmcd track
 
 // ══════════════════════════════════════════════════════════════════════════════════════════
 // TIMECODE ENTRY — type a position, land on it.
@@ -141,6 +142,8 @@ struct TimecodeContext: Equatable {
     /// the overlay says which of the two the user is typing, because they are different questions
     /// with identical-looking answers.
     let hasTimecode: Bool
+    /// Where the start came from (CHAPTER_MARKERS_PLAN §13): the footnote names it when it is not a tmcd track.
+    let source: StartTimecodeSource?
     /// Index of the last decodable frame. The clamp's ceiling.
     let lastFrame: Int
     /// Where the playhead is now. The origin for a relative entry.
@@ -166,6 +169,7 @@ struct TimecodeContext: Equatable {
         dropFrame = tc?.dropFrame ?? false
         startFrame = tc?.startFrame ?? 0
         hasTimecode = tc != nil
+        source = tc?.source
         lastFrame = engine.totalFrames
         currentFrame = engine.currentFrame
     }
@@ -532,9 +536,12 @@ struct TimecodeEntryOverlay: View {
         if entry.isRelative {
             return "⏎ go   ⎋ cancel   ·   offset from the current frame"
         }
-        return context.hasTimecode
-            ? "⏎ go   ⎋ cancel   ·   source timecode"
-            : "⏎ go   ⎋ cancel   ·   from the start of the file"
+        guard context.hasTimecode else { return "⏎ go   ⎋ cancel   ·   from the start of the file" }
+        switch context.source {
+        case .userData?, .xmp?: return "⏎ go   ⎋ cancel   ·   timecode from file metadata"
+        case .override?: return "⏎ go   ⎋ cancel   ·   start timecode set in Manifold"
+        default: return "⏎ go   ⎋ cancel   ·   source timecode"
+        }
     }
 }
 

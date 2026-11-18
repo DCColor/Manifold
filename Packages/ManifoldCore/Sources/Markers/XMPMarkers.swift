@@ -193,7 +193,14 @@ public enum XMPBoxWalk {
         case malformed
     }
 
-    private struct Box { let type: String; let start: UInt64; let headerLength: UInt64; let end: UInt64 }
+    private struct Box {
+        let type: String
+        /// The type's four bytes as one big-endian number: `©TIM` is not UTF-8, so `type` cannot name it.
+        let code: UInt32
+        let start: UInt64
+        let headerLength: UInt64
+        let end: UInt64
+    }
 
     private enum Walk { case box(Box), end, malformed }
 
@@ -215,7 +222,8 @@ public enum XMPBoxWalk {
             size = limit - offset
         }
         guard size >= hl, size <= limit - offset else { return .malformed }
-        return .box(Box(type: type, start: offset, headerLength: hl, end: offset + size))
+        let code = h.dropFirst(4).reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        return .box(Box(type: type, code: code, start: offset, headerLength: hl, end: offset + size))
     }
 
     /// The first XMP packet: a top-level `uuid` box with Adobe's XMP UUID, or `moov/udta/XMP_`, whichever comes first.
@@ -261,6 +269,54 @@ public enum XMPBoxWalk {
             }
         }
         return top ?? .none
+    }
+
+    /// The payloads of `moov/udta`'s direct children whose type is one of `codes` (the QuickTime user-data start
+    /// timecode's `©TIM`, `©TSC`, `©TSZ`; docs/CHAPTER_MARKERS_PLAN.md §13, Stage 4), first of each, each at most
+    /// `maxBytes` (a larger one is left out). The same walk as `find`: box headers only on the way, `mdat` and every other
+    /// payload skipped by size, at most 100 000 boxes. What was read before a box that does not fit is kept.
+    public static func userData(in src: XMPByteSource, codes: Set<UInt32>, maxBytes: Int = 256) -> [UInt32: Data] {
+        var out: [UInt32: Data] = [:]
+        var visited = 0
+        /// Walks `[start, end)`'s children; false when a box did not fit or the visit cap was reached.
+        @discardableResult
+        func children(_ start: UInt64, _ end: UInt64, topLevel: Bool, _ visit: (Box) -> Void) -> Bool {
+            var off = start
+            while true {
+                visited += 1
+                if visited > 100_000 { return false }
+                switch box(at: off, limit: end, in: src, topLevel: topLevel) {
+                case .end: return true
+                case .malformed: return false
+                case .box(let b):
+                    visit(b)
+                    off = b.end
+                }
+            }
+        }
+        var done = false
+        children(0, src.byteCount, topLevel: true) { b in
+            guard !done, b.type == "moov" else { return }
+            done = true
+            children(b.start + b.headerLength, b.end, topLevel: false) { m in
+                guard m.type == "udta" else { return }
+                children(m.start + m.headerLength, m.end, topLevel: false) { u in
+                    guard codes.contains(u.code), out[u.code] == nil else { return }
+                    let size = u.end - u.start - u.headerLength
+                    guard size <= UInt64(maxBytes), let d = src.bytes(at: u.start + u.headerLength, count: Int(size)) else { return }
+                    out[u.code] = d
+                }
+            }
+        }
+        return out
+    }
+
+    /// The file starts with a box an ISO base media file (`.mov`, `.mp4`) starts with. The start-timecode metadata read
+    /// asks this first, so an MXF (or anything else) is never walked as boxes.
+    public static func looksLikeISOBMFF(_ src: XMPByteSource) -> Bool {
+        guard let h = src.bytes(at: 0, count: 8) else { return false }
+        let type = String(decoding: h.dropFirst(4), as: UTF8.self)
+        return ["ftyp", "moov", "mdat", "free", "skip", "wide", "uuid", "pnot", "junk"].contains(type)
     }
 }
 

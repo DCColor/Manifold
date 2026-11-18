@@ -7,6 +7,7 @@ import StreamBookmarkModel
 import SettingsTransfer   // SettingsFile.isSettingsFile — a settings file is not media (docs/SETTINGS_EXPORT_PLAN.md §5)
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision banner (0.9.1)
 import DeckLinkRefusal    // DeckLinkConnectorMapping — the greyed sub-devices' note
+import Markers            // StartTimecodeSource — the readout's source indicator (CHAPTER_MARKERS_PLAN §13)
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -2973,6 +2974,10 @@ struct ContentView: View {
                 // line breaks that loop at the only place it could start.
                 .lineLimit(1)
                 .frame(minWidth: 86, alignment: .leading)
+                // WHERE THE TIMECODE CAME FROM, when it is not a tmcd track (CHAPTER_MARKERS_PLAN §13): a small glyph at
+                // the readout's top-right corner, its words in the tooltip. An overlay, so the row's measured size (the
+                // docked bar's height, below) never changes with it.
+                .overlay(alignment: .topTrailing) { readoutSourceIndicator }
                 // ⚠️ THE LEADING READOUT NO LONGER CYCLES THE MODE — IT OPENS TIMECODE ENTRY.
                 // The settled design says clicking the timecode display is one of the two ways
                 // in, and this is the timecode display: it is the PLAYHEAD, which is the only
@@ -3788,6 +3793,20 @@ struct ContentView: View {
         case .source:  return engine.currentSourceTimecode(at: displayTime) ?? timeString(displayTime)
         case .elapsed: return timeString(displayTime)
         case .frame:   return "\(Int((displayTime * frameRateOrDefault).rounded()))"
+        }
+    }
+
+    /// The source glyph by the leading readout: shown in Source mode, outside entry, when the timecode is not a tmcd
+    /// track (file metadata, the container, or the per-file override).
+    @ViewBuilder private var readoutSourceIndicator: some View {
+        if effectiveMode == .source, !transportKeys.isActive, let source = engine.tcInfo?.source,
+           let symbol = source.readoutSymbol {
+            Image(systemName: symbol)
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .offset(x: 2, y: -2)
+                .help(source.readoutHelp ?? "")
+                .accessibilityLabel(source.readoutHelp ?? "")
         }
     }
 

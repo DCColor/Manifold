@@ -90,9 +90,10 @@ struct MarkersScopeView: View {
         ScopeGearSectionHeader("Markers")
         Button("Import Markers…") { model.presentImport() }.disabled(!model.isActive)
         Button("Export Markers…") { model.presentExport() }.disabled(!model.isActive || model.markers.isEmpty)
-        if let b = model.basis, !b.hasTimecode {
+        // D-C17a: offered when the file has no tmcd and no container timecode — so also over a user-data or XMP start.
+        if let b = model.basis, b.overrideAvailable {
             ScopeGearSectionHeader("Start timecode")
-            StartOverrideField(model: model, current: b.label(0))
+            StartOverrideField(model: model, current: b.label(0), fileLabel: b.fileLabel)
         }
     }
 }
@@ -529,30 +530,38 @@ struct MarkerThumb: View {
     }
 }
 
-/// D6: the start timecode markers use for a file without one.
+/// D6 / D-C17: the start timecode for a file with no timecode track and no container timecode. It replaces a start read
+/// from the file's metadata, and the transport readout, timecode entry and Export Frame names use it as well as markers.
 struct StartOverrideField: View {
     @ObservedObject var model: MarkerModel
+    /// The file's own start from its metadata, nil when it has none.
+    let fileLabel: String?
     @State private var text: String
     @State private var invalid = false
 
-    init(model: MarkerModel, current: String) {
+    init(model: MarkerModel, current: String, fileLabel: String?) {
         self.model = model
+        self.fileLabel = fileLabel
         _text = State(initialValue: current)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("This file has no timecode. Markers count from:").font(.caption).foregroundStyle(.secondary)
+            Text(fileLabel.map { "From the file’s metadata: \($0). Start at:" } ?? "This file has no timecode. Start at:")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 TextField("00:00:00:00", text: $text)
                     .font(.system(.body, design: .monospaced))
                     .frame(width: 110)
                     .onSubmit { invalid = !model.setStartOverride(text) }
                 Button("Set") { invalid = !model.setStartOverride(text) }
-                Button("Reset") { text = "00:00:00:00"; invalid = !model.setStartOverride(nil) }
+                Button("Reset") { text = fileLabel ?? "00:00:00:00"; invalid = !model.setStartOverride(nil) }
             }
             if invalid { Text("Not a timecode at this rate.").font(.caption).foregroundStyle(.red) }
-            Text("The transport readout is unchanged.").font(.caption2).foregroundStyle(.secondary)
+            Text("Markers, the transport readout, timecode entry and Export Frame names all use it.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

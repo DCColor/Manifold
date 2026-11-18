@@ -133,9 +133,9 @@ public enum PremiereXML {
         w.element(7, "pathurl", pathURL(media.url))
         rate.write(&w, 7)
         w.element(7, "duration", String(frames))
-        // The file's OWN timecode: an override is the sequence's, never the clip's (§4.2).
-        let own = basis.hasTimecode ? basis
-            : TimecodeBasis(startFrame: 0, nfr: basis.nfr, rate: basis.rate, dropFrame: false, hasTimecode: false)
+        // The file's OWN timecode: an override is the sequence's, never the clip's (§4.2). A user-data or XMP start the
+        // override replaced is still the clip's own (CHAPTER_MARKERS_PLAN §13): Premiere reads it as the clip's timecode.
+        let own = basis.fileOwn
         timecode(&w, 7, own, rate)
         w.line(7, "<media>")
         w.line(8, "<video>")

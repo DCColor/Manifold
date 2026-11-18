@@ -14,6 +14,7 @@ import FileChroma
 import FrameGrid
 import FileScan        // InterlacedChroma — per-field 4:2:0 (I3)
 import PictureGeometry // the file's orientation (docs/BUGS.md, iPhone clips, 2026-10-29)
+import Markers         // StartTimecodePrecedence — the start timecode and its override (CHAPTER_MARKERS_PLAN §13)
 // The file audio reader's output layout, and the size check a source's own layout must pass first.
 import AudioOutputLayout
 import CoreAudio
@@ -127,7 +128,10 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// The still's stored values for the scopes, or nil. A separate path from `stillPicture`: the window shows macOS's
     /// picture and the scopes show the file (docs/STILLS_AND_AUDIO_ONLY_PLAN.md, B0 result).
     public var onStillScopeFrame: ((StillScopeFrame?) -> Void)?
-    @Published public private(set) var metadata: VideoMetadata?
+    @Published public private(set) var metadata: VideoMetadata? {
+        // An override on a file without timecode needs the rate, which can land after it (`refreshTimecode`).
+        didSet { if timecodeOverride != nil { refreshTimecode() } }
+    }
     @Published public private(set) var currentURL: URL?
     // Audio output gain/mute (passthrough to the persistent audioRenderer).
     @Published public private(set) var volume: Float = 1.0
@@ -216,7 +220,45 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     /// only from 1x play (shuttleRate == 1), never while JKL-shuttling (2/4/8x), and there is no
     /// loop-at-head for reverse. Transient session state — not persisted. See the end-of-media observer.
     @Published public private(set) var isLooping: Bool = false
-    public private(set) var tcInfo: TimecodeReader.Result?
+    /// THE START TIMECODE EVERY READER USES (docs/CHAPTER_MARKERS_PLAN.md §13, D-C17): the transport readout
+    /// (`currentSourceTimecode`), timecode entry (`TimecodeContext`), Export Frame names, and, through the same
+    /// `StartTimecodePrecedence.effective`, the markers' `TimecodeBasis`. It is `fileTimecode`, or the per-file override
+    /// where that applies (no `tmcd`, no container timecode), with its source. Set only by `refreshTimecode`.
+    @Published public private(set) var tcInfo: TimecodeReader.Result?
+    /// The file's own start timecode, override aside (`MediaInspector.timecode(for:)`'s precedence). Set only through
+    /// `setFileTimecode`, from every load path.
+    public private(set) var fileTimecode: TimecodeReader.Result?
+    /// The Markers slot's override, for the file it was set on (`MarkerModel`). Keyed by URL so one set for a file is
+    /// never applied to the next file, whichever of the two arrives first.
+    private var timecodeOverride: (url: URL, label: String)?
+
+    /// The per-file start override (D-C17) for `url`, or nil to clear it. `MarkerModel` calls this whenever its override
+    /// changes; it applies only while `url` is the current file and the file has no `tmcd` or container timecode.
+    public func setStartTimecodeOverride(_ label: String?, for url: URL?) {
+        if let label, let url, !label.isEmpty { timecodeOverride = (url, label) } else { timecodeOverride = nil }
+        refreshTimecode()
+    }
+
+    /// The file, container string and rate `applyLibavMetadata` last resolved the timecode for (cleared by every other
+    /// site), so a re-read of the same file does not walk it again.
+    private var libavTimecodeKey: String?
+
+    private func setFileTimecode(_ tc: TimecodeReader.Result?, fromLibav: Bool = false) {
+        if !fromLibav { libavTimecodeKey = nil }
+        fileTimecode = tc
+        refreshTimecode()
+    }
+
+    /// `tcInfo` from `fileTimecode` and the override. The rate for an override on a file without timecode is the
+    /// metadata rate, with the timecode's own as the fallback: `currentSourceTimecode`'s and `MarkerModel.basis`'s rule.
+    private func refreshTimecode() {
+        let label = timecodeOverride.flatMap { $0.url == currentURL ? $0.label : nil }
+        let declared = metadata?.frameRate ?? 0
+        let rate = declared > 0 ? declared : (fileTimecode?.fps ?? 0)
+        let new = StartTimecodePrecedence.effective(file: fileTimecode?.startTimecode, overrideLabel: label, rate: rate)
+            .map(TimecodeReader.Result.init)
+        if new != tcInfo { tcInfo = new }
+    }
 
     /// Maximum shuttle multiplier in either direction (1 → 2 → 4 → 8).
     private let maxShuttleRate: Float = 8
@@ -1813,7 +1855,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // Inspector always refreshes.
         let old = self.metadata
-        self.tcInfo = newTc
+        setFileTimecode(newTc)
         self.metadata = newMeta
 
         // An audio-only file has no colour tags to compare. Its reader is rebuilt when the audio itself changed, for the
@@ -2341,7 +2383,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // no live-transport model is implied here. metadata is intentionally left alone: it drives
         // the metadata-onChange scope wiring, which the connecting stream immediately repopulates.
         duration = 0
-        tcInfo = nil
+        setFileTimecode(nil)
         hasMedia = false
         stillPicture = nil
         stillInfo = nil
@@ -2977,7 +3019,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
         // Same inspection as AVPlayerEngine, via the shared inspector. Both publish only if this
         // load is still the current one (see `loadGeneration`).
-        self.tcInfo = MediaInspector.timecode(for: url)
+        setFileTimecode(MediaInspector.timecode(for: url))
         Task { [weak self] in
             let meta = await MediaInspector.metadata(for: asset, url: url)
             await MainActor.run {
@@ -3122,7 +3164,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         self.asset = asset
         displaySize = Self.audioOnlyCardSize
 
-        self.tcInfo = MediaInspector.timecode(for: url)
+        setFileTimecode(MediaInspector.timecode(for: url))
         Task { [weak self] in
             let meta = await MediaInspector.metadata(for: asset, url: url)
             await MainActor.run {
@@ -3188,7 +3230,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         teardownAudioReading()
         asset = nil
         metadata = nil
-        tcInfo = nil
+        setFileTimecode(nil)
         duration = 0
         currentTime = 0
         isPlaying = false
@@ -3355,7 +3397,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private func loadContainerSlackRoute(url: URL, metadataAsset: AVURLAsset, sampleEntry: FourCharCode,
                                          autoplay: Bool) async {
         self.hasMedia = true
-        self.tcInfo = MediaInspector.timecode(for: url)   // the tmcd atom walk is unaffected by the stsd
+        setFileTimecode(MediaInspector.timecode(for: url))   // the tmcd atom walk is unaffected by the stsd
         self.audioTracks = []                              // libav picks the stream, as for MXF
         self.selectedAudioTrackIndex = 0
         self.rangeOverride = .auto
@@ -3398,7 +3440,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     private func loadMXF(url: URL, autoplay: Bool) async {
         self.hasMedia = true
-        self.tcInfo = MediaInspector.timecode(for: url)   // nil for MXF; harmless
+        setFileTimecode(MediaInspector.timecode(for: url))   // nil for MXF until libav's container timecode, below
         self.videoTrack = nil                              // AVFoundation blind → libav supplies metadata
         self.audioTracks = []                              // libav picks the stream; no selection to offer
         self.selectedAudioTrackIndex = 0
@@ -3472,8 +3514,15 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         // TimecodeReader.Result from libav's TC string + frame rate so the scrubber/
         // controls show REAL timecode (start TC + elapsed), not a 00:00:00 counter.
         // Nil string → no source TC (transport falls back to the elapsed counter).
-        if let tcString = info.startTimecode {
-            self.tcInfo = TimecodeReader.parse(timecode: tcString, fps: meta.frameRate)   // after the I2 rate rule (unchanged for progressive)
+        // Stage 4 (CHAPTER_MARKERS_PLAN §13): the one precedence, with libav's string as source 2 — a `tmcd` track (a
+        // routed `.mov`) wins over it, and a file with neither falls to QuickTime user data and XMP. The rate is after
+        // the I2 rate rule (unchanged for progressive).
+        // This runs on every libav (re)read of the file; the atom walks run once per file and container string.
+        let tcKey = "\(url.path)|\(info.startTimecode ?? "")|\(meta.frameRate)"
+        if tcKey != libavTimecodeKey {
+            libavTimecodeKey = tcKey
+            setFileTimecode(MediaInspector.timecode(for: url, containerTimecode: info.startTimecode, fps: meta.frameRate),
+                            fromLibav: true)
         }
 
         // Data rate: estimate from file size / duration (libav reports no per-stream

@@ -29,6 +29,17 @@ public enum MarkerCSV {
 }
 
 public enum MarkerPlainText {
+    /// After the header's start timecode: where it came from, when it is not the file's own timecode track or container
+    /// timecode (docs/CHAPTER_MARKERS_PLAN.md §13). A file without timecode keeps its pre-Stage 4 wording, override or not.
+    static func startNote(_ basis: TimecodeBasis) -> String {
+        switch (basis.source, basis.fileSource) {
+        case (.userData?, _), (.xmp?, _): return " (from the file's metadata)"
+        case (.override?, .some): return " (set in Manifold, replacing the file's metadata timecode)"
+        case (.override?, nil), (nil, _): return " (the file has no timecode)"
+        default: return ""
+        }
+    }
+
     /// A header, then one block per marker: timecode, colour, duration and name; the notes indented below, line breaks
     /// kept; keywords last. UTF-8, LF.
     public static func export(markers: [Marker], fileName: String, basis: TimecodeBasis, date: Date = Date()) -> String {
@@ -37,7 +48,7 @@ public enum MarkerPlainText {
         df.locale = Locale(identifier: "en_US_POSIX")
         df.dateFormat = "yyyy-MM-dd HH:mm"
         var out = "Markers: \(fileName)\n"
-        out += "Start timecode: \(basis.label(0))\(basis.hasTimecode ? "" : " (the file has no timecode)")\n"
+        out += "Start timecode: \(basis.label(0))\(startNote(basis))\n"
         out += "Rate: \(basis.rateLabel) \(basis.dropFrame ? "DF" : "NDF")\n"
         out += "Markers: \(sorted.count)\n"
         out += "Exported: \(df.string(from: date))\n"

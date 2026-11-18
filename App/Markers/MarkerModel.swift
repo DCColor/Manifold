@@ -48,7 +48,11 @@ final class MarkerModel: ObservableObject {
     /// In time order.
     @Published private(set) var markers: [Marker] = []
     /// D6: the start timecode for a file without one.
-    @Published private(set) var startOverride: String?
+    @Published private(set) var startOverride: String? {
+        // D-C17b: the override drives the transport readout, timecode entry and Export Frame names too, through the
+        // engine's `tcInfo`, so one window never shows two timecodes. Keyed by this model's file.
+        didSet { engine?.setStartTimecodeOverride(startOverride, for: fileURL) }
+    }
     @Published private(set) var inPoint: Int?
     @Published private(set) var outPoint: Int?
     /// The editor sheet's marker. `editorIsNew`: Save inserts it, Cancel discards it.
@@ -127,6 +131,13 @@ final class MarkerModel: ObservableObject {
         // A stored override, or the "timecode reads differently" check, needs the rate and timecode, which land after
         // the URL (tcInfo is set by then: before the metadata task, or in the same main-actor turn on the libav path).
         engine.$metadata
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.metadataChanged() } }
+            .store(in: &cancellables)
+        // The start timecode (Stage 4): the file's own can be resolved again on the libav path after the metadata
+        // landed, and the override changes it. The list relabels and the check runs, as for a metadata change.
+        engine.$tcInfo
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.metadataChanged() } }
             .store(in: &cancellables)
@@ -236,12 +247,17 @@ final class MarkerModel: ObservableObject {
 
     /// "This file's start timecode now reads …": once per load, as soon as the rate and timecode are known. The first
     /// build ran it only when the markers loaded, so a file whose metadata landed later was never checked.
+    ///
+    /// Stage 4 (CHAPTER_MARKERS_PLAN §13): a file whose start now comes from QuickTime user data or XMP (Premiere's MP4s)
+    /// stored no `startTimecodeSeen` while it read as having no timecode; with markers and no override, its labels just
+    /// moved from 00:00:00:00, so it is told once, and why. The new value is then saved as seen, so it is not told again.
     private func checkStartTimecode() {
         guard startCheckPending, let basis, let d = doc else { return }
         startCheckPending = false
-        if let seen = d.startTimecodeSeen, basis.hasTimecode, seen != basis.label(0), !markers.isEmpty {
-            show("This file’s start timecode now reads \(basis.label(0)); its markers were made at \(seen). They stay on the same frames.")
-        }
+        let check = StartTimecodeNotice.check(seen: d.startTimecodeSeen, basis: basis, storedOverride: d.startOverride,
+                                              hasMarkers: !markers.isEmpty)
+        if let text = check.notice { show(text) }
+        if check.saveSeen { save() }
     }
 
     // MARK: Chapters (docs/CHAPTER_MARKERS_PLAN.md §4.1)
@@ -370,17 +386,19 @@ final class MarkerModel: ObservableObject {
         return DeckRegistry.shared.liveSource(for: deck) == nil && basis != nil
     }
 
-    /// The labels this file's frames get: its own timecode, else 00:00:00:00 or the override (§2, D6). The rate rule is
-    /// `TimecodeContext`'s (metadata first, the timecode track's own as the fallback), and the timecode's integer rate
-    /// is the readout's (`FrameEngine.currentSourceTimecode`).
+    /// The labels this file's frames get: its own start timecode (tmcd > container > QuickTime user data > XMP), or the
+    /// override where it applies (no tmcd, no container timecode), else 00:00:00:00 (§2, D6; CHAPTER_MARKERS_PLAN §13,
+    /// D-C17). From the engine's override-free `fileTimecode` and this model's override through
+    /// `StartTimecodePrecedence.effective` — the function the engine's `tcInfo` comes from, so markers, readout, entry
+    /// and Export Frame names agree. The rate rule is `TimecodeContext`'s (metadata first, the timecode's own as the
+    /// fallback), and the timecode's integer rate is the readout's (`FrameEngine.currentSourceTimecode`).
     var basis: TimecodeBasis? {
         guard let engine, engine.mediaKind == .video else { return nil }
         let declared = engine.metadata?.frameRate ?? 0
-        let tc = engine.tcInfo
+        let tc = engine.fileTimecode
         let rate = declared > 0 ? declared : (tc?.fps ?? 0)
         guard rate > 0 else { return nil }
-        return TimecodeBasis.forFile(rate: rate, timecodeStartFrame: tc?.startFrame, timecodeNFR: tc?.nfr,
-                                     dropFrame: tc?.dropFrame ?? false, overrideLabel: startOverride)
+        return TimecodeBasis.forFile(rate: rate, timecode: tc?.startTimecode, overrideLabel: startOverride)
     }
 
     var lastFrame: Int { engine?.totalFrames ?? 0 }
@@ -572,21 +590,24 @@ final class MarkerModel: ObservableObject {
         go(toFrame: target)
     }
 
-    // MARK: Start timecode override (D6)
+    // MARK: Start timecode override (D6, D-C17)
 
-    /// Only for a file without timecode. Nil or "" returns to 00:00:00:00.
+    /// Only for a file with no tmcd and no container timecode (D-C17a): one without timecode, or whose start comes from
+    /// QuickTime user data or XMP. Nil or "" returns to the file's own (00:00:00:00 when it has none); so does typing the
+    /// file's own value. At the file timecode's rate and drop-frame (`StartTimecodePrecedence.effective`).
     @discardableResult
     func setStartOverride(_ label: String?) -> Bool {
-        guard let b = basis, !b.hasTimecode else { return false }
+        guard let b = basis, b.overrideAvailable else { return false }
         let trimmed = label?.trimmingCharacters(in: .whitespaces) ?? ""
         let new: String?
-        if trimmed.isEmpty || trimmed == "00:00:00:00" {
+        if trimmed.isEmpty {
             new = nil
         } else {
             // Typed as timecode entry is: "1000000" is 01:00:00:00, a pasted label works too.
             guard let t = TypedTimecode(trimmed), !t.isRelative,
-                  let count = t.labelFrameCount(nfr: b.nfr, fps: b.rate, dropFrame: false) else { return false }
-            new = TimecodeBasis(startFrame: count, nfr: b.nfr, rate: b.rate, dropFrame: false, hasTimecode: false).label(0)
+                  let count = t.labelFrameCount(nfr: b.nfr, fps: b.rate, dropFrame: b.dropFrame) else { return false }
+            let typed = TimecodeBasis(startFrame: count, nfr: b.nfr, rate: b.rate, dropFrame: b.dropFrame, hasTimecode: false).label(0)
+            new = typed == (b.fileLabel ?? "00:00:00:00") ? nil : typed
         }
         startOverride = new
         doc?.startOverride = new
@@ -675,7 +696,7 @@ final class MarkerModel: ObservableObject {
         guard persisting, MarkerSettings.remember() else { doc?.markers = markers; doc?.startOverride = startOverride; return }
         d.markers = markers
         d.startOverride = startOverride
-        if let b = basis, b.hasTimecode { d.startTimecodeSeen = b.label(0) }
+        if let own = basis?.fileLabel { d.startTimecodeSeen = own }   // the file's own, override aside (Stage 4)
         doc = d
         do { try store.save(d) } catch {
             NSLog("%@", MarkerLog.unavailable(reason: .saveFailed))

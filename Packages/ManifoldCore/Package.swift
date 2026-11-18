@@ -856,7 +856,9 @@ let package = Package(
             dependencies: ["CFFmpeg", "ScopeCompute", "AudioResample", "LiveAudioResample", "CardClock", "SyncCalibration",
                            "FileAudioLookahead", "StartupRealign", "FileChroma", "ColorimetryModel",
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
-                           "AudioFileInfo", "StillImageInfo", "SMPTETimecode", "FrameGrab"],
+                           "AudioFileInfo", "StillImageInfo", "SMPTETimecode", "FrameGrab",
+                           // The start-timecode precedence and its user-data / XMP readers (CHAPTER_MARKERS_PLAN §13).
+                           "Markers"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

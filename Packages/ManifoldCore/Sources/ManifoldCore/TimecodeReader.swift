@@ -1,5 +1,6 @@
 import Foundation
 import SMPTETimecode
+import Markers
 
 /// Reads start timecode from a MOV/MP4 by walking the atom tree to the `tmcd`
 /// (timecode) track — the approach proven in Flip. Reads the start frame count
@@ -17,6 +18,28 @@ public enum TimecodeReader {
         public var startFrame: Int     // raw start frame count
         public var nfr: Int            // integer frames per second (e.g. 24, 30)
         public var fps: Double         // exact rate (e.g. 23.976)
+        /// Where it came from (docs/CHAPTER_MARKERS_PLAN.md §13): `.tmcd` for this reader's own walk.
+        public var source: StartTimecodeSource = .tmcd
+
+        public init(timecode: String, dropFrame: Bool, startFrame: Int, nfr: Int, fps: Double,
+                    source: StartTimecodeSource = .tmcd) {
+            self.timecode = timecode
+            self.dropFrame = dropFrame
+            self.startFrame = startFrame
+            self.nfr = nfr
+            self.fps = fps
+            self.source = source
+        }
+
+        public init(_ s: StartTimecode) {
+            self.init(timecode: s.label, dropFrame: s.dropFrame, startFrame: s.frameCount, nfr: s.nfr, fps: s.fps,
+                      source: s.source)
+        }
+
+        /// The same start as the Markers target's value, for `StartTimecodePrecedence`.
+        public var startTimecode: StartTimecode {
+            StartTimecode(frameCount: startFrame, nfr: nfr, fps: fps, dropFrame: dropFrame, source: source)
+        }
     }
 
     /// HOW MANY FRAME LABELS DROP-FRAME SKIPS AT EACH MINUTE — 2 at 29.97, 4 at 59.94.

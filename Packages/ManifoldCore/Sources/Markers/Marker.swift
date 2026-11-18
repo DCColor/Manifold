@@ -76,27 +76,67 @@ public struct TimecodeBasis: Equatable, Sendable {
     /// Exact rate (23.976…).
     public var rate: Double
     public var dropFrame: Bool
-    /// The file states a timecode of its own.
+    /// `startFrame` is the file's own timecode (any of the four sources, docs/CHAPTER_MARKERS_PLAN.md §13): false with no
+    /// timecode, and false when the per-file override replaced it.
     public var hasTimecode: Bool
+    /// Where `startFrame` came from: the file's source, `.override`, or nil (no timecode, 00:00:00:00).
+    public var source: StartTimecodeSource?
+    /// The file's own start, the override aside (nil when it has none), and its source. Same rate and drop-frame as the
+    /// basis: an override is read at the replaced timecode's (`StartTimecodePrecedence.effective`).
+    public var fileStartFrame: Int?
+    public var fileSource: StartTimecodeSource?
 
     public init(startFrame: Int, nfr: Int, rate: Double, dropFrame: Bool, hasTimecode: Bool) {
+        self.init(startFrame: startFrame, nfr: nfr, rate: rate, dropFrame: dropFrame, hasTimecode: hasTimecode,
+                  source: hasTimecode ? .tmcd : nil, fileStartFrame: hasTimecode ? startFrame : nil,
+                  fileSource: hasTimecode ? .tmcd : nil)
+    }
+
+    public init(startFrame: Int, nfr: Int, rate: Double, dropFrame: Bool, hasTimecode: Bool,
+                source: StartTimecodeSource?, fileStartFrame: Int?, fileSource: StartTimecodeSource?) {
         self.startFrame = startFrame
         self.nfr = max(nfr, 1)
         self.rate = rate
         self.dropFrame = dropFrame
         self.hasTimecode = hasTimecode
+        self.source = source
+        self.fileStartFrame = fileStartFrame
+        self.fileSource = fileSource
     }
 
-    /// The basis for a file: its own timecode, else 00:00:00:00 non-drop, or the per-file override (D6). An override is
-    /// used only for a file without timecode.
+    /// The basis for a file (Stage 4, D-C17): its own start timecode (`StartTimecodePrecedence.file`'s answer), or the
+    /// per-file override where it applies — the file has no `tmcd` and no container timecode — else 00:00:00:00 non-drop.
+    /// The same `StartTimecodePrecedence.effective` the engine's readout, entry and Export Frame names use.
+    public static func forFile(rate: Double, timecode: StartTimecode?, overrideLabel: String?) -> TimecodeBasis {
+        let eff = StartTimecodePrecedence.effective(file: timecode, overrideLabel: overrideLabel, rate: rate)
+        return TimecodeBasis(startFrame: eff?.frameCount ?? 0, nfr: eff?.nfr ?? max(Int(rate.rounded()), 1), rate: rate,
+                             dropFrame: eff?.dropFrame ?? false, hasTimecode: eff.map { $0.source != .override } ?? false,
+                             source: eff?.source, fileStartFrame: timecode?.frameCount, fileSource: timecode?.source)
+    }
+
+    /// A file whose timecode is a `tmcd` track (`timecodeStartFrame` given), else the override or 00:00:00:00: the
+    /// pre-Stage 4 form, kept for callers that only know a track's numbers.
     public static func forFile(rate: Double, timecodeStartFrame: Int?, timecodeNFR: Int?, dropFrame: Bool,
                                overrideLabel: String?) -> TimecodeBasis {
         let nfr = timecodeNFR ?? max(Int(rate.rounded()), 1)
-        if let start = timecodeStartFrame {
-            return TimecodeBasis(startFrame: start, nfr: nfr, rate: rate, dropFrame: dropFrame, hasTimecode: true)
-        }
-        let start = overrideLabel.flatMap { SMPTETimecode.frameCount(label: $0, nfr: nfr, fps: rate, dropFrame: false) } ?? 0
-        return TimecodeBasis(startFrame: start, nfr: nfr, rate: rate, dropFrame: false, hasTimecode: false)
+        let tc = timecodeStartFrame.map { StartTimecode(frameCount: $0, nfr: nfr, fps: rate, dropFrame: dropFrame, source: .tmcd) }
+        return forFile(rate: rate, timecode: tc, overrideLabel: overrideLabel)
+    }
+
+    /// D-C17a: the Markers slot offers the override (no `tmcd`, no container timecode).
+    public var overrideAvailable: Bool { StartTimecodePrecedence.overrideApplies(to: fileSource) }
+
+    /// The file's own start label, the override aside; nil when it has none.
+    public var fileLabel: String? {
+        fileStartFrame.map { SMPTETimecode.format(frameCount: $0, nfr: nfr, fps: rate, dropFrame: dropFrame) }
+    }
+
+    /// The same frames labelled by the file's own timecode, the override aside (00:00:00:00 when it has none).
+    public var fileOwn: TimecodeBasis {
+        if hasTimecode { return self }
+        return TimecodeBasis(startFrame: fileStartFrame ?? 0, nfr: nfr, rate: rate, dropFrame: fileStartFrame == nil ? false : dropFrame,
+                             hasTimecode: fileStartFrame != nil, source: fileSource, fileStartFrame: fileStartFrame,
+                             fileSource: fileSource)
     }
 
     public var framesPerDay: Int { SMPTETimecode.framesPerDay(nfr: nfr, fps: rate, dropFrame: dropFrame) }
@@ -158,12 +198,15 @@ public struct MarkerDocument: Codable, Equatable, Sendable {
     /// `FileFingerprint` of the media: the store's key.
     public var fingerprint: String
     public var markers: [Marker]
-    /// D6: the start timecode markers use for a file WITHOUT timecode ("01:00:00:00"); nil = 00:00:00:00.
+    /// D6 / D-C17: the start timecode for a file with no `tmcd` and no container timecode ("01:00:00:00"): it replaces a
+    /// QuickTime user-data or XMP start, and drives the readout, entry, Export Frame names and markers. Nil = the file's
+    /// own (00:00:00:00 when it has none).
     public var startOverride: String?
     /// Hints only, for finding the file again; never the key.
     public var lastPath: String?
     public var bookmark: Data?
-    /// The file's start timecode when the document was last saved, to notice a file whose timecode later reads otherwise.
+    /// The file's own start timecode (the override aside) when the document was last saved, to notice a file whose
+    /// timecode later reads otherwise. Nil when it had none.
     public var startTimecodeSeen: String?
 
     public init(fingerprint: String, markers: [Marker] = [], startOverride: String? = nil, lastPath: String? = nil,
