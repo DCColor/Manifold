@@ -249,6 +249,13 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
   (§1's Markers row): its notes hold the XMP comment, and `Marker.embeddedID` holds the marker's GUID (D-C14), so a
   second Convert skips it. That is a file-supplied identifier stored in the marker document, alongside the name and
   notes the same row already covers.
+- **Start timecode from file metadata (2026-11-18, `docs/CHAPTER_MARKERS_PLAN.md` Stage 4, §17):** a file with no `tmcd`
+  track and no container timecode has its QuickTime user-data and XMP start timecode read on open (box headers and two
+  small payloads). The timecode itself is never logged. One line, the source kind and counts only, when either was
+  present: `[TIMECODE] start source=… user-data=0|1 xmp=0|1 unreadable=…`
+  (`StartTimecodeTests.testTheLogLineHoldsTheSourceKindAndCountsOnly`). Nothing new is stored: the marker document's
+  existing `startTimecodeSeen` (§1's Markers row) now also holds a user-data or XMP start, and `startOverride` can hold
+  one that replaces it.
 - **Still logged in full (not in P1's list):**
   - the SRT host and port (`SRTClient.swift:490`, `SRTSession.m:580`);
   - the WHEP endpoint host (path withheld);

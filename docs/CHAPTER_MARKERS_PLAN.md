@@ -1899,3 +1899,124 @@ and §12.
 - A time-format `startTime`: never seen from Premiere. Tolerated forms are unit-tested only.
 - Whether Media Encoder or other Adobe apps write `xmpDM:markers` the same way: only Premiere Pro exports were read.
 - Whether `text.bubble` and the 0.3-alpha band read clearly on the LG (attended).
+
+---
+
+## 17. Stage 4 as built: the start-timecode source (2026-11-18)
+
+Decisions applied: D-C15, D-C17 as recorded in §13. Not attended yet; not committed.
+
+### 17.1 What it does
+
+- **One precedence function** (`Packages/ManifoldCore/Sources/Markers/StartTimecode.swift`, new, pure Foundation, in the
+  Markers target so `MarkersTests` tests it): `StartTimecodePrecedence.file` takes the highest of `tmcd` > container >
+  QuickTime user data > XMP. `effective` adds the per-file override, which applies only when the file's own source is
+  not `tmcd` or container (`overrideApplies`, D-C17a). Every result carries a `StartTimecodeSource` (`tmcd`, `container`,
+  `user-data`, `xmp`, `override`).
+- **Where it is called.** `MediaInspector.timecode(for:containerTimecode:fps:)` is the only producer: every `FrameEngine`
+  site from §13.2 (AVFoundation load, audio-only, container route, MXF, re-inspect, the libav path with libav's
+  `timecode` string as source 2) now calls it through `FrameEngine.setFileTimecode`. On the libav path it runs once per
+  file, container string and rate (`applyLibavMetadata` runs on every libav re-read). ManifoldCore now depends on the
+  Markers target (same arrangement as FrameGrab, which the app also links).
+- **Source 2 on the AVFoundation path: not read.** Measured on `w1/` with `/opt/homebrew/bin/ffmpeg -i`: libav's
+  `timecode` metadata for a `.mov`/`.mp4` is the `tmcd` track's (the Premiere MP4s have none; the ProRes `.mov`'s is
+  01:00:00:00 on all three streams, from `tmcd`). Opening libav there would add nothing to source 1.
+- **Source 3, QuickTime user data:** `moov/udta` `©TIM` at `©TSC` / `©TSZ` (Premiere: `01:00:00:00` at 24000 / 1001), each
+  QuickTime international text (UInt16 length, UInt16 language, text) or an iTunes-style `data` box. Read by
+  `XMPBoxWalk.userData`, the Stage 3 walk (box headers only, `mdat` never read, 100 000-box cap); a box's type is now
+  also kept as a number, since `©TIM` is not UTF-8. No `©TSC`, a rate outside 1…240 fps, or a label that is not one at
+  the rate: not used, counted as unreadable.
+- **Source 4, XMP:** `xmpDM:startTimecode`, else `xmpDM:altTimecode`, of the packet's **top-level** `rdf:Description`s
+  only (`xmpMM:Pantry` and `History` hold other files' metadata). `timeValue` at `timeFormat`: the 1000/1001 rates by
+  their digits (`23976`, `2997`, `4795`, `5994`, `11988`), else whole frames per second (1…240); `Drop` = drop-frame,
+  only at 29.97 and 59.94; a label with `;` is drop-frame too. A format that does not read falls back to
+  `xmpDM:startTimeScale` / `startTimeSampleSize`. Same XMLParser setup as Stage 3 (`XMPTree`; DTDs refused).
+- **Not walked:** a file that does not start with an ISO base media box (`ftyp`, `moov`, `mdat`, `free`, `skip`, `wide`,
+  `uuid`, `pnot`, `junk`), so an MXF is never read as boxes. Sources 3 and 4 are read only when 1 and 2 are absent.
+- **The engine** keeps `fileTimecode` (override-free) and `tcInfo` (`@Published`, effective). `MarkerModel` pushes its
+  override with `setStartTimecodeOverride(_:for:)`, keyed by the file's URL, so an override never reaches the next file
+  whichever arrives first. `tcInfo` is recomputed when the file timecode, the override or the metadata rate changes.
+- **The override (D-C17).** Offered in the Markers slot when `TimecodeBasis.overrideAvailable` (no `tmcd`, no container
+  timecode). Read at the replaced timecode's rate and drop-frame (a DF user-data start keeps DF); with no file timecode,
+  at the file rate, non-drop, as D6. Typing the file's own value, or Reset, clears it; 00:00:00:00 can now be set over a
+  metadata start. Session-only with Remember markers off (unchanged: it lives in the marker document).
+- **Readers (§13.3).** The transport readout, timecode entry and Export Frame names follow `tcInfo` unchanged.
+  `MarkerModel.basis` is `TimecodeBasis.forFile(rate:timecode:overrideLabel:)` over `fileTimecode`, the same `effective`,
+  so marker labels, tooltips, EDL / CSV / text / Premiere export and EDL import placement agree with the readout.
+  `TimecodeBasis` gains `source`, `fileStartFrame`, `fileSource`, `overrideAvailable`, `fileLabel` and `fileOwn`. Premiere
+  XML's clip timecode is `fileOwn` (a metadata start the override replaced is still the clip's own). The text export's
+  header names the source: "(from the file's metadata)", "(set in Manifold, replacing the file's metadata timecode)",
+  else as before.
+- **UI wording (proposed):**
+  - Inspector, Start TC row: from `engine.tcInfo`, "01:00:00:00 · from file metadata (QuickTime)" / "(XMP)" /
+    "· from the container" / "· set in Manifold"; a `tmcd` track has no suffix.
+  - Transport: in Source mode, a 7 pt glyph at the leading readout's top-right (`doc.text` for file metadata or
+    container, `pencil` for the override), as an overlay so the bar's measured height never changes. Tooltip: "TC from
+    file metadata (QuickTime user data), not a timecode track", "… (XMP) …", "TC from the container's metadata", "TC set in
+    Manifold for this file (Markers ▸ Start timecode)".
+  - Timecode entry footnote: "timecode from file metadata" / "start timecode set in Manifold" instead of "source
+    timecode".
+  - Slot field: "From the file's metadata: 01:00:00:00. Start at:" or "This file has no timecode. Start at:", then
+    "Markers, the transport readout, timecode entry and Export Frame names all use it." (was "The transport readout is
+    unchanged.").
+- **The notice** (`StartTimecodeNotice.check`, pure, tested). A document saved while the file read as having no timecode
+  has no `startTimecodeSeen` (it was written only for a file with timecode). So a Premiere MP4 with stored markers, now
+  read at 01:00:00:00 and with no override, gets: "This file's start timecode is now read from the file's metadata:
+  01:00:00:00. Its markers were made when it read 00:00:00:00. They stay on the same frames." The file's own start is then
+  saved as seen, so it is told once. A metadata start at 00:00:00:00 moved nothing: saved, untold. An override that still
+  applies: untold. **Changed for every file:** the seen value is now saved after any notice, so the existing notice for
+  a `tmcd` file is also shown once rather than on every open until the next edit.
+- **Log:** `[TIMECODE] start source=… user-data=0|1 xmp=0|1 unreadable=…`, when sources 3/4 were read and either was
+  present. Never a timecode (`PRIVACY_AUDIT.md` §2).
+
+### 17.2 The W1 files, read by the probe (2026-11-18)
+
+`StartTimecodeFileTests.testStartTimecodeProbe` with `MANIFOLD_TC_PROBE_LIST` over `w1/` and `markers/mk-25-notc.mp4`,
+read-only. Sources 3 and 4 only; a `tmcd` track wins over both in the app. 0–1 ms per file.
+
+| File | User data | XMP | App's source |
+|---|---|---|---|
+| `premiere_ranged_tc1h - h264.mp4`, `_V2`, `_V3` | 01:00:00:00, 23.976 | 01:00:00:00, `23976Timecode` | user data |
+| `premiere_ranged_tc1h - prores.mov` | 01:00:00:00 | 01:00:00:00 | **`tmcd`** (01:00:00:00); override not offered |
+| `premiere_allmarkers - h264.mp4` | **00:00:00:00** | **00:00:00:00** | user data, 00:00:00:00 |
+| `premiere_chapters - h264.mp4`, `h265.mp4` | 00:00:00:00 | 00:00:00:00 | user data |
+| `premiere_chapters - prores.mov` | 00:00:00:00 | 00:00:00:00 | `tmcd` if present (not probed) |
+| `resolve_chapters - *`, `RESOLVE LEVELS_*` | none | none | unchanged |
+| `mk-25-notc.mp4` | none | none | none; override offered |
+
+`premiere_allmarkers` was exported from a 00:00:00:00 sequence: it reads 00:00:00:00 from its metadata, not 01:00:00:00.
+
+### 17.3 Files
+
+| File | Change |
+|---|---|
+| `Packages/ManifoldCore/Sources/Markers/StartTimecode.swift` | **New.** `StartTimecodeSource`, `StartTimecode`, `StartTimecodePrecedence`, `StartTimecodeMetadata` (user data, XMP, `timeFormat`), `StartTimecodeNotice`, `StartTimecodeLog` |
+| `Packages/ManifoldCore/Sources/Markers/XMPMarkers.swift` | `Box.code`; `XMPBoxWalk.userData`, `looksLikeISOBMFF` |
+| `Packages/ManifoldCore/Sources/Markers/Marker.swift` | `TimecodeBasis` sources, `forFile(rate:timecode:overrideLabel:)`, `overrideAvailable`, `fileLabel`, `fileOwn`; doc comments |
+| `Packages/ManifoldCore/Sources/Markers/PremiereXML.swift`, `MarkerTextExport.swift` | `fileOwn`; the header's source note |
+| `Packages/ManifoldCore/Package.swift` | ManifoldCore depends on Markers |
+| `Packages/ManifoldCore/Sources/ManifoldCore/TimecodeReader.swift` | `Result.source`, conversions |
+| `Packages/ManifoldCore/Sources/ManifoldCore/MediaInspector.swift` | `timecode(for:containerTimecode:fps:)`: the precedence |
+| `Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift` | `fileTimecode`, `@Published tcInfo`, `setStartTimecodeOverride`, `setFileTimecode`, `refreshTimecode`; every site |
+| `App/Markers/MarkerModel.swift` | basis from `fileTimecode`; override pushed to the engine; `setStartOverride` (D-C17a, DF); the notice; seen = file's own |
+| `App/Markers/MarkersScopeView.swift` | the field's condition and wording |
+| `App/InspectorPanel.swift`, `App/ContentView.swift`, `App/TimecodeEntry.swift` | Start TC row's source; readout glyph; entry footnote |
+| Tests | `MarkersTests/StartTimecodeTests.swift` (**new**, 33 + `StartTimecodeNoticeTests` 5), `ChapterReaderTests/StartTimecodeFileTests.swift` (**new**, 1 + the opt-in probe) |
+| `docs/PRIVACY_AUDIT.md` §2 | the log line |
+
+### 17.4 Results (2026-11-18)
+
+- **`swift test`:** 1310 tests in 38 bundles, 0 failures, 3 skipped (the three opt-in probes). The new tests: 39 run, 1
+  probe skipped.
+- **Warnings:** none in new or changed lines. The App build's 19 unique App-file warnings are the Stage 3 list; the 5
+  others are the pre-existing `FrameEngine.swift` / `LibavAudioSource.swift` ones that appear whenever ManifoldCore
+  recompiles (§14.3).
+- **App:** Profile into `.build-cc`, **BUILD SUCCEEDED**. Not launched.
+
+### 17.5 UNKNOWN
+
+- Whether `premiere_chapters - prores.mov` has a `tmcd` track (not probed; the ranged ProRes `.mov` does).
+- XMP `timeFormat` strings other than `23976Timecode`: from the XMP specification's list, never seen in a file here.
+- A user-data or XMP rate that differs from the video's: used as stated (as a `tmcd` rate is). Never seen.
+- Re-inspect of an MXF still sets the AVFoundation-path answer (no container timecode) until the next libav read, as
+  before Stage 4.
