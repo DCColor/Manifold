@@ -1245,6 +1245,8 @@ final class MetalVideoRenderer {
         // Card-pull measurement (docs/CARD_PULL_MARGIN.md, *Measurement build*): the switches are read, and the log created, here
         // on init, never first on the tick, fill or completion threads.
         if CardPullPhaseLog.enabled { _ = CardPullPhaseLog.shared }
+        // The present-path measurement (docs/WINDOW_PRESENT_PATH.md §4.1, MANIFOLD_PRESENT_TIMING=1): created here, likewise.
+        if PresentTimingLog.enabled { _ = PresentTimingLog.shared }
         _ = Self.lateSwapArmed
         #endif
 
@@ -3540,14 +3542,30 @@ final class MetalVideoRenderer {
         watchTickBegan = CACurrentMediaTime()
         #endif
         currentTickStart = CACurrentMediaTime()
+        #if DEBUG
+        // The present-path measurement (MANIFOLD_PRESENT_TIMING=1, PresentTimingLog): pacer ticks only. Off, `ptOn` is false
+        // from the static let alone (the gate's lock is not taken) and nothing below that tests it runs.
+        let ptOn = PresentTimingLog.enabled && glassHost == nil && pacerPresentsOn
+        if ptOn { ptTick = PresentTimingLog.Tick(); ptTick.start = currentTickStart; ptTickActive = true }
+        #endif
         autoreleasepool {
             performDisplayTick()
+            #if DEBUG
+            if ptOn { ptTick.performEnd = CACurrentMediaTime() }
+            #endif
             // Pacer mode (addition B): a frame the present gate held back is shown on the first tick the gate allows.
             if deferredPresent != nil { servePacedPresent() }
+            #if DEBUG
+            if ptOn { ptTick.statsStart = CACurrentMediaTime() }
+            #endif
             if pacerPresentsOn { flushPacerPresentStats(now: currentTickStart) }
+            #if DEBUG
+            if ptOn { ptTick.statsEnd = CACurrentMediaTime() }
+            #endif
         }
         noteIdleTick()
         #if DEBUG
+        if ptOn { ptTick.end = CACurrentMediaTime(); ptTickActive = false; PresentTimingLog.shared.tick(ptTick) }
         watchTickEnded = CACurrentMediaTime()
         #endif
     }
@@ -4353,6 +4371,9 @@ final class MetalVideoRenderer {
             #endif
             offscreenWriteIndex = (writeIndex + 1) % Self.offscreenRingCount
             pacerPresentStats.rendered += 1
+            #if DEBUG
+            if ptTickActive { ptTick.newFrame = true }   // the present-path measurement: a new-frame tick
+            #endif
             deferredPresent = (displaySource, offscreen.width, offscreen.height)
             let wait = servePacedPresent()
             #if DEBUG
@@ -4528,6 +4549,12 @@ final class MetalVideoRenderer {
     private func servePacedPresent() -> Double? {
         guard let pending = deferredPresent else { return nil }
         let now = CACurrentMediaTime()
+        #if DEBUG
+        // The present-path measurement (MANIFOLD_PRESENT_TIMING=1, PresentTimingLog): only inside a pacer tick that set it.
+        // Every `if ptOn` below reads clocks and writes `ptTick`, nothing else; the gate's decisions are unchanged.
+        let ptOn = ptTickActive
+        if ptOn { ptAttemptBegan(at: now) }
+        #endif
         presentGateLock.lock()
         if presentsInFlight > 0, now - lastGatedPresentAt > Self.presentGateTimeout {
             presentsInFlight = 0
@@ -4535,31 +4562,117 @@ final class MetalVideoRenderer {
         }
         let inFlight = presentsInFlight, period = windowDisplayPeriod
         presentGateLock.unlock()
+        #if DEBUG
+        if ptOn { ptTick.period = period }
+        #endif
         // One waiting, or two on a display above 60 Hz (`WindowPresentTiming.presentsWaitingLimit`; docs/BUGS.md 2026-11-01).
         if inFlight > WindowPresentTiming.presentsWaitingLimit(displayPeriod: period) {
-            pacerPresentStats.heldInFlight += 1; return nil
+            pacerPresentStats.heldInFlight += 1
+            #if DEBUG
+            if ptOn { ptAttemptEnded(.heldInFlight, inFlight: inFlight) }
+            #endif
+            return nil
         }
-        if period > 0, now - lastGatedPresentAt < period * 0.75 { pacerPresentStats.heldRate += 1; return nil }
-        guard let cb = commandQueue.makeCommandBuffer() else { return nil }
+        if period > 0, now - lastGatedPresentAt < period * 0.75 {
+            pacerPresentStats.heldRate += 1
+            #if DEBUG
+            if ptOn { ptAttemptEnded(.heldRate, inFlight: inFlight) }
+            #endif
+            return nil
+        }
+        #if DEBUG
+        let ptGate = ptOn ? CACurrentMediaTime() : 0
+        #endif
+        guard let cb = commandQueue.makeCommandBuffer() else {
+            #if DEBUG
+            if ptOn { ptAttemptEnded(.noBuffer, inFlight: inFlight) }
+            #endif
+            return nil
+        }
         let t0 = CACurrentMediaTime()
-        guard let drawable = metalLayer.nextDrawable() else { pacerPresentStats.nilDrawable += 1; return nil }
+        guard let drawable = metalLayer.nextDrawable() else {
+            pacerPresentStats.nilDrawable += 1
+            #if DEBUG
+            if ptOn { ptAttemptEnded(.nilDrawable, inFlight: inFlight) }
+            #endif
+            return nil
+        }
         let wait = CACurrentMediaTime() - t0
         pacerPresentStats.drawableWait.add(wait)
         encodeDisplayStage(from: pending.texture, width: pending.width, height: pending.height, into: cb, drawable: drawable)
+        #if DEBUG
+        let ptEncoded = ptOn ? CACurrentMediaTime() : 0
+        #endif
         presentGateLock.lock(); presentsInFlight += 1; presentGateLock.unlock()
         drawable.addPresentedHandler { [weak self] _ in
             guard let self else { return }
             self.presentGateLock.lock(); self.presentsInFlight = max(0, self.presentsInFlight - 1); self.presentGateLock.unlock()
         }
+        #if DEBUG
+        if ptOn {   // a second handler, logging only: when this present reached the glass
+            ptSeq &+= 1
+            let seq = ptSeq
+            drawable.addPresentedHandler { d in
+                PresentTimingLog.shared.glass(seq: seq, presentedTime: d.presentedTime, handlerHost: CACurrentMediaTime())
+            }
+        }
+        let ptHandlers = ptOn ? CACurrentMediaTime() : 0
+        #endif
         cb.commit()
+        #if DEBUG
+        let ptCommitted = ptOn ? CACurrentMediaTime() : 0
+        #endif
         deferredPresent = nil
         lastGatedPresentAt = CACurrentMediaTime()
         pacerPresentStats.presents += 1
         reportCompareStamp(on: drawable)
+        #if DEBUG
+        if ptOn {
+            ptTick.steps.gate = ptGate - now
+            ptTick.steps.makeCommandBuffer = t0 - ptGate
+            ptTick.steps.nextDrawable = wait
+            ptTick.steps.encode = ptEncoded - (t0 + wait)
+            ptTick.steps.handler = ptHandlers - ptEncoded
+            ptTick.steps.commit = ptCommitted - ptHandlers
+            ptTick.steps.stamp = CACurrentMediaTime() - ptCommitted
+            ptTick.seq = ptSeq
+            ptInPresent = true
+        }
+        #endif
         presentDrawable(drawable, on: cb)
+        #if DEBUG
+        if ptOn { ptInPresent = false; ptAttemptEnded(.presented, inFlight: inFlight) }
+        #endif
         presentsSinceFlush &+= 1
         return wait
     }
+
+    #if DEBUG
+    /// The present-path measurement (PresentTimingLog), render thread: this tick's record, written only while `ptTickActive`.
+    private var ptTick = PresentTimingLog.Tick()
+    /// True from the start to the end of a pacer tick with MANIFOLD_PRESENT_TIMING=1; never set otherwise.
+    private var ptTickActive = false
+    /// True only around `servePacedPresent`'s call to `presentDrawable`, so that call (and no other present) times its steps.
+    private var ptInPresent = false
+    private var ptSeq: Int64 = 0
+
+    private func ptAttemptBegan(at host: CFTimeInterval) {
+        ptTick.attempts &+= 1
+        var a = PresentTimingLog.Attempt()
+        a.start = host
+        a.inRender = ptTick.performEnd.isNaN
+        if ptTick.attempts == 1 { ptTick.a1 = a } else if ptTick.attempts == 2 { ptTick.a2 = a }
+    }
+
+    private func ptAttemptEnded(_ outcome: PresentTimingLog.Outcome, inFlight: Int) {
+        let end = CACurrentMediaTime(), n = Int16(clamping: inFlight)
+        if ptTick.attempts == 1 {
+            ptTick.a1.end = end; ptTick.a1.outcome = outcome; ptTick.a1.inFlight = n
+        } else if ptTick.attempts == 2 {
+            ptTick.a2.end = end; ptTick.a2.outcome = outcome; ptTick.a2.inFlight = n
+        }
+    }
+    #endif
 
     // The B measurement: what the gate did, how long `nextDrawable()` took, and how long after its tick began each frame
     // reached the SDI ring. Logged every 10 s while output runs, beside the pacer's own interval line.
@@ -4724,7 +4837,15 @@ final class MetalVideoRenderer {
     ///
     /// Every present in this file goes through here. If you add a second one, add it here too.
     private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer) {
+        #if DEBUG
+        // The present-path measurement (PresentTimingLog): set only by `servePacedPresent` inside a measured pacer tick.
+        let ptOn = ptInPresent
+        let ptWaitStart = ptOn ? CACurrentMediaTime() : 0
+        #endif
         cmdBuffer.waitUntilScheduled()
+        #if DEBUG
+        let ptWaitEnd = ptOn ? CACurrentMediaTime() : 0
+        #endif
         #if DEBUG
         // [AV-LAG] (pre-ship removal, docs/BUGS.md). Audio heard at the moment this picture reached
         // the glass, minus the picture's own PTS: the audio content advances one second per second,
@@ -4744,12 +4865,33 @@ final class MetalVideoRenderer {
             }
         }
         #endif
+        #if DEBUG
+        let ptBegin = ptOn ? CACurrentMediaTime() : 0
+        #endif
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        #if DEBUG
+        if ptOn { ptTick.presentHost = CACurrentMediaTime() }
+        #endif
         drawable.present()
+        #if DEBUG
+        let ptPresented = ptOn ? CACurrentMediaTime() : 0
+        #endif
         CATransaction.commit()
+        #if DEBUG
+        let ptTxCommitted = ptOn ? CACurrentMediaTime() : 0
+        #endif
         // The colour state installed this tick, if any, lands in the same commit as this frame.
         closeColorStateTransaction()
+        #if DEBUG
+        if ptOn {
+            ptTick.steps.waitUntilScheduled = ptWaitEnd - ptWaitStart
+            ptTick.steps.probe = ptBegin - ptWaitEnd
+            ptTick.steps.present = ptPresented - ptBegin
+            ptTick.steps.txCommit = ptTxCommitted - ptPresented
+            ptTick.steps.colorTx = CACurrentMediaTime() - ptTxCommitted
+        }
+        #endif
     }
 
     /// RENDER THREAD ONLY. True between a colour-state install and the commit it shares with the tick's present.
