@@ -897,7 +897,46 @@ they are noise in a gate, and gating on them is how a useful check gets disabled
 
 ---
 
-## ☐ PRE-SHIP: Release configuration does not compile: DeckLinkBridge.mm uses os_unfair_lock (:2132) but includes its header only under #if DEBUG (:20-22) (found 2026-11-16, PRE-EXISTING, not fixed)
+## ✅ FIXED 2026-11-17: Release configuration does not compile: DeckLinkBridge.mm uses os_unfair_lock (:2132) but includes its header only under #if DEBUG (:20-22) (found 2026-11-16)
+
+**FIXED 2026-11-17** (uncommitted at the time of writing). `#include <os/lock.h>` moved out of the `#if DEBUG` block, to
+`App/DeckLink/DeckLinkBridge.mm:20`, unconditional. `<mach/mach_time.h>` stays inside `#if DEBUG` (`:22-23`): its only users,
+`mach_timebase_info` and `mach_absolute_time` in `cardClockHostNow()`, are themselves DEBUG-only. The file was checked whole for any
+other symbol used outside `#if DEBUG` whose declaration or include is inside it. There is none: the DEBUG test switches read in
+production code (`m_legacyStart`, `m_recoverStart`, `m_prerollVideoOnly`, `m_prerollFull`, `m_faultGap`, `m_faultRecover`) are declared
+unconditionally (`:2096-2103`). The other DEBUG-only symbols (`envIs`, `kAudioCorrLog`, `kCardClockLog`, `gCardClock`, `cardClock*`,
+`kAudioBranchLogBurst`, `m_branchLogCalls`, `m_lastBranchLogFrames`) are used only inside DEBUG blocks.
+
+**Proof.**
+- Release: `xcodebuild -project Manifold.xcodeproj -scheme Manifold -configuration Release -derivedDataPath ./.build-release-check
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO build`: **BUILD SUCCEEDED**, 0 errors, 28 unique warnings. One is new and
+  Release-only: `DeckLinkBridge.mm:1543 unused variable 'late'`, because its only reader is the DEBUG-only `[AUDIO-CORR]` line below it.
+  It is a warning, not a break; it is left for a session on this file (the file's own pattern is a `(void)late;` `#else`, as at `:941`
+  and `:1680`). The rest are the Profile warnings below, less the four in `App/Live/SyntheticLiveSource.swift`, which is wholly
+  `#if DEBUG`.
+- Profile, `-derivedDataPath ./.build-cc`: **BUILD SUCCEEDED**, 0 errors. The 26 warnings of the previous `.build-cc` build
+  (18:55 the same day) are unchanged, and `DeckLinkBridge.mm` adds none. Five more appear, in `ManifoldCore` `FrameEngine.swift:321, 5507,
+  5510` and `LibavAudioSource.swift:412` (×2). They are pre-existing: the 18:55 build was incremental and did not compile the package (its
+  log does not name `FrameEngine.swift`). The clean Release build shows the same five, and the fix does not touch the package.
+
+**Cause: `a8bb0b8`** (2026-11-10 20:00, *fix(decklink): SDI audio anchor counts the handed frame as 3 − φ frames from the wire*).
+It added `os_unfair_lock m_handedLock` and its eight lock/unlock calls as production code, unconditional, but put
+`#include <os/lock.h>` on the line after `<mach/mach_time.h>`, inside the existing `#if DEBUG` block. Profile defines DEBUG, so no
+build noticed. B17 (2026-11-07) predates it. The only commits to the file between B17 and it are `d7a4e93` and `48527a2`, neither
+of which has the lock. Same shape as `d76bb21`: a declaration that Release needs, inside `#if DEBUG`.
+
+**Guard (proposed, not built).** The cause is structural: every build, and `release-mac.sh`'s default `CONFIG`, is Profile, so
+Release is compiled only when someone thinks to. Proposal for `scripts/release-mac.sh`: a step between *3. xcodegen generate* and *4.
+Archive* (it needs the regenerated project, so it cannot sit in step 0), run when `CONFIG` is not `Release`:
+`xcodebuild build -project "$XCODEPROJ" -scheme "$SCHEME" -configuration Release -derivedDataPath "${RUN_DIR}/release-compile-check"
+ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO > "${LOG_DIR}/release-compile.log" 2>&1 || die "Release configuration does
+not compile — see ${LOG_DIR}/release-compile.log"`, followed by `ok "Release configuration compiles"`. Cost: one extra full build per
+release (no signing, no notarization). It catches this class of break at the next release rather than at the next Release-only check.
+Catching it sooner needs the same command as a dev-loop habit, or a scheduled run.
+
+---
+
+*Original entry, as found:*
 
 **Found** 2026-11-16 by the card-pull measurement build's Release compile check (`CARD_PULL_MARGIN.md` §11.5).
 `xcodebuild -configuration Release -derivedDataPath ./.build-pp-release ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
@@ -925,7 +964,8 @@ one-line include, but that is an inference.
 **⚠️ 2026-11-16: "The Release compile half is FIXED" (the heading, and "The blocking half is fixed and verified" below) is no longer
 true.** Release does not compile today: see *Release configuration does not compile: DeckLinkBridge.mm uses os_unfair_lock* above.
 The `d76bb21` fix still stands; this is a new break of the same kind (a declaration Release needs, inside `#if DEBUG`). The heading is
-left as written so links to it keep working.
+left as written so links to it keep working. **2026-11-17: that new break is FIXED** (`<os/lock.h>` unconditional; Release and
+Profile both build, see the entry above); the heading is true again.
 
 **Status:** ☐ **OPEN as a checklist item — NO LONGER A BLOCKER, lowered 2026-09-21.** The blocking
 half is fixed and verified; the audit half is untouched and stays open. **Raised:** 2026-08-27 as
