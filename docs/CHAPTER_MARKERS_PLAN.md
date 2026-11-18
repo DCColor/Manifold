@@ -671,7 +671,7 @@ All as recommended.
 | D-C5 | Chapters in EDL/CSV export | **None in 0.9.5** (Convert first) |
 | D-C6 | Navigation | **⇧↑/⇧↓ include chapters; ⇧M doesn't** |
 | D-C7 | Rounding | **Floor with a one-tick tolerance** (§3.1). Built so. **See D-C7a** |
-| D-C8 | Converted duration | **The chapter's duration** |
+| D-C8 (**revised 2026-11-17, Robbie, after the Premiere round trip**) | Converted duration | ~~The chapter's duration~~ **One frame for chapter-track and `chpl` chapters**: their implied duration (to the next chapter, or the end of the file) is a property of the chapter-track format, not something the author set. **XMP markers take their stated duration when they have one, else one frame**, Chapter and Comment alike. The read-only layer is unchanged: chapters stay flags with no band, and XMP markers with a stated duration keep their band (`ChapterMapping.convert`, §16.1) |
 | D-C9 | XMP markers | **Later, in both apps.** §11.5 raises its weight. **Superseded: built in Manifold as Stage 3 (§16)**; Flip unchanged |
 | D-C12a (Robbie, 2026-11-17, **supersedes D-C12**) | Which XMP types show | **Only Chapter and Comment.** Segmentation, WebLink, FLVCuePoint and any other type (or none) are skipped and counted in the log line (`[MARKERS] xmp … skipped=…`), never shown or converted (§12.5, §16) |
 
@@ -1687,14 +1687,19 @@ show. Stage 4 (D-C15, the timecode source) is not part of this. Not attended yet
   - Past the end: dropped and counted, as chapters. `Result.chaptersPastEnd` counts the chapter-kind ones for the
     Inspector.
   - **Stated duration → band** (D-C16) at alpha **0.3**, against a user marker's 0.55 (`TrackMarker.outlineBandAlpha`,
-    `filledBandAlpha`), in the item's color, or the neutral when it has none. No band without a stated duration. The
+    `filledBandAlpha`), in the item's layer color (below). No band without a stated duration. The
     strip gives a frame's outlined flag the longest stated duration among the items on it.
-  - Outline in the item's own color (D-C13), neutral when none (chapter tracks, `chpl`, an XMP marker without the param).
+  - Outline in the item's **layer color** (`MappedChapter.layerColor`, D-C13; amended 2026-11-17): its own color when it
+    states one; **an XMP marker without the color param in Manifold's Green**, because Premiere writes no value for its
+    Green (MARKER_EXPORT_PLAN §4.1, P0) and Convert gives it Green, so the strip and Convert agree; **neutral** for
+    chapter-track and `chpl` chapters, which never state a color and convert to Blue. The list rows' icons use the same
+    color. The read itself still leaves an XMP marker's `color` nil: nothing is invented in the parse.
   - **De-duplication:** a chapter-track or `chpl` chapter on the frame of an XMP **Chapter** is left out and counted
     (`duplicates`); the XMP one, which has a color and an id, is shown. An XMP Comment on a chapter's frame is a
     different marker: both show. Duplicates are not drops.
-  - A Comment with no duration is 1 frame and does not end the chapter before it (as Stage 2). An XMP Chapter with no
-    duration runs to the next chapter (D-C8).
+  - A Comment with no duration is 1 frame and does not end the chapter before it (as Stage 2). On the layer, an XMP
+    Chapter with no duration runs to the next chapter, as a chapter-track chapter does, with no band; Convert makes both
+    one frame (D-C8 revised, below).
 - **UI, renamed (Robbie, 2026-11-17):**
   - View ▸ **Show File Markers** (no key); the filter chip **From File** (`doc.text`); the window's header
     "12 markers · 3 from file" and the slot's " · 3 from file"; **Convert All File Markers to Markers** in the Mark menu
@@ -1710,11 +1715,14 @@ show. Stage 4 (D-C15, the timecode source) is not part of this. Not attended yet
     changed (`ShortcutCatalog`; `MenuKeyAudit` matches by the catalog title, which the menu items read from it).
   - The Inspector row stays **"Chapters"** and now counts the chapter-kind items (XMP Chapters included, de-duplicated),
     not Comments.
-- **Convert (XMP items):** color through the decided 8→16 table (`PremiereMarkerColor`), else D-C4 Blue; keyword
-  "chapter" or "comment"; name = name; **notes = comment**; duration = stated, else D-C8 for chapters and 1 frame for
-  comments. D-C14: the GUID goes into `Marker.embeddedID`, and a second Convert skips it.
-  - Which of Premiere's 8 a value is: the three measured values exactly (Red #D22C36, Purple #AF8BB1, Orange #E96F24);
-    any other by hue, an **inference until one export of each is decoded**: White when saturation < 0.12; Red < 12° or
+- **Convert (XMP items):** color through the decided 8→16 table (`PremiereMarkerColor`); **no color param is Premiere's
+  Green, so Green** (amended 2026-11-17, MARKER_EXPORT_PLAN §4.1; chapter-track and `chpl` chapters keep D-C4 Blue); keyword
+  "chapter" or "comment"; name = name; **notes = comment**; **duration = the stated one, else one frame, Chapter and
+  Comment alike** (D-C8 revised 2026-11-17; a chapter-track or `chpl` chapter always converts to one frame).
+  D-C14: the GUID goes into `Marker.embeddedID`, and a second Convert skips it.
+  - Which of Premiere's 8 a value is: the seven measured values exactly (Red #D22C36, Purple #AF8BB1, Orange #E96F24;
+    since 2026-11-17 also Yellow #D0A12B, White #FFFFFF, Blue #428DFC, Cyan #19F4D6, from Premiere's xmeml, the same
+    integers as XMP for the three measured in both, MARKER_EXPORT_PLAN §4.1); Green has no value. Any other value by hue: White when saturation < 0.12; Red < 12° or
     ≥ 330°, Orange < 40°, Yellow < 75°, Green < 160°, Cyan < 200°, Blue < 250°, Purple < 330°.
 - **Log, counts only:** `[MARKERS] xmp status=… where=uuid|udta bytes=… tracks=… chapter=… comment=… unreadable=…
   skipped=… segmentation=… weblink=… flvcuepoint=… cue=… index=… other=… read=…ms`, once per open whenever the file has
