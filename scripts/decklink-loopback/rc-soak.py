@@ -50,11 +50,15 @@ def guard():
     if r.returncode: say(f"GUARD TRIPPED, stopping: {r.stderr.strip()}"); sys.exit(2)
 def menu(pid, bar, item):
     sh("osascript", "-e", f'tell application "System Events" to tell (first process whose unix id is {pid}) to click menu item "{item}" of menu 1 of menu bar item "{bar}" of menu bar 1')
+DENIED = 0   # licence prompts denied by this process (a click on Deny that osascript reported done); saved per block
 def deny_licence_prompt():
     """An unsigned build's licence prompt, and only that: Deny writes nothing. Anything else on SecurityAgent is left alone."""
+    global DENIED
     if sh("pgrep", "-x", "SecurityAgent").returncode: return
     t = sh("osascript", "-e", 'tell application "System Events" to tell process "SecurityAgent" to get value of static texts of window 1').stdout
-    if "manifold" in t.lower(): sh("osascript", "-e", 'tell application "System Events" to tell process "SecurityAgent" to click button "Deny" of window 1')
+    if "manifold" in t.lower():
+        if sh("osascript", "-e", 'tell application "System Events" to tell process "SecurityAgent" to click button "Deny" of window 1').returncode == 0:
+            DENIED += 1; say(f"licence prompt denied ({DENIED} this block)")
 def resolve_running():
     return any("/DaVinci Resolve.app/Contents/MacOS/" in l for l in sh("ps", "-axo", "comm=").stdout.splitlines())
 
@@ -81,7 +85,9 @@ class Freeze:
 # The card-pull measurement build (docs/CARD_PULL_MARGIN.md, *Measurement build*) and option C's A/B (§7 C, MANIFOLD_PACER_PHASE):
 # the only variables `env NAME=VALUE` may add. None changes the card lock, Stage 2, the recovery paths or the audio routing (option C
 # moves the output pacer's deadlines by at most 20 µs a tick, and only while it is on); without `env` nothing here changes.
-EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"1"}}
+# The present-path measurement (docs/WINDOW_PRESENT_PATH.md §4.1, MANIFOLD_PRESENT_TIMING) only reads clocks and logs.
+EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"1"},
+                     "MANIFOLD_PRESENT_TIMING": {"1"}}
 
 def parse_extra_env(items):
     out = {}
@@ -105,13 +111,13 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
     if extra_env: env.update(extra_env)
     meta = dict(label=label, output=output, app=app, fixture=fixture, length=length, mode=mode, dest=dest, minutes=minutes, cycles=k, seed=seed,
                 env=sorted(x for x in env if x.startswith("MANIFOLD_")), began=datetime.datetime.now().isoformat(timespec="seconds"), freezes=[])
-    if extra_env: meta["extra_env"] = {k2: (v if k2 == "MANIFOLD_DECKLINK_CADENCE_LOG" else f"{len(v.split(','))} entries") for k2, v in extra_env.items()}
+    if extra_env: meta["extra_env"] = {k2: (f"{len(v.split(','))} entries" if k2 == "MANIFOLD_DECKLINK_LATE_SWAP_AT" else v) for k2, v in extra_env.items()}
     if markers: fp = fingerprint(fixture); meta.update(markers_expected=markers, fingerprint=fp[:16], regens=[], latedrop=[])
     defp = subprocess.Popen([f"{DEV}/defout", "100000", f"{OUT}/{label}.defout"])
     p = subprocess.Popen([app, "-manifold.decklink.audioDestination", dest, "-manifold.decklink.manualOutputMode", mode],
                          stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     pid = p.pid; meta["pid"] = pid; say(f"{label}: pid {pid}, {title}, {mode}, destination {dest}, {k} cycles, seed {seed}")
-    def save(**kw): meta.update(kw); json.dump(meta, open(f"{OUT}/{label}.json", "w"), indent=1)
+    def save(**kw): meta.update(kw, licence_prompts_denied=DENIED); json.dump(meta, open(f"{OUT}/{label}.json", "w"), indent=1)
     def quit_build(why):
         r = sh(PROC, "quit", str(pid), "--timeout", "60")
         if r.returncode: say(f"pid {pid} did not quit ({r.returncode}: {r.stderr.strip()}); left running, stopping"); save(ended=why, quit="FAILED"); defp.terminate(); sys.exit(5)
