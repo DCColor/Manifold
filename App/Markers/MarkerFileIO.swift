@@ -1,8 +1,9 @@
 //
 //  MarkerFileIO.swift — File ▸ Export Markers… and File ▸ Import Markers… (docs/MARKERS_PLAN.md §6, §7 v1).
 //
-//  Export: Resolve marker EDL, CSV or plain text, chosen in the save panel. Import: a Resolve marker EDL, merged into
-//  the window's markers (D9), with the whole-hour shift offered and never applied unasked (§6.4).
+//  Export: Resolve marker EDL, CSV, plain text or Premiere Pro XML (docs/MARKER_EXPORT_PLAN.md), chosen in the save
+//  panel. Import: a Resolve marker EDL, merged into the window's markers (D9), with the whole-hour shift offered and never
+//  applied unasked (§6.4).
 //
 //  ⚠️ Logs through `MarkerLog` only (counts). The panels and alerts show the user's own words to the user; nothing
 //  here writes them anywhere else.
@@ -15,21 +16,29 @@ import UniformTypeIdentifiers
 @MainActor
 enum MarkerFileIO {
 
+    /// Stored by raw value in `formatKey`: NEW CASES GO AT THE END, so a saved choice keeps its meaning
+    /// (docs/MARKER_EXPORT_PLAN.md §5). Final Cut takes 4 when it comes.
     enum Format: Int, CaseIterable {
-        case resolveEDL, csv, text
+        case resolveEDL, csv, text, premiereXML
         var title: String {
             switch self {
             case .resolveEDL: return "DaVinci Resolve Marker EDL (.edl)"
             case .csv: return "CSV (.csv)"
             case .text: return "Plain Text (.txt)"
+            case .premiereXML: return "Premiere Pro (XML)"
             }
         }
-        var ext: String { ["edl", "csv", "txt"][rawValue] }
-        var type: UTType { UTType(filenameExtension: ext) ?? .plainText }
+        var ext: String { ["edl", "csv", "txt", "xml"][rawValue] }
+        var type: UTType {
+            if self == .premiereXML { return .xml }
+            return UTType(filenameExtension: ext) ?? .plainText
+        }
     }
 
     private static let formatKey = "manifold.markers.exportFormat"
     private static let keywordsKey = "manifold.markers.edlKeywordsInNotes"
+    /// E2 (§8): Premiere's own checkbox, off by default, kept apart from the EDL's so turning one on never turns on the other.
+    private static let premiereKeywordsKey = "manifold.markers.premiereKeywordsInComments"
 
     // MARK: Export
 
@@ -44,7 +53,8 @@ enum MarkerFileIO {
         panel.title = "Export Markers"
         panel.prompt = "Export"
         let accessory = ExportAccessory(format: Format(rawValue: UserDefaults.standard.integer(forKey: formatKey)) ?? .resolveEDL,
-                                        keywords: UserDefaults.standard.bool(forKey: keywordsKey))
+                                        keywords: UserDefaults.standard.bool(forKey: keywordsKey),
+                                        premiereKeywords: UserDefaults.standard.bool(forKey: premiereKeywordsKey))
         panel.accessoryView = accessory.view
         panel.isExtensionHidden = false
         func applyFormat() {
@@ -59,7 +69,9 @@ enum MarkerFileIO {
                 guard response == .OK, let url = panel.url else { return }
                 UserDefaults.standard.set(accessory.format.rawValue, forKey: formatKey)
                 UserDefaults.standard.set(accessory.keywords, forKey: keywordsKey)
-                write(model: model, basis: basis, format: accessory.format, keywordsInNotes: accessory.keywords, to: url)
+                UserDefaults.standard.set(accessory.premiereKeywords, forKey: premiereKeywordsKey)
+                let keywords = accessory.format == .premiereXML ? accessory.premiereKeywords : accessory.keywords
+                write(model: model, basis: basis, format: accessory.format, keywordsInNotes: keywords, to: url)
             }
         }
         if let window { panel.beginSheetModal(for: window, completionHandler: finish) } else { finish(panel.runModal()) }
@@ -96,6 +108,25 @@ enum MarkerFileIO {
                     .write(to: url, options: .atomic)
                 NSLog("%@", MarkerLog.exported(.text, count: markers.count))
                 model.show("Exported \(markers.count) markers to text.")
+            case .premiereXML:
+                // User markers only: the file's chapters and XMP markers are exported after Convert (D-C5, §4.4).
+                guard let media = model.premiereMedia else { NSSound.beep(); return }
+                let unconverted = model.unconvertedChapters.count
+                let out: (data: Data, report: PremiereXML.ExportReport)
+                do {
+                    out = try PremiereXML.export(markers: markers, sequenceName: model.clipName, media: media, basis: basis,
+                                                 sequenceUUID: UUID(),
+                                                 options: .init(appendKeywordsToComments: keywordsInNotes))
+                } catch {
+                    NSLog("%@", MarkerLog.exportRefusedRate())
+                    model.show("Premiere Pro XML can’t state this file’s frame rate (\(basis.rateLabel) fps). Nothing was written.")
+                    NSSound.beep()
+                    return
+                }
+                try out.data.write(to: url, options: .atomic)
+                NSLog("%@", MarkerLog.exported(xmeml: out.report, audioChannels: media.audioChannels,
+                                               unconvertedFileMarkers: unconverted))
+                model.show(PremiereXML.notice(out.report, unconvertedFileMarkers: unconverted))
             }
         } catch {
             model.show("The markers could not be written there.")
@@ -194,26 +225,35 @@ enum MarkerFileIO {
     }
 }
 
-/// The save panel's format pop-up and the EDL's keywords checkbox.
+/// The save panel's format pop-up, the EDL's keywords checkbox, and, for Premiere Pro XML only, its own keywords
+/// checkbox and a one-line note (docs/MARKER_EXPORT_PLAN.md §5).
 @MainActor
 private final class ExportAccessory: NSObject {
     let view: NSView
     private let popup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let checkbox = NSButton(checkboxWithTitle: "Add keywords to notes", target: nil, action: nil)
+    private let premiereCheckbox = NSButton(checkboxWithTitle: "Add keywords to comments", target: nil, action: nil)
+    private let premiereNote = NSTextField(labelWithString:
+        "The file contains the media’s full path. Markers arrive in Premiere as Comment markers.")
     var onChange: (() -> Void)?
 
     var format: MarkerFileIO.Format { MarkerFileIO.Format(rawValue: popup.indexOfSelectedItem) ?? .resolveEDL }
     var keywords: Bool { checkbox.state == .on }
+    var premiereKeywords: Bool { premiereCheckbox.state == .on }
 
-    init(format: MarkerFileIO.Format, keywords: Bool) {
+    init(format: MarkerFileIO.Format, keywords: Bool, premiereKeywords: Bool) {
         let label = NSTextField(labelWithString: "Format:")
         popup.addItems(withTitles: MarkerFileIO.Format.allCases.map(\.title))
         popup.selectItem(at: format.rawValue)
         checkbox.state = keywords ? .on : .off
         checkbox.toolTip = "An EDL has no keyword field. On: keywords are added to the end of the note as [a, b]."
+        premiereCheckbox.state = premiereKeywords ? .on : .off
+        premiereCheckbox.toolTip = "Premiere markers have no keyword field. On: keywords are added to the end of the comment as [a, b]."
+        premiereNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        premiereNote.textColor = .secondaryLabelColor
         let row = NSStackView(views: [label, popup])
         row.orientation = .horizontal
-        let stack = NSStackView(views: [row, checkbox])
+        let stack = NSStackView(views: [row, checkbox, premiereCheckbox, premiereNote])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 20, bottom: 10, right: 20)
@@ -225,7 +265,11 @@ private final class ExportAccessory: NSObject {
     }
 
     @objc private func changed() {
+        let premiere = format == .premiereXML
         checkbox.isEnabled = format == .resolveEDL
+        checkbox.isHidden = premiere          // one keywords checkbox at a time
+        premiereCheckbox.isHidden = !premiere
+        premiereNote.isHidden = !premiere
         onChange?()
     }
 }

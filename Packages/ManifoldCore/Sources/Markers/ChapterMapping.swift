@@ -184,6 +184,17 @@ public struct MappedChapter: Equatable, Identifiable, Sendable {
 
     public var id: Int { fileIndex }
     public var lastFrame: Int { frame + max(duration, 1) - 1 }
+
+    /// The color the read-only layer draws the item's outline and band in (D-C13), so the strip and the list agree with
+    /// Convert: its own color when it states one; an XMP item without one in Manifold's Green, the color Convert gives it
+    /// (Premiere writes no value for its Green, docs/MARKER_EXPORT_PLAN.md §4.1); nil (drawn neutral) for a chapter-track
+    /// or `chpl` chapter, which never states one and converts to Blue.
+    public var layerColor: EmbeddedColor? {
+        if let color { return color }
+        guard source == .xmp else { return nil }
+        let h = MarkerColor.green.hex
+        return EmbeddedColor(red: UInt8((h >> 16) & 0xFF), green: UInt8((h >> 8) & 0xFF), blue: UInt8(h & 0xFF))
+    }
 }
 
 public enum ChapterMapping {
@@ -362,9 +373,12 @@ public enum ChapterMapping {
     }
 
     /// Convert to Markers (D-C4, D-C8, D-C13, D-C14): the item's own color through Premiere's 8→16 table
-    /// (`PremiereMarkerColor`), else Blue; the kind's keyword ("chapter" or "comment"); name = its title; notes = its
-    /// comment; the item's duration (stated, else D-C8's run for a chapter, 1 frame for a comment); its stable id when it
-    /// has one. Through the import merge rule, so an item on a frame that already holds a different marker is skipped and
+    /// (`PremiereMarkerColor`); with none, Green for an XMP item (Premiere's Green has no value) and Blue otherwise; the
+    /// kind's keyword ("chapter" or "comment"); name = its title; notes = its comment; its stable id when it has one.
+    /// DURATION (D-C8 revised, Robbie, 2026-11-17): an XMP item's STATED duration when it has one, else ONE frame,
+    /// Chapter and Comment alike; a chapter-track or `chpl` chapter is always ONE frame. A chapter's run to the next
+    /// chapter (`duration`) is a property of the chapter-track format, not something the author set, so it stays on the
+    /// read-only layer and never becomes a marker's length. Through the import merge rule, so an item on a frame that already holds a different marker is skipped and
     /// counted, and one identical to a marker there merges (D19, `ResolveEDL.merge`). An item whose stable id a marker
     /// already carries is skipped first.
     public static func convert(_ chapters: [MappedChapter], into existing: [Marker], created: Date = Date()) -> ConvertResult {
@@ -372,8 +386,10 @@ public enum ChapterMapping {
         var incoming: [Marker] = []
         for c in chapters {
             if let id = c.stableID, existing.contains(where: { $0.embeddedID == id }) { skipped += 1; continue }
-            incoming.append(Marker(frame: c.frame, duration: c.duration, name: c.title, notes: c.comment,
-                                   keywords: [c.kind.keyword], color: PremiereMarkerColor.markerColor(for: c.color),
+            let duration = c.source == .xmp ? (c.statedDuration ?? 1) : 1
+            incoming.append(Marker(frame: c.frame, duration: duration, name: c.title, notes: c.comment,
+                                   keywords: [c.kind.keyword],
+                                   color: PremiereMarkerColor.markerColor(for: c.color, source: c.source),
                                    created: created, embeddedID: c.stableID))
         }
         return ConvertResult(merge: ResolveEDL.merge(incoming, into: existing), alreadyConverted: skipped)

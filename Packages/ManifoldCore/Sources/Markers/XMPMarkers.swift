@@ -56,17 +56,31 @@ public enum PremiereMarkerColor: String, CaseIterable, Sendable {
         }
     }
 
-    /// The three values measured on Premiere's own exports (§12.5), sRGB.
-    public static let measured: [EmbeddedColor: PremiereMarkerColor] = [
-        EmbeddedColor(red: 0xD2, green: 0x2C, blue: 0x36): .red,
-        EmbeddedColor(red: 0xAF, green: 0x8B, blue: 0xB1): .purple,
-        EmbeddedColor(red: 0xE9, green: 0x6F, blue: 0x24): .orange,
-    ]
+    /// Premiere's own integer for the color, A,B,G,R, as its xmeml `<pproColor>` and its XMP `{"color": …}` param write
+    /// it. All seven measured on Robbie's xmeml exports (docs/MARKER_EXPORT_PLAN.md §4.1, P0); Red, Purple and Orange are
+    /// the same integers §12.5 measured in XMP, so the other four are taken to be the same in XMP too. GREEN HAS NONE:
+    /// Premiere writes no value for it (P0), and a marker with no value is Green.
+    public var pproColor: UInt32? {
+        switch self {
+        case .green: return nil
+        case .red: return 4281740498
+        case .purple: return 4289825711
+        case .orange: return 4280578025
+        case .yellow: return 4281049552
+        case .white: return 4294967295
+        case .blue: return 4294741314
+        case .cyan: return 4292277273
+        }
+    }
 
-    /// Which of the 8 a decoded color is. The three measured values exactly; any other value by its hue (an INFERENCE:
-    /// Green, Yellow, White, Blue and Cyan are not measured yet, so this names them by where those hues lie):
-    /// White when nearly grey (saturation under 0.12); otherwise Red below 12° or from 330°, Orange to 40°, Yellow to 75°, Green to
-    /// 160°, Cyan to 200°, Blue to 250°, Purple to 330°. (Measured Purple, #AF8BB1, is 297°; Orange 23°; Red 356°.)
+    /// The seven measured values (all but Green, which has none), sRGB: exact matches before the hue rule.
+    public static let measured: [EmbeddedColor: PremiereMarkerColor] = Dictionary(uniqueKeysWithValues:
+        allCases.compactMap { c in c.pproColor.map { (XMPMarkers.abgr($0), c) } })
+
+    /// Which of the 8 a decoded color is. A measured value exactly; any other value by its hue: White when nearly grey
+    /// (saturation under 0.12); otherwise Red below 12° or from 330°, Orange to 40°, Yellow to 75°, Green to 160°, Cyan to
+    /// 200°, Blue to 250°, Purple to 330°. The rule names all seven measured values correctly too (§4.1): Red 356°,
+    /// Orange 23°, Yellow 43°, Cyan 172°, Blue 216°, Purple 297°, White by saturation.
     public init(nearest c: EmbeddedColor) {
         if let m = Self.measured[c] { self = m; return }
         let r = Double(c.red) / 255, g = Double(c.green) / 255, b = Double(c.blue) / 255
@@ -90,10 +104,27 @@ public enum PremiereMarkerColor: String, CaseIterable, Sendable {
         }
     }
 
-    /// The marker color a converted XMP item gets: its own color through the table, else D-C4's Blue.
-    public static func markerColor(for c: EmbeddedColor?) -> MarkerColor {
-        c.map { PremiereMarkerColor(nearest: $0).markerColor } ?? .blue
+    /// The marker color a converted item gets: its own color through the table. With no color: an XMP item is Premiere's
+    /// Green, since Premiere writes no value for Green (docs/MARKER_EXPORT_PLAN.md §4.1, P0); a chapter-track or `chpl`
+    /// chapter, which never states one, is D-C4's Blue.
+    public static func markerColor(for c: EmbeddedColor?, source: EmbeddedMarkerSource = .chapterTrack) -> MarkerColor {
+        if let c { return PremiereMarkerColor(nearest: c).markerColor }
+        return source == .xmp ? PremiereMarkerColor.green.markerColor : .blue
     }
+
+    // MARK: Export (docs/MARKER_EXPORT_PLAN.md §4.1)
+
+    /// Which of Premiere's 8 a Manifold color exports as. The eight colors the import table produces go back to the
+    /// Premiere color they came from (so they round-trip unchanged); the other eight Resolve colors take the hue rule
+    /// (`init(nearest:)`) applied to Manifold's own swatch.
+    public init(exporting color: MarkerColor) {
+        if let back = Self.allCases.first(where: { $0.markerColor == color }) { self = back; return }
+        let h = color.hex
+        self.init(nearest: EmbeddedColor(red: UInt8((h >> 16) & 0xFF), green: UInt8((h >> 8) & 0xFF), blue: UInt8(h & 0xFF)))
+    }
+
+    /// The Manifold color is the one this Premiere color imports as: nothing was approximated.
+    public func isDirectMatch(for color: MarkerColor) -> Bool { markerColor == color }
 }
 
 // MARK: - Finding the packet

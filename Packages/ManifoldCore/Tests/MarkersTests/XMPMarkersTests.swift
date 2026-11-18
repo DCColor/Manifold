@@ -100,6 +100,54 @@ final class XMPMarkersTests: XCTestCase {
         XCTAssertEqual(r.items.map(\.color), [EmbeddedColor(red: 0xAF, green: 0x8B, blue: 0xB1), nil])
     }
 
+    /// MARKER_EXPORT_PLAN §4.1 (P0): Premiere's xmeml integers, the same three as §12.5 measured in XMP, plus Yellow,
+    /// White, Blue and Cyan. Each decodes to an exact table entry; Green has no value.
+    func testAllSevenMeasuredValuesAreExactMatchesAndNoValueIsGreen() {
+        let values: [(UInt32, EmbeddedColor, PremiereMarkerColor, MarkerColor)] = [
+            (4281740498, EmbeddedColor(red: 0xD2, green: 0x2C, blue: 0x36), .red, .red),
+            (4289825711, EmbeddedColor(red: 0xAF, green: 0x8B, blue: 0xB1), .purple, .lavender),
+            (4280578025, EmbeddedColor(red: 0xE9, green: 0x6F, blue: 0x24), .orange, .sand),
+            (4281049552, EmbeddedColor(red: 0xD0, green: 0xA1, blue: 0x2B), .yellow, .yellow),
+            (4294967295, EmbeddedColor(red: 0xFF, green: 0xFF, blue: 0xFF), .white, .cream),
+            (4294741314, EmbeddedColor(red: 0x42, green: 0x8D, blue: 0xFC), .blue, .blue),
+            (4292277273, EmbeddedColor(red: 0x19, green: 0xF4, blue: 0xD6), .cyan, .cyan),
+        ]
+        XCTAssertEqual(PremiereMarkerColor.measured.count, 7)
+        for (v, rgb, p, m) in values {
+            XCTAssertEqual(XMPMarkers.colorParam("{\"color\":\(v)}"), rgb, p.rawValue)
+            XCTAssertEqual(PremiereMarkerColor.measured[rgb], p, p.rawValue)
+            XCTAssertEqual(PremiereMarkerColor(nearest: rgb), p, p.rawValue)
+            XCTAssertEqual(PremiereMarkerColor.markerColor(for: rgb, source: .xmp), m, p.rawValue)
+        }
+        XCTAssertNil(PremiereMarkerColor.green.pproColor)
+        XCTAssertEqual(PremiereMarkerColor.markerColor(for: nil, source: .xmp), .green, "no value is Premiere's Green")
+        XCTAssertEqual(PremiereMarkerColor.markerColor(for: nil, source: .chapterTrack), .blue, "D-C4")
+        XCTAssertEqual(PremiereMarkerColor.markerColor(for: nil, source: .chpl), .blue, "D-C4")
+    }
+
+    /// The layer and Convert agree (MARKER_EXPORT_PLAN §4.1, CHAPTER_MARKERS_PLAN §16.1): an XMP item without a color is
+    /// drawn in Manifold's Green and converts to Green; a chapter-track or `chpl` chapter is drawn neutral (nil) and
+    /// converts to Blue; a stated color is drawn as stated.
+    func testLayerColorAgreesWithConvertForEverySource() {
+        let green = EmbeddedColor(red: 0x02, green: 0xB6, blue: 0x01)   // MarkerColor.green.hex
+        let items = [
+            MappedChapter(fileIndex: 0, frame: 10, duration: 1, title: "", source: .xmp, kind: .comment),
+            MappedChapter(fileIndex: 1, frame: 20, duration: 1, title: "", source: .xmp, kind: .chapter),
+            MappedChapter(fileIndex: 2, frame: 30, duration: 1, title: "", source: .xmp, kind: .comment,
+                          color: XMPMarkers.abgr(Self.red)),
+            MappedChapter(fileIndex: 3, frame: 40, duration: 1, title: "", source: .chapterTrack),
+            MappedChapter(fileIndex: 4, frame: 50, duration: 1, title: "", source: .chpl),
+        ]
+        XCTAssertEqual(items.map(\.layerColor), [green, green, XMPMarkers.abgr(Self.red), nil, nil])
+        XCTAssertEqual(ChapterMapping.convert(items, into: []).added.map(\.color), [.green, .green, .red, .blue, .blue])
+        // Through the parser: an XMP marker without the color param keeps `color` nil (nothing invented in the read)
+        // and is drawn Green.
+        let r = XMPMarkers.parse(Self.packet([Self.track("f25", [Self.marker("Comment", "1")])]))
+        XCTAssertNil(r.items.first?.color)
+        let mapped = ChapterMapping.map(r.items, rate: 25, lastFrame: 99)
+        XCTAssertEqual(mapped.chapters.map(\.layerColor), [green])
+    }
+
     func testGUIDFromTheAttributeElseTheMarkerGUIDParam() {
         let r = XMPMarkers.parse(Self.packet([Self.track("f25", [
             Self.marker("Chapter", "1", guid: "attr", paramGUID: "param"),
@@ -512,11 +560,14 @@ final class XMPMarkersTests: XCTestCase {
             MappedChapter(fileIndex: 4, frame: 50, duration: 9, title: "track"),
         ]
         let r = ChapterMapping.convert(items, into: [])
-        XCTAssertEqual(r.added.map(\.color), [.red, .sand, .lavender, .blue, .blue])
+        // No color: Premiere's Green for the XMP item (Green has no value, MARKER_EXPORT_PLAN §4.1), D-C4's Blue for the
+        // chapter-track one.
+        XCTAssertEqual(r.added.map(\.color), [.red, .sand, .lavender, .green, .blue])
         XCTAssertEqual(r.added.map(\.keywords), [["comment"], ["chapter"], ["comment"], ["comment"], ["chapter"]])
         XCTAssertEqual(r.added.map(\.notes), ["line one\nline two", "chapter note", "", "", ""])
         XCTAssertEqual(r.added.map(\.name), ["ranged", "act", "lav", "none", "track"])
-        XCTAssertEqual(r.added.map(\.duration), [96, 50, 1, 1, 9])
+        // D-C8 revised: stated (96), else one frame, the XMP Chapter's run to the next (50) and the chapter-track's (9) too.
+        XCTAssertEqual(r.added.map(\.duration), [96, 1, 1, 1, 1])
         XCTAssertEqual(r.added.map(\.embeddedID), ["g-1", "g-2", "g-3", "g-4", nil])
         // A second Convert skips every XMP item by its id (D-C14); the chapter-track one merges by frame and name.
         let again = ChapterMapping.convert(items, into: r.added)

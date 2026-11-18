@@ -263,11 +263,31 @@ final class ChapterMappingTests: XCTestCase {
         XCTAssertEqual(r.identical, 1)
         let m = r.added[0]
         XCTAssertEqual(m.frame, 0)
-        XCTAssertEqual(m.duration, 240)
+        XCTAssertEqual(m.duration, 1, "D-C8 revised: a chapter-track chapter is one frame, not its run to the next")
         XCTAssertEqual(m.name, "Opening")
         XCTAssertEqual(m.color, .blue)
         XCTAssertEqual(m.keywords, ["chapter"])
         XCTAssertEqual(m.notes, "")
+    }
+
+    /// D-C8 revised (Robbie, 2026-11-17): chapter-track and `chpl` chapters convert to one frame whatever their run; XMP
+    /// items take their STATED duration, else one frame, Chapter and Comment alike. The layer keeps every `duration` and
+    /// `statedDuration` as mapped: Convert reads them, never changes them.
+    func testConvertDurationIsStatedForXMPElseOneFrame() {
+        let items = [
+            MappedChapter(fileIndex: 0, frame: 0, duration: 240, title: "track", source: .chapterTrack),
+            MappedChapter(fileIndex: 1, frame: 240, duration: 481, title: "chpl", source: .chpl),
+            MappedChapter(fileIndex: 2, frame: 800, duration: 120, title: "xmp chapter stated", source: .xmp, kind: .chapter,
+                          statedDuration: 120),
+            MappedChapter(fileIndex: 3, frame: 1000, duration: 200, title: "xmp chapter run", source: .xmp, kind: .chapter),
+            MappedChapter(fileIndex: 4, frame: 1300, duration: 48, title: "xmp comment stated", source: .xmp, kind: .comment,
+                          statedDuration: 48),
+            MappedChapter(fileIndex: 5, frame: 1400, duration: 1, title: "xmp comment", source: .xmp, kind: .comment),
+        ]
+        let r = ChapterMapping.convert(items, into: [])
+        XCTAssertEqual(r.added.map(\.duration), [1, 1, 120, 1, 48, 1])
+        XCTAssertEqual(items.map(\.duration), [240, 481, 120, 200, 48, 1], "the layer's durations are untouched")
+        XCTAssertEqual(items.map(\.statedDuration), [nil, nil, 120, nil, 48, nil], "bands only where stated")
     }
 
     func testConvertSkipsStableIDsAlreadyConvertedAndCarriesTheID() {

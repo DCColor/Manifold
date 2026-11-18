@@ -378,9 +378,10 @@ struct MarkerListBody: View {
         }
     }
 
-    /// The file marker's own color when it has one (XMP items, D-C13), else the list's secondary.
+    /// The layer's color for the file marker (`MappedChapter.layerColor`: its own, Green for an XMP item without one),
+    /// else the list's secondary.
     private func chapterTint(_ c: MappedChapter, slot: Bool) -> Color {
-        if let k = c.color { return Color(.sRGB, red: Double(k.red) / 255, green: Double(k.green) / 255, blue: Double(k.blue) / 255) }
+        if let k = c.layerColor { return Color(.sRGB, red: Double(k.red) / 255, green: Double(k.green) / 255, blue: Double(k.blue) / 255) }
         return slot ? .white.opacity(0.75) : .secondary
     }
 

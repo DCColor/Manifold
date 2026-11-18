@@ -9,7 +9,7 @@
 import Foundation
 
 public enum MarkerLog {
-    public enum Format: String, Sendable { case edl = "edl", csv = "csv", text = "text" }
+    public enum Format: String, Sendable { case edl = "edl", csv = "csv", text = "text", xmeml = "xmeml" }
 
     public static func loaded(count: Int, fingerprintMs: Int) -> String {
         "[MARKERS] loaded n=\(count) fingerprint=\(fingerprintMs)ms"
@@ -33,6 +33,16 @@ public enum MarkerLog {
     }
 
     public static func exported(_ format: Format, count: Int) -> String { "[MARKERS] export \(format.rawValue) n=\(count)" }
+
+    /// Premiere Pro XML (docs/MARKER_EXPORT_PLAN.md §5): counts only. Never the media path, which the file holds.
+    public static func exported(xmeml r: PremiereXML.ExportReport, audioChannels: Int, unconvertedFileMarkers: Int) -> String {
+        "[MARKERS] export \(Format.xmeml.rawValue) n=\(r.markers) ranged=\(r.ranged) nearest-colors=\(r.nearestColors) "
+            + "flattened-notes=\(r.flattenedNotes) dropped-keywords=\(r.droppedKeywords) keywords-in-comments=\(r.appendedKeywords) "
+            + "audio-channels=\(audioChannels) unconverted-file-markers=\(unconvertedFileMarkers)"
+    }
+
+    /// Premiere Pro XML refused: the file's rate is not one xmeml can state.
+    public static func exportRefusedRate() -> String { "[MARKERS] export xmeml refused: rate not expressible" }
 
     public static func imported(added: Int, duplicates: Int, occupied: Int = 0, outside: Int, unknownColors: Int,
                                 shiftHours: Int, dropFrameMismatch: Bool) -> String {

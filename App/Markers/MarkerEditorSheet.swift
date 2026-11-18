@@ -285,7 +285,7 @@ struct MarkedTransportScrubber: View {
                 // (`ChapterLayer.flagToolTip`). Tooltips are local UI; never logged.
                 let label = group.items.map { ChapterLayer.flagToolTip($0, timecode: b.label($0.frame)) }.joined(separator: "\n")
                 let stated = group.items.compactMap(\.statedDuration).max()
-                let color = first.color.map { NSColor(srgbRed: CGFloat($0.red) / 255, green: CGFloat($0.green) / 255,
+                let color = first.layerColor.map { NSColor(srgbRed: CGFloat($0.red) / 255, green: CGFloat($0.green) / 255,
                                                       blue: CGFloat($0.blue) / 255, alpha: 1) } ?? TrackMarker.neutralOutline
                 let end = stated.map { first.frame + $0 } ?? first.frame
                 out.append(Flag(track: TrackMarker(start: Double(first.frame) / b.rate, end: Double(end) / b.rate,

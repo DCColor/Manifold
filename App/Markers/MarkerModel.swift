@@ -345,8 +345,8 @@ final class MarkerModel: ObservableObject {
     func go(to chapter: MappedChapter) { go(toFrame: chapter.frame) }
 
     /// Convert to Marker (a row or the selection) and Convert All File Markers to Markers: the item's color through the
-    /// D-C13 table (else D-C4 Blue), its kind's keyword, its comment as notes, its duration (D-C8), D-C14 stable ids
-    /// skipped, through the import merge rule. One undo step.
+    /// D-C13 table (`ChapterMapping.convert`), its kind's keyword, its comment as notes, an XMP item's stated duration
+    /// else one frame (D-C8 revised), D-C14 stable ids skipped, through the import merge rule. One undo step.
     func convert(_ items: [MappedChapter]) {
         guard isActive, state == .ready, !items.isEmpty else { NSSound.beep(); return }
         let r = ChapterMapping.convert(items, into: markers)
@@ -387,6 +387,18 @@ final class MarkerModel: ObservableObject {
 
     var fileName: String { fileURL?.lastPathComponent ?? "" }
     var clipName: String { fileURL?.deletingPathExtension().lastPathComponent ?? "Markers" }
+
+    /// The media as Premiere Pro XML describes it (docs/MARKER_EXPORT_PLAN.md §5): its URL (written into the exported
+    /// file, nowhere else), frame count, picture size and audio, all from the player's own reading. Audio channels are
+    /// summed across the file's audio tracks; the rate and depth are the first track's. Nil with no file.
+    var premiereMedia: PremiereXML.Media? {
+        guard let fileURL, let engine, let md = engine.metadata else { return nil }
+        let tracks = md.audioTracks
+        return PremiereXML.Media(url: fileURL, frameCount: lastFrame + 1, width: md.width, height: md.height,
+                                 audioChannels: tracks.reduce(0) { $0 + max($1.channelCount, 0) },
+                                 audioSampleRate: Int((tracks.first?.sampleRate ?? 0).rounded()),
+                                 audioBitDepth: tracks.first?.bitDepth ?? 16)
+    }
 
     /// The frame a marker made now goes on (D2; see the header).
     var markFrame: Int? {
