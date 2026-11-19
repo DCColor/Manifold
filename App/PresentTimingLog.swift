@@ -76,6 +76,9 @@ final class PresentTimingLog: @unchecked Sendable {
         var presentHost = Double.nan
         /// The window display's period, as the gate read it.
         var period = 0.0
+        /// False for option B's scheduled present (`MANIFOLD_PACER_PRESENT_TX=0`): no `waitUntilScheduled`, no `CATransaction`, so
+        /// those steps stay NaN and are left out of their series.
+        var transactional = true
     }
 
     struct Glass { var seq: Int64; var presentedTime: Double; var handlerHost: Double }
@@ -190,6 +193,7 @@ private let sPresentTotal = 12, sTick = 13, sPerform = 14, sStats = 15, sIdle = 
 private struct Counts {
     var ticks = 0, newFrame = 0, repeatTicks = 0
     var presents = 0, presentsNewFirst = 0, presentsNewSecond = 0, presentsRepeat = 0
+    var presentsTransactional = 0, presentsScheduled = 0
     var heldInFlight = 0, heldRate = 0, nilDrawable = 0, noBuffer = 0, extraAttempts = 0
     var inFlightAt = [0, 0, 0, 0]   // 0, 1, 2, 3+ at each attempt
     var glass = 0, dropped = 0, lateTwo = 0, noHandler = 0
@@ -208,6 +212,7 @@ private struct Counts {
             case .noBuffer: noBuffer += 1
             case .presented:
                 presents += 1
+                if t.transactional { presentsTransactional += 1 } else { presentsScheduled += 1 }
                 if !t.newFrame { presentsRepeat += 1 } else if a.inRender { presentsNewFirst += 1 } else { presentsNewSecond += 1 }
             case .none: break
             }
@@ -223,6 +228,7 @@ private struct Counts {
             + "\(presentsNewFirst), same tick 2nd \(presentsNewSecond), repeat tick \(presentsRepeat)) · held in flight \(heldInFlight), "
             + "rate \(heldRate), nil drawable \(nilDrawable), no buffer \(noBuffer), attempts beyond 2 \(extraAttempts) · in flight at "
             + "attempt 0:\(inFlightAt[0]) 1:\(inFlightAt[1]) 2:\(inFlightAt[2]) 3+:\(inFlightAt[3])"
+            + " · presents transactional \(presentsTransactional), scheduled \(presentsScheduled)"
     }
 }
 

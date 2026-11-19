@@ -24,6 +24,13 @@
 //  0.5 ms of a due time is moved off it in one step of at most 0.5 ms (the establishment guard). With `phaseSample` nil (the switch off, and
 //  always in Release) the loop's deadline arithmetic is `deadline += step`, as before; the switch costs one nil test a tick.
 //
+//  C+ (docs/CARD_PULL_MARGIN.md §17.3; `MANIFOLD_PACER_PHASE=2`, DEBUG). Option C, plus `leadSample`: the renderer's pull phase for
+//  this Play (the handed frame's lead plus its tick's x). The follower then moves its reference earlier, inside the guard band, so the
+//  card's lead is at least P + 0.5 ms where the band allows (`PacerPhaseFollower.leadGuard`). With `leadSample` nil (=1) the follower
+//  is option C exactly.
+//
+//  Export Diagnostics (production): each missed deadline is also added to `PlaybackCounters`, in the branch that already counts it.
+//
 
 import Foundation
 import QuartzCore
@@ -41,6 +48,8 @@ final class OutputPacer: @unchecked Sendable {
     private let tick: () -> Void
     /// Option C: what the renderer's selection saw on the tick just run. Nil with the switch off; then nothing of option C runs.
     private let phaseSample: (() -> PacerPhaseSample)?
+    /// C+ only: the renderer's pull phase (seconds) for this Play, or nil. Nil for option C; then the follower never reads it.
+    private let leadSample: (() -> Double?)?
     private var phaseMatched = false      // cond: the card and source rates are matched (`PacerPhase.isMatched`)
 
     // Pacer thread only, then read by `cancel()` after the join.
@@ -58,13 +67,14 @@ final class OutputPacer: @unchecked Sendable {
     private var phaseWindowStart: CFTimeInterval = 0
 
     init(period: Double, label: String, phaseSample: (() -> PacerPhaseSample)? = nil, phaseMatched: Bool = false,
-         tick: @escaping () -> Void) {
+         leadSample: (() -> Double?)? = nil, tick: @escaping () -> Void) {
         self.period = period
         self.label = label
         self.tick = tick
         self.phaseSample = phaseSample
         self.phaseMatched = phaseMatched
-        if phaseSample != nil { follower = PacerPhaseFollower(quantum: Self.secondsPerMachTick) }
+        self.leadSample = leadSample
+        if phaseSample != nil { follower = PacerPhaseFollower(quantum: Self.secondsPerMachTick, leadGuard: leadSample != nil) }
         // Strong: the thread keeps the pacer until `cancel()` ends the loop, so a pacer can never be freed under its thread.
         let thread = Thread { self.loop() }
         thread.name = "com.graviton.manifold.outputpacer"
@@ -167,6 +177,7 @@ final class OutputPacer: @unchecked Sendable {
                 let missed = (after - deadline) / step + 1
                 deadline += missed * step
                 missedWindow += Int(missed); missedRun += Int(missed)
+                PlaybackCounters.addPacerMissedDeadlines(Int(missed))
             }
         }
         if phaseSample != nil, follower != nil { print("[PACER-PHASE] " + follower!.report(run: true)) }
@@ -178,7 +189,8 @@ final class OutputPacer: @unchecked Sendable {
     /// tick is inactive, so the pacer is exactly as with the switch off, apart from the summary line.
     private func followPhase(_ sample: () -> PacerPhaseSample, deadline: UInt64, step: UInt64, period p: Double) -> UInt64 {
         if phaseResetPending { phaseResetPending = false; follower!.reset() }
-        let (correction, event) = follower!.tick(phaseMatchedNow ? sample() : .inactive, period: p)
+        let (correction, event) = follower!.tick(phaseMatchedNow ? sample() : .inactive, period: p,
+                                                 pullPhase: phaseMatchedNow ? leadSample?() : nil)
         if case .referenceSet(let ref, let median, let guarded)? = event {
             print(String(format: "[PACER-PHASE] reference set · x_ref %.3f ms · median of the first %d new-frame ticks %.3f ms · guard %@ · P %.2f ms",
                          ref * 1000, PacerPhase.window, median * 1000,
@@ -187,6 +199,10 @@ final class OutputPacer: @unchecked Sendable {
         } else if case .establishmentNudge(let x, let moved)? = event {
             print(String(format: "[PACER-PHASE] establishment guard · x %.3f ms within %.1f ms of a due time · moved %+.3f ms · P %.2f ms",
                          x * 1000, PacerPhase.guardMargin * 1000, moved * 1000, p * 1000))
+        } else if case .leadGuard(let pp, let from, let to, let reaches)? = event {
+            print(String(format: "[PACER-PHASE] lead guard · pull phase %.3f ms · lead %.3f ms < P + %.1f ms · x_ref %.3f → %.3f ms (lead %.3f ms)%@ · P %.2f ms",
+                         pp * 1000, PacerPhase.lead(x: from, pullPhase: pp) * 1000, PacerPhase.leadSlack * 1000, from * 1000, to * 1000,
+                         PacerPhase.lead(x: to, pullPhase: pp) * 1000, reaches ? "" : " · at the guard band's edge", p * 1000))
         }
         let now = CACurrentMediaTime()
         if phaseWindowStart == 0 { phaseWindowStart = now }

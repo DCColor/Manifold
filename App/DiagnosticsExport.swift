@@ -916,6 +916,11 @@ enum DiagnosticsReport {
         out += "SDI output start : \(SDIStartRecoveryStats.summary)\n"
         if let last = SDIStartRecoveryStats.lastSilentStart { out += "Last silent start: \(last)\n" }
 
+        section("PLAYBACK COUNTERS")
+        // Output pacing and the card's pull, counted since launch (`PlaybackCounters`; docs/CARD_PULL_MARGIN.md §16–§17). The
+        // same numbers are logged when DeckLink output stops ("[DIAG] playback counters").
+        out += PlaybackCounters.lines.joined(separator: "\n") + "\n"
+
         section("ACTIVE ERROR STATE")
         var errors: [String] = []
         if let e = SRTClient.shared.lastError { errors.append("SRT   : \(e)") }

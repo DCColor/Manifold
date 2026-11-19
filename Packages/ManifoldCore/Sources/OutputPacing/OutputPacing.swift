@@ -202,6 +202,44 @@ public enum PacerPhase {
         return 0
     }
 
+    // MARK: C+ (docs/CARD_PULL_MARGIN.md §17.3; `MANIFOLD_PACER_PHASE=2`)
+    //
+    // The handed frame's lead at a pull (pull host − the frame's ring publish host) is A − x − c: A, where the card's slot sits on
+    // the frame grid past the frame's pts (fixed for a Play under card lock), less the tick's phase x and the tick → ring time c
+    // (§17.1, measured on 11 blocks). So lead + x, the "pull phase", is the same for every frame of a Play whatever x is, and
+    // lead(x) = pullPhase − x. A one-tick-late swap holds when lead < P (§17.2), so C+ chooses x so that lead ≥ P + `leadSlack`
+    // where the guard band allows. Only earlier (smaller x): that never changes which pull takes the frame, because the pull one
+    // frame earlier is less than margin − band after the frame's pts and is not eligible (§17.3). Never later: missing the pull at
+    // k = 3 (§17.3 item 6) is not done here.
+
+    /// The lead C+ keeps above P: covers a one-tick-late swap's measured delay at q99 (8.88 ms against P + 0.5 = 8.84 at 59.94).
+    public static let leadSlack = 0.5e-3
+
+    /// The pull phase (seconds) from one timed pull: the handed frame's lead (pull host − its publish host) plus the x of the tick
+    /// that rendered it. Nil when a value is not finite, or the lead is negative (a frame published after the pull: not possible for
+    /// a handed frame, so a bad reading).
+    public static func pullPhase(pullHost: Double, publishHost: Double, x: Double) -> Double? {
+        guard pullHost.isFinite, publishHost.isFinite, x.isFinite else { return nil }
+        let lead = pullHost - publishHost
+        guard lead >= 0 else { return nil }
+        return lead + x
+    }
+
+    /// The lead (seconds) a tick phase x gives against a pull phase: pullPhase − x.
+    public static func lead(x: Double, pullPhase: Double) -> Double { pullPhase - x }
+
+    /// C+'s reference: x_ref, or earlier, so that lead ≥ P + `leadSlack`, never below the guard band's low edge
+    /// (`min(guardMargin, period / 2)`) and never later than x_ref. `reachesSlack` is false when the band's edge stopped it short.
+    /// A pull phase or reference that is not finite, or a bad period: x_ref unchanged.
+    public static func leadReference(xRef: Double, pullPhase: Double, period: Double) -> (value: Double, reachesSlack: Bool) {
+        guard xRef.isFinite, pullPhase.isFinite, period.isFinite, period > 0 else { return (xRef, true) }
+        let low = min(guardMargin, period / 2)
+        let wanted = pullPhase - period - leadSlack          // the largest x with lead ≥ P + slack
+        if wanted >= xRef { return (xRef, true) }            // already enough lead: never move later
+        if wanted >= low { return (wanted, true) }
+        return (min(xRef, low), false)                       // the band's edge: as much lead as the guard allows (never later)
+    }
+
     /// The median (the mean of the middle two for an even count). Empty: NaN.
     public static func median(_ values: [Double]) -> Double {
         guard !values.isEmpty else { return .nan }
@@ -276,6 +314,9 @@ public struct PacerPhaseFollower {
         /// Establishment-guard moves (`PacerPhase.establishmentCorrection`), counted apart from the follow's corrections.
         public var nudges = 0
         public var nudgeNet = 0.0
+        /// C+ only (`leadGuard`): steps that moved the reference earlier for lead, and their total (seconds).
+        public var leadMoves = 0
+        public var leadNet = 0.0
         public init() {}
     }
 
@@ -284,6 +325,9 @@ public struct PacerPhaseFollower {
         case referenceSet(reference: Double, median: Double, guarded: PacerPhase.Guard)
         /// Before the reference: a phase inside the guard band was moved to its edge. x as measured, and the move (seconds).
         case establishmentNudge(x: Double, moved: Double)
+        /// C+ (`leadGuard`): the reference is being moved earlier for lead, from `from` toward `to` (seconds), against the pull
+        /// phase that asked for it. `reachesSlack` false: the guard band's edge stops it short of P + `leadSlack`.
+        case leadGuard(pullPhase: Double, from: Double, to: Double, reachesSlack: Bool)
     }
 
     /// Seconds per deadline unit (one mach tick in the app).
@@ -300,9 +344,15 @@ public struct PacerPhaseFollower {
     private var recent: [Double] = []      // x − applied at the time of each sample: a ring of `PacerPhase.window`
     private var recentNext = 0
     private var establishDirection = 0     // the first establishment move's sign (−1 earlier, +1 later); 0 before one
+    /// C+ (`MANIFOLD_PACER_PHASE=2`): choose the reference earlier for lead (`PacerPhase.leadReference`). False (option C): the
+    /// pull phase passed to `tick` is ignored and nothing below changes.
+    public let leadGuard: Bool
+    private var leadTarget: Double?        // C+: where the reference is being moved, in steps of at most `guardMargin`
+    private var ticksSinceLeadCheck = Int.max
 
-    public init(quantum: Double) {
+    public init(quantum: Double, leadGuard: Bool = false) {
         self.quantum = quantum
+        self.leadGuard = leadGuard
         firsts.reserveCapacity(PacerPhase.window)
         recent.reserveCapacity(PacerPhase.window)
     }
@@ -310,11 +360,13 @@ public struct PacerPhaseFollower {
     /// Drop the reference: the next eight new-frame ticks set a new one. At a wake, a re-rate, and every inactive tick.
     public mutating func reset() {
         reference = nil; applied = 0; establishDirection = 0
+        leadTarget = nil; ticksSinceLeadCheck = Int.max
         firsts.removeAll(keepingCapacity: true); recent.removeAll(keepingCapacity: true); recentNext = 0
     }
 
     /// One pacer tick, after the renderer's selection. Returns the correction for the next deadline, in quanta, and an event.
-    public mutating func tick(_ sample: PacerPhaseSample, period: Double) -> (correction: Int64, event: Event?) {
+    /// `pullPhase` (C+ only, read only with `leadGuard`): the renderer's median pull phase for this Play, or nil until it has one.
+    public mutating func tick(_ sample: PacerPhaseSample, period: Double, pullPhase: Double? = nil) -> (correction: Int64, event: Event?) {
         guard case .active(let x) = sample else {
             window.inactiveTicks += 1; run.inactiveTicks += 1
             if reference != nil || !firsts.isEmpty { reset() }
@@ -343,6 +395,7 @@ public struct PacerPhaseFollower {
                     for i in firsts.indices { firsts[i] -= applied }   // back to the ring's convention
                     if let r {
                         reference = r.value; establishDirection = 0
+                        leadTarget = nil; ticksSinceLeadCheck = Int.max   // C+: check the lead as soon as the pull phase is in
                         recent.removeAll(keepingCapacity: true); recent.append(contentsOf: firsts); recentNext = 0
                         firsts.removeAll(keepingCapacity: true)
                         window.references += 1; run.references += 1
@@ -366,6 +419,7 @@ public struct PacerPhaseFollower {
                 }
             }
         }
+        if leadGuard, event == nil, let move = leadStep(pullPhase: pullPhase, period: period) { return move }
         guard let reference, recent.count == PacerPhase.window, quantum > 0 else { return (0, event) }
         let phase = Self.median(ofRing: recent) + applied
         let c = PacerPhase.phaseCorrection(enabled: true, phase: phase, reference: reference)
@@ -376,6 +430,37 @@ public struct PacerPhaseFollower {
             applied += s
             window.corrections += 1; run.corrections += 1; window.net += s; run.net += s
         }
+        return (q, event)
+    }
+
+    /// C+, once the reference is set: every `leadCheckInterval` of pacer time (and at once after a new reference) compare the
+    /// reference with `PacerPhase.leadReference`; when it should be earlier by more than `leadHysteresis`, move it there in steps of
+    /// at most `PacerPhase.guardMargin` a tick (the establishment guard's step), the deadline with it. Moves are only earlier and stay
+    /// inside the guard band, so no move crosses a due time. The reference and `applied` move together, so the follow's phase
+    /// against the reference is unchanged by a move. Returns the tick's correction and event, or nil to fall through to the follow.
+    static let leadCheckInterval = 10.0
+    static let leadHysteresis = 50e-6
+    private mutating func leadStep(pullPhase: Double?, period: Double) -> (correction: Int64, event: Event?)? {
+        guard let ref = reference, quantum > 0, period > 0 else { return nil }
+        var event: Event?
+        if leadTarget == nil {
+            let every = max(1, Int((Self.leadCheckInterval / period).rounded()))
+            if ticksSinceLeadCheck != Int.max { ticksSinceLeadCheck += 1 }
+            guard ticksSinceLeadCheck == Int.max || ticksSinceLeadCheck >= every, let pp = pullPhase, pp.isFinite else { return nil }
+            ticksSinceLeadCheck = 0
+            let r = PacerPhase.leadReference(xRef: ref, pullPhase: pp, period: period)
+            guard r.value < ref - Self.leadHysteresis else { return nil }
+            leadTarget = r.value
+            event = .leadGuard(pullPhase: pp, from: ref, to: r.value, reachesSlack: r.reachesSlack)
+        }
+        guard let target = leadTarget else { return nil }
+        let q = Int64((max(target - ref, -PacerPhase.guardMargin) / quantum).rounded())
+        if q >= 0 || ref + Double(q) * quantum <= target + quantum { leadTarget = nil }
+        guard q < 0 else { return event.map { (0, $0) } }
+        let s = Double(q) * quantum
+        reference = ref + s
+        applied += s
+        window.leadMoves += 1; run.leadMoves += 1; window.leadNet += s; run.leadNet += s
         return (q, event)
     }
 
@@ -402,10 +487,11 @@ public struct PacerPhaseFollower {
             ? String(format: "|x − x_ref| p50 %.3f p99 %.3f max %.3f ms (n=%d)", d.quantile(0.5) * 1000, d.quantile(0.99) * 1000,
                      d.maximum * 1000, d.count)
             : "|x − x_ref| n=0"
-        let line = String(format: "%@: new-frame ticks %d · inactive ticks %d · outliers %d · %@ · corrections applied %d (net %+.3f ms) · "
+        var line = String(format: "%@: new-frame ticks %d · inactive ticks %d · outliers %d · %@ · corrections applied %d (net %+.3f ms) · "
                           + "clamp hits %d · references set %d (guard %d) · establishment nudges %d (net %+.3f ms)",
                           whole ? "run" : String(format: "%.0f s", seconds), c.newFrameTicks, c.inactiveTicks, c.outliers, dev,
                           c.corrections, c.net * 1000, c.clampHits, c.references, c.guards, c.nudges, c.nudgeNet * 1000)
+        if leadGuard { line += String(format: " · lead moves %d (net %+.3f ms)", c.leadMoves, c.leadNet * 1000) }
         if !whole { window = Counts(); windowDeviation.reset() }
         return line
     }

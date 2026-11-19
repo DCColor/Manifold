@@ -549,12 +549,36 @@ final class MetalVideoRenderer {
     /// Option C (docs/CARD_PULL_MARGIN.md §7 C), `MANIFOLD_PACER_PHASE=1`: the output pacer holds its new-frame ticks' phase against
     /// the frames' due times. Read once, here. Off (unset, any other value, and always in Release): the pacer is made without a
     /// phase sample, so its loop runs `deadline += step` as before, and nothing below is computed.
-    static let pacerPhaseEnabled = ProcessInfo.processInfo.environment["MANIFOLD_PACER_PHASE"] == "1"
+    /// `=2` is C+ (§17.3): option C exactly, plus `pacerLeadEnabled`.
+    static let pacerPhaseMode: Int = ["1": 1, "2": 2][ProcessInfo.processInfo.environment["MANIFOLD_PACER_PHASE"] ?? ""] ?? 0
+    static let pacerPhaseEnabled = pacerPhaseMode >= 1
+    /// C+ (docs/CARD_PULL_MARGIN.md §17.3), `MANIFOLD_PACER_PHASE=2`: the renderer hands the pacer one value, the pull phase (the
+    /// handed frame's lead at a timed pull plus the x of the tick that rendered it), and the pacer moves its phase earlier inside the
+    /// guard band so the lead is at least P + 0.5 ms. The pull's selection and its margin are not touched: the value is read after
+    /// the pull, from what it handed. Off (=1, unset): nothing below is recorded.
+    static let pacerLeadEnabled = pacerPhaseMode == 2
     /// Option C: what this tick's selection saw, for the pacer to take right after the tick (the same thread: the pacer calls
     /// `displayTick` synchronously). Tick thread only.
     private var pacerPhaseSample: PacerPhaseSample = .inactive
+    /// C+: a leaf lock (taken under `deckLinkLock` at the publish and the pull, and alone on the tick and pacer threads).
+    private let pacerLeadLock = NSLock()
+    /// C+: the x of each recent new-frame tick, by the frame's pts (tick thread writes; the publish reads). `pacerLeadLock`.
+    private var pacerLeadTickX: [(pts: Double, x: Double)] = []
+    /// C+: the x of the tick that rendered each ring slot's frame, written at the publish. `deckLinkLock`.
+    private var deckLinkSlotXDbg = [Double](repeating: .nan, count: MetalVideoRenderer.deckLinkRingCount)
+    /// C+: this Play's pull phases (timed pulls that handed a new frame), cleared at every untimed pull. `deckLinkLock`.
+    private var pacerLeadSamples: [Double] = []
+    /// C+: their median once there are 4, for the pacer. `pacerLeadLock`.
+    private var pacerLeadPullPhase: Double?
+    /// Option B (docs/WINDOW_PRESENT_PATH.md §4.5), `MANIFOLD_PACER_PRESENT_TX=0`: while the output pacer presents, the layer's
+    /// `presentsWithTransaction` is false and a pacer present is `cb.present(drawable)` before the commit, with no
+    /// `waitUntilScheduled` and no `CATransaction`. A tick that installs a colour state or a new drawable size keeps today's
+    /// transactional present for that frame. Set on the tick thread only (`performDisplayTick`'s top). Unset: today's path.
+    static let pacerPresentNoTx = ProcessInfo.processInfo.environment["MANIFOLD_PACER_PRESENT_TX"] == "0"
     #else
     static let pacerPhaseEnabled = false
+    static let pacerLeadEnabled = false
+    static let pacerPresentNoTx = false
     #endif
     private var deckLinkConverting = false             // one-in-flight gate (push path)
     private var deckLinkActive = false                 // only convert while DeckLink output is running
@@ -3442,7 +3466,10 @@ final class MetalVideoRenderer {
         #if DEBUG
         if let phaseMatched {
             pacer = OutputPacer(period: period, label: mode, phaseSample: { [weak self] in self?.takePacerPhaseSample() ?? .inactive },
-                                phaseMatched: phaseMatched) { [weak self] in self?.displayTick() }
+                                phaseMatched: phaseMatched,
+                                leadSample: Self.pacerLeadEnabled ? { [weak self] in self?.pacerLeadPullPhaseNow() } : nil) { [weak self] in
+                self?.displayTick()
+            }
             Self.logPacerPhaseArmed(matched: phaseMatched)
         } else {
             pacer = OutputPacer(period: period, label: mode) { [weak self] in self?.displayTick() }
@@ -3465,6 +3492,7 @@ final class MetalVideoRenderer {
         let summary = pacer.cancel()
         outputPacer = nil
         setPacerPresents(active: false)
+        print(PlaybackCounters.logLine)   // Export Diagnostics' numbers, for the soak to check against its log
         idleLock.lock(); let stopped = idleStopped; idleLock.unlock()
         let display = displayLink.map { CVDisplayLinkGetCurrentCGDisplay($0) }
         print("[PACER] stopped (\(reason)) — \(summary) · link back on display \(display.map(String.init) ?? "none")")
@@ -3486,6 +3514,50 @@ final class MetalVideoRenderer {
         let s = pacerPhaseSample
         pacerPhaseSample = .inactive
         return s
+    }
+
+    /// C+, the pacer's thread: this Play's median pull phase, or nil until 4 timed pulls have handed new frames.
+    private func pacerLeadPullPhaseNow() -> Double? {
+        pacerLeadLock.lock(); defer { pacerLeadLock.unlock() }
+        return pacerLeadPullPhase
+    }
+
+    /// C+, the tick thread, after the selection: the new frame's x, for its publish to file beside its ring slot.
+    private func notePacerLeadTick(pts: Double, x: Double) {
+        guard pts.isFinite, x.isFinite else { return }
+        pacerLeadLock.lock()
+        pacerLeadTickX.append((pts, x))
+        if pacerLeadTickX.count > 8 { pacerLeadTickX.removeFirst() }
+        pacerLeadLock.unlock()
+    }
+
+    /// C+, `deckLinkLock` held, at a ring publish: the slot's publish host and its tick's x.
+    private func notePacerLeadPublishLocked(slot: Int, pts: Double, host: Double) {
+        pacerLeadLock.lock()
+        let x = pacerLeadTickX.last(where: { $0.pts == pts })?.x ?? .nan
+        pacerLeadLock.unlock()
+        deckLinkSlotXDbg[slot] = x
+    }
+
+    /// C+, `deckLinkLock` held, after the pull handed `slot` (the pull itself is not touched): at a timed pull that handed a new
+    /// frame, its pull phase (`PacerPhase.pullPhase`); at an untimed pull (a pause, step, seek, wrap or shuttle) this Play's
+    /// samples are dropped, so the next Play starts from its own pulls.
+    private func notePacerLeadPullLocked(slot: Int, host: Double, handed: Double, previous: Double) {
+        guard deckLinkPullTimedNow else {
+            if !pacerLeadSamples.isEmpty {
+                pacerLeadSamples.removeAll(keepingCapacity: true)
+                pacerLeadLock.lock(); pacerLeadPullPhase = nil; pacerLeadLock.unlock()
+            }
+            return
+        }
+        guard handed.isFinite, !(previous.isFinite && handed <= previous),
+              let pp = PacerPhase.pullPhase(pullHost: host, publishHost: deckLinkSlotPublishHostDbg[slot], x: deckLinkSlotXDbg[slot])
+        else { return }
+        pacerLeadSamples.append(pp)
+        if pacerLeadSamples.count > 16 { pacerLeadSamples.removeFirst() }
+        guard pacerLeadSamples.count >= 4 else { return }
+        let m = PacerPhase.median(pacerLeadSamples)
+        pacerLeadLock.lock(); pacerLeadPullPhase = m; pacerLeadLock.unlock()
     }
 
     /// Tick thread, after the selection, switch on only. Active only on a pacer tick (no glass time), playing (the pause provider
@@ -3631,6 +3703,18 @@ final class MetalVideoRenderer {
         // as the colour state above: this is the one thread that touches the layer, and it must
         // land before anything acquires a drawable, because `nextDrawable()` vends a texture of
         // whatever size is current when it is called.
+        #if DEBUG
+        // OPTION B (docs/WINDOW_PRESENT_PATH.md §4.5; `MANIFOLD_PACER_PRESENT_TX=0`), on this thread because it is the layer's one
+        // writer: while the output pacer presents, no transaction, except on a tick that installs a colour state or a new drawable
+        // size, whose frame keeps today's transactional present so the state and the frame land in one commit. Before
+        // `nextDrawable()`, and before the colour transaction opens below. Off the pacer (the link ticks), always today's mode.
+        if Self.pacerPresentNoTx {
+            presentGateLock.lock(); let pacerOn = pacerPresentsActive; presentGateLock.unlock()
+            let stateTick = colorState != nil || (drawableSize.map { metalLayer.drawableSize != $0 } ?? false)
+            let wantTransaction = !pacerOn || stateTick
+            if metalLayer.presentsWithTransaction != wantTransaction { metalLayer.presentsWithTransaction = wantTransaction }
+        }
+        #endif
         if let drawableSize, metalLayer.drawableSize != drawableSize {
             metalLayer.drawableSize = drawableSize
         }
@@ -3875,6 +3959,7 @@ final class MetalVideoRenderer {
         if Self.pacerPhaseEnabled {   // option C: what this selection saw, for the pacer right after the tick
             pacerPhaseSample = pacerPhaseSampleNow(selectNow: selectNow, clock: now, clockHost: clockHost, previous: pacerPhasePrevious,
                                                    newFramePts: chosen != nil ? chosenPts : nil, held: holdFloor != nil)
+            if Self.pacerLeadEnabled, chosen != nil, tickGlassHost == nil { notePacerLeadTick(pts: chosenPts, x: selectNow - chosenPts) }
         }
         #endif
         if queueFullAhead, let oldest {
@@ -4617,6 +4702,15 @@ final class MetalVideoRenderer {
             }
         }
         let ptHandlers = ptOn ? CACurrentMediaTime() : 0
+        // Option B: the layer is out of transaction mode this tick, so the present is scheduled on the buffer, before its commit.
+        let scheduledPresent = Self.pacerPresentNoTx && !metalLayer.presentsWithTransaction
+        if scheduledPresent {
+            attachAVLagProbe(to: drawable)
+            if ptOn { ptTick.presentHost = CACurrentMediaTime() }
+            cb.present(drawable)
+        }
+        #else
+        let scheduledPresent = false
         #endif
         cb.commit()
         #if DEBUG
@@ -4639,7 +4733,7 @@ final class MetalVideoRenderer {
             ptInPresent = true
         }
         #endif
-        presentDrawable(drawable, on: cb)
+        presentDrawable(drawable, on: cb, scheduled: scheduledPresent)
         #if DEBUG
         if ptOn { ptInPresent = false; ptAttemptEnded(.presented, inFlight: inFlight) }
         #endif
@@ -4836,7 +4930,27 @@ final class MetalVideoRenderer {
     /// display-link callback off cadence.
     ///
     /// Every present in this file goes through here. If you add a second one, add it here too.
-    private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer) {
+    ///
+    /// OPTION B (`MANIFOLD_PACER_PRESENT_TX=0`, DEBUG): `scheduled` true means `servePacedPresent` already encoded
+    /// `cmdBuffer.present(drawable)` before the commit, with the layer out of transaction mode; only the colour transaction (none is
+    /// open on such a tick) is closed here. A present made while the layer is out of transaction mode by any other caller waits for
+    /// the schedule and presents directly, with no transaction to join.
+    private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer, scheduled: Bool = false) {
+        #if DEBUG
+        if scheduled {
+            let ptOn = ptInPresent, t0 = ptOn ? CACurrentMediaTime() : 0
+            closeColorStateTransaction()
+            if ptOn { ptTick.transactional = false; ptTick.steps.colorTx = CACurrentMediaTime() - t0 }
+            return
+        }
+        if !metalLayer.presentsWithTransaction {
+            cmdBuffer.waitUntilScheduled()
+            attachAVLagProbe(to: drawable)
+            drawable.present()
+            closeColorStateTransaction()
+            return
+        }
+        #endif
         #if DEBUG
         // The present-path measurement (PresentTimingLog): set only by `servePacedPresent` inside a measured pacer tick.
         let ptOn = ptInPresent
@@ -4847,23 +4961,7 @@ final class MetalVideoRenderer {
         let ptWaitEnd = ptOn ? CACurrentMediaTime() : 0
         #endif
         #if DEBUG
-        // [AV-LAG] (pre-ship removal, docs/BUGS.md). Audio heard at the moment this picture reached
-        // the glass, minus the picture's own PTS: the audio content advances one second per second,
-        // so the tick's reading is carried forward by the present latency. Positive = the picture
-        // is behind its sound. Also split into its parts: frame choice (now − pts), audio against
-        // the clock, and tick → glass.
-        if let p = avLagProbe {
-            avLagProbe = nil
-            drawable.addPresentedHandler { d in
-                let shown = d.presentedTime
-                guard shown > 0 else { return }                // dropped, never on glass
-                let present = shown - p.tick
-                let av = (p.now + p.audioMinusClock + present) - p.pts
-                FileHandle.standardError.write(Data(String(format:
-                    "[AV-LAG] tick=%.4f pts=%.5f now−pts=%+.2f ms audio−now=%+.2f ms tick→glass=%+.2f ms av=%+.2f ms\n",
-                    p.tick, p.pts, (p.now - p.pts) * 1e3, p.audioMinusClock * 1e3, present * 1e3, av * 1e3).utf8))
-            }
-        }
+        attachAVLagProbe(to: drawable)
         #endif
         #if DEBUG
         let ptBegin = ptOn ? CACurrentMediaTime() : 0
@@ -4893,6 +4991,27 @@ final class MetalVideoRenderer {
         }
         #endif
     }
+
+    #if DEBUG
+    /// [AV-LAG] (pre-ship removal, docs/BUGS.md). Audio heard at the moment this picture reached
+    /// the glass, minus the picture's own PTS: the audio content advances one second per second,
+    /// so the tick's reading is carried forward by the present latency. Positive = the picture
+    /// is behind its sound. Also split into its parts: frame choice (now − pts), audio against
+    /// the clock, and tick → glass. Attached before the present (option B's scheduled present: before the commit).
+    private func attachAVLagProbe(to drawable: CAMetalDrawable) {
+        guard let p = avLagProbe else { return }
+        avLagProbe = nil
+        drawable.addPresentedHandler { d in
+            let shown = d.presentedTime
+            guard shown > 0 else { return }                // dropped, never on glass
+            let present = shown - p.tick
+            let av = (p.now + p.audioMinusClock + present) - p.pts
+            FileHandle.standardError.write(Data(String(format:
+                "[AV-LAG] tick=%.4f pts=%.5f now−pts=%+.2f ms audio−now=%+.2f ms tick→glass=%+.2f ms av=%+.2f ms\n",
+                p.tick, p.pts, (p.now - p.pts) * 1e3, p.audioMinusClock * 1e3, present * 1e3, av * 1e3).utf8))
+        }
+    }
+    #endif
 
     /// RENDER THREAD ONLY. True between a colour-state install and the commit it shares with the tick's present.
     private var colorStateTransactionOpen = false
@@ -5812,7 +5931,8 @@ final class MetalVideoRenderer {
             #if DEBUG
             let swapHost = CACurrentMediaTime()
             self.deckLinkFrontSwapHost = swapHost
-            if CardPullPhaseLog.enabled { self.deckLinkSlotPublishHostDbg[backIndex] = swapHost }
+            if CardPullPhaseLog.enabled || Self.pacerLeadEnabled { self.deckLinkSlotPublishHostDbg[backIndex] = swapHost }
+            if Self.pacerLeadEnabled { self.notePacerLeadPublishLocked(slot: backIndex, pts: sourcePts, host: swapHost) }
             #endif
             self.deckLinkFrontPts = sourcePts
             self.deckLinkFrontSignal = frameOutput.signal
@@ -5946,7 +6066,8 @@ final class MetalVideoRenderer {
             #if DEBUG
             let swapHost = CACurrentMediaTime()
             self.deckLinkFrontSwapHost = swapHost
-            if CardPullPhaseLog.enabled { self.deckLinkSlotPublishHostDbg[backIndex] = swapHost }
+            if CardPullPhaseLog.enabled || Self.pacerLeadEnabled { self.deckLinkSlotPublishHostDbg[backIndex] = swapHost }
+            if Self.pacerLeadEnabled { self.notePacerLeadPublishLocked(slot: backIndex, pts: sourcePts, host: swapHost) }
             #endif
             self.deckLinkFrontPts = sourcePts
             self.deckLinkFrontSignal = frameOutput.signal
@@ -6050,6 +6171,11 @@ final class MetalVideoRenderer {
             }
         }
         let pts = deckLinkSlotPts[slot]
+        // Export Diagnostics (`PlaybackCounters`, every build): a timed pull after a timed pull that handed the same frame again.
+        if deckLinkPullTimedNow, deckLinkHandedTimed, pts.isFinite, pts == deckLinkHandedPts { PlaybackCounters.noteCardHoldWhilePlaying() }
+        #if DEBUG
+        if Self.pacerLeadEnabled { notePacerLeadPullLocked(slot: slot, host: host, handed: pts, previous: deckLinkHandedPts) }
+        #endif
         deckLinkHandedPts = pts.isFinite ? pts : .nan
         deckLinkHandedTimed = deckLinkPullTimedNow
         deckLinkHandedDue = deckLinkPullTimedNow ? deckLinkPullDueNow : .nan
