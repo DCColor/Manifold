@@ -848,3 +848,103 @@ behind `MANIFOLD_PACER_PRESENT_TX=0`.
 **One thing to check first:** `MANIFOLD_PRESENT_TIMING=1`'s `transactional` flag on the stalled tick says whether the 1 s wait was on
 the state tick (T) or on the first scheduled tick after it (T+1). The model above predicts T+1, or T if the frames scheduled before
 the switch are the ones stranded. If that log exists, read it before building.
+
+### 7.6 Plain B, attended on the LG (run 2026-11-19 17:52–17:55)
+
+Read-only: no build, no launch, no git. Log: `~/Code/_scratch/manifold-plainb-lg/run1.log` (1372 lines, Robbie). Every `:n` below is a
+line of that log.
+
+**The run was plain B.** The log does not print `MANIFOLD_PACER_PRESENT_TX`. But every `[PRESENT-TIMING]` window, and the final total,
+reads `presents transactional 0, scheduled 3352` (`:1361`), across 18 colour-state installs made while the pacer presented. With B off
+all 3352 would be transactional. With §4.5 step 3 still in, each state tick would be. So the layer stayed scheduled throughout, which is
+§7.5's change. CONFIRMED.
+
+**What was played and switched:**
+- **Window:** on the LG at 120.00 Hz (`:10`), in SDR mode, with EDR headroom 1.0 (`:8-9`, `:477`). From `:1076` to `:1240` it was on the
+  ASUS at 59.94 Hz.
+- **First file, `:101-446`:** 2160p23.976 Rec. 709 (`:19`, `:22-24`), SDI 2160p23.976 (`:123`). Switches #2 to #9: OS → Reference three
+  times (#2, #5, #8, at `:188`, `:289`, `:392`), Reference → Bypass three times, and Bypass → OS twice. **This is the case that stalled
+  under B with step 3** (the run before §7).
+- **Second file, `:466` on:** `wedge-pq-24track.mov`, PQ, Rec. 2020 (`:472`), SDI 1080p24 (`:500`, `:553`). It is about 4.08 s long and
+  plays in a loop (picture lines #1–#21, `:604-1328`). Switches #11 to #17: OS → Reference twice (#12, #15, at `:686`, `:839`). Each
+  leaves the HDR10 tone map (`:639`, `:783`), so §7.3's "direction" explanation (b) is covered. Also Reference → Bypass twice and
+  Bypass → OS three times.
+- **Other installs:**
+  - #10 (`:486`) is the source edge for the new file.
+  - #18 (`:1115`) and #19 (`:1284`) are display installs, from the window moving to the ASUS (`:1076`) and back (`:1240`).
+  - #1 (`:101`) came before output started (`:123`), so it was not under the pacer.
+
+**Each stall indicator against each install.** The first `[PACER]` intervals line, `[PACER] desktop` line and `[PRESENT-TIMING]` window
+after each install. Each line covers 10 s, and its line number is in brackets.
+
+| Install (log line) | Change | Pacer interval max / missed | Desktop: nil drawable · gate timeouts · `nextDrawable` max | Transactional · `[PRESENT-TIMING]` misses |
+|---|---|---|---|---|
+| #2 (`:191`) | OS → Reference, SDR | 14.25 ms / 0 (`:206`) | 0 · 0 · 0.29 ms (`:207`) | 0 · 0 (`:222`) |
+| #3 (`:212`) | → Bypass | 13.93 / 0 (`:264`) | 0 · 0 · 0.09 (`:265`) | 0 · 0 (`:222`) |
+| #4 (`:246`) | → OS | 13.93 / 0 (`:264`) | 0 · 0 · 0.09 (`:265`) | 0 · 0 (`:279`) |
+| #5 (`:292`) | OS → Reference, SDR | 13.91 / 0 (`:319`) | 0 · 0 · 0.08 (`:320`) | 0 · 0 (`:335`) |
+| #6 (`:324`) | → Bypass | 14.18 / 0 (`:383`) | 0 · 0 · 0.10 (`:384`) | 0 · 0 (`:335`) |
+| #7 (`:362`) | → OS | 14.18 / 0 (`:383`) | 0 · 0 · 0.10 (`:384`) | 0 · 0 (`:403`) |
+| #8 (`:395`) | OS → Reference, SDR | 13.92 / 0 (`:485`) | 0 · 0 · 0.09 (`:489`) | 0 · 0 (`:403`) |
+| #9 (`:421`) | → Bypass | 13.92 / 0 (`:485`) | 0 · 0 · 0.09 (`:489`) | 0 · 0 (`:445`) |
+| #10 (`:486`) | source edge, PQ file | 14.19 / 0 (`:608`) | 0 · 0 · 0.09 (`:489`) | 0 · 2, at output restarts (below) (`:582`) |
+| #11 (`:642`) | → OS, HDR10 tone map | 13.90 / 0 (`:683`) | 0 · 0 · 0.22 (`:679`) | 0 · 0 (`:677`) |
+| #12 (`:690`) | OS → Reference, PQ | 14.09 / 0 (`:755`) | 0 · 0 · 0.51 (`:753`) | 0 · 0 (`:752`) |
+| #13 (`:737`) | → Bypass | 14.09 / 0 (`:755`) | 0 · 0 · 0.51 (`:753`) | 0 · 0 (`:752`) |
+| #14 (`:786`) | → OS, HDR10 tone map | 13.91 / 0 (`:834`) | 0 · 0 · 0.11 (`:832`) | 0 · 0 (`:831`) |
+| #15 (`:843`) | OS → Reference, PQ | 13.91 / 0 (`:906`) | 0 · 0 · 0.11 (`:904`) | 0 · 0 (`:903`) |
+| #16 (`:899`) | → Bypass | 13.91 / 0 (`:906`) | 0 · 0 · 0.11 (`:904`) | 0 · 0 (`:903`) |
+| #17 (`:939`) | → OS, HDR10 tone map | 13.92 / 0 (`:994`) | 0 · 0 · 1.90 (`:992`) | 0 · 0 (`:991`) |
+| #18 (`:1115`) | display: LG → ASUS 59.94 Hz | 13.92 / 0 (`:1125`) | 0 · 0 · **3.59** (`:1122`) | 0 · 0 (`:1121`) |
+| #19 (`:1284`) | display: ASUS → LG | 13.93 / 0 (`:1311`) | 0 · 0 · 0.96 (`:1309`) | 0 · 0 (`:1307`) |
+
+**Run-wide:**
+- **WATCHDOG / "STILL IN FLIGHT":** none. CONFIRMED (grep).
+- **`drawMs` near 1000:** none. The maximum over every `[RENDER-PERF]` line is 3.59 ms, and the `[PACER] desktop` `nextDrawable` maximum
+  is also 3.59 ms. Both come from the window-moving span around #18. CONFIRMED.
+- **Gate timeouts / nil drawables:** 0 on all 14 `[PACER] desktop` lines and on every `[PRESENT-TIMING]` line. CONFIRMED.
+- **Pacer missed deadlines:** 0 on every `[PACER]` intervals line. The run summaries read 0 for the 2160p23.976 run (`:498`), the short
+  1080p24 run (`:551`) and the 1080p24 run (`:1358`). The interval maximum over the whole run was 14.25 ms (`:498`), against the stall's
+  1001.00. CONFIRMED.
+- **`[PRESENT-TIMING]` total** (`:1361`): `misses 2 (overran: perform 2)`, `ticks > 5 ms 0`, `nextDrawable` p99 0.570 / max 3.592 ms,
+  `holding 0 (0.0 %)`, and 45 presents dropped of 3352.
+  - The 2 misses are `:525` and `:575`, each logged as "the tick ended inside P: the deadline was missed outside the tick".
+  - Both fell between the pacer stopping (`:498`, `:551`) and restarting (`:500`, `:553`), after the source change. Neither is near a
+    Display Transform switch.
+  - The pacer's own count shows 0 for the same runs.
+- **DeckLink:** `late=0 dropped=0` on all 82 `DeckLink D3` lines. There is no `!!` line apart from 7 × `[SDI-AUDIO] !! edge (fill) …
+  APPENDED by the card` (`:662`, `:698`, `:726`, `:878`, `:914`, `:1194`, `:1224`).
+  - Each of those comes 24–33 lines after a loop wrap's `[SDI-AUDIO] latch #n`, and two of them (`:1194`, `:1224`) are 80–110 lines after
+    the last install. So they follow the file's loop, not the switches.
+  - The same line is on night 5's B-off blocks: 14 in `n5-5994-sdi-boff-1.log`, 1 in `-boff-2`, 5 in `-lg-boff`. Not a stall indicator.
+    CONFIRMED.
+- **SDI slips / Mac-sound re-anchors:** no slip line. The 21 `[CARDLOCK] Stage 2: Mac sound starts …` lines (`:166`-`:1328`) are the
+  loop's restarts, one for each picture line.
+  - Two started late: #13 at 378.9 ms (`:989`) and #14 at 187.2 ms (`:1035`), "its content was on the wire already".
+  - Both are loop wraps during the span from `:958` to `:1052`. That span has repeated `[CHAIN]` lines, presents above 24/s (26.9/s,
+    `:991`) and `drawMs` up to 3.59. A window move or resize in that span is an inference: no line names one.
+  - Neither was a pacer stall: intervals max 13.92 ms, missed 0 (`:994`). Their cause is UNKNOWN, and outside the window present path.
+  - `DeckLinkAudio` stopped with `underruns=20` (`:1353`). Its source is UNKNOWN.
+- **`[DIAG]` card holds:** `pacer missed deadlines 0 · card holds while playing 0` at all three output stops (`:497`, `:550`, `:1357`).
+  CONFIRMED.
+
+**Seen on the way, not stalls:**
+- #10, the source edge, logged "⚠️ AFTER a frame was already on screen … 393 present(s)" (`:486`), with one `[MATRIX] … ⚠️ DISAGREE`
+  line (`:487`).
+- The new file's tags reached the renderer as a "MID-SOURCE CHANGE" (`:472`) while output ran. Whether that ordering is new to plain B
+  is UNKNOWN: no B-off run in the logs read here loads a second file while output runs.
+- Separate from this verdict, it is worth checking.
+
+**Not covered by this log:**
+- **The HDR-display by-eye criteria of §7.5:** the LG was in SDR mode (headroom 1.0, `:8`), so a one-frame EDR or tone step could not
+  show.
+- **Any visual step at a switch:** a log cannot show one. Robbie's observation is the record.
+- **An explicit live resize:** no `[RASTER]` line after `:480`.
+- **OS → Bypass:** every Bypass install came from Reference.
+
+**Verdict: clean.**
+- 18 colour-state installs ran under the pacer with plain B: 5 OS → Reference, 3 of them on the SDR file that stalled under step 3 and 2 on the PQ file. The
+  run had 0 transactional presents, 0 WATCHDOG lines, 0 gate timeouts, 0 nil drawables and 0 pacer missed deadlines.
+- `nextDrawable` max was 3.59 ms (against 1000.22), there were 0 DeckLink late or dropped frames, and 0 card holds. No SDI slip or
+  re-anchor was tied to a switch.
+- This supports §7.3's model: the per-tick mode toggle was the cause. One attended run, CONFIRMED for this run only.

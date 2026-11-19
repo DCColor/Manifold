@@ -238,14 +238,15 @@ the pins, but reproducing them takes real time.
         overran by at least two periods, and a recovery on the next pull. Otherwise the 0.9.4 gate stands: 0 freezes, 0 unrecovered
         events, at least 6 h, and markers.
         - **The candidate runs the 0.9.5 defaults:** `MANIFOLD_PACER_PHASE` and `MANIFOLD_PACER_PRESENT_TX` unset, so C+ is on
-          and the present is transactional (option B off). C+ is compiled in DEBUG only, so the candidate is a Profile build, as
-          every build to date has been.
+          and the present is transactional (option B off). Since 2026-11-19 Release runs the same C+ code as Profile
+          (`MANIFOLD_PACER_PHASE` is a diagnostic off-switch in both), so the gate holds for either configuration.
         - **Export Diagnostics' "card holds while playing"** now leaves out the first 1 s after Play, a seek, a step or a loop wrap,
           the end of the file, and a rate mismatch's cadence (`CardHoldFilter`). On nights 4 and 5's logs this rule gives exactly
           the gate's holds (night 5: 1, 0, 0, 0, 0, 0; night 4: 2, 1, 0, 0, 0), where the old counter read 40–165 per block. So
           on the soak, the `[DIAG] playback counters` line should equal the gate's hold count.
-        - Not stated for 0.9.5: whether the 0.9.4 exception (2), the frame #0 start drop (a card drop, not a hold), still
-          applies. UNKNOWN until Robbie says.
+        - **Kept from 0.9.4 (Robbie, 2026-11-19): the frame #0 start-drop exception.** Frame #0 of an output start reported
+          Dropped, the known start-time drop (a card drop, not a hold; `BUGS.md`, "the first scheduled frame of an output start is
+          now and then reported Dropped").
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---

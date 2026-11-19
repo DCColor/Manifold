@@ -1795,8 +1795,9 @@ Evidence:
 - **What C+ does not cover:** night 5's one hold was a two-period present stall in `CATransaction.commit`, which dropped the frame at
   the pacer, so no lead could cover it (§18.3). That is the known limitation below ("a window present can overrun two periods"), not
   this entry.
-- **Release:** C and C+ are compiled only in DEBUG (Profile). Release has no switch and runs the pacer without the phase hold.
-  Every build cut to date is Profile.
+- **Release:** since 2026-11-19 Release runs the same C/C+ code as Profile, and `MANIFOLD_PACER_PHASE` (0/1/2) is a diagnostic
+  off-switch in both, like `MANIFOLD_CARDLOCK_1B`. Only the card-pull measurement logging (`MANIFOLD_DECKLINK_CADENCE_LOG=2`) is
+  DEBUG.
 
 The original entry follows, unchanged.
 
@@ -1873,7 +1874,18 @@ such a colour-state change. Toggling `presentsWithTransaction` around it strands
 runs dry. The next `nextDrawable` then waits out Core Animation's 1 s timeout, which is the 1000.22 ms in the log. Night 5's soak ran
 no state tick under B (0 transactional presents, `WINDOW_PRESENT_PATH.md` §6.2), which is why the soak passed B.
 
-**Not to do:** do not fix B's switching for 0.9.5. Option A replaces the present path as a whole.
+**Built 2026-11-19, unverified (Robbie):** the fix of `WINDOW_PRESENT_PATH.md` §7.5, behind the same `MANIFOLD_PACER_PRESENT_TX=0`, B
+still off by default:
+- **Plain B.** While the pacer presents, the layer stays out of transaction mode on every tick, colour-state and resize ticks included
+  (`WindowPresentTiming.optionBPresentsWithTransaction`). The mode changes only when the pacer starts or stops.
+- **One drawable spare.** Under B the present gate admits a present only with at most one already waiting, at any display rate
+  (`presentsWaitingLimit(displayPeriod:keepSpareDrawable:)`), so above 60 Hz one more of the three drawables stays free. A literal
+  fourth drawable is not possible: `maximumDrawableCount` throws outside [2, 3] (`CAMetalLayer.h`).
+- **Its known cost** (§7.4 option 1): under output, a colour-state tick's state is committed just after its frame, not in one commit
+  with it. That can show one wrong-colour composite or a one-frame EDR or tone step, and a resize can show stretched frames. Window
+  only, output on only.
+- **Not verified:** the attended LG check at 120 Hz has not been run. Until it is, this entry stays open. B stays a DEBUG experiment,
+  and option A is still the 0.9.6 plan.
 
 ---
 
