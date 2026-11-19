@@ -484,6 +484,8 @@ final class MetalVideoRenderer {
     private var deckLinkHandedTimed = false
     private var deckLinkHandSeq: UInt64 = 0
     private var deckLinkPullTimedNow = false
+    /// Export Diagnostics' card-hold rule (`CardHoldFilter`, ManifoldCore): which timed repeats are counted. `deckLinkLock`.
+    private var deckLinkHoldFilter = CardHoldFilter()
     /// Stage 1c follow-up (C6, §10.23): on a timed pull, the latest source time a frame may have and be due at this slot (the pull's
     /// target plus its hysteresis band). The picture's line: a frame is first shown at the first slot whose due time reaches its pts.
     private var deckLinkPullDueNow: Double = .nan
@@ -546,16 +548,17 @@ final class MetalVideoRenderer {
         }
     }()
     private var deckLinkSlipShift = 0.0
-    /// Option C (docs/CARD_PULL_MARGIN.md §7 C), `MANIFOLD_PACER_PHASE=1`: the output pacer holds its new-frame ticks' phase against
-    /// the frames' due times. Read once, here. Off (unset, any other value, and always in Release): the pacer is made without a
-    /// phase sample, so its loop runs `deadline += step` as before, and nothing below is computed.
-    /// `=2` is C+ (§17.3): option C exactly, plus `pacerLeadEnabled`.
-    static let pacerPhaseMode: Int = ["1": 1, "2": 2][ProcessInfo.processInfo.environment["MANIFOLD_PACER_PHASE"] ?? ""] ?? 0
+    /// Option C (docs/CARD_PULL_MARGIN.md §7 C): the output pacer holds its new-frame ticks' phase against the frames' due times.
+    /// `MANIFOLD_PACER_PHASE`, read once, here (`PacerSwitches.phaseMode`). **Unset is C+ (2), the 0.9.5 default** (Robbie,
+    /// 2026-11-19, after night 5, §18). `=1` is plain option C. `=0` is off: the pacer is made without a phase sample, so its loop
+    /// runs `deadline += step` as before 0.9.5, and nothing below is computed. Release has no switch and is always off (all of this
+    /// is DEBUG); every build cut to date is Profile.
+    static let pacerPhaseMode: Int = PacerSwitches.phaseMode(ProcessInfo.processInfo.environment["MANIFOLD_PACER_PHASE"])
     static let pacerPhaseEnabled = pacerPhaseMode >= 1
-    /// C+ (docs/CARD_PULL_MARGIN.md §17.3), `MANIFOLD_PACER_PHASE=2`: the renderer hands the pacer one value, the pull phase (the
+    /// C+ (docs/CARD_PULL_MARGIN.md §17.3), `MANIFOLD_PACER_PHASE` unset or `=2`: the renderer hands the pacer one value, the pull phase (the
     /// handed frame's lead at a timed pull plus the x of the tick that rendered it), and the pacer moves its phase earlier inside the
     /// guard band so the lead is at least P + 0.5 ms. The pull's selection and its margin are not touched: the value is read after
-    /// the pull, from what it handed. Off (=1, unset): nothing below is recorded.
+    /// the pull, from what it handed. Off (=1, =0): nothing below is recorded.
     static let pacerLeadEnabled = pacerPhaseMode == 2
     /// Option C: what this tick's selection saw, for the pacer to take right after the tick (the same thread: the pacer calls
     /// `displayTick` synchronously). Tick thread only.
@@ -573,8 +576,10 @@ final class MetalVideoRenderer {
     /// Option B (docs/WINDOW_PRESENT_PATH.md §4.5), `MANIFOLD_PACER_PRESENT_TX=0`: while the output pacer presents, the layer's
     /// `presentsWithTransaction` is false and a pacer present is `cb.present(drawable)` before the commit, with no
     /// `waitUntilScheduled` and no `CATransaction`. A tick that installs a colour state or a new drawable size keeps today's
-    /// transactional present for that frame. Set on the tick thread only (`performDisplayTick`'s top). Unset: today's path.
-    static let pacerPresentNoTx = ProcessInfo.processInfo.environment["MANIFOLD_PACER_PRESENT_TX"] == "0"
+    /// transactional present for that frame. Set on the tick thread only (`performDisplayTick`'s top). Unset (and `=1`): today's
+    /// transactional path, the 0.9.5 default. B stays a DEBUG experiment only: with C+ it froze the window ~1 s on a Display Transform
+    /// switch to Reference while SDI played (docs/BUGS.md; superseded by option A, `docs/WINDOW_PRESENT_PATH.md`, for 0.9.6).
+    static let pacerPresentNoTx = PacerSwitches.presentUntransacted(ProcessInfo.processInfo.environment["MANIFOLD_PACER_PRESENT_TX"])
     #else
     static let pacerPhaseEnabled = false
     static let pacerLeadEnabled = false
@@ -3450,7 +3455,7 @@ final class MetalVideoRenderer {
     }
 
     /// `linkQueue`. Stop the link (it waits for a tick in flight), then start the pacer in the link's idle state.
-    /// `phaseMatched`: option C only (`MANIFOLD_PACER_PHASE=1`); nil with the switch off, and then the pacer is made and re-rated
+    /// `phaseMatched`: option C and C+ (`MANIFOLD_PACER_PHASE` unset, =1 or =2); nil with it off (=0), and then the pacer is made and re-rated
     /// exactly as before.
     private func startPacerOnQueue(_ period: Double, k: Int, mode: String, reason: String, phaseMatched: Bool? = nil) {
         let line = String(format: "%@ · P %.2f ms (k %d, %.2f Hz)", mode, period * 1000, k, 1 / period)
@@ -5725,6 +5730,7 @@ final class MetalVideoRenderer {
         deckLinkHandedPts = .nan
         deckLinkHandedTimed = false
         deckLinkHandedDue = .nan
+        deckLinkHoldFilter = CardHoldFilter()   // a repeat still pending was never confirmed: not a hold
     }
 
     /// The slot the next convert writes: an empty one, else the oldest. Called with `deckLinkLock` held.
@@ -6171,8 +6177,12 @@ final class MetalVideoRenderer {
             }
         }
         let pts = deckLinkSlotPts[slot]
-        // Export Diagnostics (`PlaybackCounters`, every build): a timed pull after a timed pull that handed the same frame again.
-        if deckLinkPullTimedNow, deckLinkHandedTimed, pts.isFinite, pts == deckLinkHandedPts { PlaybackCounters.noteCardHoldWhilePlaying() }
+        // Export Diagnostics (`PlaybackCounters`, every build): a timed pull after a timed pull that handed the same frame again, at a
+        // matched rate, past the opening frames after a transport event, and confirmed by a later newer frame (`CardHoldFilter`).
+        let matchedRate = deckLinkSourceFrame > 0 && abs(deckLinkSourceFrame - deckLinkCardFrame) < deckLinkCardFrame * 1e-4
+        let confirmedHolds = deckLinkHoldFilter.pull(host: host, timed: deckLinkPullTimedNow, pts: pts.isFinite ? pts : .nan,
+                                                     matched: matchedRate)
+        if confirmedHolds > 0 { PlaybackCounters.addCardHoldsWhilePlaying(confirmedHolds) }
         #if DEBUG
         if Self.pacerLeadEnabled { notePacerLeadPullLocked(slot: slot, host: host, handed: pts, previous: deckLinkHandedPts) }
         #endif

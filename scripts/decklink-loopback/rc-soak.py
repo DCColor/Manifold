@@ -89,7 +89,8 @@ class Freeze:
 # C+ (docs/CARD_PULL_MARGIN.md §17.3, MANIFOLD_PACER_PHASE=2) moves the pacer's phase earlier inside option C's guard band, in steps of
 # at most 0.5 ms; option B (docs/WINDOW_PRESENT_PATH.md §4.5, MANIFOLD_PACER_PRESENT_TX=0) changes only how the window's pacer
 # presents reach the screen. Neither touches the pull, the card lock, Stage 2, the recovery paths or the audio routing.
-EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"1", "2"},
+# Since 0.9.5 C+ is the default with MANIFOLD_PACER_PHASE unset; a block without the phase hold sets MANIFOLD_PACER_PHASE=0.
+EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"0", "1", "2"},
                      "MANIFOLD_PRESENT_TIMING": {"1"}, "MANIFOLD_PACER_PRESENT_TX": {"0"}}
 
 def parse_extra_env(items):
