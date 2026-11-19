@@ -94,6 +94,20 @@ public enum WindowPresentTiming {
         return 1 / displayPeriod > secondWaitingPresentAbove ? 2 : 1
     }
 
+    /// OPTION B (`MANIFOLD_PACER_PRESENT_TX=0`, DEBUG; docs/WINDOW_PRESENT_PATH.md §7.5): the gate keeps one of the layer's three
+    /// drawables spare, so at most one present waits for the glass at any display rate. Above 60 Hz that is one drawable more free
+    /// than `presentsWaitingLimit`, where the pool otherwise has no slack (§7.2). A literal fourth drawable is not possible:
+    /// `CAMetalLayer.maximumDrawableCount` throws outside [2, 3] (CAMetalLayer.h). B off: `presentsWaitingLimit`, unchanged.
+    public static func presentsWaitingLimit(displayPeriod: Double, keepSpareDrawable: Bool) -> Int {
+        keepSpareDrawable ? 1 : presentsWaitingLimit(displayPeriod: displayPeriod)
+    }
+
+    /// OPTION B, "plain B" (docs/WINDOW_PRESENT_PATH.md §7.4 option 1, §7.5): the layer's `presentsWithTransaction` while B is on.
+    /// Transactional exactly when the output pacer is not presenting. It takes nothing about the tick (no colour state, no new
+    /// drawable size), so the mode never changes per tick, only when the pacer starts or stops. A per-tick switch to a transactional
+    /// present on a colour-state tick stranded a drawable and stalled `nextDrawable` for its 1 s timeout (§7).
+    public static func optionBPresentsWithTransaction(pacerPresenting: Bool) -> Bool { !pacerPresenting }
+
     /// The longest tick → glass lead taken; a longer one (a stalled link, a bad timestamp) selects at the tick.
     public static let maximumGlassLead = 0.1
 

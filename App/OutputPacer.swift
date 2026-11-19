@@ -18,13 +18,12 @@
 //
 //  The interval statistics (median, p99, max) go to the log every 10 s while ticking, and for the whole run at cancel.
 //
-//  OPTION C (docs/CARD_PULL_MARGIN.md §7 C; `MANIFOLD_PACER_PHASE=1`, DEBUG). With `phaseSample` set, after each
+//  OPTION C (docs/CARD_PULL_MARGIN.md §7 C; `MANIFOLD_PACER_PHASE=1`; every configuration). With `phaseSample` set, after each
 //  tick the pacer asks the renderer what its selection saw and moves the next deadline by at most 20 µs, so the new-frame
 //  ticks keep their phase against the frames' due times (`PacerPhaseFollower`). Before the reference is set, a phase within
-//  0.5 ms of a due time is moved off it in one step of at most 0.5 ms (the establishment guard). With `phaseSample` nil (`=0`, and
-//  always in Release) the loop's deadline arithmetic is `deadline += step`, as before; the switch costs one nil test a tick.
+//  0.5 ms of a due time is moved off it in one step of at most 0.5 ms (the establishment guard). With `phaseSample` nil (`=0`, in any configuration) the loop's deadline arithmetic is `deadline += step`, as before; the switch costs one nil test a tick.
 //
-//  C+ (docs/CARD_PULL_MARGIN.md §17.3; `MANIFOLD_PACER_PHASE=2`, DEBUG; **the default since 0.9.5**: unset is C+, `=0` is off,
+//  C+ (docs/CARD_PULL_MARGIN.md §17.3; `MANIFOLD_PACER_PHASE=2`; **the default since 0.9.5, Release included**: unset is C+, `=0` is off,
 //  `PacerSwitches.phaseMode`). Option C, plus `leadSample`: the renderer's pull phase for
 //  this Play (the handed frame's lead plus its tick's x). The follower then moves its reference earlier, inside the guard band, so the
 //  card's lead is at least P + 0.5 ms where the band allows (`PacerPhaseFollower.leadGuard`). With `leadSample` nil (=1) the follower
