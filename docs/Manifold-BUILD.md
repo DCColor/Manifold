@@ -228,6 +228,24 @@ the pins, but reproducing them takes real time.
           6 window late/dropped frames in all (1 at 2398-1 regen 2, 1 at 2398-1 regen 4, 3 at GOP25 regen 5, 1 at 5994-2
           regen 5). That is in line with each block's own background rate (119 late/dropped frames in 4.65 h of video blocks,
           about 4.3 expected in 30 × 20 s). From each Pause to its last thumbnail + 10 s: 0 holds, 0 skips, 0 late/dropped.
+      - **0.9.5 release gate (Robbie, 2026-11-19, after `CARD_PULL_MARGIN.md` §18 and two attended checks on the LG): 0
+        holds for any cause, except (a) a renderer recovery and (b) one named exception, "pacer-caused hold from a present
+        overrun on a scaled display, recovered". Crossing-caused holds: 0, with no exception.** The 0.9.4 exception "a late window
+        frame repeated once (either destination)" is retired: its mechanism, the crossing, is fixed by C+ (`BUGS.md`, the card
+        pull's margin, FIXED 2026-11-19). Exception (b) is `BUGS.md`'s known limitation "on a scaled 60 Hz desktop display at
+        59.94 output, a window present can overrun two periods" (night 5: 1 in about 2 h on the ASUS at 1920 × 550; 0 on the LG
+        at 120 Hz unscaled), fixed by option A in 0.9.6. A hold claimed under (b) must show, in the log, a missed pacer tick that
+        overran by at least two periods, and a recovery on the next pull. Otherwise the 0.9.4 gate stands: 0 freezes, 0 unrecovered
+        events, at least 6 h, and markers.
+        - **The candidate runs the 0.9.5 defaults:** `MANIFOLD_PACER_PHASE` and `MANIFOLD_PACER_PRESENT_TX` unset, so C+ is on
+          and the present is transactional (option B off). C+ is compiled in DEBUG only, so the candidate is a Profile build, as
+          every build to date has been.
+        - **Export Diagnostics' "card holds while playing"** now leaves out the first 1 s after Play, a seek, a step or a loop wrap,
+          the end of the file, and a rate mismatch's cadence (`CardHoldFilter`). On nights 4 and 5's logs this rule gives exactly
+          the gate's holds (night 5: 1, 0, 0, 0, 0, 0; night 4: 2, 1, 0, 0, 0), where the old counter read 40–165 per block. So
+          on the soak, the `[DIAG] playback counters` line should equal the gate's hold count.
+        - Not stated for 0.9.5: whether the 0.9.4 exception (2), the frame #0 start drop (a card drop, not a hold), still
+          applies. UNKNOWN until Robbie says.
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---

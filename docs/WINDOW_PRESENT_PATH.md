@@ -587,3 +587,264 @@ In-flight holds in more than 50 % of playing 10 s windows (§2.1's method). This
      Proposal: on the next night, note in `soak.out`'s first line any launches or prompts earlier that day, and the time since the last
      reboot.
   3. Choosing between A and B (or B as a one-night experiment first) is Robbie's decision.
+
+---
+
+## 6. Night 5: option B measured, and the window on the LG at 120 Hz (run 2026-11-18/19)
+
+Added after the audit above. Option B as specified in §4.5 (`MANIFOLD_PACER_PRESENT_TX=0`) was built, with C+ (`CARD_PULL_MARGIN.md`
+§17.3), and run on A/B night 5. The blocks were 45 min each: 59.94 SDI with B off, on, off and on, then 23.976 Computer with B on,
+all with the window on the ASUS; then 59.94 SDI with B off and the window on the LG at 120 Hz, unscaled. `MANIFOLD_PRESENT_TIMING=1`
+was set on every block. Rig, verdicts, holds and the Carbon Copy Cloner check are in `CARD_PULL_MARGIN.md` §18. Logs:
+`~/Code/_scratch/manifold-pacerphase-ab4/` (`<label>.log`, `present.report`, `ab.report`, `rig.log`). The figures are each block's last
+`[PRESENT-TIMING] total` line as `ab-check.py` prints them (`ab.report:69-81`). The measurement was complete on every block (`:82-87`).
+Holding windows and presented/s use §2.1's method (`[PACER] desktop` lines with rendered > 0; recounted in this session, the counts
+match `ab.report`'s). Read-only: no build, no launch, no git.
+
+**Verdict on B (`RIG.md`, B-on blocks 2, 4, 5): PASS** (`ab.report:49`). Missed deadlines were 0, 1 and 1, with 0 pacer late swaps and
+0 presents through `CATransaction.commit`.
+
+### 6.1 Time per step
+
+p50 / p99 / max, ms. Under B the present is scheduled from the command buffer, so `waitUntilScheduled`, the probe, `present()` and
+`CATransaction.commit` are not run ("—").
+
+| Step | 59.94 B off (1) | 59.94 B on (2) | 59.94 B off (3) | 59.94 B on (4) | 23.976 B on (5) | 59.94 B off, LG 120 Hz (6) |
+|---|---|---|---|---|---|---|
+| `makeCommandBuffer` | 0.002 / 0.010 / 0.057 | 0.002 / 0.009 / 0.025 | 0.003 / 0.010 / 0.034 | 0.002 / 0.010 / 0.058 | 0.002 / 0.004 / 0.012 | 0.002 / 0.003 / 0.016 |
+| `nextDrawable` | 0.014 / 0.036 / 0.272 | 0.011 / **0.030** / 0.310 | 0.014 / 0.036 / 0.238 | 0.011 / **0.030** / 0.281 | 0.013 / **0.021** / 0.247 | 0.014 / 0.022 / **7.008** |
+| `encodeDisplayStage` | 0.011 / 0.029 / 0.085 | 0.010 / 0.026 / 0.113 | 0.012 / 0.029 / 0.123 | 0.010 / 0.026 / 0.092 | 0.011 / 0.017 / 0.065 | 0.011 / 0.017 / 0.315 |
+| `commit` | 0.004 / 0.013 / 0.028 | 0.005 / 0.016 / 0.082 | 0.005 / 0.013 / 0.031 | 0.005 / 0.016 / 0.095 | 0.006 / 0.009 / 0.082 | 0.004 / 0.006 / 0.050 |
+| `waitUntilScheduled` | 0.073 / 0.152 / 6.801 | — | 0.072 / 0.150 / 6.860 | — | — | 0.066 / 0.161 / 7.454 |
+| `present()` | 0.007 / 0.015 / 0.101 | — | 0.007 / 0.014 / 0.103 | — | — | 0.008 / 0.017 / 0.108 |
+| **`CATransaction.commit`** | 0.048 / **2.310** / **25.162** | — | 0.048 / **2.360** / **16.598** | — | — | 0.050 / **1.904** / **16.927** |
+| `closeColorStateTransaction` | 0.001 / 0.001 / 0.005 | 0.001 / 0.001 / 0.008 | 0.001 / 0.001 / 0.007 | 0.001 / 0.001 / 0.008 | 0.001 / 0.001 / 0.008 | 0.001 / 0.001 / 0.005 |
+| **present total** | 0.184 / **2.470** / 31.071 | 0.028 / **0.075** / 0.336 | 0.184 / **2.510** / 16.712 | 0.028 / **0.076** / 0.320 | 0.030 / **0.045** / 0.293 | 0.168 / 2.080 / 22.882 |
+| `performDisplayTick` without the present | 0.012 / 0.131 / 1.140 | 0.012 / 0.117 / 1.411 | 0.012 / 0.130 / 10.657 | 0.011 / 0.117 / 14.383 | 0.005 / 0.164 / 26.490 | 0.013 / 0.151 / 16.219 |
+| tick | 0.088 / 1.779 / 31.575 | 0.047 / 0.136 / 1.412 | 0.088 / 1.859 / 17.154 | 0.047 / 0.137 / 14.477 | 0.006 / 0.195 / 26.561 | 0.015 / 1.354 / 23.186 |
+| repeat tick serving a present | 0.204 / 2.640 / 16.910 | 0.045 / **0.089** / 0.188 | 0.200 / 2.580 / 15.984 | 0.044 / **0.089** / 0.142 | none | none |
+| present → glass | 28.1 / 48.4 / 49.6 | 29.6 / 49.1 / 49.6 | 28.8 / 48.5 / 49.4 | 29.0 / 48.3 / 49.7 | 25.6 / 34.5 / 50.9 | 14.0 / 22.8 / 31.4 |
+| glass → handler | 0.404 / 0.507 / 1.642 | 0.409 / 0.515 / 1.575 | 0.404 / 0.510 / 1.991 | 0.407 / 0.511 / 1.109 | 0.412 / 0.505 / 0.608 | 0.389 / 0.474 / 3.337 |
+
+- **B takes the present off the pacer's critical path.** The present's p99 fell from 2.47–2.51 ms to 0.075–0.076 ms, and its max from
+  16.7–31.1 ms to 0.32–0.34 ms. The repeat tick that serves a held present fell from 2.58–2.64 ms to 0.089 ms at p99. The whole tick's
+  max is now set by `perform`, not the present (14.5 ms on block 4, after a seek; §6.2). CONFIRMED.
+- **The back-pressure did not move into `nextDrawable`** (§4.5's open question). With B on, its p99 was 0.030 ms against 0.036 off, and
+  its max 0.31 ms against 0.27. The pool never ran dry. CONFIRMED for these blocks.
+- **Present → glass did not drop** (§4.5's latency risk): the median was 29.0–29.6 ms with B on against 28.1–28.8 off, about 1 ms later.
+  The p99 is unchanged. So the window against the Mac sound, and `[AV-LAG]`'s tick → glass, moved by about 1 ms, inside its spread.
+- **`CATransaction.commit`'s long tail is a property of WindowServer at both refresh rates.** On the LG at 120 Hz its p99 was 1.90 ms,
+  against 2.31–2.36 ms on the ASUS, with a max of 16.9 ms. See §6.4 for why the LG paid for it once.
+
+### 6.2 Misses, and what overran
+
+| Block | Pacer missed deadlines | `miss` lines | Overran: `CATransaction.commit` | `perform` | `waitUntilScheduled` | Pacer late swaps |
+|---|---|---|---|---|---|---|
+| 1 B off | 70 | 67 | 67 (one 16.80 ms on a repeat tick, the night's only card hold) | 0 | 0 | 26 (0 held) |
+| 2 B on | **0** | 0 | — | — | — | **0** |
+| 3 B off | 68 | 66 | 65 | 1 | 0 | 29 (0 held) |
+| 4 B on | **1** | 1 | — | 1 (14.38 ms, after a seek) | — | **0** |
+| 5 B on, 23.976 | **1** | 1 | — | 1 (26.49 ms, after a seek) | — | 0 |
+| 6 B off, LG | 7 | 5 | 1 | 2 (both after a seek) | 2 | 0 |
+
+- **The B-on blocks' misses are the first new-frame tick after a seek**, as are all 5 `perform` misses of the night. Each comes within
+  400 log lines after `[TRANSPORT] seek` and `[CADENCE-SWAP]` (`CARD_PULL_MARGIN.md` §18.5). That is night 4's post-seek shape (§5.3).
+  It is not the present path, and B does not touch it.
+- **The pacer and the measurement differ** only by ticks that ended past more than one deadline (`CARD_PULL_MARGIN.md` §18.2).
+- **State ticks under B: none in the soak.** "Presents transactional" was 0 on every B-on block. So no colour install and no drawable-size
+  change happened while the pacer presented, and §4.5 step 3 (a transactional present for that one frame) was never exercised. Whether
+  the layer honours a mode change between consecutive presents is still UNKNOWN. The attended checks decide it.
+- **§4.5's planned B-on items** (reported here; `RIG.md` judged only its own criteria 1–3):
+
+| §4.5 item | Block 2 | Block 4 | Block 5 | Met |
+|---|---|---|---|---|
+| B-off reproduces the state (holding > 50 %, ≥ 20 misses) | blocks 1, 3: 72.1 %, 70; 75.7 %, 68 | | | yes (not inconclusive) |
+| Missed deadlines ≤ 2 | 0 | 1 | 1 | yes |
+| 0 pacer late swaps | 0 | 0 | 0 | yes |
+| `CATransaction.commit` only on state ticks | 0 presents | 0 | 0 | yes |
+| `nextDrawable` p99 ≤ 0.1 ms, max ≤ 2 ms | 0.030, 0.310 | 0.030, 0.281 | 0.021, 0.247 | yes |
+| Repeat tick serving a present p99 ≤ 0.5 ms | 0.089 | 0.089 | none | yes |
+| Dropped presents no more than B-off | 143 (0.10 %) | 148 (0.10 %) | 84 (0.14 %) | yes (B-off 2685, 2223) |
+| Presented/s median in holding windows ≥ night 4's 53.8–56.7 | **49.4** | **51.9** | no holding windows | **no** |
+| The 0.9.4 gate: 0 holds, skips, freezes | 0 | 0 | 0 | yes |
+
+### 6.3 The bad state under B
+
+| Block | Holding windows (of 272 playing) | Holding %, by sixth | Presented/s median, holding / clean | Presents | Dropped (`presentedTime` 0) | ≥ 2 refreshes to glass |
+|---|---|---|---|---|---|---|
+| 1 B off | 196 (72.1 %) | 72 71 64 63 80 82 | 55.5 / 59.9 | 143929 | 2685 (1.87 %) | 17989 (12.5 %) |
+| 2 B on | 196 (72.1 %) | 67 93 67 74 67 64 | **49.4** / 59.9 | 141082 | **143 (0.10 %)** | 24510 (17.4 %) |
+| 3 B off | 206 (75.7 %) | 76 89 91 50 80 69 | 54.4 / 59.9 | 143094 | 2223 (1.55 %) | 19709 (13.8 %) |
+| 4 B on | 204 (75.0 %) | 72 69 71 87 82 69 | **51.9** / 59.9 | 141607 | **148 (0.10 %)** | 23423 (16.5 %) |
+| 5 B on, 23.976 | 0 | 0 throughout | — / 24.0 | 61345 | 84 (0.14 %) | 2954 (4.8 %) |
+| 6 B off, LG 120 Hz | **0** | 0 throughout | — / 59.9 | 153295 | 141 (0.09 %) | 34436 (22.5 %; a refresh is 8.33 ms here) |
+
+- **B does not remove the bad state; it only stops the state from costing the card.** Holding windows were 72–75 % with B on as with B
+  off, from the first sixth, on the first block of the night as on the fourth. The gate still holds the new frame when two presents
+  wait for the glass. Without the transaction, the wait no longer blocks the pacer. CONFIRMED.
+- **The window pays a little instead.** In holding windows it presented 49.4 and 51.9 frames/s with B on, against 54.4–55.5 with B off
+  tonight and 53.8–56.7 on night 4. More presents took ≥ 2 refreshes to reach the glass (16.5–17.4 % against 12.5–13.8 %), and about 2 %
+  fewer presents were made over the block. Dropped presents fell about 15-fold (0.10 % against 1.55–1.87 %). Inference: without the
+  commit the compositor coalesces rather than drops. A frame shown late now replaces a frame dropped, and fewer distinct frames reach
+  the glass in a holding window. Window-only, output-on-only, 59.94-on-ASUS-only.
+- §4.5's "where the back-pressure goes" is answered for this night: into later presented handlers, which the gate turns into holds, as
+  §4.5 guessed. Not into `nextDrawable`.
+
+### 6.4 The window on the LG at 120 Hz, unscaled (block 6, reported)
+
+- **Display:** LG TV SSCR2, `3840 x 2160`, "looks like" `3840 x 2160 @ 120.00Hz` (`rig.log`, every entry). The window was placed there
+  before output started ("LG TV SSCR2 at 120.000 Hz (window shown)", `soak.out:126`).
+- **The bad state did not appear:** 0 of 272 playing windows held a frame, and the window presented 59.9 frames/s throughout. With the
+  same file, binary and night on the ASUS, every block was degraded (72–76 %). CONFIRMED.
+- **Misses: 7 pacer (5 ticks).** 2 were `perform` after a seek (16.22, 11.74 ms), 2 `waitUntilScheduled` (7.22, 7.45 ms), and 1
+  `CATransaction.commit` (16.93 ms). So commit overruns do appear at 120 Hz, but once in 45 min against 65–67 on the ASUS. All 5 were
+  new-frame ticks with 0 in flight (`present.report`). No present waits for a repeat tick when nothing is held. A miss on a new-frame
+  tick delays only the next, empty repeat tick (§5.3), and the block had 0 late swaps and 0 holds. CONFIRMED.
+- **`CATransaction.commit`'s distribution is close to the ASUS's** (p99 1.90 against 2.31–2.36 ms). The difference is where the long
+  commits land. On the LG every present is made on a new-frame tick with nothing held, so a long commit eats into an empty repeat tick.
+  On the ASUS, in holding windows, the held present is served on the repeat tick, so a long commit there runs into the next new-frame
+  deadline (§5.3). Inference from the counts.
+- **One `nextDrawable` of 7.0 ms** (max; p99 0.022 ms). It caused no miss. Its cause is UNKNOWN.
+- **WindowServer `ASEProcessing`: 26 lines a minute** after the LG block, against 3280–3282 after each 59.94 ASUS block and 2490 after
+  23.976 (`rig.log`). §2.4 found a per-frame `ASEProcessing` surface, present on nights 3, 4 and 5 with the window on the ASUS. With
+  the window on the LG it nearly vanishes. Whether that surface is the ASUS-side cause of the degraded state is UNKNOWN. This is the
+  first night on which the two have separated together.
+- **Present → glass:** 14.0 ms median (1.7 refreshes of 8.33 ms), against 28–30 ms (1.7 of 16.68 ms) on the ASUS. The window's picture
+  reaches the glass about 14 ms sooner on the LG. That matters for the window against the Mac sound at Computer (`[AV-LAG]`), not for
+  SDI.
+
+### 6.5 Carbon Copy Cloner (`CARD_PULL_MARGIN.md` §18.6)
+
+The only CCC run inside a night-5 block started at 23:30:00 and lasted 68 s, copying 1.5 MB, in block 3 (B off). Block 3's 68 misses
+were spread across the block, and 7 fell within ±3 min of the run against 8.5 expected at the block's rate. None fell inside the run
+itself, and no hold fell near it. Over nights 1, 3, 4 and 5: 12 misses in the windows against 15.9 expected, and 0 of 42 judged holds.
+The misses are spread, not clustered. A large CCC copy never overlapped a block, so its effect is UNTESTED.
+
+### 6.6 What this changes
+
+- **§4.5's question is answered: removing `CATransaction.commit` and `waitUntilScheduled` from pacer presents is enough for the card at
+  59.94 on the ASUS.** Misses fell from 68–70 to 0–1 a block, and pacer late swaps from 26–29 to 0. Night 4's inference (§5.6: "B would
+  have removed all 3 holds of night 4 and 239 of its 245 misses") holds on this night. The misses that remain are post-seek `perform`
+  overruns, outside the present path.
+- **Option A is still the structural fix.** B leaves `nextDrawable` and the encode on the pacer thread. They stayed fast tonight
+  (max 0.31 ms on the ASUS), but on the LG `nextDrawable` reached 7.0 ms once. B also keeps the window's degraded state, at a small cost
+  to the window (§6.3). A paces the window by its own display. The LG block suggests the display matters to the degraded state
+  (inference, one block).
+- **The display is now a lead, not a rig factor to rule out.** On the same night, the ASUS (1920 × 550, 59.936 Hz) was degraded in all
+  5 blocks, and the LG (3840 × 2160 at 120 Hz, unscaled) was clean, with almost no `ASEProcessing`. §2.3's search for what separates
+  night 2 from nights 1, 3 and 4 should record the window's display mode and its `ASEProcessing` rate. One LG block is not a replication.
+  Inference.
+- **Open:**
+  1. B's attended checks (§4.5) have not been run: a live resize under output, Display Transform switches, and HLG and PQ in As macOS
+     Shows It, on the LG. Step 3's state ticks were not exercised by the soak (§6.2).
+  2. What `CATransaction.commit` waits for, and why the ASUS mode degrades: UNKNOWN.
+  3. Choosing between B as shipped behaviour, A, or B then A is Robbie's decision. This section does not make it.
+
+---
+
+## 7. Why B stalls the pacer for 1 s on a Display Transform switch (attended, 2026-11-19)
+
+Read-only: no build, no launch, no git. Line numbers are HEAD `7de17c5` (`App/MetalVideoRenderer.swift` unless named). The run's log
+was not on disk in this session, so the evidence is the run as reported: LG at 120 Hz, 2160p23.976 SDI, C+ on, B on. On OS → Reference
+while playing, `[EDR] colour state #2 installed … re-presenting the frame on screen under it`, then the watchdog's "STILL IN FLIGHT", then
+`drawMs` max 1000.22, `[PACER] desktop nextDrawable` max 1000.22 ms, intervals max 1001.00, 71 missed, 24 card holds, an SDI slip and a
+Mac-sound re-anchor. It happened again on a second Reference switch. The Bypass and OS switches in the same run did not stall, and with
+B off all four switches were clean.
+
+### 7.1 What a state tick does under B
+
+All of it runs on the pacer thread. The pacer calls `displayTick` synchronously (`:560-561`), and that thread is the layer's only writer.
+1. **The mode flips at the top of the tick** (`:3711-3716`). With the pacer on and a colour state pending, `wantTransaction` is true, so
+   `presentsWithTransaction` goes false → true. The write is outside any explicit `CATransaction`, because the colour transaction opens
+   below it (`:3729`).
+2. **The colour state is installed** inside an open transaction (`:3728-3790`): colorspace, EDR, `edrMetadata`, `toneMapMode`,
+   `activeReference`. That transaction stays open until the present (`:3722-3727`).
+3. **The frame goes through the pacer branch either way.** On a new-frame tick it is the new frame. On a repeat tick it is
+   `pendingRefresh` re-rendering `lastPixelBuffer` (`:4044-4051` → `renderPixelBuffer`, set by `publishColorState` at `:2224`). Both
+   reach `if pacerPresentsOn` (`:4444`) → `deferredPresent` → `servePacedPresent` (`:4462-4463`). No path presents around the gate.
+4. **`servePacedPresent` (`:4634-4741`):**
+   - The gate lets a present through while `inFlight ≤ presentsWaitingLimit`, which is **2 above 60 Hz** (`OutputPacing.swift:92-95`).
+   - Then `nextDrawable()` (`:4678`). This is the 1000.22 ms call: `drawMs` on a pacer tick is this wait (`:4465`).
+   - `scheduledPresent` is false, because the layer is now transactional (`:4706`). So it runs `cb.commit()`, then `presentDrawable`'s
+     transactional arm (`:4959-4980`): `waitUntilScheduled`, then `CATransaction.begin` / `present()` / `commit`, nested in the colour
+     transaction, which `closeColorStateTransaction` commits (`:5020-5024`).
+5. **The next tick has no state**, so `presentsWithTransaction` goes true → false (`:3715`), and presents are scheduled from the command
+   buffer again (`:4706-4711`, `:4946-4951`).
+
+So a switch puts one transactional present between two runs of scheduled presents, and it toggles the mode twice. The scheduled presents
+before it can still be waiting for the glass.
+
+### 7.2 Where `nextDrawable` can wait 1 s
+
+`nextDrawable` blocks only when all of the pool's drawables are out, and it gives up after about 1 s (comment `:4472-4474`). The pool is
+the default three: the code sets neither `maximumDrawableCount` nor `allowsNextDrawableTimeout`.
+- **At 120 Hz the gate leaves the pool no slack.** It admits a present with 2 already in flight. With the one on the glass, that is all
+  three drawables, so the call waits until the glass advances, normally one refresh. That is the 7.0 ms `nextDrawable` of night 5's LG
+  block (§6.4).
+- **At 60 Hz** the limit is 1 and one drawable stays free. Night 5's B-on soak ran only at 60 Hz (ASUS) and at 23.976, and it had no
+  state ticks (§6.2). **B had never run at 120 Hz before this attended run, and step 3 had never run at all.**
+- A full 1 s wait therefore means at least one drawable did not come back for the whole second, and with 120 Hz's zero slack, one is
+  enough. Its 1 s length matches the timeout. The same second accounts for the rest: 24 card holds is 1 s of 23.976 frames not scheduled
+  by a blocked pacer thread, 71 missed is about 1 s of pacer deadlines, and the slip and the re-anchor follow. CONFIRMED that the tick
+  thread was inside `nextDrawable` for the timeout. The rest of this paragraph is inference.
+
+### 7.3 Answers to question 2
+
+- **A drawable stranded across the mode switch: the most likely cause. Inference, not proven.** Apple documents neither how a
+  `CAMetalLayer` hands back a drawable presented in one mode once the layer is in the other, nor whether that is supported between
+  consecutive presents. §4.5 step 3 already called this UNKNOWN.
+  - The model that fits: a scheduled present is handed back when a later scheduled present replaces it, and a transactional present when
+    a later commit replaces the layer's contents. A toggle can leave the last drawable of one mode with nothing in that mode to replace
+    it:
+    - the scheduled frames still waiting when the layer turns transactional;
+    - or the transactional frame, once the layer turns back.
+  - One such drawable, at 120 Hz with 2 in flight, empties the pool until something times out.
+  - `presentsInFlight` can also stay high until the gate's 0.5 s timeout (`:4644-4647`), because a stranded drawable's presented handler
+    never fires.
+  - Why it recovers after about 1 s is UNKNOWN.
+- **A drawable held across the switch by our code: no.** Every drawable is taken inside the tick's autorelease pool (`:3623-3637`) and
+  is presented on every path after `nextDrawable` (`:4678-4741`). The only early return after acquiring one is the `nilDrawable` arm,
+  which holds nothing. CONFIRMED.
+- **A main-thread / tick-thread ordering problem: no.** Main only parks `pendingColorState` under `refreshLock` (`:2215-2226`) and never
+  touches the layer. `pacerPresentsActive` is written on `linkQueue` and read under `presentGateLock` (`:4612`, `:4621-4624`). All layer
+  writes, `nextDrawable` calls and presents are on the tick thread. CONFIRMED.
+- **One secondary suspect: the mode write runs outside an explicit transaction** (`:3715`), on a thread with no run loop, so if that
+  property opens an implicit transaction, nothing commits it.
+  - The drawable-size write has always done the same (`:3718-3720`).
+  - Night 5's B-on blocks toggled the mode at every pacer start and stop without a stall.
+  - So this is not enough on its own to cause the stall. UNKNOWN whether it contributes.
+- **Why Reference and not Bypass or OS: not explained by the code.**
+  - On a calibrated display, Reference's layer state is the same as Bypass's: colorspace nil (`plan.layerColorSpace`, logged as
+    "REFERENCE on a calibrated display, no conversion", `:2313`), no `edrMetadata`, `.never` tone mapping (`:2177`), and an
+    identity copy in `encodeDisplayStage` (`:4544-4565`).
+  - The tick path for a switch is the same for all three modes. Nothing in it branches on the mode (`:2100-2113`, `:3711-3790`).
+  - Two explanations fit, and the log decides between them:
+    - (a) **Timing:** the stall needs 2 presents in flight at the switch, which is likely at 120 Hz, and 2 of 4 switches is not a pattern.
+    - (b) **The direction of the switch:** both stalls left OS. If the file was HDR, leaving OS also removes `edrMetadata` and changes
+      `toneMapMode` from `.automatic` to `.never`, which Bypass → OS or Reference → Bypass do not.
+  - The order of the four switches and the file's transfer were not recorded. UNKNOWN.
+
+### 7.4 Fixes considered
+
+| Option | Change | Certainty it removes the stall | What else it changes |
+|---|---|---|---|
+| **1. Never toggle per tick ("plain B")** | `:3713-3714`: `wantTransaction = !pacerOn`, dropping `stateTick`. The mode changes only when the pacer starts or stops. State ticks take the scheduled path; `closeColorStateTransaction` commits the colour state just after `cb.commit()` (`:4946-4951`). | High. Night 5 ran 135 min of B-on blocks, all without state ticks and all clean; only the per-tick toggle is new on a state tick. Not yet shown at 120 Hz. | §4.5's named risks come back: the colour state can reach the render server a few ms apart from its first frame (3–7.5 ms measured before 0.9.1). That can show one composite of the old picture under the new state, or a one-frame EDR or tone step in As macOS Shows It, on Display Transform, LUT and source changes with output on. A resize can show stretched frames. Window only, output on only. B off is unchanged. |
+| 2. Drain before the transactional frame | On a state tick, keep the colour state pending (put it back under `refreshLock`) until `presentsInFlight == 0`, then flip, present transactionally and flip back. | Medium. It covers only the "scheduled frames stranded" half of the model, not a transactional frame stranded after the flip back. | It delays every switch under output by up to the drain (a few refreshes, up to the 0.5 s gate timeout). It touches the install ordering that 0.9.1's "one commit" fix depends on. More code on the tick's hot top. |
+| 3. Install the colour state without a transactional present | The same as 1 on the present path. Only the wording differs. | As 1 | As 1 |
+| 4. Skip the re-present under B | It does not help. While playing, the state tick presents a new frame anyway, and the toggle, not the re-present, is what changes. On a paused deck the pacer is not presenting. | Low | It would leave a paused-under-output frame drawn under the old state until the next frame. |
+| 5. Give the pool slack at 120 Hz | Hold at `inFlight ≥ 2` instead of `> 2` under B, or `maximumDrawableCount = 4`. | Low as a fix: a stranded drawable would still be gone, only later. | It is a mitigation worth having under B whatever else is chosen: at 120 Hz `nextDrawable` already waits a refresh in steady state (§6.4's 7.0 ms). It changes the 2026-11-01 gate rule (`docs/BUGS.md`). |
+
+### 7.5 Verdict
+
+**Small and contained:** in `App/MetalVideoRenderer.swift:3713-3714`, set `let wantTransaction = !pacerOn`. That drops step 3, so the
+layer changes mode only when the pacer starts or stops, and B becomes plain B, the fallback §4.5 named. It is one line, DEBUG-only and
+behind `MANIFOLD_PACER_PRESENT_TX=0`.
+- **What it costs:** §4.5's colour-state, EDR and resize risks under output.
+- **Before calling it fixed:** the attended LG checks at 120 Hz, run with B on:
+  - four Display Transform switches, including OS → Bypass and OS → Reference on an HDR file, watched for a stall and for a one-frame
+    colour or tone step;
+  - a live resize.
+
+**One thing to check first:** `MANIFOLD_PRESENT_TIMING=1`'s `transactional` flag on the stalled tick says whether the 1 s wait was on
+the state tick (T) or on the first scheduled tick after it (T+1). The model above predicts T+1, or T if the frames scheduled before
+the switch are the ones stranded. If that log exists, read it before building.

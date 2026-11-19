@@ -1962,3 +1962,307 @@ and night 4's 8 pacer holds would have held, because each delay (7.95–8.54 ms)
 - One 23.976 Computer block with `=2`: exposed segments ≤ 12 % (against 20–25 % today).
 - Nights 3 and 4's on-blocks stand as the C comparator. Exposure is set by A's distribution, which was stable across those nights
   (17.1).
+
+---
+
+## 18. A/B night 5 (C+ and option B, run 2026-11-18/19): C+ **FAIL** (one hold, a two-period stall), B **PASS**, G **FAIL**, D **PASS**, P complete
+
+Started by hand (`soak.sh main > soak.out 2>&1`). The slots were set at 21:10:37. The first block began at 21:21:09, after the 10 min idle
+wait, and the last ended at 02:01:26. `ENDED` was written at 02:01 and there is no `STOP` file. All 6 blocks ran to the end (`"ended":
+"done"` in every `<label>.json`; `block … exit 0` in `soak.out`), and none was skipped. Analysed 2026-11-19 with `ab-check.py` against
+`RIG.md`'s criteria, which were written before the run. Re-run in this session, `ab-check.py`'s output is byte-identical to the night's
+`ab.report`. The re-run also rewrote the night's `present.report` in place: unlike §16, no symlinks were used. The script writes that
+file from the logs alone, and the new file has the original's size (25,781 bytes). Paths below are relative to
+`~/Code/_scratch/manifold-pacerphase-ab4/`. Host times are converted to wall times with one offset per night: the median of
+(wall − host) over the night's Regenerate presses (`<label>.json` `regens`, 24 anchors, spread 2.45 s), so about ±2 s. No build, no
+launch, no git.
+
+**Candidate** (`RIG.md`): `.build-pacerphase-4`, Profile, 0.9.4 (27), HEAD `b752fac` plus C+ (`MANIFOLD_PACER_PHASE=2`), option B
+(`MANIFOLD_PACER_PRESENT_TX=0`) and the production `PlaybackCounters`, uncommitted at the time. HEAD is now `7de17c5`, whose subject
+describes the same changes. Whether its tree equals the candidate was not checked, since no git was run in this session. sha256
+`926c1efa…`, ad-hoc linker-signed. Every block had `MANIFOLD_PACER_PHASE=2`, `MANIFOLD_DECKLINK_CADENCE_LOG=2` and
+`MANIFOLD_PRESENT_TIMING=1`, and the B-on blocks also had `MANIFOLD_PACER_PRESENT_TX=0` (`ab.report:1-7`, from each `<label>.json`
+`extra_env`). Each block ran 45 min (16 cycles of 175 s).
+
+**Verdicts (`ab.report`):**
+- **C+: FAIL** (`:32`). Criteria 1, 2a and 3 passed on every block that has them. Criterion 2 failed on block 1: 1 hold and 1 skip, both
+  `pacer (no [LATE-SWAP])` (`:28`). That pair is one missed pacer tick whose `CATransaction.commit` blocked for 16.8 ms, two periods. The
+  pacer dropped the frame due at that tick, so no lead could have covered it (§18.3). Block 3 passed criterion 2 with 68 missed deadlines
+  and 29 pacer late swaps, 0 of them held (`:30`).
+- **B: PASS** (`:49`). Pacer missed deadlines were 0, 1 and 1 on the three B-on blocks, against 70 and 68 on the B-off ASUS blocks.
+  There were 0 pacer late swaps, and 0 presents went through `CATransaction.commit`. Present-path findings are in
+  `WINDOW_PRESENT_PATH.md` §6.
+- **G: FAIL** (`:60`), on block 1 only (the C+ pair above). Blocks 2–6 passed, and there were 0 freezes on every block.
+- **D: PASS** (`:68`). On all 6 blocks, the `[DIAG] playback counters` line agrees exactly with the log.
+- **P: complete on all 6** (`:82-88`).
+- **The LG block** (reported, not judged): the bad state did not appear (0 of 272 playing windows). There were 7 missed deadlines, and
+  1 tick overran in `CATransaction.commit` (`:51`).
+
+### 18.1 Rig
+
+- **Checked before every block: passed 6 of 6.** `rig.log` has one entry per block, 21:21:08 to 01:14:45, and `soak.out` has them at
+  `:4`, `:27`, `:50`, `:73`, `:96` and `:119`. Each entry shows zoom.us none, capture closed, default output Scarlett, sha256
+  `926c1efa25aa8f15…` ok, slots `waveform | parade | markers`, and signing `flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`.
+- **Display placement, per block: as planned.**
+
+| # | Block | `RC_PLACE` / `RC_EXPECT_DISPLAY` (rig entry) | Window display at output start (`soak.out`) | `<label>.json` |
+|---|---|---|---|---|
+| 1 | `n5-5994-sdi-boff-1` | ASUS / ASUS PA147 at 59.936 Hz | `:11` ASUS PA147 at 59.936 Hz (window moved) | ASUS PA147, 59.936 |
+| 2 | `n5-5994-sdi-bon-1` | the same | `:34` the same | the same |
+| 3 | `n5-5994-sdi-boff-2` | the same | `:57` the same | the same |
+| 4 | `n5-5994-sdi-bon-2` | the same | `:80` the same | the same |
+| 5 | `n5-2398-cmp-bon` | the same | `:103` the same | the same |
+| 6 | `n5-5994-sdi-lg-boff` | LG / LG TV SSCR2 at 120 Hz | `:126` LG TV SSCR2 at 120.000 Hz (window shown) | LG TV SSCR2, 120.000 |
+
+- **Display modes, logged before every block** (`common.sh:24` prints `Resolution` · `UI Looks like`):
+  - LG TV SSCR2: `3840 x 2160` · `3840 x 2160 @ 120.00Hz`. The "looks like" mode equals the resolution, so the LG ran at **120 Hz,
+    unscaled**, on all 6 entries. CONFIRMED.
+  - ASUS PA147: `1920 x 550` · `1920 x 550 @ 60.00Hz` (measured by the window at 59.936 Hz).
+- **HID idle at each block start** (`soak.out` `:3`, `:26`, `:49`, `:72`, `:95`, `:118`): 611, 3415, 6217, 9021, 11824 and 14626 s. So the Mac
+  was not touched during the night. Resolve was closed each time.
+- **Guards:** "guard after …: clean" for all 6 blocks (`soak.out` `:23`, `:46`, `:69`, `:92`, `:115`, `:138`).
+- **Slots restored: yes.**
+  - `setslots` (21:10:37, `soak.out:1`): "slots set: waveform | parade | markers; were yrgb | meters | markers", stash
+    `prefs-stash-20261118-211037.txt`.
+  - At exit (02:01:41, `:170-171`): "slots at the end of the night: waveform | parade | markers", then "slots restored: yrgb | meters |
+    markers".
+  - Read again in this session, `com.graviton.manifold` `manifold.scope.slot0/1/2` are `yrgb | meters | markers`, which is exactly the
+    stash.
+- **Recorded, never stopping the night** (`rig.log`):
+
+| # | Block | Keychain prompts denied tonight before it (earlier launches) | Denied in it | SecurityAgent before | Memory free before / after | `ASEProcessing` per minute (end − 6 to end − 1 min) | Thermal |
+|---|---|---|---|---|---|---|---|
+| 1 | `boff-1` | 0 (0) | 2 | 0 | 88 % / 87 % | 3280 | no warning recorded |
+| 2 | `bon-1` | 2 (1) | 2 | 0 | 87 % / 87 % | 3281 | the same |
+| 3 | `boff-2` | 4 (2) | 2 | 0 | 87 % / 87 % | 3282 | the same |
+| 4 | `bon-2` | 6 (3) | 2 | 0 | 87 % / 87 % | 3282 | the same |
+| 5 | `2398-cmp-bon` | 8 (4) | 2 | 0 | 87 % / 87 % | 2490 | the same |
+| 6 | `lg-boff` | 10 (5) | 2 | 0 | 87 % / 87 % | **26** | the same |
+
+- With the window on the LG, WindowServer logged 26 `ASEProcessing` lines a minute, against 3280 with the same file on the ASUS. See
+  `WINDOW_PRESENT_PATH.md` §6.4.
+- **Not covered:** launches and prompts before `soak.sh` started are UNKNOWN. `soak.out`'s first line is the `setslots` line, and it
+  carries no note.
+
+### 18.2 Per block
+
+Holds and skips are the gate's counts (`soak.report`). Late swaps are `[LATE-SWAP]` by class, as `ab-check.py` counts them (`ab.report:1-7`).
+
+| # | Block | B | Pacer n / median / p99 / max (ms) | Missed deadlines | `[LATE-SWAP]` (held) | Holds / skips | Freezes | Renderer recov. / near-miss | Window late / dropped | Card late / dropped | Markers |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `n5-5994-sdi-boff-1` | off | 311770 / 8.35 / 8.36 / 33.35 | **70** | pacer 26 (0) | **1 / 1** | 0 | 0 / 0 | 12 / 11 | 0 / 0 | PASS |
+| 2 | `n5-5994-sdi-bon-1` | on | 311826 / 8.35 / 8.36 / 8.73 | **0** | none | 0 / 0 | 0 | 0 / 0 | 11 / 4 | 0 / 0 | PASS |
+| 3 | `n5-5994-sdi-boff-2` | off | 311778 / 8.35 / 8.36 / 25.03 | **68** | pacer 29 (0) | 0 / 0 | 0 | 0 / 0 | 8 / 9 | 0 / 0 | PASS |
+| 4 | `n5-5994-sdi-bon-2` | on | 311829 / 8.35 / 8.36 / 16.68 | **1** | none | 0 / 0 | 0 | 0 / 0 | 8 / 6 | 0 / 0 | PASS |
+| 5 | `n5-2398-cmp-bon` | on | 187093 / 13.91 / 13.92 / 27.80 | **1** | none | 0 / 0 | 0 | 0 / 0 | 8 / 5 | 0 / 0 | PASS |
+| 6 | `n5-5994-sdi-lg-boff` | off | 311832 / 8.35 / 8.36 / 25.03 | **7** | none | 0 / 0 | 0 | 0 / 0 | 12 / 4 | 0 / 0 | PASS |
+
+There were 0 crossings on every block. Markers: 24 Regenerates, all 120 thumbnails remade, 0 made while playing (`soak.out:143`).
+Recorded and not judged: `edge APPENDED by the card` lines 16, 11, 1, 9, 0 and 7 (`soak.report`, "SDI bridge").
+
+**The pacer's count against the measurement's `miss` lines** (70/67, 0/0, 68/66, 1/1, 1/1, 7/5). The difference is fully accounted for
+by ticks that ended past more than one deadline. The pacer counts `(after − deadline) / step + 1` (`App/OutputPacer.swift:177-179`), so
+a next interval of 3P counts 2 and 4P counts 3. Block 1 has one at 25.04 ms and one at 33.35 ms (+1, +2). Block 3 has two at 25.02
+and 25.03 ms, and block 6 two at 25.02 and 25.03 ms (+1 each). CONFIRMED from `present.report`.
+
+**`[PACER-PHASE]` (`run:` line; lead guard from `[PACER-PHASE] lead guard` lines):**
+
+| Block | \|x − x_ref\| p50 / p99 / max (ms) | Corrections applied (net) | Clamp hits | References set (guard) | Establishment nudges (net) | Lead moves (net) | Lead-guard lines (at band edge) |
+|---|---|---|---|---|---|---|---|
+| boff-1 | 0.004 / **0.017** / 0.565 | 111248 (+25.434 ms) | 58 | 111 (11) | 9 (+0.922 ms) | 69 (−28.052 ms) | 19 (0) |
+| bon-1 | 0.004 / **0.016** / 7.011 | 110928 (+26.015 ms) | 34 | 120 (5) | 7 (+1.039 ms) | 38 (−16.734 ms) | 8 (0) |
+| boff-2 | 0.004 / **0.037** / 0.958 | 112135 (+25.997 ms) | **782** | 107 (8) | 12 (−1.698 ms) | 42 (−19.757 ms) | 9 (1) |
+| bon-2 | 0.004 / **0.034** / 0.161 | 112205 (+25.908 ms) | 329 | 100 (4) | 9 (+0.025 ms) | 58 (−25.499 ms) | 17 (0) |
+| 2398-cmp-bon | 0.005 / **0.046** / 0.144 | 45055 (+30.064 ms) | 126 | 90 (3) | 9 (−1.153 ms) | 222 (−105.126 ms) | 21 (**11**) |
+| lg-boff | 0.004 / **0.019** / 0.174 | 111298 (+25.640 ms) | 143 | 110 (9) | 13 (−0.076 ms) | 50 (−21.909 ms) | 10 (0) |
+
+- **bon-1's max of 7.011 ms** is one tick in one 10 s window (`n5-5994-sdi-bon-1.log:201806`, that window's p99 0.030 ms). Its cause
+  is UNKNOWN. No hold or skip came of it.
+- **boff-2's 782 clamp hits** came almost entirely from five 10 s windows within one stretch of the block (`:504533` to `:518977`), and
+  246 of its 10 s windows had 0. Why is UNKNOWN.
+
+**Lead and exposure** (§17's method; steady segments from `ab-check.py` `night5`):
+
+| Block | P (ms) | Steady segments | Exposed segments | Exposed steady pulls | Newest-frame lead p01 (ms) | §17.3's target p01 ≥ P + 0.25 |
+|---|---|---|---|---|---|---|
+| boff-1 | 8.3417 | 80 | **0** | 568 of 148143 (0.38 %) | 8.535 | 8.59: under by 0.06 |
+| bon-1 | 8.3417 | 80 | **0** | 327 of 148142 (0.22 %) | 8.676 | met |
+| boff-2 | 8.3417 | 80 | **0** | 409 of 148145 (0.28 %) | 8.743 | met |
+| bon-2 | 8.3417 | 80 | **0** | 509 of 148146 (0.34 %) | 8.499 | under by 0.09 |
+| lg-boff | 8.3417 | 80 | **0** | 346 of 148141 (0.23 %) | 8.526 | under by 0.07 |
+| 2398-cmp-bon | 13.9028 | 80 | **9 (11.3 %)** | 6090 of 56120 (10.9 %) | 2.897 | — |
+
+- **At 59.94, C+ did what §17.3 predicted for segments: 0 of 400 exposed**, against 4–9 % on nights 3 and 4 (§17.1). Exposed steady pulls
+  fell from 3.9–8.1 % (§17.1) to 0.22–0.38 %. A segment's median lead is above P, but 1 pull in 300–450 still falls under it. Inference:
+  the slot clock's ~0.4 ms wobble (§17.2), against a lead held 0.5 ms or less above P.
+- **§17.3's per-pull target (p01 ≥ P + 0.25 ms) was missed by 0.06–0.09 ms on 3 of the 5 59.94 blocks.** It is not one of `RIG.md`'s
+  criteria, which judge segments (2a), so this is reported, not judged.
+- **At 23.976, exposure fell to 11.3 % of segments**, under §17.3's ≤ 12 % and against 20–25 % on nights 3 and 4. 11 of the 21 lead-guard
+  lines stopped at the band's edge, which is §17.3's k = 3 limit: moving earlier cannot reach the slack in Plays with small A.
+
+### 18.3 The hold and the skip (block 1)
+
+| | Log | What it shows |
+|---|---|---|
+| Steady play before | `[PULLPHASE] pull #47044`–`#47059` | `newest`, lead 9.12–9.77 ms (P 8.34), so above P by about 0.8–1.4 ms, as C+ intends |
+| The missed tick | `present.report` (`n5-5994-sdi-boff-1.log:185976`), host 430921.5596 | repeat tick, tick's 2nd call presented (in flight 1), tick 16.910 ms, **overran `CATransaction.commit` 16.799 ms**, next interval 25.039 ms (3P) |
+| The frame due next | `[TICKPHASE]` | pts 790.856733 at host …551272, then **790.890100** at …584660 (interval 25.039 ms, prev-tick 16.910 ms). **No tick rendered 790.873417** |
+| Hold | `[PULLPHASE] pull #47060` (host …578034), `[CADENCE] #47060` | `branch held`, handed 790.856733 again (`soak.report:4`, 21:34:29) |
+| Skip | `[PULLPHASE] pull #47061`, `[CADENCE] #47061` | handed 790.890100: 790.856733 → 790.890100, frames +2 (`soak.report:5`) |
+
+- **The mechanism is not the one C+ addresses.** C+ lengthens the lead so that a swap **one** period late still lands before the pull
+  (§17.3). Here the commit blocked for two periods. The pacer skips a missed deadline rather than catching up (`App/OutputPacer.swift:16`),
+  so frame 790.873417 was never rendered. With no frame in the ring, the card had to repeat and then jump, whatever the lead.
+  `ab-check.py` classifies it as `pacer (no [LATE-SWAP])` because no swap happened that could be late. CONFIRMED from the lines above.
+- **The 55 one-period pacer late swaps on blocks 1 and 3 held nothing** (26 + 29, held 0; `ab.report:28`, `:30`). On nights 3 and 4 the
+  on-blocks held 8 of 92 (§17.2). Inference: the part of C+ that §17.3 predicts worked. The remaining failure needs the present-path
+  fix.
+- **Of the 4 multi-period ticks on the B-off ASUS blocks, only this one held.** It is the only one on a repeat tick. The other three
+  (block 1 33.35 ms, block 3 25.02 and 25.03 ms) were new-frame ticks. They delayed only the following repeat tick, as night 4 found
+  for new-frame misses (`WINDOW_PRESENT_PATH.md` §5.3). The hold is not near a Regenerate (regen 1 at 21:31:25, `soak.out`) or a CCC
+  run (§18.6).
+
+### 18.4 Against the criteria
+
+**C+** (`RIG.md`, every block; criterion 2 on the B-off ASUS blocks 1 and 3):
+
+| # | Criterion | Result |
+|---|---|---|
+| 1 | 0 crossing-caused holds or skips, every block | PASS: 0 on all 6 (0 crossings) |
+| 2 | Blocks 1, 3: 0 pacer-caused holds or skips (with misses) | **FAIL on block 1**: 2 (1 hold, 1 skip; 70 missed deadlines, 26 pacer late swaps, 0 held). PASS on block 3: 0 (68 missed, 29 pacer late swaps, 0 held). Tested on both, not UNTESTED |
+| 2a | Blocks 1, 3: 0 exposed steady segments at 59.94 | PASS: 0 of 80, 0 of 80 |
+| 3 | \|x − x_ref\| p99 ≤ 0.1 ms, every block | PASS: 0.017, 0.016, 0.037, 0.034, 0.046, 0.019 |
+
+**C+: FAIL**, as the criteria were written. §18.3 shows the failing pair is a two-period present stall, which no lead can cover.
+
+**B** (B-on blocks 2, 4, 5):
+
+| # | Criterion | Block 2 | Block 4 | Block 5 |
+|---|---|---|---|---|
+| 1 | Missed deadlines ≤ 2 | PASS: 0 | PASS: 1 | PASS: 1 |
+| 2 | 0 pacer late swaps | PASS: 0 | PASS: 0 | PASS: 0 |
+| 3 | `CATransaction.commit` absent: 0 misses overran by it; transactional presents ≤ 0.1 % | PASS: 0; 0 of 141082 | PASS: 0; 0 of 141607 | PASS: 0; 0 of 61345 |
+| 4 | `nextDrawable` p50 / p99 / max (reported) | 0.011 / 0.030 / 0.310 ms | 0.011 / 0.030 / 0.281 ms | 0.013 / 0.021 / 0.247 ms |
+
+B-off for comparison: 0.014 / 0.036 / 0.272 (block 1), 0.014 / 0.036 / 0.238 (block 3), 0.014 / 0.022 / 7.008 ms (LG block 6).
+
+**B: PASS.** The B-on blocks' 2 misses were each the first new-frame tick after a seek, which overran in `perform` (§18.5,
+`WINDOW_PRESENT_PATH.md` §6.2).
+
+**G** (the 0.9.4 gate): block 1 **FAIL** (1 hold, 1 skip, `pacer (no [LATE-SWAP])`). Blocks 2–6 PASS. Renderer recoveries and near-misses
+were 0 on every block. **G: FAIL.** As `RIG.md` states, G does not decide C+ or B.
+
+**D** (Export Diagnostics' counters; `[DIAG] playback counters` against the log):
+
+| Block | Pacer missed deadlines (DIAG / `[PACER] stopped`) | Card holds while playing (DIAG / timed-after-timed repeats) | Gate holds | Renderer recoveries (DIAG / attempt lines) |
+|---|---|---|---|---|
+| boff-1 | 70 / 70 | 118 / 118 | 1 | 0 / 0 |
+| bon-1 | 0 / 0 | 113 / 113 | 0 | 0 / 0 |
+| boff-2 | 68 / 68 | 113 / 113 | 0 | 0 / 0 |
+| bon-2 | 1 / 1 | 120 / 120 | 0 | 0 / 0 |
+| 2398-cmp-bon | 1 / 1 | 40 / 40 | 0 | 0 / 0 |
+| lg-boff | 7 / 7 | 112 / 112 | 0 | 0 / 0 |
+
+**D: PASS.** Read with care: "card holds while playing" counts 40–120 per block where the gate counts 0–1. The production counter
+includes each Play's opening repeat and the repeats around transport, which the gate excludes. In a block with 48 Plays and 48 seeks
+that is about 2 per Play. The repeats come in bunches at the same offsets in each 175 s cycle (§18.6). A tester's Export Diagnostics will therefore show a non-zero card-hold count after ordinary playback. Inference.
+
+**P:** complete on all 6. Each block has a `total` line, 0 dropped records, and `miss` lines equal to the total: 67, 0, 66, 1, 1, 5
+(`ab.report:82-87`).
+
+### 18.5 Where the misses were (summary; detail in `WINDOW_PRESENT_PATH.md` §6)
+
+| Block | Misses (lines) | `CATransaction.commit` | `perform` | `waitUntilScheduled` |
+|---|---|---|---|---|
+| boff-1 | 67 | 67 | 0 | 0 |
+| bon-1 | 0 | — | — | — |
+| boff-2 | 66 | 65 | 1 | 0 |
+| bon-2 | 1 | 0 | 1 (14.38 ms) | 0 |
+| 2398-cmp-bon | 1 | 0 | 1 (26.49 ms) | 0 |
+| lg-boff | 5 | 1 | 2 | 2 |
+
+All 5 `perform` misses of the night (boff-2 `:577125`, bon-2 `:604927`, 2398 `:29280`, lg `:481640`, `:646069`) come within 400 log lines
+after a `[TRANSPORT] seek` and its `[CADENCE-SWAP]`. They are each the first new-frame tick after a seek, the shape of night 4's two
+(`WINDOW_PRESENT_PATH.md` §5.3). CONFIRMED.
+
+### 18.6 Missed deadlines and holds against the Carbon Copy Cloner runs (nights 1, 3, 4, 5)
+
+**Source.** CCC's privileged-helper log, `/Library/Application Support/com.bombich.ccc/pht_debug.log` (world-readable; the history
+databases are not plain SQLite and were not read). Each run's line `exit_status=… start_time=… end_time=… data_copied=…` gives its
+real times. Every run from 2026-11-16 03:30 to 2026-11-19 11:30 started at its scheduled :30:00 and ended 64–82 s later. Night 1's
+19:30 run copied 8.23 GB (19:30:00–19:31:21).
+
+**Method.**
+- **Misses:** every `[PACER] … intervals 10 s: … · missed N` line (`App/OutputPacer.swift:221`), placed at the last host stamp before
+  it. The 10 s counts sum to each block's `[PACER] stopped` total, less the final partial window: one fewer on 2 of 26 blocks
+  (`id-gop25-at-5994-on`, `n5-5994-sdi-boff-2`). On nights 4 and 5, each miss in a window was also timed exactly from `present.report`.
+- **Holds:** all of the gate's holds and skips, from `rc-soak-report.py`'s `analyse()` (the call `ab-check.py` `causes` uses). Note that
+  `soak.report` lists at most 20 per block.
+- **Window:** CCC start ± 3 min, over the blocks' wall-clock spans. A 10 s window overlapping the edge counts as inside.
+- **Expected:** that block's own miss rate times the window's length inside it. A night-wide rate would mix B-on blocks (≈ 0 misses)
+  with B-off blocks (≈ 70).
+- Scripts in the session scratchpad, not kept.
+
+**Which CCC starts fall within ±3 min of a block:**
+
+| Night | Blocks span | CCC starts in or next to it | Overlapping block(s) | Data copied |
+|---|---|---|---|---|
+| 1 (`manifold-cardpull-s1`) | 11-16 19:45:52 – 23:10:24 | 19:30 (ended 19:31:21, **14.5 min before** the first block); 23:30 (19.6 min after the last) | **none** | 8.23 GB; 2.56 GB |
+| 3 (`manifold-pacerphase-ab`) | 11-17 20:49:54 – 11-18 03:58:46 | 23:30; 03:30 | `ab-gop25-sdi-on` (22:52–23:53); `id-gop25-at-5994-on` (03:17–03:38) | 0.84 MB; 0 |
+| 4 (`manifold-pacerphase-ab3`) | 11-18 13:30:25 – 18:36:03 | 15:30 | `n4-2398-cmp-on` (window 339 s, to its end at 15:32:39); `n4-gop25-sdi-on` (18 s, from 15:32:42) | 3.0 MB |
+| 5 (`manifold-pacerphase-ab4`) | 11-18 21:21:09 – 11-19 02:01:26 | 23:30 | `n5-5994-sdi-boff-2` (22:54–23:41) | 1.5 MB |
+
+**Every missed deadline within ±3 min of a CCC start:**
+
+| Night | Block (block total) | CCC | Misses in the window, time from CCC start | In window / expected at block rate |
+|---|---|---|---|---|
+| 1 | — | — | none (no block overlaps a window) | — |
+| 3 | `ab-gop25-sdi-on` (10) | 23:30 | 1, in the 10 s window ending 23:30:01 (−9 to +1 s) | 1 / 0.98 |
+| 3 | `id-gop25-at-5994-on` (21; 20 in the 10 s lines) | 03:30 | 4, in 10 s windows ending at −147, +27, +107, +170 s | 4 / 5.79 |
+| 4 | `n4-2398-cmp-on` (6) | 15:30 | none | 0 / 0.55 |
+| 4 | `n4-gop25-sdi-on` (8) | 15:30 | none | 0 / 0.04 |
+| 5 | `n5-5994-sdi-boff-2` (68) | 23:30 | 7, exactly (`present.report`): −157.1, −128.4, −52.8, −13.5, −12.0, +83.2, +163.2 s | 7 / 8.49 |
+| | **All** | | **12** | **12 / 15.85** |
+
+**Every hold within ±3 min of a CCC start: none.**
+- The gate's judged holds and skips: night 1 3, night 3 34, night 4 3, night 5 2. That is 42, and **0** fell in a window. The nearest
+  was 39.7 min from a CCC start (night 3 `ab-5994-sdi-on`, which has no window).
+- `id-gop25-at-5994-on` (25p on 59.94, whose repeats are the cadence and are not judged, §15, `:1508`) had 64,449. 19,286 of them
+  (29.9 %) fall in its window, which covers 28.9 % of the block: no excess.
+- The card-hold repeats on night 4's and night 5's windowed blocks (`[PULLPHASE]` timed-after-timed, the D counter's rule) were 5 against
+  4.99 expected (`n4-2398-cmp-on`), 0 against 0.08 (`n4-gop25-sdi-on`) and 16 against 14.53 (`n5-5994-sdi-boff-2`). The bunches at
+  −51.7 s and +121.4 s recur at the same offsets on both nights. Inference: Plays after the soak's transport steps, not CCC.
+
+**Spread, not clustered.** CONFIRMED by the counts above.
+- 12 misses fell in the windows against 15.85 expected at each block's own rate. No block exceeds its expectation by more than 0.02.
+- The misses in a window are spread across its 6 minutes. Only 2 of the 12 can lie in the 65–68 s the run itself lasted, both on night 3
+  and both known only to ±10 s.
+  - `ab-gop25-sdi-on`'s miss falls between −9 and +1 s. That block's 10 misses come about every 6 min through its hour (10 s windows
+    ending 22:57, 23:04, 23:10, 23:11, 23:16, 23:23, 23:30, 23:42, 23:45, 23:48).
+  - `id-gop25-at-5994-on`'s miss falls between +17 and +27 s. That block has a miss every 20–120 s from 03:18 to 03:37, with or without
+    CCC.
+- On night 5, where the times are exact, none of the 7 fell inside the run (0 to +68 s). `n5-5994-sdi-boff-2`'s misses per 6 min, from
+  its start, were 10 12 10 9 7 9 5 4, and the CCC start falls in the 6th bin (9).
+- **Limits:** the four runs that overlapped a block copied 0 to 3 MB. The two large runs (8.23 GB on 11-16 19:30, 6.65 GB on 11-17 15:30)
+  overlapped no block. So a large CCC copy's effect on the pacer is UNTESTED. What these nights show is that a routine run (about 1 min,
+  a few MB) did not cluster misses or holds.
+
+### 18.7 What this shows (not part of the verdicts)
+
+- **B removed the misses that matter to the card.** At 59.94 on the ASUS: 70 and 68 missed deadlines with B off, against 0 and 1 with B
+  on, in the same degraded state (72–76 % holding windows on all four blocks, `WINDOW_PRESENT_PATH.md` §6.3). There were 55 pacer late
+  swaps with B off and 0 with B on. B's one 59.94 miss was a post-seek `perform` overrun.
+- **C+ removed the exposure at 59.94** (0 of 400 segments) and every one-period pacer hold (55 swaps, 0 held). It cannot cover a
+  two-period stall, which drops the frame at the pacer (§18.3). With B on there were no present stalls to cover. Inference: on this
+  night's evidence, the two changes together leave the 59.94 card path without a held pacer frame. Each covers what the other cannot.
+  Untested together on a B-on block with a two-period stall, because none occurred.
+- **The LG block at 120 Hz, unscaled, did not enter the bad state** (0 holding windows; misses 7, of which 2 are post-seek `perform`
+  overruns). The same binary, file and night on the ASUS was degraded in every block. Whether the degraded state belongs to the ASUS
+  mode (1920 × 550 at 59.936 Hz) rather than to the build or the night is suggested by this, but one block does not settle it.
+  Inference. `WINDOW_PRESENT_PATH.md` §6.4.
+- **Open:**
+  - Whether to commit or ship C+ or B is a decision for Robbie; this section does not make it. B's attended checks (`WINDOW_PRESENT_PATH.md`
+    §4.5: live resize, Display Transform switches, HLG and PQ on the LG) have not been run, and the soak exercised no state tick under B
+    (0 transactional presents, §6.2 there).
+  - The per-pull lead target (p01 ≥ P + 0.25 ms) was missed by under 0.1 ms on 3 blocks. Whether s_L should be larger is open.
+  - boff-2's clamp hits and bon-1's 7 ms excursion: UNKNOWN.
