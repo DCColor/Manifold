@@ -948,3 +948,198 @@ after each install. Each line covers 10 s, and its line number is in brackets.
 - `nextDrawable` max was 3.59 ms (against 1000.22), there were 0 DeckLink late or dropped frames, and 0 card holds. No SDI slip or
   re-anchor was tied to a switch.
 - This supports §7.3's model: the per-tick mode toggle was the cause. One attended run, CONFIRMED for this run only.
+
+### 7.7 Plain B against B off, with the LG in HDR mode (runs 2026-11-19 18:00–18:03)
+
+Read-only: no build, no launch, no git. Logs are in `~/Code/_scratch/manifold-plainb-lg/`: `run2.log` (821 lines, plain B) and
+`run3.log` (818 lines, B off). `r2:` and `r3:` are line numbers in them. Code line numbers are HEAD `7de17c5`.
+
+**The modes are confirmed by the counters.** Run 2 reads `presents transactional 0, scheduled 1787` (`r2:793`). Run 3 reads
+`transactional 1793, scheduled 0` (`r3:788`).
+
+**The LG was in HDR mode in both runs.** Headroom potential was 8.9654, and 4.4827 was granted to the layer (`r2:104`, `r3:101`), at
+120.000 Hz (`r2:108`, `r3:104`). In run 3, from `r3:692` on, the layer was no longer granted headroom (current 1.0), after a display
+reconfiguration.
+
+**What was done.** The PQ wedge was played to SDI 1080p24, then the file was changed to the 2160p23.976 Rec. 709 file with output on.
+- **Run 2:**
+  - Switches #2 OS → Bypass (`r2:203`), #3 → OS, #4 OS → Bypass (`r2:284`), #5 → OS, and #6 OS → Reference (`r2:392`).
+  - The log has **two** OS → Bypass switches, not three.
+  - The live resize is inferred from the windows at `r2:501` and `r2:587`: 38.6 and 31.0 presents/s against a 24 fps source. No
+    `[RASTER]` line names it.
+  - The file change is at #7 (`r2:662`).
+- **Run 3:** switches #2 → Bypass, #3 → OS, #4 → Bypass, #5 → OS, #6 → Reference and #7 → OS (`r3:217-445`). The file change is at #8
+  (`r3:521`).
+
+**Each switch: the first `[PACER]` intervals line, `[PACER] desktop` line and `[PRESENT-TIMING]` window after it.** Each line covers
+10 s.
+
+| Run, install | Change | Pacer interval max / missed | Desktop: held in flight · gate timeouts · nil · `nextDrawable` max | Transactional · misses |
+|---|---|---|---|---|
+| 2 #2 (`r2:206`) | OS → Bypass, HDR | 13.91 ms / 0 (`r2:271`) | 0 · 0 · 0 · 0.12 ms (`r2:272`) | 0 · 0 |
+| 2 #3 (`r2:237`) | → OS | 13.91 / 0 | same window | 0 · 0 |
+| **2 #4 (`r2:287`)** | **OS → Bypass, HDR** | 13.90 / 0 (`r2:352`) | **47 · 1** · 0 · 0.20 (`r2:353`) | 0 · 0 (`r2:355`) |
+| **2 #5 (`r2:336`)** | **→ OS** | 13.90 / 0 | **same window** | 0 · 0 |
+| 2 #6 (`r2:396`) | OS → Reference, HDR | 13.91 / 0 (`r2:423`) | 0 · 0 · 0 · 0.09 (`r2:424`) | 0 · 0 |
+| 2 resize (about `r2:430-590`) | — | 0 missed | 0 · 0 · 0 · 1.34, 1.77 (`r2:501`, `r2:587`) | 0 · 0 |
+| 2 #7 (`r2:662`) | file change → SDR | 0 missed (`r2:679`) | 0 · 0 · 0 · 0.09 (`r2:751`) | 0 · 3, at output restarts |
+| 3 #2–#3 (`r3:220`, `r3:290`) | → Bypass, → OS | 13.90 / 0, 14.18 / 0 | 0 · 0 · 0 · 0.12, 0.10 | 235, 237 · 0 |
+| 3 #4–#5 (`r3:340`, `r3:378`) | → Bypass, → OS | 13.91 / 0 | 0 · 0 · 0 · 0.11 | 237 · 0 |
+| 3 #6–#7 (`r3:412`, `r3:445`) | → Reference, → OS | 13.91 / 0 | 0 · 0 · 0 · 0.29 | 238 · 0 |
+| 3 #8 (`r3:521`) | file change → SDR | 14.23 / 0 (`r3:658`) | 0 · 0 · 0 · 0.11 (`r3:635`) | 172 · 3, at output restarts |
+
+**Run-wide, both runs:**
+- **WATCHDOG lines:** 0.
+- **`drawMs` max:** 1.77 ms in run 2 and 1.68 ms in run 3.
+- **`nextDrawable` max:** 1.768 and 1.679 ms.
+- **Nil drawables:** 0.
+- **Pacer missed deadlines:** 0 at every stop (`r2:679`, `:724`, `:812`; `r3:538`, `:583`, `:808`).
+- **`[DIAG]`:** `pacer missed deadlines 0 · card holds while playing 0` at every stop (`r2:678`, `:723`, `:811`; `r3:537`, `:582`, `:807`).
+- **DeckLink:** `late=0 dropped=0` on all 42 and 40 `D3` lines.
+- **`!!` lines:** only the `[SDI-AUDIO] !! edge (fill)` loop-wrap lines: 7 in run 2 and 6 in run 3, which is the B-off baseline (§7.6).
+- **Slips and re-anchors:** no slip line. One Mac-sound start was late: 12.2 ms at a loop wrap (`r2:514`), in the resize span.
+- **`[PRESENT-TIMING]` misses:**
+  - Run 2 had 4. Three fell at the output restarts after the file change (`r2:689`, `r2:690`, `r2:730`). The fourth (`r2:787`) followed a
+    scrub drag and a pause/play (`r2:779-785`).
+  - Run 3 had 3, all at the output restarts (`r3:546`, `r3:547`, `r3:589`).
+  - All 7 are "missed outside the tick", and none is at a switch.
+- **Run 3's one tick over 5 ms** (6.355 ms, `r3:636`) is in the window that holds the file change. B was off, so this was a
+  transactional tick.
+
+**The one finding: a window hold of ≥ 0.5 s under plain B, at #4 or #5** (`r2:353`, `r2:355`).
+- **What the counters show:**
+  - In the 10 s window that holds #4 (OS → Bypass) and #5 (Bypass → OS), the window rendered 237 frames but presented 226.
+  - The attempts were split `in flight at attempt 0:222 1:3 2:47`: 47 attempts in a row found 2 presents not yet acknowledged and were
+    held.
+  - Then the gate's timeout fired once. The timeout is 0.5 s with no present (`App/MetalVideoRenderer.swift:4644-4647`, `:4603`).
+  - So for at least 0.5 s the window showed no new frame: 11 frames, about 0.46 s at 24 fps. CONFIRMED from the counters.
+- **The glass:** in that window `dropped 2`, `no handler 0`, present → glass max 17.58 ms, glass → handler max 0.521 ms. Inference: the 2
+  presents that held the gate were the 2 the compositor dropped, and their presented handlers arrived only after the timeout.
+- **Pacer and SDI were not affected:** 13.90 ms max, 0 missed, 0 card holds. That is B's purpose: a stuck present no longer blocks the
+  pacer.
+- **Which switch:** UNKNOWN, #4 or #5. The records are 10 s aggregates.
+- **How it compares:**
+  - #2 was the same OS → Bypass switch on the same file in the same run, and was clean.
+  - Run 3 (B off, the same switches, HDR mode) had 0 holds and 0 gate timeouts.
+  - Run 1 (plain B, SDR mode) had 0.
+  - A gate timeout is not unique to B: night 5 had one in a B-off block (`n5-5994-sdi-boff-2.log`) and one in a B-on block
+    (`n5-5994-sdi-bon-2.log`), on the ASUS, not at switches.
+- **What it may be:** an OS ↔ Bypass switch in HDR mode changes `edrMetadata` (HDR10 ↔ nil), `toneMapMode` (`.automatic` ↔ `.never`)
+  and the colorspace. Under plain B those reach the render server in a commit separate from the frame (§4.5's risk). Inference: the
+  compositor dropped 2 queued scheduled frames across that reconfiguration and acknowledged them late. One occurrence in 3 HDR-mode
+  OS ↔ Bypass switches under B, and 0 in 4 with B off. Not enough to call it B's.
+
+**The "AFTER a frame was already on screen" warning at the file change**
+
+| | Run 2 (plain B) | Run 3 (B off) |
+|---|---|---|
+| Line | `r2:662`, colour state #7, "after **59** present(s)" | `r3:521`, colour state #8, "after **62** present(s)" |
+| The old file's position when it stopped | 2.458333 s (`r2:648`) → 2.458333 × 24 = **59.0** | 2.583333 s (`r3:506`) → **62.0** |
+| The next `[MATRIX]` line | `r2:663`: picture decodes **Rec. 2020 (buffer tag ITU_R_2020)**, the rest Rec. 709, ⚠️ DISAGREE | `r3:522`: the same |
+| The new file's first frame drawn (`[MATRIX]` … agree, Rec. 709 tag) | `r2:711`, after main's `18:01:13.987` (`r2:708`) | `r3:554`, after `18:03:02.740` (`r3:551`) |
+
+- **It appears in both runs, so it is not new with B.** Run 1 had it too (393, §7.6). CONFIRMED.
+- **N counts the old file's frames, not the new file's.**
+  - `presentsSinceFlush` is reset only in `flush()` (`App/MetalVideoRenderer.swift:3280-3302`). A seek calls `flush()`, and the wedge's
+    loop wrap is a seek.
+  - A file change with output on does not reset it before the new state installs: the new file's tags arrive as a "MID-SOURCE CHANGE"
+    (`r2:654`, `r3:511`; `:2495-2498`).
+  - N equals the wedge's frames since its last wrap, to the frame, in both runs. CONFIRMED.
+- **What the window showed:** the warning's text is wrong on this path.
+  - No frame of the new file was drawn under the old state. The first frame drawn after the install is a Rec. 2020 buffer, the old wedge
+    frame, re-rendered by `pendingRefresh` (`:4044-4051`). `[MATRIX]` prints on a change only (`:6810-6826`), so that first frame would
+    have printed agree if it had been a new-file frame.
+  - The wrong pairing is the reverse of what the warning says: **the old file's last frame (PQ code values) under the new file's SDR
+    state.**
+    - Run 2, Reference: layer colorspace nil, EDR off, identity copy (`r2:653-657`).
+    - Run 3, OS: CoreMedia709, EDR off (`r3:512-514`).
+    - On an HDR-mode LG that shows PQ code values as SDR: a flat, dim picture.
+  - **How long:** from the install to the new file's first frame. By main's timestamps that is under about 110 ms (`r2:659` 13.876 →
+    `r2:708` 13.987; `r3:516` 02.634 → `r3:551` 02.740), about 2–3 frame periods at 24 fps.
+  - The frames in between are refreshes of that one held old frame. Their number is not logged. Inference: one re-present.
+  - This is the same in both modes. The only difference B could make is a few ms in the order of state and frame (§4.5), on a frame that
+    is wrong under either order.
+- **What follows:**
+  - The warning is a false positive for a file change made with output on: the same class as 0.9.1's mode-change false positives
+    (`:3770-3773`).
+  - The picture it hides is a brief old-frame-under-new-state flash, outside B.
+  - A separate item for `docs/BUGS.md`: the counter is not reset at a file change, and the old frame is re-presented under the new file's
+    state. Not B.
+
+**Verdict for B (runs 1–3).**
+- **SDI and pacer: clean.** Across 24 colour installs under plain B (18 in run 1, 6 in run 2), there was no 1 s stall, the pacer had 0 missed deadlines, and there
+  were 0 card holds and 0 DeckLink late or dropped frames. `nextDrawable` max was 3.59 ms. The live resize and a file change with output
+  on were also clean. CONFIRMED.
+- **Window: not clean.** There was one hold of ≥ 0.5 s, a gate timeout, at an HDR-mode OS ↔ Bypass switch (run 2, #4 or #5). Run 3, with
+  B off, had none at the same switches. Its cause is UNKNOWN and it happened once.
+- **Before B is called clean for the window:** repeat OS ↔ Bypass in HDR mode on the wedge, about 10 switches each with plain B and with
+  B off. Count the gate timeouts and the held-in-flight attempts in the `[PRESENT-TIMING]` window after each switch.
+- **The by-eye check:** whether the hold was visible at the switch is Robbie's observation, not the log's.
+
+### 7.8 OS ↔ Bypass in HDR mode, plain B against B off, output off and on (runs 2026-11-19 18:10–18:16)
+
+Read-only: no build, no launch, no git. Logs are in `~/Code/_scratch/manifold-plainb-lg/`: `run4-bon.log` (589 lines, plain B, `r4:`) and
+`run5-boff.log` (652 lines, B off, `r5:`).
+
+**The setup.**
+- **The file:** `HDR TEST.mov`, PQ, Rec. 2020 (`r4:30`, `r5:30`), moving, looped, 2160p23.976 to SDI.
+- **The display:** the LG at 120.000 Hz in HDR mode, with headroom 4.4827 of 8.9654 granted (`r4:101`, `r5:106`).
+- **The modes, from the counters:** `presents transactional 0, scheduled 1472` (`r4:578`) and `transactional 1685, scheduled 0` (`r5:541`).
+
+**Output on or off: the pacer runs from `[PACER] started` to `[PACER] stopped`** (`r4:304`→`r4:575`, `r5:237`→`r5:640`).
+- **With output off:** the window is presented by the display link through the transactional path. B does not apply there (§4.5 step 1),
+  and there is no present gate. The link path's `presMs` reads 0.18–0.36 ms there, against 0.00 under the pacer in both runs
+  (`r4:118-160` against `r4:351`).
+- So the output-off sets are the same code in both runs. They are a control, not a test of B.
+
+**Each switch, from the first `[RENDER-PERF]` (frames rendered and `drawMs` max, ~1 s) and the first `[Play] presented` after the
+install.** With output on, it also lists the first 10 s `[PACER]`, `[PACER] desktop` and `[PRESENT-TIMING]` lines after it. Every switch
+alternates OS → Bypass (even #) and Bypass → OS (odd #).
+
+| Run | Output | Installs (log lines) | Rendered / presented, the next second | `drawMs` max, the next second | Tick max | Gate timeouts · held in flight (10 s) | Missed (10 s) | `nextDrawable` max (10 s) |
+|---|---|---|---|---|---|---|---|---|
+| 4, plain B | off | #2–#11 (`r4:125`–`r4:284`), 10 | 24–26 / 22.4–24.0 fps | 0.09–0.11 ms | 9.30–9.34 ms (link, 120 Hz) | no gate | no pacer | — |
+| 4, plain B | **on** | #12–#19 (`r4:348`–`r4:552`), **8** | 25 / 24.0 fps, every one | 0.08–0.21 ms | 13.91–13.94 ms | **0 · 0** (`r4:358`, `:398`, `:433`, `:477`, `:515`, `:557`) | **0** | 0.08–0.21 ms |
+| 5, B off | off | #2–#7 (`r5:131`–`r5:227`), 6 | 25–26 / 23.8–24.0 fps | 0.09–0.11 ms | 9.29–9.30 ms | no gate | no pacer | — |
+| 5, B off | **on** | #8–#21 (`r5:287`–`r5:615`), **14** | 25–26 / 24.0–24.3 fps | 0.09–0.34 ms | 13.91–13.92 ms | **0 · 0** (`r5:294`, `:336`, `:378`, `:415`, `:460`, `:503`, `:538`, `:580`, `:620`) | **0** | 0.10–0.34 ms |
+
+- **The output-on desktop windows:** rendered equalled presented in every one (239–242 per 10 s).
+- **The attempt split** was `in flight at attempt 0:238–242 1:0–2 2:0` in every window. No attempt found 2 in flight.
+- **The one second under 23.8 after a switch** is run 4's #4 (22.4 fps, `r4:159`). It is the clip's loop wrap (`FrameEngine: reading
+  from 0.0s`, `r4:153`), in a set with output off.
+- **Every `[Play] presented` second under 23.5 fps in either run** comes 2–10 lines after a loop wrap: 7 in run 4 and 8 in run 5, B on
+  and B off alike. The two at 0.3 and 0.4 are the first second of play.
+
+**Run-wide:**
+
+| | Run 4, plain B | Run 5, B off |
+|---|---|---|
+| WATCHDOG lines | 0 | 0 |
+| `drawMs` max | 0.30 ms | 0.34 ms |
+| `[PACER] desktop` lines: gate timeouts / held in flight | 6 lines: 0 / 0 | 9 lines: 0 / 0 |
+| `[PRESENT-TIMING]` total | 1472 presents, held 0, holding 0 %, `nextDrawable` max 0.208 ms, dropped 0, misses 0, ticks > 5 ms 0 (`r4:578`) | 1685 presents, held 0, 0 %, max 0.344 ms, dropped 0, misses 0, ticks > 5 ms 0 (`r5:541`) |
+| Pacer missed deadlines | 0 (`r4:575`), interval max 13.93 ms | 0 (`r5:640`), 13.93 ms |
+| `[DIAG]` card holds while playing | 0 (`r4:574`) | 0 (`r5:639`) |
+| DeckLink `D3` | 31 lines, `late=0 dropped=0` | 46 lines, `late=0 dropped=0` |
+| `!!`, slips, late Mac-sound starts | none | none |
+
+**Robbie's report, by eye:** **not seen**. He saw nothing he would call a pause. He saw camera judder, which he attributes to the clip:
+it was 25 fps, exported as 23.98. That fits the logs: presented frames held at 24.0 fps outside the loop wraps in both runs. The judder
+comes with the content, not with B (inference).
+
+**The rule, set before the run:** any hold at a switch with B on and output on, and none with B off, means B stays off for 0.9.5. Zero
+in both means B goes to a night.
+- **B on, output on:** 0 holds in 8 switches. Across the whole run there were 0 gate timeouts and 0 held-in-flight attempts, so the 10 s
+  granularity cannot hide one.
+- **B off, output on:** 0 in 14.
+- **Result: zero in both → B goes to a night.**
+
+**Carried forward:**
+- **Run 2's hold is not reproduced, and is not explained** (§7.7): 1 window in 4 HDR-mode OS ↔ Bypass switches under plain B with output
+  on there, 0 in 8 here. Across runs 2 and 4 that is 1 window in 12 switches with plain B, and 0 in 18 with B off (runs 3 and 5).
+  - The two runs differ in the file (the wedge against `HDR TEST.mov`) and in the session. Which of those matters is UNKNOWN.
+- **The night should report per switch, or at least per 10 s window:**
+  - gate timeouts;
+  - held-in-flight attempts;
+  - the `in flight at attempt 2:` count.
+  So a recurrence is placed against a switch, not only against the block.
