@@ -86,8 +86,11 @@ class Freeze:
 # the only variables `env NAME=VALUE` may add. None changes the card lock, Stage 2, the recovery paths or the audio routing (option C
 # moves the output pacer's deadlines by at most 20 µs a tick, and only while it is on); without `env` nothing here changes.
 # The present-path measurement (docs/WINDOW_PRESENT_PATH.md §4.1, MANIFOLD_PRESENT_TIMING) only reads clocks and logs.
-EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"1"},
-                     "MANIFOLD_PRESENT_TIMING": {"1"}}
+# C+ (docs/CARD_PULL_MARGIN.md §17.3, MANIFOLD_PACER_PHASE=2) moves the pacer's phase earlier inside option C's guard band, in steps of
+# at most 0.5 ms; option B (docs/WINDOW_PRESENT_PATH.md §4.5, MANIFOLD_PACER_PRESENT_TX=0) changes only how the window's pacer
+# presents reach the screen. Neither touches the pull, the card lock, Stage 2, the recovery paths or the audio routing.
+EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"1", "2"},
+                     "MANIFOLD_PRESENT_TIMING": {"1"}, "MANIFOLD_PACER_PRESENT_TX": {"0"}}
 
 def parse_extra_env(items):
     out = {}
@@ -127,9 +130,12 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
     if sh(PROC, "check", str(pid)).returncode: say("the build did not come up"); defp.terminate(); save(ended="no-launch"); sys.exit(4)
     deny_licence_prompt()
     sh(PROC, "open", str(pid), fixture); time.sleep(3.5)
-    sh(AXT, str(pid), "place", title, "ASUS"); time.sleep(1.5)
+    # RC_PLACE=<display name substring> (optional, default "ASUS"): the display the window is placed on (linkpace-ax, AX only).
+    place = os.environ.get("RC_PLACE", "ASUS"); save(window_place=place)
+    sh(AXT, str(pid), "place", title, place); time.sleep(1.5)
     # Optional (RC_EXPECT_DISPLAY=<name>): the window's display before output starts, from the app's last [LINK] line. Logged and
     # saved; on any other display the block is skipped (quit by PID, exit 8) and the night goes on. Unset: nothing here runs.
+    # Optional RC_EXPECT_HZ=<Hz>: that display's refresh too, within 0.5 Hz, or the block is skipped the same way.
     want = os.environ.get("RC_EXPECT_DISPLAY")
     if want:
         links = re.findall(r'^\[LINK\] window \d+ → display \d+ "([^"]+)" \(([\d.]+) Hz\) · ([^·]+)', open(log, errors="replace").read(), re.M)
@@ -138,6 +144,9 @@ def block(app, fixture, length, mode, dest, label, minutes, markers=0, extra_env
         say(f"window display: {name} at {hz} Hz ({how and how.strip()})")
         if name != want:
             say(f"window is not on {want}: block skipped"); quit_build("wrong-display"); sys.exit(8)
+        want_hz = os.environ.get("RC_EXPECT_HZ")
+        if want_hz and not (hz and abs(float(hz) - float(want_hz)) <= 0.5):
+            say(f"window display is at {hz} Hz, not {want_hz}: block skipped"); quit_build("wrong-refresh"); sys.exit(8)
     # `nooutput` (option C's identity block): DeckLink output is never started, so the window's display link ticks, not the pacer.
     if output: menu(pid, "File", "Start/Stop DeckLink Output"); time.sleep(2.5)
     txt = open(log, errors="replace").read()
