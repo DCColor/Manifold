@@ -808,7 +808,9 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var stage2StartsAt = 0.0
     private var stage2LastStep: Double?
     private var stage2DeviceUID: String?
-    private var stage2Counts = (starts: 0, lateStarts: 0, timeouts: 0, coarse: 0, integratorResets: 0, slips: 0)
+    private var stage2Counts = (starts: 0, lateStarts: 0, timeouts: 0, coarse: 0, integratorResets: 0, slips: 0, refused: 0, rereads: 0)
+    /// The last picture line a start or a correction refused (`CardClockStage2Guard`), so the refusal is logged once per line, not at 10 Hz.
+    private var stage2RefusedSerial: UInt64?
     /// The picture line the steering last acted on. A different one while steering is a slip (`CardClockStage2.slipBound`). Set by a
     /// start, nil after a start without a line.
     private var stage2SteerSerial: UInt64?
@@ -1227,6 +1229,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         func startWithPicture(_ why: String) {
             stage2Pending = nil
             let pic = synchronizer.currentTime().seconds
+            let parked = box.contentTime(atOutputTime: own.currentTime().seconds)
             own.setRate(1, time: CMTime(seconds: box.outputTime(atContentTime: pic), preferredTimescale: 1_000_000_000),
                         atHostTime: CMTime(seconds: now, preferredTimescale: 1_000_000_000))
             stage2StartsAt = now
@@ -1234,6 +1237,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             stage2LastStep = nil
             cardAudioSteering.coarseEvent()
             print(String(format: "[CARDLOCK] Stage 2: %@ %.0f ms after Play; the Mac's sound started with the picture clock, at %.3f", why, (now - p.host) * 1e3, pic))
+            soundClockMoved(from: parked, to: pic, why: "Stage 2 start with the picture clock")
         }
         if let line = pictureLine.read(), !line.matched, line.firstSlot > p.slot {
             startWithPicture("rate mismatch (the SDI picture has no line)")
@@ -1247,29 +1251,68 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             }
             return
         }
-        stage2Pending = nil
         let out0 = own.currentTime().seconds
         let m0 = box.contentTime(atOutputTime: out0)
-        guard let start = stage2WireHost(content: m0) else { return }   // the same line and fit as the guard above
+        guard let start = stage2WireHost(content: m0) else { stage2Pending = nil; return }   // the same line and fit as the guard above
+        let verdict = CardClockStage2Guard.startVerdict(wireHost: start, now: now)
+        // A line that puts the parked content more than a second from now is not this content's: night 7's seek while playing left two
+        // pre-seek frames moving, the bridge confirmed a line on them, and a start on it moved the sound 186.6 s forward and lost 65 s
+        // of SDI sound (docs/SDI_AUDIO_NIGHT7.md, fault (b)). Still pending: the next line, or the start timeout, starts it.
+        if case .refuse(let offset) = verdict {
+            if stage2RefusedSerial != line.serial {
+                stage2RefusedSerial = line.serial
+                stage2Counts.refused += 1
+                print(String(format: "[CARDLOCK] refused: Stage 2 start on line #%llu (φ %.6f): content %.6f is on the wire %.1f ms %@, over the %.0f ms bound; waiting for the next line (%d refused so far)",
+                             line.serial, line.phi, m0, abs(offset) * 1e3, offset < 0 ? "ago" : "from now",
+                             CardClockStage2Guard.maxLineDisagreement * 1e3, stage2Counts.refused))
+            }
+            if now - p.host > CardClockStage2.startTimeout {
+                stage2Counts.timeouts += 1
+                startWithPicture("no SDI picture line for this content (refused)")
+            }
+            return
+        }
+        stage2Pending = nil
         cardAudioSteering.coarseEvent()
         stage2LastStep = nil
         stage2SteerSerial = line.serial
         stage2Counts.starts += 1
-        if start > now + 0.001 {
+        switch verdict {
+        case .startAt(let start):
             own.setRate(1, time: CMTime(seconds: out0, preferredTimescale: 1_000_000_000),
                         atHostTime: CMTime(seconds: start, preferredTimescale: 1_000_000_000))
             stage2StartsAt = start
             print(String(format: "[CARDLOCK] Stage 2: Mac sound starts with the SDI picture: content %.6f at host %.6f, %.1f ms after Play, %.1f ms from now (line #%llu)",
                          m0, start, (start - p.host) * 1e3, (start - now) * 1e3, line.serial))
-        } else {
-            let at = now + 0.002, late = at - start
+        case .startLate(let late):
+            let at = now + 0.002
             own.setRate(1, time: CMTime(seconds: out0 + late, preferredTimescale: 1_000_000_000),
                         atHostTime: CMTime(seconds: at, preferredTimescale: 1_000_000_000))
             stage2StartsAt = at
             stage2Counts.lateStarts += 1
             print(String(format: "[CARDLOCK] Stage 2: Mac sound starts %.1f ms into the SDI picture's run (its content was on the wire already; line #%llu)",
                          late * 1e3, line.serial))
+            soundClockMoved(from: m0, to: box.contentTime(atOutputTime: out0 + late), why: "Stage 2 late start")
+        case .refuse:
+            break   // returned above
         }
+    }
+
+    /// Fault (b)'s second guard (docs/SDI_AUDIO_NIGHT7.md): a write that moved the Mac sound's clock by more than
+    /// `CardClockStage2Guard.rereadJump` reads the sound again from the new time, as an automatic flush does (`daa09cb`,
+    /// `audioRendererFlushedAutomatically`). Without it the renderer can be left holding sound far ahead of its moved clock: it then never
+    /// asks for more, the pump stops, the tap with it, and SDI reads nothing until a seek (night 7: 65 s). Contents in seconds. Skipped,
+    /// and said so, with no file arm (a live source pushes) or during a renderer move (the move re-reads at its end when it should).
+    /// A seek re-reads by itself and does not come here.
+    private func soundClockMoved(from: Double, to: Double, why: String) {
+        guard CardClockStage2Guard.needsReread(from: from, to: to) else { return }
+        let fileArm = hasMedia && (useLibav ? libavAudioSource != nil : audioReader != nil)
+        let skip: String? = !fileArm ? "no file audio arm" : cardAudioMoving ? "a renderer move is in flight" : nil
+        if skip == nil { stage2Counts.rereads += 1 }
+        print(String(format: "[CARDLOCK] sound clock moved %+.3f s (%@): content %.6f → %.6f; %@", to - from, why, from, to,
+                     skip.map { "not re-read (\($0))" } ?? String(format: "reading the sound again from %.6f (%d so far)", to, stage2Counts.rereads)))
+        guard skip == nil else { return }
+        readSoundAgain(from: CMTime(seconds: to, preferredTimescale: 1_000_000_000))
     }
 
     /// 10 Hz on main: one paired read, the error against the SDI picture, one controller step. In the measurement build, one [W2] line
@@ -1312,6 +1355,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 cardAudioSteering.coarseEvent(); stage2LastStep = nil; stage2StartsAt = h
                 state = "mismatch: re-anchored to the picture clock"
                 print(String(format: "[CARDLOCK] Stage 2: rate mismatch: the Mac's sound re-anchored to the picture clock, %+.2f ms off at %.3f", ep * 1e3, pic))
+                soundClockMoved(from: m, to: pic, why: "Stage 2 rate-mismatch re-anchor")
             } else {
                 let dt = stage2LastStep.map { h - $0 } ?? 1 / CardClockStage2.tickHz
                 cardAudioSteering.step(error: ep, dt: dt, resample: box)
@@ -1320,6 +1364,17 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             }
         } else if !w.isFinite {
             state = "held: no line"; stage2LastStep = nil
+        } else if !CardClockStage2Guard.lineAgreesWithPicture(lineContent: w + stage2K, pictureContent: pic) {
+            // Fault (b) (docs/SDI_AUDIO_NIGHT7.md): the SDI picture trails the picture clock by the wire's lag, never by seconds, so a line
+            // this far off is another content's. Neither written nor steered on; the next line is judged afresh.
+            state = "refused: line disagrees with the picture clock"; stage2LastStep = nil
+            if let line, stage2RefusedSerial != line.serial {
+                stage2RefusedSerial = line.serial
+                stage2Counts.refused += 1
+                print(String(format: "[CARDLOCK] refused: Stage 2 correction on line #%llu (φ %.6f): it puts content %.6f on the wire with the picture clock at %.6f, %+.1f ms apart, over the %.0f ms bound; sound at content %.6f left as it is (%d refused so far)",
+                             line.serial, line.phi, w + stage2K, pic, (w + stage2K - pic) * 1e3, CardClockStage2Guard.maxLineDisagreement * 1e3,
+                             m, stage2Counts.refused))
+            }
         } else if abs(e) > (slip ? CardClockStage2.slipBound : CardClockStage2.coarseBound), let own = audioSynchronizer, let box = cardResample {
             let target = box.outputTime(atContentTime: w + stage2K)
             let past = 0.005
@@ -1344,6 +1399,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             }
             stage2SteerSerial = line?.serial
             stage2KChanged = false
+            soundClockMoved(from: m, to: w + stage2K, why: "Stage 2 \(state) re-anchor")
         } else if let box = cardResample {
             let dt = stage2LastStep.map { h - $0 } ?? 1 / CardClockStage2.tickHz
             cardAudioSteering.step(error: e, dt: dt, resample: box)
@@ -1376,6 +1432,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             own.setRate(1, time: CMTime(seconds: picture - past * Double(synchronizer.rate), preferredTimescale: 1_000_000_000),
                         atHostTime: CMTime(seconds: t0 - past, preferredTimescale: 1_000_000_000))
             print(String(format: "[CARDLOCK] audio clock re-anchored: it was %+.2f ms from the picture at clock %.3f", part * 1e3, picture))
+            soundClockMoved(from: audio, to: picture, why: "Stage 1b re-anchor")
         }
         return part
     }
