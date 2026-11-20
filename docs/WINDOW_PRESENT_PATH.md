@@ -1143,3 +1143,136 @@ in both means B goes to a night.
   - held-in-flight attempts;
   - the `in flight at attempt 2:` count.
   So a recurrence is placed against a switch, not only against the block.
+
+## 8. Night 6: the present path with B off (the 0.9.5 defaults) against plain B (run 2026-11-19 19:11–23:51)
+
+Read-only: no build, no launch, no git. The night, its rig and its verdicts are in `CARD_PULL_MARGIN.md` §19. Files are in
+`~/Code/_scratch/manifold-pacerphase-ab5/`: `present.report` (every missed tick) and `windows.report` (every playing 10 s `[PACER] desktop`
+window, with a wall time from the block's clock pair). The verdict, by the rule set before the run: **B as the 0.9.5 default: NO**. B
+failed B1 on the LG block only (§8.3). Window holds were equal between B on and off.
+
+### 8.1 Per block
+
+From `ab.report` B4–B6 and the B-off comparison rows, and from `windows.report`. "Holding" is the share of playing windows with any
+present held because one was already in flight.
+
+| # | Block | B | Window | Missed ticks (overran) | Gate timeouts / nil drawables | Held in flight: total, windows holding | Presented / rendered | `nextDrawable` p50 / p99 / max (ms) | Presents transactional / scheduled |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | `boff-1` | off | ASUS 59.936 | 2 (`CATransaction.commit` 2) | 1 / 0 | 102259, 120 of 272 (44 %) | 149755 / 152758 (98.0 %) | 0.015 / 0.038 / 0.315 | transactional |
+| 2 | `bon-1` | on | ASUS 59.936 | **0** | 0 / 0 | 83668, 97 of 272 (36 %) | 151922 / 152750 (99.5 %) | 0.011 / 0.030 / 0.297 | 0 / 152460 |
+| 3 | `boff-2` | off | ASUS 59.936 | 52 (`CATransaction.commit` 50, `perform` 2) | 1 / 0 | 156543, 217 of 272 (80 %) | 141801 / 152760 (92.8 %) | 0.015 / 0.037 / 0.268 | transactional |
+| 4 | `bon-2` | on | ASUS 59.936 | **0** | 1 / 0 | 168135, 212 of 272 (78 %) | 142667 / 152762 (93.4 %) | 0.011 / 0.030 / 0.465 | 0 / 143200 |
+| 5 | `2398-cmp-bon` | on | ASUS 59.936 | 0 | 0 / 0 | 0, 0 of 272 | 61141 / 61141 (100 %) | 0.013 / 0.021 / 0.272 | 0 / 61353 |
+| 6 | `lg-bon` | on | **LG 120** | 2 (`perform` 2) | 0 / 0 | 4, 1 of 272 (0.4 %) | 152769 / 152769 (100 %) | 0.011 / 0.020 / 0.472 | 0 / 153306 |
+
+- **B removed every `CATransaction.commit` overrun on the ASUS, again:** 0 misses on blocks 2 and 4, against 2 and 52 with B off. That
+  matches night 5 (§6, `CARD_PULL_MARGIN.md` §18.7). There were 0 transactional presents with B on (B4–B6, `ab.report`).
+- **`nextDrawable` never waited.** The maximum on any block was 0.472 ms. There were 0 nil drawables all night, so the 1 s `nextDrawable`
+  stall of §7 did not occur in the soak, with B on or off. Inference: the soak makes no Display Transform switch, so it has no state
+  tick.
+- **The ASUS degraded state is the same with B on and off** (36–78 % holding with B on, 44–80 % off). It comes and goes in runs of tens of
+  seconds to minutes in every ASUS block (`windows.report`). B neither causes nor cures it. Block 5 (23.976 to the computer) never entered
+  it.
+- **The LG at 120 Hz, unscaled, under plain B: the bad state did not appear** (1 window of 272 held 4 presents, at 23:35:17,
+  `windows.report`). Rendered equalled presented across the block. That repeats night 5's LG block with B off (0 of 272, §6.4).
+
+### 8.2 Gate timeouts: three, each inside a Regenerate, B on or off
+
+The night had three gate timeouts, the only window holds. Each was in a 10 s window that ends inside a Regenerate (`CARD_PULL_MARGIN.md`
+§19.4):
+- 19:41:41 (`boff-1`, Regenerate #3);
+- 21:25:07 (`boff-2`, #4);
+- 22:01:51 (`bon-2`, #3).
+
+Each lost about 30 presents in its window (≈ 0.5 s, one `presentGateTimeout`). That is 1 with B on against 2 in two blocks with B off,
+and 1 against the B-off maximum of 1 per block, which is what the verdict rule compares. The other 21 Regenerates show no gate timeout.
+What separates these three from the others is UNKNOWN; the 10 s granularity doesn't place them closer than the window.
+
+### 8.3 The LG block's two misses, which fail B1
+
+Both are new-frame ticks right after `[TRANSPORT] seek 1895.00`:
+- `n6-5994-sdi-lg-bon.log:29480`, 22.177 ms, 24 ms after the seek at `:29460`;
+- `:111675`, 21.986 ms, 31 ms after the seek at `:111664`.
+
+Their parts put 22.081 and 21.820 ms in `perform` and under 0.2 ms in every present part: `nextDrawable` 0.019 / 0.016, `commit` 0.009 /
+0.012, `colorTx` 0. Each overran two periods, so 4 missed deadlines against B1's ≤ 2.
+- `perform` is `performDisplayTick`'s own work outside the present attempts (`App/PresentTimingLog.swift:16`, `:316`). That is not the
+  part B changes (inference from the parts).
+- The same post-seek `perform` miss occurred with B off: tonight's `boff-2` (`n6-5994-sdi-boff-2.log:358437`, 21.309 ms) and night 5's
+  B-off LG block (2 of its 5 misses, 7 missed deadlines).
+- Neither tick caused a hold or a skip.
+
+The verdict stays as written, NO, because B1 has no seek exception. Re-stating B1 is for Robbie.
+
+### 8.4 Against the attended runs (§7.6–§7.8)
+
+The soak makes no Display Transform switches, so it neither confirms nor refutes run 2's unexplained hold (§7.7). The attended evidence
+stands at 1 hold window in 12 plain-B HDR-mode switches with output on, and 0 in 18 with B off. What the night adds is that plain B,
+across 3 h of play on two displays, made no gate timeout or nil drawable that B off did not also make.
+
+## 9. Night 7: plain B in every block, gate-style mix (run 2026-11-20 00:41–06:48)
+
+Read-only: no build, no launch, no git. The night, its rig and its verdicts are in `CARD_PULL_MARGIN.md` §20. Files are in
+`~/Code/_scratch/manifold-pacerphase-ab6/`: `present.report` (every missed tick, marked post-seek first frame or counted) and
+`windows.report` (every playing 10 s `[PACER] desktop` window, with a wall time from the block's clock pair; drift −0.034 to +0.053 s
+per block). Every block ran `MANIFOLD_PACER_PRESENT_TX=0`; there was no B-off block, so this section has no A/B comparison of its own.
+It compares with night 6 (§8) where the block is the same.
+
+### 9.1 Per block
+
+From `ab.report` B4–B6 and the LG row, and `windows.report`. "Holding" is the share of playing windows with any present held because one
+was already in flight.
+
+| # | Block | Window | Missed ticks (overran) | Gate timeouts / nil drawables | Held in flight: total, windows holding | Presented / rendered | `nextDrawable` p50 / p99 / max (ms) | Presents transactional / scheduled |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `bon-1` | ASUS 59.936 | 0 | 0 / 0 | 216741, 274 of 357 (77 %) | 189098 / 200661 (94.2 %) | 0.011 / 0.031 / 0.297 | 0 / 189456 |
+| 2 | `2398-cmp-bon` | ASUS 59.936 | 0 | 0 / 0 | 0, 0 of 357 | 80314 / 80314 (100 %) | 0.013 / 0.021 / 0.219 | 0 / 80526 |
+| 3 | `gop25-sdi-bon` | ASUS 59.936 (75 Hz pacer, k 3) | 1 (`perform`, after a paused seek) | 0 / 0 | 0, 0 of 357 | 83752 / 83752 (100 %) | 0.013 / 0.024 / 0.264 | 0 / 83977 |
+| 4 | `lg-bon` | **LG 120** | 1 (`perform`, post-seek first frame) | 0 / 0 | 2, 1 of 357 (0.3 %) | 200667 / 200667 (100 %) | 0.011 / 0.020 / 0.323 | 0 / 201205 |
+| 5 | `bon-2` | ASUS 59.936 | 0 | 0 / 0 | 224705, 288 of 357 (81 %) | 186156 / 200665 (92.8 %) | 0.012 / 0.031 / **2.612** | 0 / 186698 |
+| 6 | `ao48-sdi-bon` | ASUS 59.936 | 0 | 0 / 0 | — (no window picture) | 0 / 0 | — | 0 / 0 |
+
+- **0 overruns in any present step all night:** no `CATransaction.commit` (absent under B), no `waitUntilScheduled`, no `nextDrawable`.
+  0 transactional presents. The two misses are both `perform` (§9.3). That repeats nights 5–6's B-on blocks.
+- **`nextDrawable` never waited.** The night's maximum, 2.612 ms, is `bon-2`'s first playing window (`n7-5994-sdi-bon-2.log:8613`, 04:46:45,
+  about 40 s after launch). Every other block's max was under 0.33 ms. 0 nil drawables, so the 1 s `nextDrawable` stall of §7 did not
+  occur (the soak makes no Display Transform switch).
+- **The ASUS degraded state, under B, as before:** 77 % and 81 % of playing windows holding on the two 59.94 ASUS blocks (night 6, B on:
+  36 % and 78 %; B off 44 % and 80 %, §8.1). It comes and goes: 48 and 37 separate holding runs (`windows.report`). The 23.976 and 25p
+  blocks on the same display never entered it (0 of 357 each), so on this rig it appears only with 59.94 content at the ASUS's 59.936 Hz.
+- **The LG at 120 Hz under plain B: no bad state again.** 1 window of 357 held 2 presents (04:41:34, `n7-5994-sdi-lg-bon.log:806485`,
+  rendered = presented 420). Rendered equalled presented across the block (night 6: 1 of 272).
+
+### 9.2 Window holds per 10 s window: none, and no run-2-style hold
+
+- **0 gate timeouts and 0 nil drawables in any 10 s window of any block** (`ab.report` B4, `windows.report`). So no ≥ 0.5 s window hold
+  occurred, of the run-2 kind (§7.7) or any other.
+- **Night 6's three Regenerate-time gate timeouts (§8.2) did not recur** in tonight's 30 Regenerates (6 per video block), with B on in every
+  block. Night 6 had 1 with B on in 16 Regenerates and 2 with B off in 8. Tonight adds 0 in 30 with B on. What separated night 6's three
+  stays UNKNOWN.
+- **Run 2 itself is not tested by a soak:** its hold came at an HDR-mode OS ↔ Bypass switch, and the soak makes none. The attended count
+  stands at 1 hold window in 12 plain-B HDR-mode switches with output on, and 0 in 18 with B off (§7.8). What the night adds: 5.60 h of
+  play under plain B on two displays, 4.65 h of it with a window picture, with no window hold of any length.
+- During the CCC run (03:30:00–03:31:06, block 3), every window from 03:29:54 to 03:31:27 had rendered = presented and 0 held.
+
+### 9.3 The two missed ticks
+
+| Block | Line | Wall ≈ | Tick, kind | Overran | Before it |
+|---|---|---|---|---|---|
+| `gop25-sdi-bon` | `n7-gop25-sdi-bon.log:355028` | 03:41:39 | 16.288 ms, repeat | `perform` 16.237 ms; no present attempt | `[TRANSPORT] seek 767.40` while paused, 35 ms earlier (`:355018`) |
+| `lg-bon` | `n7-5994-sdi-lg-bon.log:851537` | 04:44:44 | 21.648 ms, new-frame | `perform` 21.574 ms; every present part under 0.1 ms | a seek 29 ms earlier, no new frame between |
+
+- Both are the first render after a seek, in `perform` (`performDisplayTick`'s work outside its present attempts,
+  `App/PresentTimingLog.swift:16`). The LG one meets `RIG.md`'s post-seek first-frame rule and is not counted in B1. The GOP one is tagged
+  a repeat tick, because the seek was made while paused, so it is counted; B1 passes either way (`CARD_PULL_MARGIN.md` §20.3).
+- Night 6 had 2 such ticks on its LG block, both after `seek 1895.00`, and 2 on a B-off block (§8.3). They occur with B on and off, and B
+  does not change that part (inference from the parts).
+
+### 9.4 What this changes
+
+- Across nights 5–7, plain B has had 0 present-step overruns and 0 pacer late swaps in every B-on block. Its only misses are post-seek
+  `perform` ticks, which B-off blocks have too.
+- The window under plain B made no gate timeout or nil drawable in 6 blocks, including 30 Regenerates. The open window question is still
+  run 2's single hold at an HDR-mode switch (§7.7–§7.8), which a soak cannot test.
+- The night's two faults are SDI sound, not the window (`CARD_PULL_MARGIN.md` §20.4): a 55 min loss of the card's audio callbacks on
+  `bon-2`, and 65 s of tap-starved sound after one seek on the GOP block. Neither touches the present path (inference).

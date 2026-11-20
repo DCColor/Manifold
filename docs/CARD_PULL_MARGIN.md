@@ -2266,3 +2266,313 @@ real times. Every run from 2026-11-16 03:30 to 2026-11-19 11:30 started at its s
     (0 transactional presents, §6.2 there).
   - The per-pull lead target (p01 ≥ P + 0.25 ms) was missed by under 0.1 ms on 3 blocks. Whether s_L should be larger is open.
   - boff-2's clamp hits and bon-1's 7 ms excursion: UNKNOWN.
+
+## 19. A/B night 6 (0.9.5 defaults against plain B, run 2026-11-19): defaults **PASS**, B **FAIL** (B1 on the LG block only), D **PASS**, P complete. B as the 0.9.5 default: **NO**
+
+Started by hand (`soak.sh main > soak.out 2>&1`). The slots were set at 19:00:14. The first block began at 19:11:17, after the 10 min idle
+wait, and the last ended at 23:51:33. `ENDED` was written at 23:51 and there is no `STOP` file. All 6 blocks ran to the end (`"ended":
+"done"` in every `<label>.json`; `block … exit 0` at `soak.out:27`, `:52`, `:77`, `:102`, `:127`, `:152`), and none was skipped. That
+is 4.27 h played (`soak.report`). The verdicts are `ab-check.py`'s, run by `soak.sh` at exit against `RIG.md`'s criteria, which were
+written before the run. They were not re-run in this session. Paths below are relative to `~/Code/_scratch/manifold-pacerphase-ab5/`.
+
+Wall times come from the clock pairs `rig.log` records before and after each block. The two pairs' offsets differ by −0.014 to +0.028 s
+per block (`ab.report:1-7`), so the mapping holds to well under a second. That rests on an inference: Python's `time.monotonic()` reads
+the clock behind the logs' host stamps. Window times in `windows.report` are the end of a 10 s window. No build, no launch, no git.
+
+**Candidate** (`RIG.md`): `.build-pacerphase-5`, Profile, 0.9.4 (27), built from HEAD `e80dc2b` (C+ the default; plain B behind
+`MANIFOLD_PACER_PRESENT_TX=0`). sha256 `114efe07dc4f1d87…`, ad-hoc linker-signed. `MANIFOLD_PACER_PHASE` was unset in every block, so C+
+ran as shipped. Every block had `MANIFOLD_DECKLINK_CADENCE_LOG=2` and `MANIFOLD_PRESENT_TIMING=1`, and blocks 2, 4, 5 and 6 also had
+`MANIFOLD_PACER_PRESENT_TX=0` (`ab.report:1-7`, from each `<label>.json` `extra_env`). Each block ran 45 min (16 cycles of 175 s).
+
+**Verdicts (`ab.report`):**
+- **The 0.9.5 defaults (B-off blocks 1 and 3): PASS** (`:26`).
+  - DEF1, DEF2 and DEF4: 0 crossings, 0 crossing-caused holds or skips, 0 freezes.
+  - DEF5: 0 holds or skips of any cause, 0 unrecovered events, markers met. So exception (b) was never needed (DEF3: none accepted, none
+    to accept).
+  - The gate's ≥ 6 h is not tested by 1.5 h of B-off blocks (`RIG.md`).
+- **B (B-on blocks 2, 4, 5, 6): FAIL** (`:54`), on one criterion in one block: **B1 on the LG block, with 4 pacer missed deadlines against
+  ≤ 2** (`:46`). Every other B row passed: B1 on blocks 2, 4 and 5 (0 each); B2 (0 pacer late swaps on all four); and B3 (0 holds or
+  skips on all four). Section 19.3 says what the 4 were.
+- **D: PASS** (`:64`). On all 6 blocks, the `[DIAG] playback counters` line agrees exactly with the log. **Card holds while playing were
+  0 in every block, against the gate's 0.** This is the first night with `CardHoldFilter`, and the counter now equals the gate's hold
+  count. Night 5's binary read 112–120 (§18.2).
+- **P: complete on all 6** (`:65`): 2, 0, 52, 0, 0 and 2 misses.
+- **The verdict rule** (`:66-71`). Window holds (gate timeouts + nil drawables) passed on all four B-on blocks: 0, 1, 0 and 0, against
+  the B-off maximum of 1 (blocks 2 and 4), or against 0 (blocks 5 and 6). B's verdict is FAIL, so **"B AS THE 0.9.5 DEFAULT: NO (B FAIL;
+  window holds PASS)"** (`:71`). As the rule was written, B stays off for 0.9.5.
+
+### 19.1 Rig
+
+- **Checked before every block: passed 6 of 6.** `rig.log` has one entry per block, and `soak.out` has them at `:4`, `:29`, `:54`, `:79`,
+  `:104` and `:129`. Each entry shows zoom.us none, capture closed, default output Scarlett, `MANIFOLD_PACER_PHASE` unset, sha256
+  `114efe07dc4f1d87…` ok, slots `waveform | parade | markers`, and signing `flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not
+  set`.
+- **Display placement: as planned.**
+  - Blocks 1–5: the ASUS PA147 at 59.936 Hz ("window moved": `soak.out:12`, `:37`, `:62`, `:87`, `:112`).
+  - Block 6: the LG TV SSCR2 at 120.000 Hz ("window shown": `:137`).
+  - Each `<label>.json` `window_display` agrees.
+  - Before every block the LG read `3840 x 2160` · `3840 x 2160 @ 120.00Hz` (unscaled) and the ASUS read `1920 x 550` · `1920 x 550 @
+    60.00Hz`.
+- **HID idle at each block start** (`soak.out:3`, `:28`, `:53`, `:78`, `:103`, `:128`): 612, 3415, 6218, 9021, 11824 and 14627 s. The
+  Mac was not touched, and Resolve was closed each time.
+- **Guards:** "guard after …: clean" for all 6 blocks (`soak.out:24`, `:49`, `:74`, `:99`, `:124`, `:149`).
+- **Slots restored: yes.**
+  - `setslots` (19:00:14, `soak.out:1`): "were yrgb | meters | markers", stash `prefs-stash-20261119-190014.txt`.
+  - At exit (23:51:53, `:188-189`): "slots at the end of the night: waveform | parade | markers", then "slots restored: yrgb | meters |
+    markers".
+  - Read again in this session (read only), `com.graviton.manifold` `manifold.scope.slot0/1/2` are `yrgb | meters | markers`, which is
+    exactly the stash.
+- **Recorded, never stopping the night** (`rig.log`):
+
+| # | Block | Keychain prompts denied before it (earlier launches) | Denied in it | SecurityAgent before | Memory free before / after | `ASEProcessing` per minute | Thermal | Clock-pair drift |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `boff-1` | 0 (0) | 2 | 0 | 86 % / 86 % | 3284 | no warning recorded | +0.002 s |
+| 2 | `bon-1` | 2 (1) | 2 | 0 | 86 % / 86 % | 3284 | the same | +0.027 s |
+| 3 | `boff-2` | 4 (2) | 2 | 0 | 86 % / 85 % | 3281 | the same | −0.014 s |
+| 4 | `bon-2` | 6 (3) | 2 | 0 | 85 % / 86 % | 3282 | the same | +0.020 s |
+| 5 | `2398-cmp-bon` | 8 (4) | 2 | 0 | 86 % / 86 % | 2569 | the same | +0.028 s |
+| 6 | `lg-bon` | 10 (5) | 2 | 0 | 86 % / 86 % | **25** | the same | −0.013 s |
+
+- `ASEProcessing` repeats night 5 (§18.1): about 3280 a minute with the window on the ASUS, and 25 with it on the LG.
+- **Not covered:** launches and prompts before `soak.sh` started are UNKNOWN. `soak.out`'s first line is the `setslots` line, and it
+  carries no note.
+
+### 19.2 Per block
+
+Holds, skips, freezes and late/dropped counts are the gate's (`soak.report`). Pacer and late-swap counts are `ab-check.py`'s
+(`ab.report:1-7`). Window holds are from `windows.report`.
+
+| # | Block | B | Pacer n / median / p99 / max (ms) | Missed deadlines | Pacer `[LATE-SWAP]` (held) | Holds / skips | Freezes | Window late / dropped | Card late / dropped | Gate timeouts / nil drawables | Presented / rendered | Markers |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `n6-5994-sdi-boff-1` | off | 311852 / 8.35 / 8.36 / 16.76 | 2 | 1 (0) | 0 / 0 | 0 | 10 / 4 | 0 / 0 | 1 / 0 | 98.0 % | PASS |
+| 2 | `n6-5994-sdi-bon-1` | on | 311824 / 8.35 / 8.36 / 8.79 | **0** | 0 | 0 / 0 | 0 | 6 / 5 | 0 / 0 | 0 / 0 | 99.5 % | PASS |
+| 3 | `n6-5994-sdi-boff-2` | off | 311790 / 8.35 / 8.36 / 25.03 | **53** | 25 (0) | 0 / 0 | 0 | 13 / 6 | 0 / 0 | 1 / 0 | 92.8 % | PASS |
+| 4 | `n6-5994-sdi-bon-2` | on | 311826 / 8.35 / 8.36 / 8.73 | **0** | 0 | 0 / 0 | 0 | 9 / 4 | 0 / 0 | 1 / 0 | 93.4 % | PASS |
+| 5 | `n6-2398-cmp-bon` | on | 187085 / 13.91 / 13.92 / 14.36 | 0 | 0 | 0 / 0 | 0 | 11 / 1 | 0 / 0 | 0 / 0 | 100 % | PASS |
+| 6 | `n6-5994-sdi-lg-bon` | on | 311840 / 8.35 / 8.36 / 25.03 | **4** | 0 | 0 / 0 | 0 | 10 / 3 | 0 / 0 | 0 / 0 | 100 % | PASS |
+
+- **Markers:** 24 Regenerates pressed, all remade, 0 made while playing. Near them: holds and skips 0, late or dropped 4 (all window).
+- **SDI bridge `!!`:** only "edge APPENDED by the card", 14 / 14 / 14 / 12 / — / 10 on the six blocks, with 0 late edges. The counts are the
+  same with B on and off (`soak.report`).
+
+### 19.3 B1 on the LG block: the 4 missed deadlines are 2 post-seek `perform` ticks
+
+`present.report` lists 2 missed ticks on the LG block. Each one overran by two periods (next interval 25.02 ms, 3P), so it counts 2 missed
+deadlines, which makes the `[PACER] stopped` line's 4 (`ab.report:7`, pacer max 25.03).
+
+| Log line | Wall ≈ | Tick | Overran | Before it |
+|---|---|---|---|---|
+| `n6-5994-sdi-lg-bon.log:29480` | 23:07:13.7 | 22.177 ms | `perform` 22.081 ms | `[TRANSPORT] seek 1895.00` (`:29460`) 24 ms earlier, made while paused (the pulls before it read `branch paused`); the first new-frame tick after it |
+| `n6-5994-sdi-lg-bon.log:111675` | 23:12:59.8 | 21.986 ms | `perform` 21.820 ms | `[TRANSPORT] seek 1895.00` (`:111664`) 31 ms earlier |
+
+- **In both, every present part is under 0.2 ms** (`nextDrawable` 0.016–0.019, `commit` 0.009–0.012, `colorTx` 0). The time is in
+  `perform`, which is `performDisplayTick`'s work outside its present attempts (`App/PresentTimingLog.swift:16`, `:316`). That is the
+  first frame's render after a seek, not the present path that B changes.
+- **The same tick class occurs with B off:**
+  - tonight's block 3 at the same seek (`n6-5994-sdi-boff-2.log:358437`, 21.309 ms, `perform` 17.727 ms, 27 ms after `[TRANSPORT] seek
+    1895.00` at `:358425`);
+  - night 5's B-off LG block: 2 `perform` misses (`../manifold-pacerphase-ab4/present.report:145-146`) among 7 missed deadlines.
+    That is more than B1's ≤ 2 allows;
+  - night 5's `boff-2` (`:131`).
+  - With B on, it also occurred on night 5's `bon-2` and `2398-cmp-bon` (`:138`, `:140`). That was B's one 59.94 miss in §18.7.
+  - Every block tonight had 48 seeks.
+- No hold and no skip followed either tick, at the card or by the gate.
+- **So B1 failed on a tick the B switch does not touch** (inference from the parts). That doesn't change the verdict: B1 was written as ≤ 2
+  missed deadlines per B-on block, with no exception for seeks, and `RIG.md` named the LG block as a B-on block in every B criterion.
+  Whether to re-state B1 (for example as "≤ 2 outside a seek's first tick", or "no more than the B-off LG count") is Robbie's call. It is
+  not applied here.
+
+### 19.4 Window holds and the Carbon Copy Cloner runs
+
+**The three gate timeouts of the night each fall inside a Regenerate**, one per block in 1, 3 and 4. They are the only window holds; there
+are 0 nil drawables anywhere.
+
+| Block | B | `windows.report` row (window end) | Rendered / presented in that 10 s | Regenerate in progress (`soak.out`) |
+|---|---|---|---|---|
+| `boff-1` | off | `n6-5994-sdi-boff-1.log:429592` (19:41:41) | 600 / 571 | #3, pressed 19:41:33, done 19:42:04 |
+| `boff-2` | off | `n6-5994-sdi-boff-2.log:571931` (21:25:07) | 590 / 559 | #4, 21:25:00 → 21:25:26 |
+| `bon-2` | **on** | `n6-5994-sdi-bon-2.log:429537` (22:01:51) | 600 / 570 | #3, 22:01:43 → 22:02:13 |
+
+- Each shows about 30 frames not presented in that window. That is about 0.5 s, one `presentGateTimeout`.
+- The gate timeout is in the window path and around a Regenerate pause. It happened once with B on and twice with B off.
+- That 1 against 1 is what the verdict rule's window-hold row compares.
+
+**CCC (`ccc.log`, 2 runs since 19:00:13, `soak.out:154`):**
+
+| Run | Start → end | Copied | Block | In it |
+|---|---|---|---|---|
+| 1 | 19:30:00 → 19:31:06 | 1,265,903 bytes | `boff-1` (B off) | no missed tick (block 1's misses at 19:12:03 and 19:33:51), no gate timeout, no hold. The 10 s windows show presents held in flight up to 19:30:39 and none from 19:30:49 to 19:31:19, a pattern that comes and goes all block. |
+| 2 | 23:30:00 → 23:31:05 | 0 bytes | `lg-bon` (B on) | no missed tick (block 6's at 23:07 and 23:12), no gate timeout, no held present. Rendered = presented in every window. |
+
+- Both were routine runs (about 1 min, ≤ 1.3 MB) and overlapped a block without effect, as on night 5 (§18.6).
+- A large copy remains UNTESTED.
+
+### 19.5 What this shows (not part of the verdicts)
+
+- **The defaults pass the 0.9.5 gate's terms on 1.5 h** (0 holds, 0 crossings, 0 freezes), with C+ as shipped and the
+  transactional present.
+  - Block 3 reproduced night 5's ASUS miss rate: 53 missed deadlines from 52 missed ticks. 50 were `CATransaction.commit` overruns and 2
+    were `perform` (`present.report`). There were 25 pacer late swaps, 0 held.
+  - Block 1 had only 2 misses in the same mode, both `CATransaction.commit`. Why the two B-off blocks differ by 26× is UNKNOWN; night 5's were 70 and 68.
+- **On the ASUS, B again removed the present-path misses**: 0 and 0 on blocks 2 and 4, against 2 and 53. With B on there were 0 pacer late
+  swaps, 0 transactional presents, and `nextDrawable` max ≤ 0.47 ms. The held-in-flight degraded state was unchanged (36–78 % of
+  windows with B on, 44–80 % with it off; `WINDOW_PRESENT_PATH.md` §8).
+- **B's only failing row is a post-seek render tick** that B-off blocks show too (§19.3).
+- **Open, for Robbie:**
+  - whether the rule stands as written (B off for 0.9.5) or B1 is re-stated and judged again on these logs;
+  - why boff-1 and boff-2 differ so much;
+  - the Regenerate gate timeouts, which B neither caused nor removed.
+
+## 20. Night 7 (B-only, plain B in every block, run 2026-11-20): B **PASS**, 0.9.5 gate **PASS** as `ab-check.py` computes it, D **PASS**, P complete. Two SDI sound faults the gate's tools do not count (§20.4)
+
+Started by hand (`soak.sh main > soak.out 2>&1`). The slots were set at 00:30:44. The first block began at 00:41:16, after the 10 min idle
+wait, and the last ended at 06:48:06. `ENDED` was written at 06:48 and there is no `STOP` file. All 6 blocks ran to the end (`"ended":
+"done"` in every `<label>.json`; `block … exit 0` at `soak.out:31`, `:60`, `:89`, `:118`, `:147`, `:163`), and none was skipped. That
+is 5.60 h played, 6 h 07 min of block wall time (`soak.report`, TOTAL). The verdicts are `ab-check.py`'s, run by `soak.sh` at exit
+against `RIG.md`'s criteria, which were written before the run (2026-11-20 00:30). They were not re-run in this session. Paths below are
+relative to `~/Code/_scratch/manifold-pacerphase-ab6/`. No build, no launch, no git.
+
+**Candidate:** night 6's binary, unchanged (`.build-pacerphase-5`, Profile, 0.9.4 (27), from `e80dc2b`; sha256 `114efe07dc4f1d87…`,
+checked before every block; ad-hoc linker-signed). Every block had `MANIFOLD_PACER_PRESENT_TX=0` (plain B), `MANIFOLD_DECKLINK_CADENCE_LOG=2`
+and `MANIFOLD_PRESENT_TIMING=1`, and no `MANIFOLD_PACER_PHASE` (C+ as shipped). `ab.report:2-7` reads `B on True` for all six, from each
+`<label>.json` `extra_env`. Each block ran 21 cycles of 175 s (61.25 min).
+
+**Verdicts (`ab.report`):**
+- **B: PASS** (`:46`). All six blocks pass "B on", B1, B2 and B3.
+  - **B1 (re-stated, Robbie 2026-11-20: post-seek first-frame `perform` misses reported, not counted):** counted 0, 0, **1**, 0, 0, 0
+    (`ab.report:17`, `:22`, `:27`, `:32`, `:37`, `:42`). The LG block's 2 missed deadlines are one post-seek `perform` tick, reported and
+    not counted (§20.3). The GOP block's 1 is counted (§20.3).
+  - **B2:** 0 pacer late swaps on all six. **B3:** 0 holds and 0 skips on all six (`ab.report:8-14` "holds and skips by cause": none).
+- **G, the 0.9.5 gate as written, under B: PASS** (`:54`). On all six blocks: 0 freezes, 0 unrecovered (as `rc-soak-report.py` counts
+  them), 0 holds or skips of any cause, 0 card drops (so the frame #0 start-drop exception was not needed), 0 card late, markers met on
+  the five video blocks. The gate's ≥ 6 h: 5.60 h playing in 6 h 07 min of blocks, the same as 0.9.3's accepted 5.60 h in 6 h 07 min
+  (`Manifold-BUILD.md`). `ab-check.py` does not judge the duration (`RIG.md`).
+  - **Not counted by the gate's tools, and gate-relevant: SDI sound lost for 55 min on block 5, never recovered within the output session,
+    and 65 s of SDI sound missing after a seek on the GOP block (§20.4).** `rc-soak-report.py` counts only silent *starts* as unrecovered
+    sound events, so G reads PASS. Whether these fail the gate's "0 unrecovered events" is Robbie's call. My reading: block 5's is an
+    unrecovered event in substance.
+- **D: PASS** (`:83`). On all six blocks the `[DIAG] playback counters` line agrees exactly with the log: pacer missed deadlines 0, 0, 1, 2,
+  0, 0 against the `[PACER] stopped` lines; card holds while playing 0 against the gate's 0; renderer recoveries 0 against 0.
+  **The WAV block printed its own `[DIAG]` line and passed D** (`:82`). `RIG.md` had left that UNKNOWN; it is not a failure of any kind.
+- **P: complete on all six** (`:84`), including the WAV block (0 misses each, its `[PRESENT-TIMING] total` present). Misses: 0, 0, 1, 1, 0,
+  0 (`present.report`).
+- B as the 0.9.5 default is not computed (`RIG.md`): night 6's rule compared B-on blocks with B-off blocks, and tonight had none.
+
+### 20.1 Rig
+
+- **Checked before every block: passed 6 of 6** (`soak.out:4`, `:33`, `:62`, `:91`, `:120`, `:149`; `rig.log`): zoom.us none, capture
+  closed, default output Scarlett, `MANIFOLD_PACER_PHASE` unset, **`MANIFOLD_PACER_PRESENT_TX=0` passed** (the new `bcheck`), sha256
+  `114efe07dc4f1d87…` ok, slots `waveform | parade | markers`, signing `flags=0x20002(adhoc,linker-signed)` (6 of 6 entries).
+- **Display placement: as planned.** Blocks 1, 2, 3, 5, 6 on the ASUS PA147 at 59.936 Hz ("window moved": `soak.out:12`, `:41`, `:70`,
+  `:128`, `:157`); block 4 on the LG TV SSCR2 at 120.000 Hz ("window shown": `:99`). The WAV's window was placed and checked like the
+  others. Before every block the LG read `3840 x 2160 @ 120.00Hz` and the ASUS `1920 x 550 @ 60.00Hz`.
+- **HID idle at each block start:** 626, 4295, 7963, 11632, 15300, 18969 s (`soak.out:3`, `:32`, `:61`, `:90`, `:119`, `:148`). The Mac
+  was not touched; Resolve was closed each time.
+- **Guards:** "guard after …: clean" for all 6 (`soak.out:28`, `:57`, `:86`, `:115`, `:144`, `:160`).
+- **Slots restored: yes.** Set at 00:30:44 ("were yrgb | meters | markers", `soak.out:1`, stash `prefs-stash-20261120-003044.txt`); at
+  exit "slots at the end of the night: waveform | parade | markers", then "slots restored: yrgb | meters | markers" (`:199-200`). Read
+  again in this session (read only): `manifold.scope.slot0/1/2` are `yrgb | meters | markers`, exactly the stash.
+- **Recorded, never stopping the night** (`rig.log`; `ab.report:2-7` for drift):
+
+| # | Block | Denied before (earlier launches) | Denied in it | SecurityAgent before | Memory free before / after | `ASEProcessing` / min | Thermal | Clock-pair drift |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `bon-1` | 0 (0) | 2 | 0 | 86 % / 86 % | 3281 | no warning recorded | +0.051 s |
+| 2 | `2398-cmp-bon` | 2 (1) | 2 | 0 | 86 % / 86 % | 2547 | the same | +0.027 s |
+| 3 | `gop25-sdi-bon` | 4 (2) | 2 | 0 | 86 % / 86 % | 2606 | the same | −0.024 s |
+| 4 | `lg-bon` | 6 (3) | 2 | 0 | 86 % / 85 % | **24** | the same | +0.053 s |
+| 5 | `bon-2` | 8 (4) | 2 | 0 | 86 % / 85 % | 3279 | the same | +0.014 s |
+| 6 | `ao48-sdi-bon` | 10 (5) | 2 | 0 | 86 % / 85 % | **0** | the same | −0.034 s |
+
+- `ASEProcessing` repeats nights 5–6 on the ASUS and the LG. The WAV block, with no window picture, had 0.
+- **Not covered:** launches and prompts before `soak.sh` started are UNKNOWN (`soak.out:1` is the `setslots` line, with no note).
+
+### 20.2 Per block
+
+Holds, skips, freezes, late/dropped, SDI and markers are the gate's (`soak.report`). Pacer and window figures are `ab-check.py`'s.
+
+| # | Block | Pacer n / median / p99 / max (ms) | Missed deadlines (counted) | Pacer late swaps | Holds / skips | Freezes | Window late / dropped | Card late / dropped | Gate timeouts / nil drawables | Presented / rendered | SDI `!!` lines | SDI missing samples | Markers |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `bon-1` | 409249 / 8.35 / 8.36 / 8.84 | 0 (0) | 0 | 0 / 0 | 0 | 18 / 6 | 0 / 0 | 0 / 0 | 94.2 % | 16 appended edges | 19,572 | PASS |
+| 2 | `2398-cmp-bon` | 245547 / 13.91 / 13.92 / 14.23 | 0 (0) | 0 | 0 / 0 | 0 | 15 / 2 | 0 / 0 | 0 / 0 | 100 % | none | 0 | PASS |
+| 3 | `gop25-sdi-bon` | 256214 / 13.34 / 13.35 / 26.67 | 1 (1) | 0 | 0 / 0 | 0 | 20 / 21 | 0 / 0 | 0 / 0 | 100 % | 4 appended edges | **3,123,840** | PASS |
+| 4 | `lg-bon` | 409256 / 8.35 / 8.36 / 25.02 | 2 (0) | 0 | 0 / 0 | 0 | 11 / 10 | 0 / 0 | 0 / 0 | 100 % | 11 appended edges | 18,877 | PASS |
+| 5 | `bon-2` | 409261 / 8.35 / 8.36 / 8.69 | 0 (0) | 0 | 0 / 0 | 0 | 10 / 8 | 0 / 0 | 0 / 0 | 92.8 % | 1 appended edge, **4,139 `no audio callback`** | 1,741 | PASS |
+| 6 | `ao48-sdi-bon` | 406585 / 8.35 / 8.36 / 8.41 | 0 (0) | 0 | 0 / 0 | 0 | — (no window picture) | 0 / 0 | 0 / 0 | — | 20 appended edges | 69,868 | (no markers) |
+
+- **Markers:** 30 Regenerates pressed, all remade, 0 made while playing. Near them: holds and skips 0, late or dropped 7 (all window).
+- **Totals:** 378 Plays, 378 seeks, 126 loop wraps, 944,224 card pulls while playing, 0 missed slots, 6 output starts all with sound,
+  0 silent starts.
+
+### 20.3 B1: the three missed deadlines of the night
+
+| Block | Log line | Wall ≈ | Tick | Overran | Before it | B1 |
+|---|---|---|---|---|---|---|
+| `lg-bon` | `n7-5994-sdi-lg-bon.log:851537` | 04:44:44 | 21.648 ms, new-frame, next 25.02 ms (3P → 2 deadlines) | `perform` 21.574 ms | a `[TRANSPORT] seek` 29 ms earlier, no new frame between | post-seek first frame: **reported, not counted** |
+| `gop25-sdi-bon` | `n7-gop25-sdi-bon.log:355028` | 03:41:39 | 16.288 ms, **repeat** tick, next 26.62 ms (2P → 1 deadline) | `perform` 16.237 ms | `[TRANSPORT] seek 767.40` while paused (`:355018`), 35 ms earlier | **counted** (`RIG.md`'s rule requires a new-frame tick) |
+
+- The GOP tick is the same post-seek render cost as the LG one: a seek made while paused, so the first tick after it has no new frame to
+  show and is tagged a repeat tick. That is inference from the parts (`perform` is all of it; no present attempt). It is counted as the
+  rule was written, and B1 still passes (1 ≤ 2).
+- No missed tick was a present-path step: 0 `CATransaction.commit`, 0 `waitUntilScheduled` overruns all night. No hold or skip followed
+  either tick.
+
+### 20.4 Two SDI sound faults the gate's tools do not count
+
+**Block 5 (`bon-2`): the card's audio callbacks stopped at 04:51:38 and never resumed in that output session (55 min).**
+- The last `[SDI-AUDIO] runs` line is `n7-5994-sdi-bon-2.log:78387` (≈ 04:51:37). From `:78876` (frame 20112, ≈ 04:51:39) to the end of
+  the block, the video callback logs `[SDI-AUDIO] !! no audio callback in the last 48 frames … callbacks 16722, audio buffered 0` every
+  48 frames: 4,139 lines, to frame 218,736 (`:865481`). The stop line reads `audio callbacks 16722` (`:865583`).
+- So the bridge's audio callback (`RenderAudioSamples`) stopped coming, and the card drained its audio buffer to 0. This is the diagnostic
+  added after chain11 (`CARD_CLOCK_FINDINGS.md` §10.22, D7 follow-up) firing for the first time. It answers chain11's open question for
+  this case: the callback stopped, not the card refusing samples. Unlike chain11 and `BUGS.md`'s output-start failures, there was no
+  output restart: this was mid-session, while playing, about 6 s after a loop wrap's re-latch (`:77008`–`:77049`, latch #11).
+- Video ran normally to the end: completions every frame, 0 late, 0 dropped, 0 holds. The Mac side kept going: 57 more Plays, 95 card-lock
+  `Stage 2` starts and 95 latches after the stall. The SDI bridge made **0 latches and 0 `runs` lines** after it (11 latches before). So
+  the SDI wire carried picture without sound for 57 Plays (inference from the bridge's counters; the wire was not recorded).
+- **What else happened at that second:** nothing in Manifold's log. In the unified log, System Events (pid 7550, started by the block's
+  accessibility driver) exited at 04:51:37.162 after 353 s. But System Events exited about 6 min into **every** block tonight (00:47:03,
+  01:48:12, 02:49:20, 03:50:29, 04:51:37, 05:52:46, `loginwindow` `applicationQuit`), and sound was lost only once. So that exit is not
+  enough to explain it. No DeckLink, Desktop Video or kernel line appears between 04:51:33 and 04:51:42.
+- **Cause: UNKNOWN.** Whether B has anything to do with it: UNKNOWN. B changes the window's present path (`WINDOW_PRESENT_PATH.md` §4.5),
+  and the audio callback is the card driver's thread, so a link is not expected (inference). It is 1 occurrence in the 10 B-on SDI blocks
+  of nights 5–7 (2, 3 and 5), and 0 in every earlier soak log searched (`manifold-rc-soak`, `manifold-rc094-soak`, `manifold-pacerphase-ab`, `-ab3`,
+  `-ab4`, `-ab5`: 0 `no audio callback` lines).
+- **Why the gate missed it:** `rc-soak-report.py` counts silent output *starts* and renderer GAVE UP as unrecovered. A mid-session loss of
+  SDI sound is not detected. The `!!` line is in `soak.report`'s SDI line (`'no audio callback in the last N frames': 4139`), but nothing
+  judges it.
+
+**Block 3 (`gop25-sdi-bon`): 65 s of SDI sound missing after one seek while playing (02:44:45–02:45:55).**
+- The block's SDI missing count is 3,123,840 samples (`soak.report`), against 5,760–15,360 on every earlier GOP block
+  (`../manifold-rc094-soak/rc-gop25-sdi-1.log`, `../manifold-pacerphase-ab/ab-gop25-sdi-on.log`, `-off.log`,
+  `../manifold-pacerphase-ab3/n4-gop25-sdi-on.log`). Almost all of it, 3.06 M, accrues at about 48,000 a second in two streaks:
+  `n7-gop25-sdi-bon.log:5936-10658` and `:10787-12890`.
+- It starts at a seek while playing, `[TRANSPORT] seek 978.16` at `:5674` (from 1165.03 s). The bridge re-latched correctly onto the new
+  picture: latch #3, `pts 978.240000` (`:5744`). But the audio tap, which read ahead from 979 s, ran on to 1166.805 s within a few seconds
+  and stopped there (`AudioTap` pts 1166.805 from about `:6500` until the next seek), near the position *before* the seek. The bridge
+  needed 978–1043 s, which the tap's 8 s ring (`held≈384000f`) no longer held. So every sample was missing for the rest of that Play
+  (to the Pause at `:10587`, 45 s) and the next Play (`:10752`–`:12859`, 20 s). The seek to 1895 at `:12970` brought the tap back in step.
+- Inference: after this seek, the tap kept its pre-seek read limit. That is not checked in the code here. It happened at 1 of the block's 63
+  seeks (21 while playing). Picture, holds and the window were unaffected. Whether the Mac's own sound was affected is UNKNOWN (the Mac path
+  reads through AVFoundation, not the tap's ring; inference).
+
+### 20.5 Window holds and the Carbon Copy Cloner run
+
+- **Window holds: 0 all night.** 0 gate timeouts and 0 nil drawables in every block (`ab.report` B4). So **no run-2-style hold of
+  ≈ 0.5 s recurred**, and the three Regenerate-time gate timeouts of night 6 (§19.4) did not recur in tonight's 30 Regenerates.
+  Every playing 10 s window, with its wall time, is in `windows.report`. Details in `WINDOW_PRESENT_PATH.md` §9.
+- **CCC (`ccc.log`, 1 run since 00:30:44, `soak.out:165`):** 03:30:00 → 03:31:06, 286,020 bytes, inside block 3 (`gop25-sdi-bon`). In it:
+  no missed tick (block 3's one miss is at 03:41:39), no hold, no gate timeout. Rendered = presented in every 10 s window from 03:29:54 to
+  03:31:27, with 0 held (`windows.report`). Routine size again; a large copy remains UNTESTED.
+
+### 20.6 What this shows (not part of the verdicts)
+
+- **Plain B passed every B criterion on a gate-style mix of 6 blocks and 5.60 h**, with B1 as re-stated. The present path had 0 overruns
+  all night; the only misses were post-seek `perform` ticks (one counted under the rule's letter).
+- **Plain B passed the 0.9.5 gate as `ab-check.py` computes it**: 0 holds of any cause, 0 freezes, 0 card drops, markers met, D exact.
+- **But the night is not clean for SDI sound.** Block 5 lost SDI sound for 55 min with no recovery (cause UNKNOWN, first occurrence), and
+  the GOP block lost 65 s after one seek. Neither is B's path (inference), and neither is counted by the gate's tools.
+- **Open, for Robbie:**
+  - whether block 5's SDI sound loss fails the 0.9.5 gate's "0 unrecovered events" (my reading: yes, in substance);
+  - whether the GOP block's post-seek repeat-tick miss should count under B1 (it does as written; it passes either way);
+  - follow-ups, not made: a mid-session SDI-sound check in `rc-soak-report.py` (the `no audio callback` line and a missing-samples rate);
+    the tap's read limit after a seek while playing; whether the audio-callback stop recurs, with B off.

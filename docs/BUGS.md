@@ -1793,8 +1793,8 @@ Evidence:
 - **One-period late swaps:** night 5's 55 one-period pacer late swaps on the B-off blocks held 0 frames. On nights 3 and 4, 8 of 92
   held (§17.2, §18.3).
 - **What C+ does not cover:** night 5's one hold was a two-period present stall in `CATransaction.commit`, which dropped the frame at
-  the pacer, so no lead could cover it (§18.3). That is the known limitation below ("a window present can overrun two periods"), not
-  this entry.
+  the pacer, so no lead could cover it (§18.3). That was the known limitation below ("a window present could overrun two periods"),
+  FIXED 2026-11-20 by plain B, not this entry.
 - **Release:** since 2026-11-19 Release runs the same C/C+ code as Profile, and `MANIFOLD_PACER_PHASE` (0/1/2) is a diagnostic
   off-switch in both, like `MANIFOLD_CARDLOCK_1B`. Only the card-pull measurement logging (`MANIFOLD_DECKLINK_CADENCE_LOG=2`) is
   DEBUG.
@@ -1854,58 +1854,76 @@ grid, behind its own switch) and an overnight A/B, per `CARD_PULL_MARGIN.md` §8
 
 ---
 
-## ☐ PARKED: option B freezes the window ~1 s on a colour-state change while SDI plays (Robbie, 2026-11-19, attended check on the LG)
+## ✅ CLOSED 2026-11-20, SUPERSEDED by plain B (the 0.9.5 default): option B froze the window ~1 s on a colour-state change while SDI played (Robbie, 2026-11-19, attended check on the LG)
 
-**Status:** B is parked, behind its DEBUG switch only (`MANIFOLD_PACER_PRESENT_TX=0`). The default stays the transactional present
-(unset or `=1`; `PacerSwitches.presentUntransacted`). Option A (`docs/WINDOW_PRESENT_PATH.md`) supersedes it for 0.9.6.
+**Closed (Robbie, 2026-11-20).** The freeze was the per-tick switch to a transactional present on a colour-state tick, which plain B
+removed (`WINDOW_PRESENT_PATH.md` §7.5). Plain B is now the default in Profile and Release (`MANIFOLD_PACER_PRESENT_TX` unset or `=0`;
+`=1` restores the transactional present; `PacerSwitches.presentUntransacted`). Its status and residual costs are in the FIXED entry
+below ("on a scaled 60 Hz desktop display … a window present can overrun two periods").
+- **Plain B, attended on the LG at 120 Hz** (`WINDOW_PRESENT_PATH.md` §7.6–§7.8): 24 colour installs with output on, no 1 s stall, 0 pacer
+  missed deadlines. One window hold of ≥ 0.5 s at an HDR-mode OS ↔ Bypass switch (run 2), the residual listed below.
+- **Nights 6 and 7** (`CARD_PULL_MARGIN.md` §19–§20): 0 `nextDrawable` stalls, 0 present-step overruns in every B-on block.
 
-**What happens.** Attended check 1, with C+ and B on, on the LG: switching the Display Transform from OS to Reference while playing with
-SDI output froze the window and stalled the output pacer for about 1 s. It happened again on a second switch to Reference. The log:
-- `[IDLE] WATCHDOG: no tick in 500 ms … STILL IN FLIGHT`;
-- `nextDrawable` max 1000.22 ms, `drawMs` 1000.22 ms;
-- 24 card holds, a slip, and a re-anchor of the Mac's sound.
-
-Attended check 2, with C+ on and B off: OS → Reference → Bypass → OS switches were all clean, with 0 missed deadlines and 0 card holds.
-
-**Mechanism (inference from the log; not instrumented).** Under B, a tick switches between presents per frame: an untransacted
-`cb.present(drawable)` while the pacer presents, and today's transactional present for a tick that installs a colour state or a new
-drawable size (`docs/WINDOW_PRESENT_PATH.md` §4.5; `App/MetalVideoRenderer.swift`, `pacerPresentNoTx`). A Display Transform switch is
-such a colour-state change. Toggling `presentsWithTransaction` around it strands a drawable that is never presented, so the layer's pool
-runs dry. The next `nextDrawable` then waits out Core Animation's 1 s timeout, which is the 1000.22 ms in the log. Night 5's soak ran
-no state tick under B (0 transactional presents, `WINDOW_PRESENT_PATH.md` §6.2), which is why the soak passed B.
-
-**Built 2026-11-19, unverified (Robbie):** the fix of `WINDOW_PRESENT_PATH.md` §7.5, behind the same `MANIFOLD_PACER_PRESENT_TX=0`, B
-still off by default:
-- **Plain B.** While the pacer presents, the layer stays out of transaction mode on every tick, colour-state and resize ticks included
-  (`WindowPresentTiming.optionBPresentsWithTransaction`). The mode changes only when the pacer starts or stops.
-- **One drawable spare.** Under B the present gate admits a present only with at most one already waiting, at any display rate
-  (`presentsWaitingLimit(displayPeriod:keepSpareDrawable:)`), so above 60 Hz one more of the three drawables stays free. A literal
-  fourth drawable is not possible: `maximumDrawableCount` throws outside [2, 3] (`CAMetalLayer.h`).
-- **Its known cost** (§7.4 option 1): under output, a colour-state tick's state is committed just after its frame, not in one commit
-  with it. That can show one wrong-colour composite or a one-frame EDR or tone step, and a resize can show stretched frames. Window
-  only, output on only.
-- **Not verified:** the attended LG check at 120 Hz has not been run. Until it is, this entry stays open. B stays a DEBUG experiment,
-  and option A is still the 0.9.6 plan.
+**The original report, kept for the record.** Attended check 1, with C+ and B on, on the LG: switching the Display Transform from OS to
+Reference while playing with SDI output froze the window and stalled the output pacer for about 1 s, twice (`[IDLE] WATCHDOG: no tick
+in 500 ms … STILL IN FLIGHT`; `nextDrawable` max 1000.22 ms; 24 card holds, a slip, and a re-anchor of the Mac's sound). With B off the
+same switches were clean. Mechanism (inference from the log, `WINDOW_PRESENT_PATH.md` §7): toggling `presentsWithTransaction` around a
+state tick stranded a drawable, the pool ran dry, and the next `nextDrawable` waited out Core Animation's 1 s timeout.
 
 ---
 
-## ☐ KNOWN LIMITATION (0.9.5): on a scaled 60 Hz desktop display at 59.94 output, a window present can overrun two periods and cause a recovered SDI hold (Robbie, 2026-11-19)
+## ✅ FIXED 2026-11-20 by plain B (the 0.9.5 default): on a scaled 60 Hz desktop display at 59.94 output, a window present could overrun two periods and cause a recovered SDI hold (Robbie, 2026-11-19)
 
-**What happens.** With output on, the window's present runs on the output pacer's tick, through `CATransaction.commit`. On a scaled
-60 Hz display that commit sometimes blocks for more than one pacer period. When it blocks for two periods on a repeat tick, the pacer
-skips the deadline of the frame due next, so that frame is never rendered. The card repeats the previous frame (a hold), then jumps
-(a skip), and recovers on the next pull. C+ cannot cover it: no lead helps a frame that was never made (`CARD_PULL_MARGIN.md` §18.3).
+**Fixed (Robbie, 2026-11-20, after nights 6 and 7).** Was the 0.9.5 known limitation and the gate's named exception (b). Plain B takes
+the window's pacer present out of `CATransaction`: while the output pacer presents, the layer's `presentsWithTransaction` is false and
+the present is `cb.present(drawable)` before the commit, with no `waitUntilScheduled` and no `CATransaction.commit` on the tick
+(`WINDOW_PRESENT_PATH.md` §4.5, §7.5). The step that overran is gone from the pacer's tick. Default in Profile and Release since
+2026-11-20: `MANIFOLD_PACER_PRESENT_TX` unset (or `=0`) is plain B; `=1` restores the transactional present, a diagnostic off-switch in
+both (`PacerSwitches.presentUntransacted`; `App/MetalVideoRenderer.swift`, `pacerPresentNoTx`).
 
-**Night 5** (`CARD_PULL_MARGIN.md` §18, `WINDOW_PRESENT_PATH.md` §6):
-- **ASUS PA147 at 1920 × 550 (scaled), 59.936 Hz:** 1 hold in about 2 h of B-off 59.94 SDI play (block 1: one tick 16.910 ms, of
-  which `CATransaction.commit` took 16.799 ms; next interval 25.039 ms, 3P). The two B-off ASUS blocks had 70 and 68 missed deadlines,
-  almost all in `CATransaction.commit`.
-- **LG at 3840 × 2160 @ 120 Hz, unscaled:** 0 holds in the 45 min block, and 1 commit overrun.
+**What happened.** With output on, the window's present ran on the output pacer's tick, through `CATransaction.commit`. On a scaled 60 Hz
+display that commit sometimes blocked for more than one pacer period. When it blocked for two periods on a repeat tick, the pacer skipped
+the deadline of the frame due next, so that frame was never rendered: the card repeated the previous frame (a hold), then jumped (a skip),
+and recovered on the next pull. C+ cannot cover it (`CARD_PULL_MARGIN.md` §18.3).
 
-**For 0.9.5:** accepted as the named exception in the release gate (`Manifold-BUILD.md`, 0.9.5 release gate: "pacer-caused hold from a
-present overrun on a scaled display, recovered"). Crossing-caused holds have no exception.
+**Evidence, nights 5–7** (ASUS PA147 at 1920 × 550, scaled, 59.936 Hz, unless stated):
+- **Night 5** (`CARD_PULL_MARGIN.md` §18; `WINDOW_PRESENT_PATH.md` §6.2): B off, 70 and 68 missed deadlines, almost all
+  `CATransaction.commit`, and the night's one hold (a 16.80 ms commit on a repeat tick). B on: 0 and 1 missed deadlines, 0 holds; the 1 was
+  a post-seek `perform` tick.
+- **Night 6** (`CARD_PULL_MARGIN.md` §19.2, §19.5): B off, 2 and 53 missed deadlines (50 of the 53 from `CATransaction.commit`). B on: 0
+  and 0, 0 pacer late swaps, 0 transactional presents, `nextDrawable` max ≤ 0.47 ms. 0 holds in every block.
+- **Night 7** (`CARD_PULL_MARGIN.md` §20; `WINDOW_PRESENT_PATH.md` §9): plain B in all 6 blocks, 5.60 h, four on the ASUS and one on the
+  LG at 120 Hz. 0 `CATransaction.commit` and 0 `waitUntilScheduled` overruns all night, 0 pacer late swaps, 0 holds or skips of any cause,
+  0 window holds (0 gate timeouts, 0 nil drawables). The only misses were post-seek `perform` ticks (the low entry below).
 
-**Fix:** option A in 0.9.6 (`docs/WINDOW_PRESENT_PATH.md`), which takes the window's present off the pacer's tick.
+**B's residual costs: window only, output on only.** None reaches the SDI picture.
+- **A possible one-frame colour or EDR step at a mode switch.** A colour-state tick's state is committed just after its frame's
+  `cb.commit()`, not in one commit with it (`WINDOW_PRESENT_PATH.md` §7.4 option 1). That can show one composite in the wrong colour state,
+  or a one-frame EDR or tone step, at a Display Transform, LUT or colour-space change.
+- **Stretched frames during a live resize.** The same split applies to a new drawable size.
+- **The window may not keep up with 100 or 119.88 fps files at 120 Hz.** Under B the present gate admits a present only with at most one
+  already waiting, at any display rate, to keep a drawable spare (`WindowPresentTiming.presentsWaitingLimit(displayPeriod:keepSpareDrawable:)`),
+  where B off allows two above 60 Hz. At a frame rate near the display's, the window can drop presents. The card is not affected.
+- **One unexplained window hold of ~0.5 s** (a gate timeout), in attended run 2 at an HDR-mode OS ↔ Bypass switch with output on
+  (`WINDOW_PRESENT_PATH.md` §7.7–§7.8): 1 in 12 plain-B HDR-mode switches, 0 in 18 with B off. It did not recur in nights 6 and 7 (0 gate
+  timeouts under B on night 7, in 30 Regenerates; night 6's one B-on gate timeout fell inside a Regenerate, like its two B-off ones,
+  `CARD_PULL_MARGIN.md` §19.4). A soak makes no Display Transform switches, so the soaks neither confirm nor rule out run 2's case.
+
+**Option A** (`docs/WINDOW_PRESENT_PATH.md`), which takes the window's present off the pacer's tick altogether, stays the 0.9.6 plan.
+
+---
+
+## ☐ LOW (not for 0.9.5): the first frame after a seek can take ~22 ms to render (`perform`), so the pacer misses one or two ticks at 59.94 (Robbie, 2026-11-20)
+
+**What happens.** The first render after a seek can take ~22 ms in `perform` (`performDisplayTick`'s work outside its present attempts,
+`App/PresentTimingLog.swift`), so the pacer misses one or two ticks at 59.94. No hold: no hold or skip followed any of them, at the card or
+by the gate. Seen with B on and B off.
+- Night 5: B off, 1 on block 3 and 2 on the LG block; B on, 1 each on blocks 4 and 5 (`WINDOW_PRESENT_PATH.md` §6.2).
+- Night 6: 2 on the B-on LG block (22.177 and 21.986 ms, both after `seek 1895.00`), and 2 on B-off block 3 (`CARD_PULL_MARGIN.md` §19.3, §19.5).
+- Night 7: 1 on the LG block (21.648 ms, 2 deadlines) and 1 on the GOP block (16.288 ms, a repeat tick after a seek made while paused)
+  (`CARD_PULL_MARGIN.md` §20.3).
+
+**Status:** reported, not counted, in the soak's B1 (re-stated 2026-11-20). Cause in the render not investigated. Not for 0.9.5.
 
 ---
 

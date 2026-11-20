@@ -228,18 +228,22 @@ the pins, but reproducing them takes real time.
           6 window late/dropped frames in all (1 at 2398-1 regen 2, 1 at 2398-1 regen 4, 3 at GOP25 regen 5, 1 at 5994-2
           regen 5). That is in line with each block's own background rate (119 late/dropped frames in 4.65 h of video blocks,
           about 4.3 expected in 30 × 20 s). From each Pause to its last thumbnail + 10 s: 0 holds, 0 skips, 0 late/dropped.
-      - **0.9.5 release gate (Robbie, 2026-11-19, after `CARD_PULL_MARGIN.md` §18 and two attended checks on the LG): 0
-        holds for any cause, except (a) a renderer recovery and (b) one named exception, "pacer-caused hold from a present
-        overrun on a scaled display, recovered". Crossing-caused holds: 0, with no exception.** The 0.9.4 exception "a late window
-        frame repeated once (either destination)" is retired: its mechanism, the crossing, is fixed by C+ (`BUGS.md`, the card
-        pull's margin, FIXED 2026-11-19). Exception (b) is `BUGS.md`'s known limitation "on a scaled 60 Hz desktop display at
-        59.94 output, a window present can overrun two periods" (night 5: 1 in about 2 h on the ASUS at 1920 × 550; 0 on the LG
-        at 120 Hz unscaled), fixed by option A in 0.9.6. A hold claimed under (b) must show, in the log, a missed pacer tick that
-        overran by at least two periods, and a recovery on the next pull. Otherwise the 0.9.4 gate stands: 0 freezes, 0 unrecovered
-        events, at least 6 h, and markers.
-        - **The candidate runs the 0.9.5 defaults:** `MANIFOLD_PACER_PHASE` and `MANIFOLD_PACER_PRESENT_TX` unset, so C+ is on
-          and the present is transactional (option B off). Since 2026-11-19 Release runs the same C+ code as Profile
-          (`MANIFOLD_PACER_PHASE` is a diagnostic off-switch in both), so the gate holds for either configuration.
+      - **0.9.5 release gate (Robbie, 2026-11-19, after `CARD_PULL_MARGIN.md` §18 and two attended checks on the LG; amended
+        2026-11-20 after nights 6 and 7, §19–§20): 0 holds for any cause, except a renderer recovery. Crossing-caused holds: 0,
+        with no exception.** The 0.9.4 exception "a late window frame repeated once (either destination)" is retired: its mechanism,
+        the crossing, is fixed by C+ (`BUGS.md`, the card pull's margin, FIXED 2026-11-19). The scaled-display exception ("pacer-caused
+        hold from a present overrun on a scaled display, recovered") is removed (2026-11-20): plain B fixes it (`BUGS.md`, "on a scaled
+        60 Hz desktop display … a window present could overrun two periods", FIXED 2026-11-20). Otherwise the 0.9.4 gate stands: 0
+        freezes, 0 unrecovered events, at least 6 h, and markers.
+        - **The candidate runs the 0.9.5 defaults:** `MANIFOLD_PACER_PHASE` and `MANIFOLD_PACER_PRESENT_TX` unset, so C+ is on and
+          the window's pacer present is plain B. Since 2026-11-19 Release runs the same C+ code as Profile, and since 2026-11-20 the
+          same plain-B present path; both switches are diagnostic off-switches in both configurations (`MANIFOLD_PACER_PHASE=0`,
+          `MANIFOLD_PACER_PRESENT_TX=1`), so the gate holds for either configuration.
+        - **B1, re-stated as on night 7 (Robbie, 2026-11-20; `CARD_PULL_MARGIN.md` §20):** pacer missed deadlines ≤ 2 per block, not
+          counting those whose overrunning step is the post-seek first-frame render (`perform`); those are reported, not counted. A miss
+          is post-seek first-frame when it overran `perform`, it is a new-frame tick, a `[TRANSPORT] seek` is at most 0.5 s before it,
+          and no `[CADENCE-SWAP]` lies between that seek and it (`BUGS.md`, "the first frame after a seek can take ~22 ms to render",
+          LOW, not for 0.9.5).
         - **Export Diagnostics' "card holds while playing"** now leaves out the first 1 s after Play, a seek, a step or a loop wrap,
           the end of the file, and a rate mismatch's cadence (`CardHoldFilter`). On nights 4 and 5's logs this rule gives exactly
           the gate's holds (night 5: 1, 0, 0, 0, 0, 0; night 4: 2, 1, 0, 0, 0), where the old counter read 40–165 per block. So
