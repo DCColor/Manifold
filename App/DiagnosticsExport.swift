@@ -908,10 +908,12 @@ enum DiagnosticsReport {
               """
 
         section("PICTURE RECOVERY")
-        // The picture-freeze watchdog (docs/BUGS.md, top 1.0 entry): how often a playing file's pacing renderer stalled and was
-        // flushed and re-armed. Each recovery and near-miss also has its own line in the captured log below.
+        // The picture-freeze watchdog (docs/BUGS.md, top 1.0 entry; docs/PICTURE_FREEZE_AUDIT.md): how often a playing file's
+        // pacing renderer stalled (one per episode, however many re-arms it took), and how each ended: recovered, or GAVE UP (the
+        // picture stayed frozen). Each attempt, outcome and near-miss also has its own line in the captured log below.
         out += "Pacing renderer  : \(RendererRecoveryStats.summary)\n"
-        if let last = RendererRecoveryStats.lastRecovery { out += "Last recovery    : \(last)\n" }
+        if let last = RendererRecoveryStats.lastStall { out += "Last stall       : \(last)\n" }
+        if let last = RendererRecoveryStats.lastOutcome { out += "Last outcome     : \(last)\n" }
         // SDI output starts whose sound the card never began playing, and the output restarts that recovered them (§10.25).
         out += "SDI output start : \(SDIStartRecoveryStats.summary)\n"
         if let last = SDIStartRecoveryStats.lastSilentStart { out += "Last silent start: \(last)\n" }

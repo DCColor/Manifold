@@ -49,6 +49,8 @@ let package = Package(
         .library(name: "PlayheadSlider", targets: ["PlayheadSlider"]),
         // ManifoldCore uses it (frame-stepping on the AVFoundation path); a product so the tests can name it.
         .library(name: "FrameGrid", targets: ["FrameGrid"]),
+        // ManifoldCore uses it (the picture-freeze watchdog's decision and counts); a product so the tests can name it.
+        .library(name: "RendererWatchdog", targets: ["RendererWatchdog"]),
         // ManifoldCore uses it (the file audio reader's output layout); a product so the tests can name it.
         .library(name: "AudioOutputLayout", targets: ["AudioOutputLayout"]),
         // Linked by the APP target directly (project.yml), for the renderer's paused-picture rules.
@@ -480,6 +482,23 @@ let package = Package(
                 .swiftLanguageMode(.v5)
             ]
         ),
+        // The picture-freeze watchdog's decision and its Export Diagnostics counts (docs/PICTURE_FREEZE_AUDIT.md). A leaf target,
+        // Foundation only, for the same linking reason as the others.
+        .target(
+            name: "RendererWatchdog",
+            path: "Sources/RendererWatchdog",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "RendererWatchdogTests",
+            dependencies: ["RendererWatchdog"],
+            path: "Tests/RendererWatchdogTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
         // The file audio reader's output channel layout, and the check a source's own layout must pass before it is
         // trusted (docs/BUGS.md, "a malformed channel layout silences a 1- or 2-channel file"). A leaf target,
         // CoreAudioTypes only, for the same linking reason as the others.
@@ -858,7 +877,9 @@ let package = Package(
                            "ContainerRepair", "FrameGrid", "AudioOutputLayout", "FileScan", "PictureGeometry",
                            "AudioFileInfo", "StillImageInfo", "SMPTETimecode", "FrameGrab",
                            // The start-timecode precedence and its user-data / XMP readers (CHAPTER_MARKERS_PLAN §13).
-                           "Markers"],
+                           "Markers",
+                           // The picture-freeze watchdog's decision and counts (PacingRendererWatchdog.swift).
+                           "RendererWatchdog"],
             swiftSettings: [
                 .swiftLanguageMode(.v5),
                 // So Swift's import of CFFmpeg can also locate the libav headers.

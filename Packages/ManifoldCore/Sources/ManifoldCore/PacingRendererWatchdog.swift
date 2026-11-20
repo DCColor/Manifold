@@ -12,18 +12,20 @@
 //  (§10.15), so this does not prevent it: it notices it and gets out of it.
 //
 //  Both pumps report here (`RendererActivity`). The engine's watchdog (`FrameEngine.rendererWatchdogTick`, 20 Hz on main,
-//  reads only while a file plays) tests: rate > 0, renderer NOT ready, and nothing of ours pending in it (its timebase is
-//  a frame past the last frame we enqueued, so every frame we gave it is due). That state never happens in healthy play:
-//  the pump keeps 0.1–0.2 s ahead, and a renderer with nothing due ahead is ready.
+//  reads only while a file plays) feeds the decision, `RendererWatchdog` (its own leaf target, with tests): rate > 0,
+//  renderer NOT ready, and nothing of ours pending in it (its timebase is a frame past the last frame we enqueued, so every
+//  frame we gave it is due). That state never happens in healthy play: the pump keeps 0.1–0.2 s ahead, and a renderer with
+//  nothing due ahead is ready.
 //    • Lasting over 100 ms and clearing on its own: one `[RENDERER-NEARMISS]` line and a count.
-//    • With no pump callback for 500 ms: one `[RENDERER-RECOVER]` line, a count, then flush the renderer and re-arm the
-//      request on the same session (no seek, no audio touched). If three recoveries in a row do not bring a frame out,
-//      the session is rebuilt at the clock (a seek), said in its own line.
-//  The counts are process-wide and go into Export Diagnostics.
+//    • In the state for 150 ms with no pump callback for 200 ms (500 ms until 0.9.5): one `[RENDERER-RECOVER]` line, then
+//      flush the renderer and re-arm the request on the same session (no seek, no audio touched). If three re-arms in a row
+//      do not bring a frame out, the session is rebuilt at the clock (a seek), said in its own line; then GAVE UP.
+//  The counts (stalls, re-arms, rebuilds, recovered, gave up, near-misses) are process-wide and go into Export Diagnostics.
 //
 
 import Foundation
 import QuartzCore
+import RendererWatchdog
 
 /// What the pump has done to the pacing renderer in the current arm. The pump queue writes; main reads.
 public final class RendererActivity: @unchecked Sendable {
@@ -65,22 +67,31 @@ public final class RendererActivity: @unchecked Sendable {
     public func ended() { lock.lock(); s.ended = true; lock.unlock() }
 }
 
-/// Process-wide counts for Export Diagnostics.
+/// Process-wide counts for Export Diagnostics and the `[DIAG]` line: stalls, not re-arm attempts, and every give-up.
 public enum RendererRecoveryStats {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var recoveries = 0
-    nonisolated(unsafe) private static var rebuilds = 0
-    nonisolated(unsafe) private static var nearMisses = 0
-    nonisolated(unsafe) private static var last: String?
+    nonisolated(unsafe) private static var tally = RendererRecoveryTally()
+    nonisolated(unsafe) private static var lastStallLine: String?
+    nonisolated(unsafe) private static var lastOutcomeLine: String?
 
-    static func noteRecovery(_ line: String) { lock.lock(); recoveries += 1; last = line; lock.unlock() }
-    static func noteRebuild() { lock.lock(); rebuilds += 1; lock.unlock() }
-    static func noteNearMiss() { lock.lock(); nearMisses += 1; lock.unlock() }
+    /// Count one decision. `line` is the log line it printed: a stall's first re-arm is kept as the last stall, a recovery or a
+    /// give-up as the last outcome.
+    static func note(_ action: RendererWatchdog.Action, line: String? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        tally.note(action)
+        switch action {
+        case .rearm(attempt: 1, _), .wouldRecover: lastStallLine = line
+        case .recovered, .gaveUp: lastOutcomeLine = line
+        default: break
+        }
+    }
+
+    public static var counts: RendererRecoveryTally { lock.lock(); defer { lock.unlock() }; return tally }
 
     /// One line for the diagnostics report.
-    public static var summary: String {
-        lock.lock(); defer { lock.unlock() }
-        return "\(recoveries) recover\(recoveries == 1 ? "y" : "ies") (\(rebuilds) needing a rebuild), \(nearMisses) near-miss\(nearMisses == 1 ? "" : "es") since launch"
-    }
-    public static var lastRecovery: String? { lock.lock(); defer { lock.unlock() }; return last }
+    public static var summary: String { counts.summary }
+    /// The last stall's first attempt line, with the renderer's state.
+    public static var lastStall: String? { lock.lock(); defer { lock.unlock() }; return lastStallLine }
+    /// The last stall's outcome: "picture moving again" or GAVE UP.
+    public static var lastOutcome: String? { lock.lock(); defer { lock.unlock() }; return lastOutcomeLine }
 }

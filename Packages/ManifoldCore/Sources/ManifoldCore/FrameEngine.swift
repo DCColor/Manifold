@@ -14,6 +14,7 @@ import FileChroma
 import FrameGrid
 import FileScan        // InterlacedChroma — per-field 4:2:0 (I3)
 import PictureGeometry // the file's orientation (docs/BUGS.md, iPhone clips, 2026-10-29)
+import RendererWatchdog // the picture-freeze watchdog's decision (PacingRendererWatchdog.swift)
 import Markers         // StartTimecodePrecedence — the start timecode and its override (CHAPTER_MARKERS_PLAN §13)
 // The file audio reader's output layout, and the size check a source's own layout must pass first.
 import AudioOutputLayout
@@ -1699,16 +1700,8 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
 
     // MARK: - The picture-freeze watchdog (docs/BUGS.md, top 1.0 entry; PacingRendererWatchdog.swift)
 
-    private enum RendererStall {
-        case idle
-        /// Not ready with nothing of ours pending, since `since`. `wouldRecover`: the measurement switch held a recovery back.
-        case stalled(since: Double, wouldRecover: Bool)
-        /// Re-armed at `armHost`, waiting for a frame; `attempts` re-arms so far; `rebuilt`: the session was rebuilt.
-        case recovering(began: Double, armHost: Double, attempts: Int, rebuilt: Bool)
-        /// Out of attempts for this episode: wait for the state to clear, or for transport to stop.
-        case gaveUp
-    }
-    private var rendererStall = RendererStall.idle
+    /// The decision (`RendererWatchdog`, its own leaf target with tests); this tick reads the renderer and carries out the answer.
+    private var rendererWatchdog = RendererWatchdog()
     #if MANIFOLD_CARDCLOCK
     // MANIFOLD_RENDERER_SELFTEST=recover:<s> | nearmiss:<s> (measurement build): once per launch, <s> s into a run, stop the
     // renderer's request and read it as not ready until a re-arm, so the watchdog can be checked against a known answer.
@@ -1717,10 +1710,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     private var watchdogSelftestDone = false
     private var watchdogForceNotReady = false
     #endif
-    private static let nearMissAfter = 0.1     // the state lasting longer than this, then clearing by itself, is a near-miss
-    private static let recoverAfter = 0.5      // no pump callback for this long while in the state: recover
-    private static let rearmWait = 1.0         // a re-arm that brings no frame out within this is tried again
-    private static let rearmAttempts = 3       // then the session is rebuilt at the clock, once
 
     /// Measurement build only: `MANIFOLD_RENDERER_RECOVER=0` detects and logs but never recovers, for the before-rate.
     private static let recoveryEnabled: Bool = {
@@ -1741,7 +1730,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         let now = CACurrentMediaTime()
         guard isPlaying, synchronizer.rate > 0, hasMedia, mediaKind == .video, let r = videoRenderer,
               currentSource != nil || libavSource != nil else {
-            if case .idle = rendererStall {} else { rendererStall = .idle }   // paused or gone: not this fault's to judge
+            rendererWatchdog.notJudged()   // paused or gone: not this fault's to judge
             #if MANIFOLD_CARDCLOCK
             watchdogPlayingSince = nil
             #endif
@@ -1774,69 +1763,52 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
         #endif
         let a = rendererActivity.snapshot()
         let tb = CMTimebaseGetTime(r.timebase).seconds
-        let frame = a.frameDuration > 0 ? a.frameDuration : 1.0 / 60
-        // Nothing of ours pending: the renderer's clock is a frame past the last frame we gave it, so all of it is due.
-        // Healthy play keeps 0.1–0.2 s ahead, and a renderer with nothing ahead is ready, so this pair never holds there.
-        let nothingPending = a.enqueuedSinceArm == 0 ? now - a.armedHost > 0.25 : tb > a.lastEnqueuedPTS + frame
-        let inState = !a.ended && !ready && nothingPending
-
-        switch rendererStall {
-        case .idle:
-            if inState { rendererStall = .stalled(since: now, wouldRecover: false) }
-        case let .stalled(since, wouldRecover):
-            if !inState {
-                rendererStall = .idle
-                let lasted = now - since
-                guard lasted > Self.nearMissAfter else { return }
-                RendererRecoveryStats.noteNearMiss()
-                print(String(format: "[RENDERER-NEARMISS] pacing renderer not ready with nothing pending for %.0f ms, cleared by itself%@: ready %@, last callback %.0f ms ago, last frame in pts %.6f, renderer clock %.6f, %@",
-                             lasted * 1e3, wouldRecover ? " (past the recovery point; recovery off)" : "",
-                             r.isReadyForMoreMediaData ? "true" : "false", (now - a.lastCallbackHost) * 1e3, a.lastEnqueuedPTS, tb, useLibav ? "libav" : "AVFoundation"))
-                return
-            }
-            guard now - a.lastCallbackHost >= Self.recoverAfter, now - since >= Self.nearMissAfter else { return }
-            guard Self.recoveryEnabled else {
-                if !wouldRecover {
-                    rendererStall = .stalled(since: since, wouldRecover: true)
-                    print("[RENDERER-RECOVER] DISABLED (measurement, MANIFOLD_RENDERER_RECOVER=0): would recover now · " + rendererStallState(r, a, tb: tb, now: now, since: since))
-                }
-                return
-            }
-            recoverPacingRenderer(r, a, tb: tb, now: now, began: since, attempt: 1)
-        case let .recovering(began, armHost, attempts, rebuilt):
-            let after = rendererActivity.snapshot()
-            if after.enqueuedSinceArm > 0 {   // `armed()` zeroed it at the re-arm (or the rebuild's new session)
-                rendererStall = .idle
-                print(String(format: "[RENDERER-RECOVER] picture moving again: first frame in %.0f ms after the %@, %.3f s after the stall began; now newest frame in pts %.6f, renderer clock %.6f",
-                             (after.lastEnqueueHost - armHost) * 1e3, rebuilt ? "rebuild" : "re-arm", now - began, after.lastEnqueuedPTS, tb))
-                return
-            }
-            guard now - armHost >= Self.rearmWait else { return }
-            if rebuilt {
-                rendererStall = .gaveUp
-                print("[RENDERER-RECOVER] GAVE UP: no frame after \(attempts) re-arms and a rebuild · " + rendererStallState(r, a, tb: tb, now: now, since: began))
-            } else if attempts < Self.rearmAttempts {
-                recoverPacingRenderer(r, a, tb: tb, now: now, began: began, attempt: attempts + 1)
-            } else {
-                let clock = CMTimeGetSeconds(synchronizer.currentTime())
-                RendererRecoveryStats.noteRebuild()
-                print(String(format: "[RENDERER-RECOVER] REBUILD: %d re-arms brought no frame; reading again from the clock %.6f · ", attempts, clock)
-                      + rendererStallState(r, a, tb: tb, now: now, since: began))
-                rendererStall = .recovering(began: began, armHost: now, attempts: attempts, rebuilt: true)
-                Task { await beginReading(from: clock, resumePlaying: true) }
-            }
-        case .gaveUp:
-            if !inState { rendererStall = .idle }
+        let reading = RendererWatchdog.Reading(now: now, ready: ready, ended: a.ended, armedHost: a.armedHost,
+                                               lastCallbackHost: a.lastCallbackHost, lastEnqueueHost: a.lastEnqueueHost,
+                                               lastEnqueuedPTS: a.lastEnqueuedPTS, frameDuration: a.frameDuration,
+                                               enqueuedSinceArm: a.enqueuedSinceArm, rendererClock: tb)
+        let action = rendererWatchdog.step(reading, recoveryEnabled: Self.recoveryEnabled)
+        switch action {
+        case .none:
+            return
+        case let .nearMiss(lasted, pastRecoveryPoint):
+            let line = String(format: "[RENDERER-NEARMISS] pacing renderer not ready with nothing pending for %.0f ms, cleared by itself%@: ready %@, last callback %.0f ms ago, last frame in pts %.6f, renderer clock %.6f, %@",
+                              lasted * 1e3, pastRecoveryPoint ? " (past the recovery point; recovery off)" : "",
+                              r.isReadyForMoreMediaData ? "true" : "false", (now - a.lastCallbackHost) * 1e3, a.lastEnqueuedPTS, tb, useLibav ? "libav" : "AVFoundation")
+            RendererRecoveryStats.note(action, line: line)
+            print(line)
+        case let .wouldRecover(since):
+            let line = "[RENDERER-RECOVER] DISABLED (measurement, MANIFOLD_RENDERER_RECOVER=0): would recover now · " + rendererStallState(r, a, tb: tb, now: now, since: since)
+            RendererRecoveryStats.note(action, line: line)
+            print(line)
+        case let .rearm(attempt, began):
+            let line = String(format: "[RENDERER-RECOVER] attempt %d: flushing and re-arming the pacing renderer · ", attempt)
+                + rendererStallState(r, a, tb: tb, now: now, since: began)
+            RendererRecoveryStats.note(action, line: line)
+            print(line)
+            recoverPacingRenderer(r)
+        case let .recovered(firstFrameAfterArm, sinceStallBegan, afterRebuild):
+            let line = String(format: "[RENDERER-RECOVER] picture moving again: first frame in %.0f ms after the %@, %.3f s after the stall began; now newest frame in pts %.6f, renderer clock %.6f",
+                              firstFrameAfterArm * 1e3, afterRebuild ? "rebuild" : "re-arm", sinceStallBegan, a.lastEnqueuedPTS, tb)
+            RendererRecoveryStats.note(action, line: line)
+            print(line)
+        case let .gaveUp(attempts, began):
+            let line = "[RENDERER-RECOVER] GAVE UP: no frame after \(attempts) re-arms and a rebuild · " + rendererStallState(r, a, tb: tb, now: now, since: began)
+            RendererRecoveryStats.note(action, line: line)
+            print(line)
+        case let .rebuild(attempts, began):
+            let clock = CMTimeGetSeconds(synchronizer.currentTime())
+            let line = String(format: "[RENDERER-RECOVER] REBUILD: %d re-arms brought no frame; reading again from the clock %.6f · ", attempts, clock)
+                + rendererStallState(r, a, tb: tb, now: now, since: began)
+            RendererRecoveryStats.note(action, line: line)
+            print(line)
+            Task { await beginReading(from: clock, resumePlaying: true) }
         }
     }
 
     /// Flush the stalled renderer and re-arm its request on the SAME session: no seek, the reader carries on where it was,
     /// and the sound is not touched. Its frames are then a little late, and the renderer and the window drop them to catch up.
-    private func recoverPacingRenderer(_ r: AVSampleBufferVideoRenderer, _ a: RendererActivity.Snapshot, tb: Double, now: Double, began: Double, attempt: Int) {
-        let line = String(format: "[RENDERER-RECOVER] attempt %d: flushing and re-arming the pacing renderer · ", attempt)
-            + rendererStallState(r, a, tb: tb, now: now, since: began)
-        RendererRecoveryStats.noteRecovery(line)
-        print(line)
+    private func recoverPacingRenderer(_ r: AVSampleBufferVideoRenderer) {
         #if MANIFOLD_CARDCLOCK
         watchdogForceNotReady = false
         #endif
@@ -1849,7 +1821,6 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
             r.flush()
             try? src.start()
         }
-        rendererStall = .recovering(began: began, armHost: CACurrentMediaTime(), attempts: attempt, rebuilt: false)
     }
 
     private func rendererStallState(_ r: AVSampleBufferVideoRenderer, _ a: RendererActivity.Snapshot, tb: Double, now: Double, since: Double) -> String {

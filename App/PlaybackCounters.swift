@@ -9,7 +9,7 @@
 //  can check the export's numbers against its log without driving the export's save panel.
 //
 //  Late swaps by class are NOT here: the classifier (`LateSwapClassifier`) runs only in the DEBUG card-pull measurement
-//  (`MANIFOLD_DECKLINK_CADENCE_LOG=2`). Renderer recoveries are `RendererRecoveryStats` (ManifoldCore), repeated here for reading.
+//  (`MANIFOLD_DECKLINK_CADENCE_LOG=2`). Renderer stalls are `RendererRecoveryStats` (ManifoldCore), repeated here for reading.
 //
 
 import Foundation
@@ -65,7 +65,8 @@ enum PlaybackCounters {
             "Card holds while playing: \(s.cardHolds) (SDI repeated a frame during steady 1× play at a matched rate, since launch; "
                 + "not counted: the first 1 s after Play, a seek, a step or a loop wrap, the end of the file, a rate mismatch's cadence)",
             "Late swaps by class    : not counted in this build (the DEBUG card-pull measurement only)",
-            "Renderer recoveries    : \(RendererRecoveryStats.summary)",
+            "Renderer stalls        : \(RendererRecoveryStats.summary) (the picture-freeze watchdog: one per stall, however many "
+                + "re-arms it took; GAVE UP is a picture left frozen)",
             "SDI audio stops        : \(sdiAudioSummary(s)) (the card's audio callback stopped for 3 s while playing with sound, "
                 + "since launch)",
         ]
