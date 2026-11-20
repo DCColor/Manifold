@@ -94,7 +94,7 @@ public enum WindowPresentTiming {
         return 1 / displayPeriod > secondWaitingPresentAbove ? 2 : 1
     }
 
-    /// OPTION B (`MANIFOLD_PACER_PRESENT_TX=0`, DEBUG; docs/WINDOW_PRESENT_PATH.md §7.5): the gate keeps one of the layer's three
+    /// OPTION B (the 0.9.5 default, every configuration; `MANIFOLD_PACER_PRESENT_TX=1` turns it off; docs/WINDOW_PRESENT_PATH.md §7.5): the gate keeps one of the layer's three
     /// drawables spare, so at most one present waits for the glass at any display rate. Above 60 Hz that is one drawable more free
     /// than `presentsWaitingLimit`, where the pool otherwise has no slack (§7.2). A literal fourth drawable is not possible:
     /// `CAMetalLayer.maximumDrawableCount` throws outside [2, 3] (CAMetalLayer.h). B off: `presentsWaitingLimit`, unchanged.

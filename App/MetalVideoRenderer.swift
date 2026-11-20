@@ -545,17 +545,16 @@ final class MetalVideoRenderer {
         }
     }()
     private var deckLinkSlipShift = 0.0
-    /// Option B (docs/WINDOW_PRESENT_PATH.md §4.5), `MANIFOLD_PACER_PRESENT_TX=0`: while the output pacer presents, the layer's
-    /// `presentsWithTransaction` is false and a pacer present is `cb.present(drawable)` before the commit, with no
-    /// `waitUntilScheduled` and no `CATransaction`, on every tick ("plain B", §7.5, 2026-11-19: a colour-state or resize tick no
-    /// longer switches to a transactional present), and the present gate keeps one drawable spare at any display rate. Set on the
-    /// tick thread only (`performDisplayTick`'s top). Unset (and `=1`): today's transactional path, the 0.9.5 default. B stays a DEBUG
-    /// experiment only. Before plain B, with C+ it froze the window ~1 s on a Display Transform switch to Reference while SDI played
-    /// (docs/BUGS.md; WINDOW_PRESENT_PATH.md §7). Option A, `docs/WINDOW_PRESENT_PATH.md`, is the 0.9.6 plan.
-    static let pacerPresentNoTx = PacerSwitches.presentUntransacted(ProcessInfo.processInfo.environment["MANIFOLD_PACER_PRESENT_TX"])
-    #else
-    static let pacerPresentNoTx = false
     #endif
+    /// Option B, "plain B" (docs/WINDOW_PRESENT_PATH.md §4.5, §7.5): while the output pacer presents, the layer's
+    /// `presentsWithTransaction` is false and a pacer present is `cb.present(drawable)` before the commit, with no
+    /// `waitUntilScheduled` and no `CATransaction`, on every tick (a colour-state or resize tick included), and the present gate keeps
+    /// one drawable spare at any display rate. Set on the tick thread only (`performDisplayTick`'s top). `MANIFOLD_PACER_PRESENT_TX`,
+    /// read once, here (`PacerSwitches.presentUntransacted`). **Unset (or `=0`) is plain B, the 0.9.5 default alongside C+** (Robbie,
+    /// 2026-11-20, after nights 6 and 7, docs/CARD_PULL_MARGIN.md §19–§20). `=1` restores the transactional present, a diagnostic
+    /// off-switch. **Every configuration, Release included**, like C+: Release and Profile run this same code. Only the present-path
+    /// measurement (`PresentTimingLog`, `MANIFOLD_PRESENT_TIMING`) and the [AV-LAG] probe around it are DEBUG.
+    static let pacerPresentNoTx = PacerSwitches.presentUntransacted(ProcessInfo.processInfo.environment["MANIFOLD_PACER_PRESENT_TX"])
     /// Option C (docs/CARD_PULL_MARGIN.md §7 C): the output pacer holds its new-frame ticks' phase against the frames' due times.
     /// `MANIFOLD_PACER_PHASE`, read once, here (`PacerSwitches.phaseMode`). **Unset is C+ (2), the 0.9.5 default** (Robbie,
     /// 2026-11-19, after night 5, §18). `=1` is plain option C. `=0` is off: the pacer is made without a phase sample, so its loop
@@ -3700,8 +3699,7 @@ final class MetalVideoRenderer {
         // as the colour state above: this is the one thread that touches the layer, and it must
         // land before anything acquires a drawable, because `nextDrawable()` vends a texture of
         // whatever size is current when it is called.
-        #if DEBUG
-        // OPTION B, PLAIN (docs/WINDOW_PRESENT_PATH.md §4.5, §7.5; `MANIFOLD_PACER_PRESENT_TX=0`), on this thread because it is the
+        // OPTION B, PLAIN (docs/WINDOW_PRESENT_PATH.md §4.5, §7.5; the default, every configuration), on this thread because it is the
         // layer's one writer: while the output pacer presents, no transaction, on every tick, a colour-state or resize tick included
         // (`WindowPresentTiming.optionBPresentsWithTransaction`). The mode changes only when the pacer starts or stops. A per-tick
         // switch to a transactional present for a state tick stalled `nextDrawable` 1 s on a Display Transform switch (§7). The cost
@@ -3712,7 +3710,6 @@ final class MetalVideoRenderer {
             let wantTransaction = WindowPresentTiming.optionBPresentsWithTransaction(pacerPresenting: pacerOn)
             if metalLayer.presentsWithTransaction != wantTransaction { metalLayer.presentsWithTransaction = wantTransaction }
         }
-        #endif
         if let drawableSize, metalLayer.drawableSize != drawableSize {
             metalLayer.drawableSize = drawableSize
         }
@@ -4645,7 +4642,7 @@ final class MetalVideoRenderer {
         if ptOn { ptTick.period = period }
         #endif
         // One waiting, or two on a display above 60 Hz (`WindowPresentTiming.presentsWaitingLimit`; docs/BUGS.md 2026-11-01).
-        // Option B (DEBUG, `MANIFOLD_PACER_PRESENT_TX=0`): one at any rate, so a drawable stays spare (WINDOW_PRESENT_PATH.md §7.5).
+        // Option B (the default; `MANIFOLD_PACER_PRESENT_TX=1` turns it off): one at any rate, so a drawable stays spare (WINDOW_PRESENT_PATH.md §7.5).
         if inFlight > WindowPresentTiming.presentsWaitingLimit(displayPeriod: period, keepSpareDrawable: Self.pacerPresentNoTx) {
             pacerPresentStats.heldInFlight += 1
             #if DEBUG
@@ -4697,16 +4694,16 @@ final class MetalVideoRenderer {
             }
         }
         let ptHandlers = ptOn ? CACurrentMediaTime() : 0
+        #endif
         // Option B: the layer is out of transaction mode this tick, so the present is scheduled on the buffer, before its commit.
         let scheduledPresent = Self.pacerPresentNoTx && !metalLayer.presentsWithTransaction
         if scheduledPresent {
+            #if DEBUG
             attachAVLagProbe(to: drawable)
             if ptOn { ptTick.presentHost = CACurrentMediaTime() }
+            #endif
             cb.present(drawable)
         }
-        #else
-        let scheduledPresent = false
-        #endif
         cb.commit()
         #if DEBUG
         let ptCommitted = ptOn ? CACurrentMediaTime() : 0
@@ -4926,26 +4923,30 @@ final class MetalVideoRenderer {
     ///
     /// Every present in this file goes through here. If you add a second one, add it here too.
     ///
-    /// OPTION B (`MANIFOLD_PACER_PRESENT_TX=0`, DEBUG): `scheduled` true means `servePacedPresent` already encoded
+    /// OPTION B (the default, every configuration; `MANIFOLD_PACER_PRESENT_TX=1` turns it off): `scheduled` true means `servePacedPresent` already encoded
     /// `cmdBuffer.present(drawable)` before the commit, with the layer out of transaction mode; only the colour transaction is closed
     /// here (plain B: open on a colour-state tick, which is now scheduled too, so the state is committed just after the frame's). A present made while the layer is out of transaction mode by any other caller waits for
     /// the schedule and presents directly, with no transaction to join.
     private func presentDrawable(_ drawable: CAMetalDrawable, on cmdBuffer: MTLCommandBuffer, scheduled: Bool = false) {
-        #if DEBUG
         if scheduled {
+            #if DEBUG
             let ptOn = ptInPresent, t0 = ptOn ? CACurrentMediaTime() : 0
+            #endif
             closeColorStateTransaction()
+            #if DEBUG
             if ptOn { ptTick.transactional = false; ptTick.steps.colorTx = CACurrentMediaTime() - t0 }
+            #endif
             return
         }
         if !metalLayer.presentsWithTransaction {
             cmdBuffer.waitUntilScheduled()
+            #if DEBUG
             attachAVLagProbe(to: drawable)
+            #endif
             drawable.present()
             closeColorStateTransaction()
             return
         }
-        #endif
         #if DEBUG
         // The present-path measurement (PresentTimingLog): set only by `servePacedPresent` inside a measured pacer tick.
         let ptOn = ptInPresent

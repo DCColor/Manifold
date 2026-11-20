@@ -90,8 +90,10 @@ class Freeze:
 # at most 0.5 ms; option B (docs/WINDOW_PRESENT_PATH.md §4.5, MANIFOLD_PACER_PRESENT_TX=0) changes only how the window's pacer
 # presents reach the screen. Neither touches the pull, the card lock, Stage 2, the recovery paths or the audio routing.
 # Since 0.9.5 C+ is the default with MANIFOLD_PACER_PHASE unset; a block without the phase hold sets MANIFOLD_PACER_PHASE=0.
+# Since 2026-11-20 plain B is the default too, with MANIFOLD_PACER_PRESENT_TX unset (=0 is the same); a block with the transactional
+# present sets MANIFOLD_PACER_PRESENT_TX=1.
 EXTRA_ENV_ALLOWED = {"MANIFOLD_DECKLINK_CADENCE_LOG": {"1", "2"}, "MANIFOLD_DECKLINK_LATE_SWAP_AT": None, "MANIFOLD_PACER_PHASE": {"0", "1", "2"},
-                     "MANIFOLD_PRESENT_TIMING": {"1"}, "MANIFOLD_PACER_PRESENT_TX": {"0"}}
+                     "MANIFOLD_PRESENT_TIMING": {"1"}, "MANIFOLD_PACER_PRESENT_TX": {"0", "1"}}
 
 def parse_extra_env(items):
     out = {}

@@ -76,7 +76,7 @@ final class PresentTimingLog: @unchecked Sendable {
         var presentHost = Double.nan
         /// The window display's period, as the gate read it.
         var period = 0.0
-        /// False for option B's scheduled present (`MANIFOLD_PACER_PRESENT_TX=0`): no `waitUntilScheduled`, no `CATransaction`, so
+        /// False for option B's scheduled present (the default; `MANIFOLD_PACER_PRESENT_TX=1` turns B off): no `waitUntilScheduled`, no `CATransaction`, so
         /// those steps stay NaN and are left out of their series.
         var transactional = true
     }

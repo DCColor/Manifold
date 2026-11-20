@@ -1,8 +1,9 @@
 import XCTest
 @testable import OutputPacing
 
-/// The 0.9.5 defaults (Robbie, 2026-11-19): C+ on with `MANIFOLD_PACER_PHASE` unset, option B off with `MANIFOLD_PACER_PRESENT_TX`
-/// unset; and Export Diagnostics' card-hold rule (`CardHoldFilter`), which must read 0 for a normal session.
+/// The 0.9.5 defaults: C+ on with `MANIFOLD_PACER_PHASE` unset (Robbie, 2026-11-19), plain option B on with
+/// `MANIFOLD_PACER_PRESENT_TX` unset (Robbie, 2026-11-20, CARD_PULL_MARGIN.md §19–§20); and Export Diagnostics' card-hold rule
+/// (`CardHoldFilter`), which must read 0 for a normal session.
 final class PacerSwitchesTests: XCTestCase {
 
     // MARK: MANIFOLD_PACER_PHASE
@@ -24,15 +25,27 @@ final class PacerSwitchesTests: XCTestCase {
 
     // MARK: MANIFOLD_PACER_PRESENT_TX
 
-    func testPresentStaysTransactionalByDefault() {
-        XCTAssertFalse(PacerSwitches.presentUntransacted(nil), "unset is today's transactional present: B is off")
-        XCTAssertFalse(PacerSwitches.presentUntransacted(""))
-        XCTAssertFalse(PacerSwitches.presentUntransacted("1"))
-        XCTAssertFalse(PacerSwitches.presentUntransacted("2"))
+    func testPlainBIsTheDefault() {
+        XCTAssertTrue(PacerSwitches.presentUntransacted(nil), "unset is plain B, the 0.9.5 default")
+        XCTAssertTrue(PacerSwitches.presentUntransacted(""))
+        XCTAssertTrue(PacerSwitches.presentUntransacted("0"), "=0 is plain B, as before the default changed")
     }
 
-    func testOnlyZeroSelectsOptionB() {
-        XCTAssertTrue(PacerSwitches.presentUntransacted("0"))
+    func testOnlyOneRestoresTheTransactionalPresent() {
+        XCTAssertFalse(PacerSwitches.presentUntransacted("1"), "=1 is the diagnostic off-switch")
+    }
+
+    func testPresentTxUnrecognisedIsTheDefault() {
+        for v in ["2", "off", "no", " 1", "01", "-1", "true"] { XCTAssertTrue(PacerSwitches.presentUntransacted(v), v) }
+    }
+
+    /// The default reaches the gate: with the switch unset the gate keeps a drawable spare at 120 Hz; `=1` is the old gate.
+    func testDefaultSwitchSelectsTheSpareDrawableGate() {
+        let hz120 = 1.0 / 120
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: hz120,
+                                                                keepSpareDrawable: PacerSwitches.presentUntransacted(nil)), 1)
+        XCTAssertEqual(WindowPresentTiming.presentsWaitingLimit(displayPeriod: hz120,
+                                                                keepSpareDrawable: PacerSwitches.presentUntransacted("1")), 2)
     }
 
     // MARK: CardHoldFilter

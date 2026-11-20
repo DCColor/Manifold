@@ -2,13 +2,14 @@
 //  PacerSwitches.swift
 //  OutputPacing
 //
-//  The 0.9.5 defaults of the output pacer's two DEBUG switches, and the rule Export Diagnostics uses to count card holds while
-//  playing. Pure: the app reads the environment once and hands the values here, so the defaults are testable.
+//  The 0.9.5 defaults of the output pacer's two switches, and the rule Export Diagnostics uses to count card holds while
+//  playing. Pure: the app reads the environment once and hands the values here, so the defaults are testable. Both switches are
+//  read in every configuration, Release included: each is a diagnostic off-switch, not a DEBUG experiment.
 //
-//  Decided 2026-11-19 (docs/CARD_PULL_MARGIN.md §18; docs/WINDOW_PRESENT_PATH.md §6, the attended checks on the LG):
-//    • `MANIFOLD_PACER_PHASE`: unset means C+ (2). `=0` turns the phase hold off, `=1` is plain option C, `=2` is C+.
-//    • `MANIFOLD_PACER_PRESENT_TX`: unset means today's transactional present. Only `=0` selects option B, a DEBUG experiment:
-//      it froze the window for ~1 s on a Display Transform switch to Reference while SDI played (docs/BUGS.md).
+//    • `MANIFOLD_PACER_PHASE` (decided 2026-11-19, docs/CARD_PULL_MARGIN.md §18): unset means C+ (2). `=0` turns the phase hold
+//      off, `=1` is plain option C, `=2` is C+.
+//    • `MANIFOLD_PACER_PRESENT_TX` (decided 2026-11-20, after nights 6 and 7, docs/CARD_PULL_MARGIN.md §19–§20): unset means plain
+//      option B, the untransacted pacer present (docs/WINDOW_PRESENT_PATH.md §7.5). `=1` restores the transactional present.
 //
 
 import Foundation
@@ -23,8 +24,9 @@ public enum PacerSwitches {
         }
     }
 
-    /// Whether `MANIFOLD_PACER_PRESENT_TX` selects option B's untransacted pacer presents. Only `"0"` does; unset is today's path.
-    public static func presentUntransacted(_ value: String?) -> Bool { value == "0" }
+    /// Whether `MANIFOLD_PACER_PRESENT_TX` selects option B's untransacted pacer presents. Unset, empty, `"0"` or anything
+    /// unrecognised: yes, plain B, the 0.9.5 default. Only `"1"` restores the transactional present.
+    public static func presentUntransacted(_ value: String?) -> Bool { value != "1" }
 }
 
 /// Export Diagnostics' "card holds while playing": which timed card pulls that hand the frame handed last are counted.

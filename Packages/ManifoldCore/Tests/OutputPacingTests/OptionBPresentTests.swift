@@ -2,7 +2,8 @@ import XCTest
 @testable import OutputPacing
 
 /// Option B after docs/WINDOW_PRESENT_PATH.md §7.5 (Robbie, 2026-11-19): plain B never changes the layer's present mode per tick, and
-/// the gate keeps one drawable spare at any display rate. B off: the gate exactly as before.
+/// the gate keeps one drawable spare at any display rate. B off (`MANIFOLD_PACER_PRESENT_TX=1`): the gate exactly as before.
+/// Plain B is the 0.9.5 default since 2026-11-20 (`PacerSwitchesTests`).
 final class OptionBPresentTests: XCTestCase {
     private let hz120 = 1.0 / 120, hz11988 = 1001.0 / 120000, hz60 = 1.0 / 60, hz5994 = 1001.0 / 60000
 
