@@ -17,7 +17,15 @@ Log text that is built OUTSIDE a log call (a helper returning a line that is the
 be told apart from UI text by syntax, so it is listed in ALLOW below, by file and a snippet of the
 literal. Add to ALLOW only for text that never reaches the UI or an exported file.
 
-Usage:  python3 scripts/check-us-spelling.py [repo root]      exit 0 clean, 1 on any finding.
+--logs scans exactly the text the default run skips: log-call literals, `[TAG]` literals and the ALLOW
+entries (American since 2026-11-20, docs/BUGS.md *American English in log lines*). Soak/report scripts and tests match on log text: before changing a line, grep
+Packages/*/Tests, scripts/ and the soak folders for it and change every matcher with it.
+
+"tick" is flagged only in its British checkbox sense (TICK_UI); a clock tick passes everywhere. Every run first
+checks the rules against SELF_CHECK, strings that must pass and must fail, and exits 2 if any does not.
+
+Usage:  python3 scripts/check-us-spelling.py [--logs] [repo root]
+        exit 0 clean, 1 on any finding, 2 if the self-check fails.
 """
 import os
 import re
@@ -29,7 +37,7 @@ BRITISH = re.compile(r"""(?ix)\b(
     cancell(ed|ing)\b | \w*favour\w* | \w*honour\w* | \w*labour\w* | \w*neighbour\w* | \w*flavour\w* |
     \w*(label|model|travel|signal|level|dial|total|fuel|channel|cancel|tunnel|pixel)l(ed|ing)\b |
     programmes? | artefacts? | \w*catalogue\w* | analogue | analys(e|es|ed|ing) |
-    tick | ticked | unticked |
+    untick\w* |
     whilst | amongst | judgement | ageing | fulfil | enrol(s|ment)? | aluminium | defence | offence |
     metres? | litres? | fibres? | calibre | manoeuvr\w* |
     \w{2,}is(e|es|ed|ing|ation|ations|er|ers|able)
@@ -44,7 +52,21 @@ ISE_OK = re.compile(r"""(?ix)^(
     \w*tois(e|es) | porpois\w* | valis\w* | turquois\w* | elis(e|es) | louis\w* | denis\w* |
     mortis\w* | precis\w* | concis\w* | excis\w* | incis\w* | dais\w* | appris\w*
 )$""")
-# "dialogue" is allowed (Robbie, 2026-11-16). Whole words only: "tick" never matches "ticks" or "tickMs".
+# "dialogue" is allowed (Robbie, 2026-11-16).
+# "tick" is British only as a checkbox verb or state ("tick the box", "tick only if", "is ticked"); "untick*" is
+# always flagged (BRITISH above). A clock tick ("display link tick", "no tick in 500 ms", "has not ticked",
+# "tick=%.4f", "heartbeat tick(s)") is American too and passes. Write check / select / uncheck / checked instead.
+_TICK_OBJ = r"(box|boxes|checkbox|checkboxes|option|options|setting|settings|item|items|button|toggle)"
+TICK_UI = re.compile(r"""(?ix)
+    \btick(s|ed|ing)?[\s-]?box(es)?\b                                         # tick box, tickbox, tick-box
+  | \btick(s|ing)?\s+(the|this|that|a|an|each|every|both|any|one|it|them)\s+(\S+\s+){0,3}?""" + _TICK_OBJ + r"""\b
+  | \btick\s+only\s+(if|when)\b                                               # "tick only if"
+  | (^|[.!?;:]\s+|[(“"‘']\s*)tick\s+(to|here|it|this|the|a|an|each|every|both|any|one|only|if|when|once)\b
+                                                                               # sentence-initial imperative
+  | \b(is|are|was|were|be|been|being|stays?|remains?|left|keep|kept|box|checkbox|option|setting|item|when|if
+        |while|once|unless)\s+ticked\b                                          # checkbox state
+  | \bticked\s+by\s+default\b
+""")
 # Day-month-year dates, in any scanned text.
 DMY = re.compile(r"(?i)\b\d{1,2} (January|February|March|April|May|June|July|August|September|October|November|"
                  r"December) \d{4}\b")
@@ -58,20 +80,7 @@ LOG_TAG = re.compile(r"^\s*(%@\s*)?\[[A-Z0-9][A-Z0-9 _./+-]*\]")
 
 # (path suffix, snippet of the literal): log/diagnostic text built outside a log call.
 ALLOW = [
-    ("App/Live/StreamColorimetry.swift", "SPS unreadable before the colour fields"),   # spsColorLine → NSLog
-    ("App/Live/StreamColorimetry.swift", "absent (no colour description)"),            # spsColorLine → NSLog
     ("App/MetalVideoRenderer.swift", "/\\(colour)"),                                    # [SCRUB-GEOM] dedupe key
-    ("App/SRT/SRTFrameRouter.swift", "quantised and cannot tile"),                     # timeBaseVerdict → NSLog
-    ("App/HLS/HLSClient.swift", "requested format was not honoured"),                  # first-frame verdict → NSLog
-    ("App/WebRTC/DataChannelBridge.m", "synchronisable"),                              # CNAME line → NSLog
-    ("Packages/ManifoldCore/Sources/LiveAudioResample/SenderReportLineFit.swift", "synchronisable"),  # → NSLog
-    ("Packages/ManifoldCore/Sources/LiveAudioResample/SenderReportLineFit.swift", "RE-LEVELLED"),     # → NSLog; tests match it
-    ("Packages/ManifoldCore/Sources/LicenseRecord/LicenseRecordSync.swift", "legacy licence values"), # migration log
-    ("Packages/ManifoldCore/Sources/FileChroma/BitstreamColorCheck.swift", "bitstream states no colour"),  # → NSLog
-    # "tick" as a clock tick, not a checkbox (American too):
-    ("App/AudioMeterScope.swift", "meter.tick"),                                       # ScopePerf counter key (DEBUG)
-    ("App/DiagnosticsExport.swift", "the decode-rate tick"),                           # diagnostics note
-    ("Packages/ManifoldCore/Sources/LiveAudioResample/LiveAudioResampleStage.swift", "at in-tick"),  # → NSLog
 ]
 
 # (file, snippet of the line): release-note text that is ABOUT a British spelling, so must keep it.
@@ -163,7 +172,8 @@ def literals(src, objc):
         i += 1
 
 
-def findings(root):
+def findings(root, logs=False):
+    """logs=False: user-facing literals (log text skipped). logs=True: only the log text the default skips."""
     roots = [os.path.join(root, "App")]
     pk = os.path.join(root, "Packages")
     if os.path.isdir(pk):
@@ -180,12 +190,13 @@ def findings(root):
                 with open(path, encoding="utf-8") as fh:
                     src = fh.read()
                 for line, text, in_log in literals(src, objc):
-                    if in_log or LOG_TAG.match(text):
-                        continue
-                    if any(rel.endswith(p) and s in text for p, s in ALLOW):
+                    skipped = bool(in_log or LOG_TAG.match(text)
+                                   or any(rel.endswith(p) and s in text for p, s in ALLOW))
+                    if skipped != logs:
                         continue
                     for word, why in check_text(text):
-                        yield rel, line, word, why + " in user-facing string", text.strip()
+                        where = " in log text" if logs else " in user-facing string"
+                        yield rel, line, word, why + where, text.strip()
 
 
 def check_text(text):
@@ -194,8 +205,43 @@ def check_text(text):
         word = m.group(0)
         if not (ISE_OK.match(word) or GREY_OK.match(word)):
             yield word, "British spelling"
+    for m in TICK_UI.finditer(text):
+        yield m.group(0).strip(" .!?;:(“\"‘'"), "British 'tick' (checkbox sense: check / select / checked)"
     for m in DMY.finditer(text):
         yield m.group(0), "day-month-year date"
+
+
+# Strings the rules must FAIL and must PASS. Checked at the start of every run.
+SELF_CHECK_FAIL = [
+    "Tick the box to include file names", "tick the box", "Tick the “Include file names” box",
+    "tick only if you need it", "Tick to enable", "Untick it to stop", "untick", "unticked",
+    "Unticking the option hides it", "the box is ticked", "When ticked, Manifold logs it",
+    "stays ticked after relaunch", "ticked by default", "a tick box", "the tickbox", "tick-box",
+    "ticking each option", "colour", "16 November 2026",
+]
+SELF_CHECK_PASS = [
+    # the clock-tick strings that failed the old word rule (2026-11-20), and the old ALLOW entries:
+    "tick-x", "Pacer missed deadlines :   (output pacer deadlines skipped because a tick ran past them, since launch)",
+    "tick", "repeat tick serving a present", "ticks   (new-frame  , repeat  ) · presents    (new-frame tick",
+    ", same tick 2nd  , repeat tick  ) · held in flight  ,", "· next interval   ms (P   ms) ·   tick",
+    "(the tick ended inside P: the deadline was missed outside the tick)",
+    "meter.tick", "the decode-rate tick", "%@ input axis %@ %.2f ms at in-tick %lld — %@; output axis",
+    # more clock ticks:
+    "[IDLE] ⚠️ display link meant to run has not ticked for   ms — restarting it",
+    "[IDLE] ⚠️ WATCHDOG: no tick in 500 ms after a wake · last tick began %.3f s before the wake",
+    "%@ mirror — %d mapping change(s) + %d heartbeat tick(s) → %d setRate call(s)",
+    "[AV-LAG] tick=%.4f pts=%.5f", "on every tick the pacer presents the frame", "skip the tick if it is late",
+    "one tick only", "video on the display tick, audio on a dedicated pump", "timeBase=%d/%d (%.6f s/tick — %@)",
+    "tickMs", "ticks", "Check the box to include file names", "checked by default", "color", "November 16, 2026",
+]
+
+
+def self_check():
+    """Return the SELF_CHECK strings the rules get wrong."""
+    wrong = [f"should FAIL but passes: {t!r}" for t in SELF_CHECK_FAIL if not list(check_text(t))]
+    wrong += [f"should PASS but fails ({[w for w, _ in check_text(t)]}): {t!r}" for t in SELF_CHECK_PASS
+              if list(check_text(t))]
+    return wrong
 
 
 def note_findings(root):
@@ -219,8 +265,24 @@ def note_findings(root):
 
 
 def main():
-    root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1
-                           else os.path.join(os.path.dirname(__file__), ".."))
+    wrong = self_check()
+    if wrong:
+        print("check-us-spelling: SELF-CHECK FAILED, the rules are wrong:\n  " + "\n  ".join(wrong))
+        return 2
+    args = sys.argv[1:]
+    logs = "--logs" in args
+    args = [a for a in args if a != "--logs"]
+    root = os.path.abspath(args[0] if args else os.path.join(os.path.dirname(__file__), ".."))
+    if logs:
+        bad = list(findings(root, logs=True))
+        for rel, line, word, why, text in bad:
+            print(f"{rel}:{line}: {why} '{word}': {text[:120]!r}")
+        if bad:
+            print(f"\n{len(bad)} finding(s) in log text. Use American spelling, and change every test and soak/report "
+                  "script that matches the old text in the same change.")
+            return 1
+        print("check-us-spelling --logs: no British spellings or day-month-year dates in log text.")
+        return 0
     bad = list(findings(root)) + list(note_findings(root))
     for rel, line, word, why, text in bad:
         print(f"{rel}:{line}: {why} '{word}': {text[:120]!r}")

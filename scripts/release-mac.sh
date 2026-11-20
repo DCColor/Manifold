@@ -207,17 +207,23 @@ ok "configuration: ${CONFIG}"
 
 # American English in every user-facing string (Robbie, 2026-11-15; docs/BUGS.md "American English — a RECURRING DRIFT").
 # A manual sweep did not hold, so the release refuses a British spelling. Exit 1 is a finding; any other non-zero exit
-# means the check itself did not run, and a check that did not run must not pass either. Log text is out of its scope.
-SPELL_RC=0
-SPELL_OUT=$(python3 "${REPO_ROOT}/scripts/check-us-spelling.py" "${REPO_ROOT}" 2>&1) || SPELL_RC=$?
-if [[ $SPELL_RC -eq 1 ]]; then
-    die "British spelling in user-facing strings (scripts/check-us-spelling.py):
+# means the check itself did not run (exit 2: its self-check failed), and a check that did not run must not pass either.
+# Log text is checked by a second run, --logs (docs/BUGS.md "American English in log lines", FIXED 2026-11-20). Tests
+# and soak/report scripts match on log text: fix a finding together with every matcher of the old text.
+for SPELL_MODE in "" --logs; do
+    SPELL_WHAT="user-facing strings"; [[ -n "$SPELL_MODE" ]] && SPELL_WHAT="log text"
+    SPELL_RC=0
+    SPELL_OUT=$(python3 "${REPO_ROOT}/scripts/check-us-spelling.py" ${SPELL_MODE:+"$SPELL_MODE"} "${REPO_ROOT}" 2>&1) \
+        || SPELL_RC=$?
+    if [[ $SPELL_RC -eq 1 ]]; then
+        die "British spelling in ${SPELL_WHAT} (scripts/check-us-spelling.py${SPELL_MODE:+ $SPELL_MODE}):
 $(printf '%s\n' "$SPELL_OUT" | sed 's/^/       /')"
-elif [[ $SPELL_RC -ne 0 ]]; then
-    die "scripts/check-us-spelling.py did not run (exit ${SPELL_RC}):
+    elif [[ $SPELL_RC -ne 0 ]]; then
+        die "scripts/check-us-spelling.py${SPELL_MODE:+ $SPELL_MODE} did not run (exit ${SPELL_RC}):
 $(printf '%s\n' "$SPELL_OUT" | sed 's/^/       /')"
-fi
-ok "American spelling in user-facing strings"
+    fi
+    ok "American spelling in ${SPELL_WHAT}"
+done
 
 [[ -f "$PROJECT_YML" ]] || die "project.yml not found at ${PROJECT_YML}"
 
