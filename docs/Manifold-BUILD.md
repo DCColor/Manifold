@@ -268,6 +268,16 @@ the pins, but reproducing them takes real time.
         - **Kept from 0.9.4 (Robbie, 2026-11-19): the frame #0 start-drop exception.** Frame #0 of an output start reported
           Dropped, the known start-time drop (a card drop, not a hold; `BUGS.md`, "the first scheduled frame of an output start is
           now and then reported Dropped").
+        - **The renderer watchdog's detection wait is 200 ms, was 500 ms (decided Robbie, 2026-11-20; `BUGS.md`, the picture
+          freeze; `PICTURE_FREEZE_AUDIT.md` §6).** It recovers once the state has lasted 150 ms with no pump callback for 200 ms. A
+          state over 100 ms that clears by itself is still a near-miss, not a recovery: the 100–150 ms band is kept for it. Basis:
+          54 h of soak data, the state never appeared in healthy play and no state over 100 ms cleared by itself. A renderer
+          recovery stays allowed by the gate (it is not a freeze); a GAVE UP is unrecovered. `rc-soak-report.py` lists every stall and
+          near-miss per block, with its time in the state, its silence and its outcome, marks a stall taken with under 0.5 s of silence
+          "sooner than the old 0.5 s wait", and prints a `RENDERER WATCHDOG` line. Any stall or near-miss in a soak is unexpected
+          (none in 15.7 h of release soaks): read each one before calling the gate. Export Diagnostics and the `[DIAG] playback
+          counters` line now count stalls, not re-arm attempts ("1 stall (1 recovered, 0 GAVE UP), 3 re-arms, 0 rebuilds, 0
+          near-misses"), and count GAVE UP; the report checks the last `[DIAG]` line against the log's counts.
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
