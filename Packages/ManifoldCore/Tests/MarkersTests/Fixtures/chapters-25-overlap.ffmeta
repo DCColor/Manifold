@@ -1,0 +1,21 @@
+;FFMETADATA1
+[CHAPTER]
+TIMEBASE=1/25
+START=0
+END=254
+title=Start
+[CHAPTER]
+TIMEBASE=1/25
+START=254
+END=304
+title=Chapter - This is a café
+[CHAPTER]
+TIMEBASE=1/25
+START=304
+END=600
+title=Close behind
+[CHAPTER]
+TIMEBASE=1/25
+START=600
+END=650
+title=Ranged last

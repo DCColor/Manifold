@@ -1,8 +1,8 @@
 //
 //  MarkerFileIO.swift — File ▸ Export Markers… and File ▸ Import Markers… (docs/MARKERS_PLAN.md §6, §7 v1).
 //
-//  Export: Resolve marker EDL, CSV, plain text or Premiere Pro XML (docs/MARKER_EXPORT_PLAN.md), chosen in the save
-//  panel. Import: a Resolve marker EDL, merged into the window's markers (D9), with the whole-hour shift offered and never
+//  Export: Resolve marker EDL, CSV, plain text, Premiere Pro XML (docs/MARKER_EXPORT_PLAN.md), or a chapter list for
+//  ffmpeg or a YouTube description (docs/CHAPTER_MARKERS_PLAN.md §15), chosen in the save panel. Import: a Resolve marker EDL, merged into the window's markers (D9), with the whole-hour shift offered and never
 //  applied unasked (§6.4).
 //
 //  ⚠️ Logs through `MarkerLog` only (counts). The panels and alerts show the user's own words to the user; nothing
@@ -17,20 +17,25 @@ import UniformTypeIdentifiers
 enum MarkerFileIO {
 
     /// Stored by raw value in `formatKey`: NEW CASES GO AT THE END, so a saved choice keeps its meaning
-    /// (docs/MARKER_EXPORT_PLAN.md §5). Final Cut takes 4 when it comes.
+    /// (docs/MARKER_EXPORT_PLAN.md §5). The chapter lists took 4 and 5 (CHAPTER_MARKERS_PLAN §15); Final Cut takes the next.
     enum Format: Int, CaseIterable {
-        case resolveEDL, csv, text, premiereXML
+        case resolveEDL, csv, text, premiereXML, ffmeta, youtube
         var title: String {
             switch self {
             case .resolveEDL: return "DaVinci Resolve Marker EDL (.edl)"
             case .csv: return "CSV (.csv)"
             case .text: return "Plain Text (.txt)"
             case .premiereXML: return "Premiere Pro (XML)"
+            case .ffmeta: return "Chapter List — ffmpeg (.ffmeta)"
+            case .youtube: return "Chapter List — YouTube (.txt)"
             }
         }
-        var ext: String { ["edl", "csv", "txt", "xml"][rawValue] }
+        var ext: String { ["edl", "csv", "txt", "xml", "ffmeta", "txt"][rawValue] }
         var type: UTType {
             if self == .premiereXML { return .xml }
+            // No system type claims .ffmeta: a dynamic one would grey out the name field's extension, so plain text, which
+            // `nameFieldStringValue` then names .ffmeta.
+            if self == .ffmeta { return UTType(filenameExtension: ext, conformingTo: .plainText) ?? .plainText }
             return UTType(filenameExtension: ext) ?? .plainText
         }
     }
@@ -127,6 +132,27 @@ enum MarkerFileIO {
                 NSLog("%@", MarkerLog.exported(xmeml: out.report, audioChannels: media.audioChannels,
                                                unconvertedFileMarkers: unconverted))
                 model.show(PremiereXML.notice(out.report, unconvertedFileMarkers: unconverted))
+            case .ffmeta, .youtube:
+                // Markers only, in elapsed time from the first frame (CHAPTER_MARKERS_PLAN §15.2-§15.3); the file's own
+                // chapters after Convert (D-C5). `lastFrame + 1` frames, as Premiere's media takes it.
+                let unconverted = model.unconvertedChapters.count
+                let frameCount = model.lastFrame + 1
+                let logFormat: MarkerLog.Format = format == .ffmeta ? .ffmeta : .youtube
+                if format == .ffmeta, let out = MarkerFFMetadata.export(markers: markers, rate: basis.rate, frameCount: frameCount) {
+                    try Data(out.text.utf8).write(to: url, options: .atomic)
+                    NSLog("%@", MarkerLog.exported(ffmeta: out.report, unconvertedFileMarkers: unconverted))
+                    var parts = ["Exported \(out.report.markers) chapter\(out.report.markers == 1 ? "" : "s") to ffmpeg metadata."]
+                    if let line = MarkerChapterList.unconvertedNotice(unconverted) { parts.append(line) }
+                    model.show(parts.joined(separator: " "))
+                } else if format == .youtube, let out = MarkerYouTube.export(markers: markers, basis: basis, frameCount: frameCount) {
+                    try Data(out.text.utf8).write(to: url, options: .atomic)
+                    NSLog("%@", MarkerLog.exported(youtube: out.report, unconvertedFileMarkers: unconverted))
+                    model.show(MarkerYouTube.notice(out.report, unconvertedFileMarkers: unconverted))
+                } else {
+                    NSLog("%@", MarkerLog.exportRefusedRate(logFormat))
+                    model.show("A chapter list can’t state this file’s frame rate (\(basis.rateLabel) fps). Nothing was written.")
+                    NSSound.beep()
+                }
             }
         } catch {
             model.show("The markers could not be written there.")

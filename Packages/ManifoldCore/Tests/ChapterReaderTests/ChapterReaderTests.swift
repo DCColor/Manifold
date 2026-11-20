@@ -19,6 +19,10 @@ import Markers
 ///  - r-offset.mp4    25 fps, the video delayed 1 s with -itsoffset (an empty edit): libav's video start_time is 1 s.
 ///  - r-chap0.mov     r-track.mov with its video tref `chap` target set to track ID 0 (2026-11-17, a 4-byte patch of a
 ///                    copy, same size), as Premiere writes in a comment-only ProRes .mov (§12.6).
+///  - r-export.mov    r-track.mov's video with the chapters of MarkersTests/Fixtures/chapters-roundtrip-2398.ffmeta (the
+///                    chapter-list export's golden file, §15), made 2026-11-20 by the same ffmpeg:
+///                    `-i r-track.mov -i chapters-roundtrip-2398.ffmeta -map 0:v -map_chapters 1 -map_metadata 0 -c copy
+///                    -movflags disable_chpl -f mov r-export.mov`.
 final class ChapterReaderTests: XCTestCase {
 
     private func fixture(_ name: String) throws -> URL {
@@ -124,6 +128,33 @@ final class ChapterReaderTests: XCTestCase {
         XCTAssertTrue(first.hasPrefix("Café Zürich — Ærøskøbing, Łódź, 東京, Ελληνικά, 🎬 a long chapter title"))
         XCTAssertFalse(first.contains("\u{FFFD}"))
         XCTAssertEqual(r.chapters.last?.title, "Reserved = ; # \\ characters", "unescaped: libav's API has no ffmetadata layer")
+        await crossCheck(url, libav: r)
+    }
+
+    // MARK: The chapter-list export, read back (§15.1)
+
+    /// The markers `chapters-roundtrip-2398.ffmeta` was written from (MarkersTests `MarkerChapterExportTests.roundTrip`).
+    private static let exportedMarkers: [Marker] = [
+        Marker(frame: 0, name: "Opening"),
+        Marker(frame: 17),
+        Marker(frame: 30, duration: 12, name: #"A = b; #1 \ c"#),
+        Marker(frame: 49, name: "Fourth"),
+        Marker(frame: 70, name: "Near end"),
+    ]
+
+    func testChapterListExportRoundTrip() async throws {
+        let rate = 24000.0 / 1001
+        let export = try XCTUnwrap(MarkerFFMetadata.export(markers: Self.exportedMarkers, rate: rate, frameCount: 72))
+        let url = try fixture("r-export.mov")
+        let r = try ChapterReader.read(url: url)
+        XCTAssertEqual(r.chapters.map(\.title), Self.exportedMarkers.map(\.name), "the escapes are undone by ffmpeg")
+        let mapped = ChapterMapping.map(r.chapters, origin: r.videoStart, rate: rate, lastFrame: 71)
+        XCTAssertEqual(mapped.chapters.map(\.frame), Self.exportedMarkers.map(\.frame), "the same frames (D-C7a)")
+        XCTAssertEqual(mapped.dropped, 0)
+        // What the written END values give back, recorded: the chapter track has no gaps, so the ranged chapter's end
+        // (42) is not kept and it runs to the next chapter (49).
+        print("[CHAPTER-ROUNDTRIP] durations=\(mapped.chapters.map(\.duration)) export-report=\(export.report)")
+        XCTAssertEqual(mapped.chapters.map(\.duration), [17, 13, 19, 21, 2])
         await crossCheck(url, libav: r)
     }
 

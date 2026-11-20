@@ -1,0 +1,5 @@
+00:00 Opening
+00:10 Second
+00:20 Ranged = ; # \ shot
+00:41 01:00:41:16
+01:00 Last frame

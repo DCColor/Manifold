@@ -9,7 +9,7 @@
 import Foundation
 
 public enum MarkerLog {
-    public enum Format: String, Sendable { case edl = "edl", csv = "csv", text = "text", xmeml = "xmeml" }
+    public enum Format: String, Sendable { case edl = "edl", csv = "csv", text = "text", xmeml = "xmeml", ffmeta = "ffmeta", youtube = "youtube" }
 
     public static func loaded(count: Int, fingerprintMs: Int) -> String {
         "[MARKERS] loaded n=\(count) fingerprint=\(fingerprintMs)ms"
@@ -40,6 +40,22 @@ public enum MarkerLog {
             + "flattened-notes=\(r.flattenedNotes) dropped-keywords=\(r.droppedKeywords) keywords-in-comments=\(r.appendedKeywords) "
             + "audio-channels=\(audioChannels) unconverted-file-markers=\(unconvertedFileMarkers)"
     }
+
+    /// Chapter list, ffmpeg metadata (docs/CHAPTER_MARKERS_PLAN.md §15): counts only, never a title.
+    public static func exported(ffmeta r: MarkerFFMetadata.ExportReport, unconvertedFileMarkers: Int) -> String {
+        "[MARKERS] export \(Format.ffmeta.rawValue) n=\(r.markers) empty-titles=\(r.emptyTitles) escaped=\(r.escapedTitles) capped-ends=\(r.cappedEnds) "
+            + "unconverted-file-markers=\(unconvertedFileMarkers)"
+    }
+
+    /// Chapter list, YouTube description (§15): counts and the rule flags only, never a title.
+    public static func exported(youtube r: MarkerYouTube.ExportReport, unconvertedFileMarkers: Int) -> String {
+        "[MARKERS] export \(Format.youtube.rawValue) n=\(r.markers) timecode-titles=\(r.timecodeTitles) "
+            + "no-zero=\(r.noLineAtZero ? "yes" : "no") too-few=\(r.tooFew ? "yes" : "no") under-min=\(r.underMinimum) "
+            + "shared-second=\(r.sharedSecond) unconverted-file-markers=\(unconvertedFileMarkers)"
+    }
+
+    /// A chapter list refused: the file's rate has no exact form.
+    public static func exportRefusedRate(_ format: Format) -> String { "[MARKERS] export \(format.rawValue) refused: rate not expressible" }
 
     /// Premiere Pro XML refused: the file's rate is not one xmeml can state.
     public static func exportRefusedRate() -> String { "[MARKERS] export xmeml refused: rate not expressible" }
