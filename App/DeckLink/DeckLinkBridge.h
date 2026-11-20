@@ -115,6 +115,24 @@ typedef void (^DeckLinkPictureLineBlock)(uint64_t serial, double phi, int64_t fi
 /// `restart`, restarts the whole output on its own queue; it must only hand the work off.
 typedef void (^DeckLinkSilentStartBlock)(NSString *what, BOOL restart);
 
+/// The card's audio callback as the running output sees it (docs/SDI_AUDIO_NIGHT7.md, fault (a)): what the service's watchdog reads.
+/// Hosts are `CACurrentMediaTime` seconds; 0 means "not yet". All zero / NO with no output.
+typedef struct {
+    bool running;
+    bool audioEnabled;
+    /// Entries into `RenderAudioSamples` and returns from it since this output started. entered > returned: a call is in flight.
+    uint64_t callbacksEntered;
+    uint64_t callbacksReturned;
+    double lastEnterHost;
+    double lastExitHost;
+    /// Video frames completed, late or dropped since this output started (the video callback still running or not).
+    uint64_t videoCompletions;
+    uint32_t audioBuffered;
+    bool audioBufferedKnown;
+    /// When this was read.
+    double nowHost;
+} DeckLinkAudioHealth;
+
 typedef double (^DeckLinkAudioSourceTimeBlock)(void);
 
 /// Stage 1c (docs/CARD_CLOCK_FINDINGS.md §10.22): asked once after each fill, on the thread that filled. The pts of the frame last
@@ -246,6 +264,8 @@ typedef void (^DeckLinkProfileChangeBlock)(NSInteger deviceIndex, BOOL activated
 @property (nonatomic) BOOL outputRestart;
 /// The running output's frame duration in seconds, exactly as the mode states it (1001/60000 at 59.94). 0 when stopped.
 @property (nonatomic, readonly) double activeFrameSeconds;
+/// The card's audio callback, for the SDI audio watchdog. Call on the thread that starts and stops the output (the service's queue).
+- (DeckLinkAudioHealth)audioHealth;
 
 /// D3 "scheduled playback": start CONTINUOUS free-running output on device 0 at 2160p23.98 /
 /// v210 10-bit YUV, driven by the frame-completion callback against the card's hardware clock. Frames

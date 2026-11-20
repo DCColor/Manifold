@@ -19,6 +19,9 @@ enum PlaybackCounters {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var pacerMissedDeadlines = 0
     nonisolated(unsafe) private static var cardHoldsWhilePlaying = 0
+    nonisolated(unsafe) private static var sdiAudioStops = 0
+    nonisolated(unsafe) private static var sdiAudioRecoveries = 0
+    nonisolated(unsafe) private static var sdiAudioGaveUp = 0
 
     /// The output pacer's thread, in its missed-deadline branch: the deadlines that tick skipped (`OutputPacer.loop`).
     static func addPacerMissedDeadlines(_ n: Int) {
@@ -38,9 +41,20 @@ enum PlaybackCounters {
         lock.lock(); cardHoldsWhilePlaying += n; lock.unlock()
     }
 
-    static var snapshot: (pacerMissed: Int, cardHolds: Int) {
+    /// The SDI audio watchdog (`DeckLinkService`, on its queue; docs/SDI_AUDIO_NIGHT7.md, fault (a)): the card's audio callback
+    /// stopped for 3 s while playing with sound (`stop`), the output restart that brought it back (`recovery`, counted once the new
+    /// output's callbacks run), and a second stop within 60 s that gave up for the output session (`gaveUp`).
+    static func addSDIAudioStop() { lock.lock(); sdiAudioStops += 1; lock.unlock() }
+    static func addSDIAudioRecovery() { lock.lock(); sdiAudioRecoveries += 1; lock.unlock() }
+    static func addSDIAudioGaveUp() { lock.lock(); sdiAudioGaveUp += 1; lock.unlock() }
+
+    static var snapshot: (pacerMissed: Int, cardHolds: Int, sdiStops: Int, sdiRecoveries: Int, sdiGaveUp: Int) {
         lock.lock(); defer { lock.unlock() }
-        return (pacerMissedDeadlines, cardHoldsWhilePlaying)
+        return (pacerMissedDeadlines, cardHoldsWhilePlaying, sdiAudioStops, sdiAudioRecoveries, sdiAudioGaveUp)
+    }
+
+    private static func sdiAudioSummary(_ s: (pacerMissed: Int, cardHolds: Int, sdiStops: Int, sdiRecoveries: Int, sdiGaveUp: Int)) -> String {
+        "\(s.sdiStops) stop\(s.sdiStops == 1 ? "" : "s"), \(s.sdiRecoveries) recovered by an output restart, \(s.sdiGaveUp) given up"
     }
 
     /// The export's lines.
@@ -52,6 +66,8 @@ enum PlaybackCounters {
                 + "not counted: the first 1 s after Play, a seek, a step or a loop wrap, the end of the file, a rate mismatch's cadence)",
             "Late swaps by class    : not counted in this build (the DEBUG card-pull measurement only)",
             "Renderer recoveries    : \(RendererRecoveryStats.summary)",
+            "SDI audio stops        : \(sdiAudioSummary(s)) (the card's audio callback stopped for 3 s while playing with sound, "
+                + "since launch)",
         ]
     }
 
@@ -59,6 +75,6 @@ enum PlaybackCounters {
     static var logLine: String {
         let s = snapshot
         return "[DIAG] playback counters since launch (as in Export Diagnostics): pacer missed deadlines \(s.pacerMissed) · "
-            + "card holds while playing \(s.cardHolds) · renderer \(RendererRecoveryStats.summary)"
+            + "card holds while playing \(s.cardHolds) · renderer \(RendererRecoveryStats.summary) · SDI audio \(sdiAudioSummary(s))"
     }
 }

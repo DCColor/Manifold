@@ -18,9 +18,18 @@
 #include <unistd.h>
 // Unconditional: m_handedLock (os_unfair_lock) is production code. Under #if DEBUG it broke the Release compile (docs/BUGS.md).
 #include <os/lock.h>
+// Unconditional: the audio callback's entry and exit stamps (`hostSecondsNow`) are production code.
+#include <mach/mach_time.h>
+
+namespace {
+/// Host seconds on the clock `CACurrentMediaTime` reads (mach absolute time), so the service compares the bridge's stamps with its own.
+inline double hostSecondsNow() {
+    static const double scale = [] { mach_timebase_info_data_t tb; mach_timebase_info(&tb); return (double)tb.numer / (double)tb.denom / 1e9; }();
+    return (double)mach_absolute_time() * scale;
+}
+}
 
 #if DEBUG
-#include <mach/mach_time.h>
 // [CARDCLOCK] (MANIFOLD_CARDCLOCK_LOG=1; DEBUG; pre-ship removal, docs/BUGS.md; docs/CARD_CLOCK_FINDINGS.md). Measurement only, reads
 // nothing but status. Once a second from the completion callback: the completed-frame count, the host time, the frame's completion
 // timestamp (the SDK: locked to the system clock) and the output's hardware reference clock (the SDK: locked to the rate the hardware
@@ -714,6 +723,24 @@ public:
     uint64_t droppedCount()    const { return m_dropped.load(); }
     uint64_t flushedCount()    const { return m_flushed.load(); }
 
+    // The card's audio callback, for the service's watchdog (fault (a), docs/SDI_AUDIO_NIGHT7.md). Atomics only, plus one buffered-count
+    // query: safe from the service's queue, which is also the only thread that starts and stops this player.
+    DeckLinkAudioHealth audioHealth() const {
+        DeckLinkAudioHealth h = {};
+        h.running = m_running.load();
+        h.audioEnabled = m_audioEnabled;
+        h.callbacksReturned = m_audioReturns.load(std::memory_order_acquire);
+        h.callbacksEntered = m_audioCallbacks.load(std::memory_order_relaxed);
+        h.lastEnterHost = m_audioEnterHost.load(std::memory_order_relaxed);
+        h.lastExitHost = m_audioExitHost.load(std::memory_order_relaxed);
+        h.videoCompletions = m_completed.load() + m_late.load() + m_dropped.load();
+        uint32_t buffered = 0;
+        h.audioBufferedKnown = m_output && m_audioEnabled && m_output->GetBufferedAudioSampleFrameCount(&buffered) == S_OK;
+        h.audioBuffered = buffered;
+        h.nowHost = hostSecondsNow();
+        return h;
+    }
+
     // --- IUnknown ---
     HRESULT QueryInterface(REFIID iid, LPVOID *ppv) override {
         if (ppv == nullptr) return E_POINTER;
@@ -765,6 +792,13 @@ public:
     //                 callback. Steering is a ≤2-sample skip/repeat per callback (see the constants).
     HRESULT RenderAudioSamples(bool preroll) override {
         m_audioCallbacks.fetch_add(1, std::memory_order_relaxed);
+        // Entry and exit stamps (docs/SDI_AUDIO_NIGHT7.md, fault (a)): when the callbacks stop, entered > returned says a call is stuck
+        // in here (in a driver call: none of our own waits can block), entered == returned says the SDK stopped calling.
+        m_audioEnterHost.store(hostSecondsNow(), std::memory_order_relaxed);
+        struct ExitMark {
+            DeckLinkScheduledPlayer *p;
+            ~ExitMark() { p->m_audioExitHost.store(hostSecondsNow(), std::memory_order_relaxed); p->m_audioReturns.fetch_add(1, std::memory_order_release); }
+        } exitMark{this};
         if (!m_running.load() || !m_audioEnabled) return S_OK;
         // §10.24: never inside StartScheduledPlayback or the preroll's end; the start holds this lock across them. Skipping one call
         // costs nothing (the queue is 80–200 ms deep), and the callback never waits on the start thread, so the two cannot deadlock.
@@ -2087,7 +2121,10 @@ private:
     uint64_t m_lastHandSeq = 0;                       // fill thread only
     std::atomic<bool> m_byTime{false};
     std::atomic<bool> m_playbackStarted{false};
-    std::atomic<uint64_t> m_audioCallbacks{0};   // every RenderAudioSamples call (diagnostic)
+    std::atomic<uint64_t> m_audioCallbacks{0};   // every RenderAudioSamples call (diagnostic; the watchdog's count)
+    std::atomic<uint64_t> m_audioReturns{0};     // every return from it (fault (a), docs/SDI_AUDIO_NIGHT7.md)
+    std::atomic<double> m_audioEnterHost{0.0};   // host seconds of the last entry and the last return (0: none yet)
+    std::atomic<double> m_audioExitHost{0.0};
     // Output start and stop (§10.24). The callback try-locks this; the start holds it across EndAudioPreroll and StartScheduledPlayback.
     std::recursive_mutex m_audioCbMutex;
     uint64_t m_audioCbSkipped = 0;                // audio thread: callbacks skipped while the start held the lock
@@ -3001,6 +3038,11 @@ private:
 
 - (void)stopScheduledPlayback {
     [self stopScheduledPlaybackEndingOnBlack:NO];
+}
+
+- (DeckLinkAudioHealth)audioHealth {
+    if (_player == NULL) { DeckLinkAudioHealth none = {}; none.nowHost = hostSecondsNow(); return none; }
+    return _player->audioHealth();
 }
 
 - (void)stopScheduledPlaybackEndingOnBlack:(BOOL)endOnBlack {

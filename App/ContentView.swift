@@ -1397,6 +1397,7 @@ struct ContentView: View {
                 arbitrationNotice
                 connectErrorBanner
                 deckLinkRefusalBanner
+                sdiSoundStoppedBanner
                 dolbyVisionBanner
             }
         }
@@ -2722,6 +2723,37 @@ struct ContentView: View {
                 Spacer(minLength: 8)
                 Button {
                     DeckLinkService.shared.clearStartRefusal()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.55))
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.orange.opacity(0.55)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// The SDI audio watchdog gave up for this output session (`DeckLinkService.sdiSoundStopped`; docs/SDI_AUDIO_NIGHT7.md, fault (a)):
+    /// the card's audio callback stopped twice within 60 s, so SDI carries picture without sound until output is restarted. Standing,
+    /// like `deckLinkRefusalBanner` and in its style: no timer, cleared by the operator's stop or start of output or by closing it.
+    /// Shown only in a window that may drive the card.
+    @ViewBuilder private var sdiSoundStoppedBanner: some View {
+        if let message = deckLink.sdiSoundStopped, deckLink.isOutputting, deck.gate.deviceControlsEnabled {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "speaker.slash.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button {
+                    DeckLinkService.shared.clearSDISoundStopped()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }

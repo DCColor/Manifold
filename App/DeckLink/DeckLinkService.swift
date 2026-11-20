@@ -4,6 +4,7 @@ import Combine
 import ManifoldCore
 import ColorimetryModel   // OutputSignal — what each frame is tagged with (colour S7)
 import DeckLinkRefusal     // what a refused start says: the busy card gets a message, the rest stay in the log
+import OutputPacing        // SDIAudioWatchdog: the card's audio callback stopping (docs/SDI_AUDIO_NIGHT7.md, fault (a))
 
 /// App-side service for Blackmagic DeckLink OUTPUT. Hardware I/O lives in the App layer, decoupled
 /// from ManifoldCore's engine logic. Owns the output on/off state + selected device as observable
@@ -464,6 +465,19 @@ final class DeckLinkService: ObservableObject {
         startRefusal = nil
     }
 
+    /// The SDI audio watchdog gave up for this output session (docs/SDI_AUDIO_NIGHT7.md, fault (a)): the card's audio callback stopped
+    /// again within 60 s of the restart that recovered it. The picture runs on; SDI carries no sound until the operator restarts output.
+    /// Cleared when output is stopped or started by the operator, and by the banner's close button. MAIN THREAD.
+    @Published private(set) var sdiSoundStopped: String?
+
+    func clearSDISoundStopped() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        sdiSoundStopped = nil
+    }
+
+    /// The banner's words (Robbie, 2026-11-20).
+    static let sdiSoundStoppedMessage = "SDI sound stopped; restart output"
+
     // MARK: - D4b-2: SDI audio
 
     /// The engine's PCM ring (D4b-1), set by the App at startup alongside `renderer`. The card's audio
@@ -597,6 +611,20 @@ final class DeckLinkService: ObservableObject {
     /// Each output start's number (queue only), so a silent-start recovery that arrives after the output has stopped or been
     /// re-established for another reason does nothing (docs/CARD_CLOCK_FINDINGS.md §10.25).
     private var startGeneration = 0
+
+    // MARK: SDI audio watchdog (docs/SDI_AUDIO_NIGHT7.md, fault (a)). Queue only.
+
+    /// The decision (`SDIAudioWatchdog`, OutputPacing). Reset when the operator stops or starts output, so a give-up lasts one output
+    /// session; the watchdog's own restarts and mode or format re-establishes keep it.
+    private var audioWatchdog = SDIAudioWatchdog()
+    private var audioWatchdogTimer: DispatchSourceTimer?
+    /// The callback count and the video completions when the count last moved, for the detection line.
+    private var audioWatchLastEntered: UInt64 = 0
+    private var audioWatchCompletionsAtMove: UInt64 = 0
+    /// A restart the watchdog made, waiting for the new output's callbacks to run (then counted as a recovery).
+    private var audioWatchRecoveryPending: Double?
+    /// How often the watchdog reads the card's callback count. A few times a second: atomics and one buffered-count query.
+    static let audioWatchdogInterval: TimeInterval = 0.25
     private var colorObserver: NSObjectProtocol?
 
     /// D4a: the output DISPLAY MODE derived from the loaded file (video cadence). Resolution follows
@@ -1112,10 +1140,12 @@ final class DeckLinkService: ObservableObject {
         }
         isOutputting = true
         startRefusal = nil    // a new attempt; a refusal is said again if it recurs
+        sdiSoundStopped = nil // the operator restarted output: the watchdog may restart it again (fault (a))
         applyAudioRouting()   // D4b-3: ENABLE transition — with .sdi (the default), the Mac goes silent
         let deviceIndex = selectedDeviceIndex
         let mode = currentMode   // D4a: display mode derived from the current source (or default)
         queue.async {
+            self.resetAudioWatchdog()
             self.startOutputOnQueue(deviceIndex: deviceIndex, mode: mode)
         }
     }
@@ -1128,6 +1158,7 @@ final class DeckLinkService: ObservableObject {
     private func startOutputOnQueue(deviceIndex: Int, mode: OutputMode, recovery: Bool = false) {
         self.activeStart = (deviceIndex, mode)   // so an audio restart can replay it
         self.startGeneration &+= 1
+        self.armAudioWatchdog()
 
         // Arm the renderer's push convert (allocate v210 staging sized to the OUTPUT frame = the mode's
         // resolution; the source offscreen is the same size for a native file → 1:1, no scaling).
@@ -1281,6 +1312,13 @@ final class DeckLinkService: ObservableObject {
         let full = line + "restarting the whole output (once per output start)"
         SDIStartRecoveryStats.note(restarted: true, line: full)
         print(full)
+        restartWholeOutput(start, recovery: true, what: "silent-start recovery")
+    }
+
+    /// The whole output stopped and started again as a mode change does, with no black frame between: the silent-start recovery's
+    /// (§10.25) and the SDI audio watchdog's (fault (a)). On the queue. `recovery`: the new start is a silent-start recovery's and is
+    /// not recovered again. `what` names the restart in the line said if the start is dropped.
+    private func restartWholeOutput(_ start: (deviceIndex: Int, mode: OutputMode), recovery: Bool, what: String) {
         bridge.stopScheduledPlayback()
         renderer?.stopDeckLinkOutput()
         // The start waits half a second after the stop (§10.26). Back to back while playing, the recovery's start often threw its audio
@@ -1292,14 +1330,94 @@ final class DeckLinkService: ObservableObject {
         #if DEBUG
         if let ms = Double(ProcessInfo.processInfo.environment["MANIFOLD_SDI_RECOVERY_GAP_MS"] ?? "") { gap = ms / 1000 }   // test switch
         #endif
-        guard gap > 0 else { startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: true); return }
+        guard gap > 0 else { startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: recovery); return }
         let stopped = startGeneration
         queue.asyncAfter(deadline: .now() + gap) { [weak self] in
             guard let self, self.startGeneration == stopped, self.activeStart != nil else {
-                print("[SDI-AUDIO] the silent-start recovery's start dropped: the output stopped or restarted during its wait"); return
+                print("[SDI-AUDIO] the \(what)'s start dropped: the output stopped or restarted during its wait"); return
             }
-            self.startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: true)
+            self.startOutputOnQueue(deviceIndex: start.deviceIndex, mode: start.mode, recovery: recovery)
         }
+    }
+
+    // MARK: SDI audio watchdog (docs/SDI_AUDIO_NIGHT7.md, fault (a))
+
+    /// The timer, once, on the queue: it reads the card's callback count for the life of the service (nothing when no output runs).
+    private func armAudioWatchdog() {
+        guard audioWatchdogTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + Self.audioWatchdogInterval, repeating: Self.audioWatchdogInterval, leeway: .milliseconds(20))
+        t.setEventHandler { [weak self] in self?.audioWatchdogTick() }
+        t.resume()
+        audioWatchdogTimer = t
+    }
+
+    /// The operator stopped or started output: a new output session.
+    private func resetAudioWatchdog() {
+        audioWatchdog.reset()
+        audioWatchRecoveryPending = nil
+    }
+
+    /// Production code, like the renderer watchdog (`PacingRendererWatchdog`). While output runs with sound and the transport plays, a
+    /// callback count that has not moved for 3 s restarts the output, at most once per 60 s; a second stop within 60 s gives up for
+    /// the output session and tells the user. Each detection says which side stopped: a call in flight (entered > returned) is stuck
+    /// in a driver call, none in flight means the SDK stopped calling.
+    private func audioWatchdogTick() {
+        let h = bridge.audioHealth()
+        let running = h.running && activeStart != nil
+        if h.callbacksEntered != audioWatchLastEntered {
+            audioWatchLastEntered = h.callbacksEntered
+            audioWatchCompletionsAtMove = h.videoCompletions
+            if let since = audioWatchRecoveryPending, running, h.callbacksEntered > 0 {
+                audioWatchRecoveryPending = nil
+                PlaybackCounters.addSDIAudioRecovery()
+                print(String(format: "[SDI-AUDIO-RECOVER] sound back: the restarted output's audio callback runs (%llu callbacks, %.1f s after the restart)",
+                             h.callbacksEntered, h.nowHost - since))
+            }
+        }
+        let hasSound = running && h.audioEnabled && enabledAudioFormat != nil && (heldSignal == nil || heldCarriesSound)
+            && (sdiIsAudioDestination() || Self.sdiAudioBoth)
+        let playing = renderer?.isPausedProvider?() == false
+        let action = audioWatchdog.step(.init(outputRunning: running, hasSound: hasSound, playing: playing,
+                                              callbacks: h.callbacksEntered, now: h.nowHost))
+        switch action {
+        case .none:
+            return
+        case .recover(let stalled):
+            PlaybackCounters.addSDIAudioStop()
+            print("[SDI-AUDIO-RECOVER] the card's audio callback stopped: " + Self.audioStallState(h, stalled: stalled,
+                  completionsAtMove: audioWatchCompletionsAtMove) + " · restarting the whole output (at most once per "
+                  + String(format: "%.0f s)", SDIAudioWatchdog.retryWindow))
+            guard let start = activeStart else { return }
+            audioWatchRecoveryPending = h.nowHost
+            restartWholeOutput(start, recovery: false, what: "audio-callback recovery")
+        case .giveUp(let stalled, let since):
+            PlaybackCounters.addSDIAudioStop()
+            PlaybackCounters.addSDIAudioGaveUp()
+            audioWatchRecoveryPending = nil
+            print("[SDI-AUDIO-RECOVER] GAVE UP: the card's audio callback stopped again "
+                  + String(format: "%.1f s after the last restart", since) + ": "
+                  + Self.audioStallState(h, stalled: stalled, completionsAtMove: audioWatchCompletionsAtMove)
+                  + " · no more restarts until output is restarted; the user is told")
+            DispatchQueue.main.async { self.sdiSoundStopped = Self.sdiSoundStoppedMessage }
+        }
+    }
+
+    /// The detection line's state: callbacks, whether a call is in flight and for how long, buffered audio, the video callback.
+    static func audioStallState(_ h: DeckLinkAudioHealth, stalled: Double, completionsAtMove: UInt64) -> String {
+        let inFlight = h.callbacksEntered > h.callbacksReturned
+        let ago: (Double) -> String = { $0 > 0 ? String(format: "%.3f s ago", h.nowHost - $0) : "never" }
+        let flight = inFlight
+            ? String(format: "a call IN FLIGHT for %.3f s (stuck in the driver)", h.lastEnterHost > 0 ? h.nowHost - h.lastEnterHost : -1)
+            : "no call in flight (the SDK stopped calling)"
+        let video = h.videoCompletions > completionsAtMove
+            ? "still advancing (+\(h.videoCompletions - completionsAtMove) frames since the count last moved)"
+            : "NOT advancing"
+        return String(format: "no entry for %.1f s while playing with sound · callbacks entered %llu, returned %llu, ", stalled,
+                      h.callbacksEntered, h.callbacksReturned)
+            + flight + " · last entry " + ago(h.lastEnterHost) + ", last return " + ago(h.lastExitHost)
+            + " · audio buffered " + (h.audioBufferedKnown ? "\(h.audioBuffered)" : "unknown")
+            + " · video completions " + video
     }
 
     /// The silent-start recovery's wait between its stop and its start (§10.26).
@@ -1321,11 +1439,13 @@ final class DeckLinkService: ObservableObject {
         // The destination enum keeps whatever value it had and now has no authority over either path —
         // which is exactly why this call is unconditional and not guarded on `audioDestination == .sdi`.
         applyAudioRouting()
+        sdiSoundStopped = nil
         queue.async {
             self.bridge.stopScheduledPlayback(endingOnBlack: true)
             self.renderer?.stopDeckLinkOutput()
             self.enabledAudioFormat = nil
             self.activeStart = nil
+            self.resetAudioWatchdog()
             print("DeckLink D-real: output stopped")
         }
     }
