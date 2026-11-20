@@ -39,14 +39,42 @@
 #                      remade, how many were made while playing (written before the next Pause: must be 0), in the pause, or finished
 #                      after Play resumed; and holds / skips / late / dropped in two windows: ±WIN s around the press, and from the
 #                      Pause to WIN s after the last thumbnail was made (the next Play included). Those are inside the totals above too.
+#   0.9.5 GATE         the 0.9.5 release gate as written in Manifold-BUILD.md (Robbie, 2026-11-19, amended 2026-11-20), on its own line
+#                      after the GATE line above (the 0.9.3 rule, unchanged: other tools parse it). Every block run:
+#                      1. 0 freezes, 0 unrecovered events (as GATE: freezes, silent starts, renderer GAVE UP, silent-start recovery
+#                         dropped, SDI sound continuity);
+#                      2. 0 holds or skips for any cause except a renderer recovery: a hold or skip whose pull lies from the stall's start
+#                         (the attempt line's [CADENCE] host less its "no pump callback" time, − 0.05 s) to 0.5 s after the first pull
+#                         after "picture moving again" (night 7's rule, ab-check.py `causes`). A GAVE UP stall excuses nothing;
+#                      3. card drops: only the frame #0 start drop (the first completion after StartScheduledPlayback is `result 2 stream 0`
+#                         and it is the first Dropped line since that start; night 7's `card_drops`). Any other Dropped line fails. Card
+#                         late lines are reported. This reads the gate's named exception as excluding every other drop (night 7's reading);
+#                      4. B1, re-stated (Robbie, 2026-11-20): pacer missed deadlines ≤ 2, from the block's last "[PACER] stopped" line,
+#                         less those whose overrunning step is the post-seek first-frame render: a "[PRESENT-TIMING] miss" that overran
+#                         `perform`, a new-frame tick, a [TRANSPORT] seek ≤ 0.5 s before it and no [CADENCE-SWAP] between (night 7's
+#                         `post_seek_perform`; its deadlines are the next interval in periods less one). Without [PRESENT-TIMING] lines
+#                         (MANIFOLD_PRESENT_TIMING unset, as on a release soak) nothing can be subtracted: a block with ≤ 2 passes, a
+#                         block with more is UNDETERMINED (it may be post-seek renders the log cannot name), and so is the gate;
+#                      5. markers, on every block run with markers (the MARKERS line);
+#                      and in all: 6. at least 6 h, judged on wall time (block start → finish, from <label>.json), as 0.9.3 and 0.9.4 were
+#                         accepted (0.9.3: 6 h 07 min wall, 5.60 h playing); playing hours are printed beside it.
+#                      Checked beside it, not part of the verdict: the last "[DIAG] playback counters" line against the log (pacer missed
+#                      deadlines = [PACER] stopped; card holds while playing = the gate's holds; SDI audio stops = check 1's callback stops).
 #   rc-soak-report.py <dir> <label>...     (labels without .log)
-import collections, json, re, sys
+import bisect, collections, datetime, json, re, sys
 EXCL, STARTX, WRAP, WIN = 1.0, 20.0, 30, 10.0
 # SDI sound continuity (docs/SDI_AUDIO_NIGHT7.md). Missing counts are at 48 kHz, the soak fixtures' rate. Since 0.9.3 no SDI block had
 # more than ~5,100 missing in one second, more than 1 s in a row at MISS_RUN, or a run of over 2 "D3: frame" lines without "runs:".
 CB_RECOVER, CB_BACKSTOP = 10.0, 5
 MISS_RUN, MISS_BIG, MISS_STREAK = 4800, 24000, 3
 ST2_BOUND, ST2_MERGE = 1000.0, 10.0
+# The 0.9.5 gate's readings (night 7's ab-check.py, ~/Code/_scratch/manifold-pacerphase-ab6).
+B1_MAX, PS_WINDOW, GATE_HOURS = 2, 0.5, 6.0
+PTMISS = re.compile(r"\[PRESENT-TIMING\] miss · host (\S+) · tick (\S+) ms · next interval (\S+) ms \(P (\S+) ms\) · (\S+) tick · attempts: (.*?) · overran: (.+?) (\S+) ms")
+PACER_STOP = re.compile(r"\[PACER\] stopped .*missed deadlines (\d+)")
+COMPL = re.compile(r"\[CADENCE\] completion result (\d+) stream (\d+) ")
+DROPPED = re.compile(r"DeckLink D3: !! Dropped at frame (\d+)")
+DIAG_PC = re.compile(r"\[DIAG\] playback counters .*pacer missed deadlines (\d+) · card holds while playing (\d+) · .*SDI audio (\d+) stops?, (\d+) recovered")
 # The renderer watchdog's thresholds as built (RendererWatchdog.Thresholds.shipping), for the report's header and marks.
 WD_NEARMISS, WD_IN_STATE, WD_SILENCE, WD_OLD_SILENCE = 0.10, 0.15, 0.20, 0.5
 FRAME = {"1080p59.94": 1001 / 60000, "1080p23.98": 1001 / 24000, "2160p59.94": 1001 / 60000, "2160p23.98": 1001 / 24000,
@@ -58,6 +86,7 @@ def analyse(path, mode, length):
     playing = False; play_host = None; events = []; prev = None; first_host = None; host = 0.0; played = 0.0
     pending_recover = 0; silent = []; last_wrap = -1e9
     stalls = []; nearmisses = []; diag = None
+    seeks = []; swaps = []; ptmiss = []; pacer_stop = None; drops = []; comps = 0; first_comp = None; drops_since = 0; diag_pc = None
     snd = sdi_sound_tracker(); snd.f = f
     for ln, l in enumerate(open(path, errors="replace"), 1):
         snd.line(ln, l, host, events)
@@ -78,6 +107,7 @@ def analyse(path, mode, length):
                     else: holds.append(("skip", host, prev[2], pts, dslot, dn))
                 if dslot > 1: r["missed slots"] += dslot - 1
                 if dslot > 0: r["pulls while playing"] += 1
+            if stalls and stalls[-1].get("moved_line") and "moved_host" not in stalls[-1]: stalls[-1]["moved_host"] = host
             prev = cur; continue
         if l.startswith("[TRANSPORT] "):
             m = re.search(r" host (\S+)", l); h = float(m[1]) if m else host
@@ -86,7 +116,9 @@ def analyse(path, mode, length):
             elif w == "pause":
                 if playing and play_host: played += h - play_host
                 playing = False; events.append(h)
-            elif w in ("seek", "loop", "step", "shuttle"): events.append(h); r[w + "s"] += 1
+            elif w in ("seek", "loop", "step", "shuttle"):
+                events.append(h); r[w + "s"] += 1
+                if w == "seek": seeks.append(h)
             elif w == "output":   # an output stop pauses through the arbiter, with no pause line: the run ends here
                 if playing and play_host: played += h - play_host
                 playing = False; events.append(h); r["output steps"] += 1
@@ -102,7 +134,7 @@ def analyse(path, mode, length):
             r["renderer recoveries"] += 1
             m = re.search(r"first frame in (\d+) ms after the \S+, ([\d.]+) s after the stall began", l)
             if stalls and stalls[-1]["outcome"] == "open":
-                stalls[-1]["outcome"] = "recovered"
+                stalls[-1]["outcome"] = "recovered"; stalls[-1]["moved_line"] = ln
                 if m: stalls[-1]["first_ms"] = int(m[1]); stalls[-1]["hold_s"] = float(m[2])
         elif l.startswith("[RENDERER-RECOVER] REBUILD"):
             r["renderer rebuilds"] += 1
@@ -116,6 +148,8 @@ def analyse(path, mode, length):
             m = re.search(r"for (\d+) ms, cleared by itself", l)
             nearmisses.append(dict(line=ln, host=host, ms=int(m[1]) if m else None, past="past the recovery point" in l))
         elif l.startswith("[DIAG] playback counters"):
+            mp = DIAG_PC.search(l)
+            diag_pc = dict(pacer=int(mp[1]), card_holds=int(mp[2]), sdi_stops=int(mp[3]), sdi_recovered=int(mp[4])) if mp else "old format"
             m = re.search(r"renderer (\d+) stalls? \((\d+) recovered, (\d+) GAVE UP\), (\d+) re-arms?, (\d+) rebuilds?, (\d+) near-miss", l)
             diag = dict(stalls=int(m[1]), recovered=int(m[2]), gave_up=int(m[3]), rearms=int(m[4]), rebuilds=int(m[5]),
                         nearmisses=int(m[6])) if m else "old format"
@@ -137,7 +171,26 @@ def analyse(path, mode, length):
             stopped.append(dict(late_edges=g(r"late edges (\d+)"), missing=g(r"missing (-?\d+) samples"), relatches=g(r"re-latches (\d+)"),
                                 appended=g(r"edges appended by the card (\d+)")))
         elif l.startswith("DeckLink D3: !! DisplayedLate"): r["card late"] += 1
-        elif l.startswith("DeckLink D3: !! Dropped"): r["card dropped"] += 1
+        elif l.startswith("DeckLink D3: !! Dropped"):
+            r["card dropped"] += 1
+            m = DROPPED.match(l)
+            drops.append(dict(line=ln, frame=int(m[1]) if m else None, start_drop=comps == 1 and first_comp == ("2", "0") and drops_since == 0))
+            drops_since += 1
+        elif "StartScheduledPlayback(" in l: comps = 0; first_comp = None; drops_since = 0
+        elif l.startswith("[CADENCE] completion result"):
+            m = COMPL.match(l)
+            if m:
+                comps += 1
+                if comps == 1: first_comp = (m[1], m[2])
+        elif l.startswith("[CADENCE-SWAP] host "):
+            try: swaps.append(float(l.split()[2]))
+            except (IndexError, ValueError): pass
+        elif l.startswith("[PRESENT-TIMING] miss"):
+            m = PTMISS.match(l)
+            if m: ptmiss.append(dict(line=ln, host=float(m[1]), tick=float(m[2]), next=float(m[3]), P=float(m[4]), kind=m[5], step=m[7], ms=float(m[8])))
+        elif l.startswith("[PACER] stopped"):
+            m = PACER_STOP.search(l)
+            if m: pacer_stop = int(m[1])
         else:
             m = re.match(r"\[PLAYBACK-STATS\] t=\S+ presented=(\d+) dropped=(\d+) late=(\d+)", l)
             if m: r["window presented"] += int(m[1]); r["window dropped"] += int(m[2]); r["window late"] += int(m[3])
@@ -154,7 +207,68 @@ def analyse(path, mode, length):
         elif l.startswith("[TRANSPORT] pause") or l.startswith("[TRANSPORT] output"): playing = False; open_fz = None
     tot = {k: sum(s[k] for s in stopped) for k in ("late_edges", "missing", "relatches", "appended")}
     return dict(counts=dict(r), played_h=round(played / 3600, 3), freezes=fz, holds=holds, sdi_lines=dict(kinds), sdi_stopped=tot, silent=silent,
-                sdi_sound=snd.finish(host), stalls=stalls, nearmisses=nearmisses, diag=diag)
+                sdi_sound=snd.finish(host), stalls=stalls, nearmisses=nearmisses, diag=diag,
+                seeks=sorted(seeks), swaps=sorted(swaps), ptmiss=ptmiss, pacer_stop=pacer_stop, drops=drops, diag_pc=diag_pc)
+
+def post_seek_perform(miss, seeks, swaps):
+    """B1's re-statement (night 7's ab-check.py): overran `perform`, a new-frame tick, a seek ≤ PS_WINDOW s before, no swap between."""
+    if miss["step"] != "perform" or miss["kind"] != "new-frame": return None
+    j = bisect.bisect_left(seeks, miss["host"]) - 1
+    if j < 0 or miss["host"] - seeks[j] > PS_WINDOW: return None
+    k = bisect.bisect_right(swaps, seeks[j])
+    if k < len(swaps) and swaps[k] < miss["host"]: return None
+    return seeks[j]
+
+def miss_deadlines(miss): return max(1, round(miss["next"] / miss["P"]) - 1)
+
+def gate095_block(a, meta, unrec_block, markers_ok):
+    """The 0.9.5 gate's rows for one block (header). Returns (verdict PASS/FAIL/UNDETERMINED, [detail strings])."""
+    c = a["counts"]; out = []; v = "PASS"
+    def fail(): nonlocal v; v = "FAIL"
+    if a["freezes"] or unrec_block: fail()
+    out.append(f"freezes {len(a['freezes'])}, unrecovered {unrec_block}")
+    wins = [(st["host"] - st["silence"] - 0.05, st["moved_host"] + 0.5) for st in a["stalls"] if "moved_host" in st]
+    exc = [h for h in a["holds"] if any(lo <= h[1] <= hi for lo, hi in wins)]
+    bad = [h for h in a["holds"] if h not in exc]
+    if bad: fail()
+    out.append("holds/skips other than a renderer recovery " + (", ".join(f"{h[0]} at host {h[1]:.3f}" for h in bad) or "none")
+               + f"; in a renderer recovery {len(exc)}")
+    other = [d for d in a["drops"] if not d["start_drop"]]
+    if other: fail()
+    out.append(f"card dropped {len(a['drops'])} (frame #0 start drop: " + (", ".join(f"line {d['line']} frame {d['frame']}" for d in a["drops"] if d["start_drop"]) or "none")
+               + "; other: " + (", ".join(f"line {d['line']} frame {d['frame']}" for d in other) or "none") + f"), card late {c.get('card late', 0)} (reported)")
+    stop = a["pacer_stop"]
+    if stop is None:
+        out.append("B1: no [PACER] stopped line (UNDETERMINED)")
+        if v == "PASS": v = "UNDETERMINED"
+    else:
+        ps = [(m, s) for m in a["ptmiss"] if (s := post_seek_perform(m, a["seeks"], a["swaps"])) is not None]
+        sub = sum(miss_deadlines(m) for m, _ in ps); counted = stop - sub
+        detail = f"B1: counted {counted} = [PACER] stopped {stop} − post-seek perform {sub}"
+        if a["ptmiss"] or counted <= B1_MAX:
+            if not a["ptmiss"] and stop: detail += " (no [PRESENT-TIMING] lines: nothing subtracted)"
+            if counted > B1_MAX: fail()
+        else:
+            detail += f" — over {B1_MAX} with no [PRESENT-TIMING] lines: post-seek renders cannot be named (UNDETERMINED)"
+            if v == "PASS": v = "UNDETERMINED"
+        if ps: detail += "; post-seek perform misses (reported): " + ", ".join(f"line {m['line']} perform {m['ms']:.1f} ms, {miss_deadlines(m)} deadline(s), {1e3 * (m['host'] - s):.0f} ms after the seek" for m, s in ps)
+        out.append(detail)
+    if markers_ok is False: fail()
+    out.append("markers " + ("n/a (no markers)" if markers_ok is None else "PASS" if markers_ok else "FAIL"))
+    d = a["diag_pc"]; ss = a["sdi_sound"]
+    nh = len(a["holds"])
+    if d is None: out.append("[DIAG] check: no [DIAG] playback counters line")
+    elif d == "old format": out.append("[DIAG] check: older format, not checked")
+    else:
+        cb = len(ss["cb"]) if ss["applies"] else 0
+        same = d["pacer"] == stop and d["card_holds"] == nh and d["sdi_stops"] == cb
+        out.append(f"[DIAG] check: pacer {d['pacer']} vs {stop}, card holds {d['card_holds']} vs the gate's holds/skips {nh}, SDI audio stops "
+                   f"{d['sdi_stops']} vs callback stops {cb}: {'agree' if same else 'DIFFER'} (checked, not in the verdict)")
+    return v, out
+
+def wall_hours(meta):
+    try: return (datetime.datetime.fromisoformat(meta["finished"]) - datetime.datetime.fromisoformat(meta["began"])).total_seconds() / 3600
+    except (KeyError, ValueError, TypeError): return 0.0
 
 def renderer_report(a):
     """The picture-freeze watchdog's lines for one block: counts, each stall and near-miss, and the [DIAG] cross-check."""
@@ -298,9 +412,10 @@ def markers_report(meta, a, total):
         total["markers late/dropped near regenerate"] += sum(w1[2].values()) + sum(w2[2].values())
     if not ok: total["markers blocks failing"] += 1
     total["markers blocks"] += 1
+    return bool(ok)
 
 def main(d, labels):
-    total = collections.Counter(); allh = 0.0; gate = []
+    total = collections.Counter(); allh = 0.0; gate = []; g95 = []; wall = 0.0
     for lab in labels:
         try: meta = json.load(open(f"{d}/{lab}.json")); open(f"{d}/{lab}.log").close()
         except OSError: print(f"== {lab}: no record (the block stopped before its launch)"); continue
@@ -339,7 +454,10 @@ def main(d, labels):
                       f"{' (same incident as a missing-sound event)' if s2['merged'] else ' (UNRECOVERED event)'}")
         print(f"   late/dropped: card late {c.get('card late', 0)}, card dropped {c.get('card dropped', 0)}; window late {c.get('window late', 0)}, "
               f"dropped {c.get('window dropped', 0)} of {c.get('window presented', 0)} presented")
-        if "regens" in meta: markers_report(meta, a, total)
+        mk = markers_report(meta, a, total) if "regens" in meta else None
+        ub = (unrec_fz + unrec_ss + c.get("renderer GAVE UP", 0) + c.get("silent-start recovery dropped", 0) + a["sdi_sound"]["unrecovered"])
+        gv, gd = gate095_block(a, meta, ub, mk); g95.append((lab, gv)); wall += wall_hours(meta)
+        print(f"   0.9.5 gate: {gv} — " + " · ".join(gd))
         for k, v in c.items(): total[k] += v
         total["renderer stalls sooner than 0.5 s"] += sum(1 for st in a["stalls"] if st["silence"] < WD_OLD_SILENCE)
         total["freezes"] += len(a["freezes"]); total["unrecovered freezes"] += unrec_fz; total["holds"] += nh; total["skips"] += ns
@@ -366,6 +484,13 @@ def main(d, labels):
     print(f"== GATE (0 freezes, 0 unrecovered events, 0 holds/skips beyond expected cadence): {'PASS' if ok else 'FAIL'} — "
           f"freezes {total['freezes']}, unrecovered {unrec} (SDI sound {total['sdi sound unrecovered']}; recovered, allowed: "
           f"{total['sdi sound recovered']}), holds {total['holds']}, skips {total['skips']}")
+    vs = [v for _, v in g95]
+    hours_ok = wall >= GATE_HOURS
+    g = "FAIL" if "FAIL" in vs or not hours_ok or not vs else "UNDETERMINED" if "UNDETERMINED" in vs else "PASS"
+    print(f"== 0.9.5 GATE (Manifold-BUILD.md: 0 freezes, 0 unrecovered events, 0 holds for any cause except a renderer recovery, card drops "
+          f"only the frame #0 start drop, B1 pacer missed deadlines ≤ {B1_MAX} per block less post-seek perform, markers, at least "
+          f"{GATE_HOURS:.0f} h): {g} — blocks " + ", ".join(f"{lab} {v}" for lab, v in g95)
+          + f" · wall {wall:.2f} h ({'≥' if hours_ok else '<'} {GATE_HOURS:.0f} h), playing {allh:.2f} h")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3: sys.exit("rc-soak-report.py <dir> <label>...")
