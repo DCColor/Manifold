@@ -800,7 +800,7 @@ final class HLSAudioTap: @unchecked Sendable {
         lastRate = rate
         NSLog("[HLS-AUDIO] first buffer — %d frames · %d ch · %.0f Hz · pts=%.3fs. "
             + "Channel ROLES are empty and that is MEASURED, not missing: an HLS AVURLAsset vends "
-            + "no AVAssetTracks, the item's synthesised audio track carries NO AudioChannelLayout "
+            + "no AVAssetTracks, the item's synthesized audio track carries NO AudioChannelLayout "
             + "(checked at runtime), and the tap's ASBD has none either. Empty means the meters "
             + "show NUMBERS, which is this codebase's stated answer for a source that declares "
             + "nothing — never a layout inferred from the count.",

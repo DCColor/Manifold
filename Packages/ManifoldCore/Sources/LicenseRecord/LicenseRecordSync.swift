@@ -158,8 +158,8 @@ public enum LicenseRecordSync {
     }
 
     private static func keptLine(_ keys: [String], reason: String) -> String {
-        keys.isEmpty ? "no legacy licence values in the preferences plist"
-                     : "legacy licence values left in place in the preferences plist "
+        keys.isEmpty ? "no legacy license values in the preferences plist"
+                     : "legacy license values left in place in the preferences plist "
                        + "(\(keys.joined(separator: ", "))): \(reason)"
     }
 }

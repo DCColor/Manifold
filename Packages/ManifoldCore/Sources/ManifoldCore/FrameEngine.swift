@@ -4566,7 +4566,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
     public nonisolated static func setLiveAudioRatioPinned(_ pinned: Bool) {
         ratioPinLock.lock(); ratioPinned = pinned; ratioPinLock.unlock()
         NSLog("[RESAMPLE] ratio %@ from the next connect (debug switch)",
-              pinned ? "PINNED at 1.0 — step 3 behaviour" : "on the LOOP — step 4")
+              pinned ? "PINNED at 1.0 — step 3 behavior" : "on the LOOP — step 4")
     }
 
     /// Whether the CURRENT session runs pinned. NDI asks this to decide whether its own 10 ms
@@ -5093,7 +5093,7 @@ public final class FrameEngine: ObservableObject, PlaybackEngine {
                 if gateNote?.withoutPresentation == true {
                     NSLog("%@ ⚠️ NO FIRST PRESENTATION within %.1f s of the first mapping — the "
                         + "picture is not presenting. Anchored on the first-mapping rule (the "
-                        + "pre-4b behaviour) rather than hold audio hostage to a video fault.",
+                        + "pre-4b behavior) rather than hold audio hostage to a video fault.",
                           tag, Self.presentationWaitSeconds)
                 }
                 if gateNote?.withoutSenderReport == true {

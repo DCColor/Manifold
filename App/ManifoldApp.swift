@@ -489,7 +489,7 @@ enum DebugMenuGate {
         let viaPreference = UserDefaults.standard.bool(forKey: defaultsKey)
         guard viaEnvironment || viaPreference else { return false }
         NSLog("[DEBUG-MENU] enabled via %@ — the Debug menu is in the menu bar. It contains a tone "
-            + "generator that REPLACES programme audio and a recorder that writes .wav files to the "
+            + "generator that REPLACES program audio and a recorder that writes .wav files to the "
             + "Desktop. Turn it off with: defaults delete com.graviton.manifold %@",
               viaEnvironment ? "\(environmentVariable)=1" : "the \(defaultsKey) preference",
               defaultsKey)

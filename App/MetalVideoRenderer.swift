@@ -2109,7 +2109,7 @@ final class MetalVideoRenderer {
         guard displayTransform != mode else { return }
         displayTransform = mode
         print("[EDR] display transform → \(mode.logLabel)"
-            + (mode == .bypass ? "  ⚠️ DIAGNOSTIC — no colour management, never correct (§6.1)" : ""))
+            + (mode == .bypass ? "  ⚠️ DIAGNOSTIC — no color management, never correct (§6.1)" : ""))
         publishColorState()
         // The readout's Transform line comes from `referencePlan`, which exists only after the
         // publish above.
@@ -3769,14 +3769,14 @@ final class MetalVideoRenderer {
             // `presentsSinceFlush` counts since the source loaded, so every mode change printed the warning although
             // no frame had been drawn through a state that was not its own (docs/BUGS.md, measured 2026-10-30).
             if colorState.sourceEdge {
-                print("[EDR] colour state #\(colorState.seq) installed on the layer after \(presentsSinceFlush) present(s) "
+                print("[EDR] color state #\(colorState.seq) installed on the layer after \(presentsSinceFlush) present(s) "
                     + "of this source"
                     + (presentsSinceFlush == 0
                        ? " — BEFORE its first frame, as intended"
                        : " — ⚠️ AFTER a frame was already on screen; that frame was drawn through the"
-                         + " previous colour state. Re-rendering to repair it."))
+                         + " previous color state. Re-rendering to repair it."))
             } else {
-                print("[EDR] colour state #\(colorState.seq) installed on the layer (same source: mode, LUT, display, "
+                print("[EDR] color state #\(colorState.seq) installed on the layer (same source: mode, LUT, display, "
                     + "override or teardown); re-presenting the frame on screen under it")
             }
         }

@@ -610,15 +610,15 @@ final class SRTAudioDecoder {
             // labels describe the samples — but the mux's own words are not what is on the wire,
             // and that is worth a line rather than a silent divergence.
             NSLog("[SRT-AUDIO] ⚠️ layout: requested %@ and the converter reports %@ — the READ-BACK "
-                + "wins. The bars are labelled with what the decoder actually interleaves.",
+                + "wins. The bars are labeled with what the decoder actually interleaves.",
                   asked, gotRoles)
         } else if requestMade && requestStatus != noErr {
             NSLog("[SRT-AUDIO] layout: the request was refused; the converter's own output layout "
-                + "is %@ and the bars are labelled from that.", gotRoles)
+                + "is %@ and the bars are labeled from that.", gotRoles)
         } else if !requestMade {
             NSLog("[SRT-AUDIO] layout: the mux declared nothing usable, but the CONVERTER declares "
                 + "%@ — a decoder's statement about its own interleave, not an inference from the "
-                + "channel count. Labelling from it.", gotRoles)
+                + "channel count. Labeling from it.", gotRoles)
         } else {
             NSLog("[SRT-AUDIO] ✅ layout CONFIRMED: %@ — requested from the mux's declaration and "
                 + "read back from the converter, which is what makes it a fact about the samples "

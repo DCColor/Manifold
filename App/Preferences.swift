@@ -930,12 +930,12 @@ final class StreamBookmarkStore: ObservableObject {
             shared.noteSecretReadable()
             return StreamSecrets.dialURL(secret)
         case .failed(let status):
-            NSLog("[STREAMS] ⚠️ stored stream secret could not be read (%@) — not dialling without it",
+            NSLog("[STREAMS] ⚠️ stored stream secret could not be read (%@) — not dialing without it",
                   keychainStatusDescription(status))
             shared.noteSecretUnreadable(status)
             return nil
         case .missing, .unusable:
-            NSLog("[STREAMS] ⚠️ this stream's saved address is not in the Keychain — not dialling")
+            NSLog("[STREAMS] ⚠️ this stream's saved address is not in the Keychain — not dialing")
             shared.noteSecretMissing()
             return nil
         }

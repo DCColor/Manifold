@@ -371,10 +371,10 @@ public final class SenderReportLineFit: @unchecked Sendable {
         let text: String
         switch (a, v) {
         case let (a?, v?) where a == v:
-            text = "SDP CNAMEs match (\"\(a)\") — the sender declares these streams synchronisable"
+            text = "SDP CNAMEs match (\"\(a)\") — the sender declares these streams synchronizable"
         case let (a?, v?):
             text = "SDP CNAMEs DIFFER (audio \"\(a)\", video \"\(v)\") — RFC 3550 §6.5.1 does not "
-                + "declare these streams synchronisable. Applying the SR line anyway (§2.6 decision "
+                + "declare these streams synchronizable. Applying the SR line anyway (§2.6 decision "
                 + "b): it is used whenever both streams send SRs, and fallbacks key on the fit's own "
                 + "measured sd, never on the server"
         default:
@@ -691,7 +691,7 @@ public final class SenderReportLineFit: @unchecked Sendable {
         rejectedRun.removeAll()
         recentRejected.removeAll()
         events.append(String(format: "%@ ⚠️ Δ STEPPED — %d consecutive pairs %+.3f ms off the line "
-            + "(their own sd %.3f ms, bound %.3f ms). RE-LEVELLED: every stored pair shifted by the "
+            + "(their own sd %.3f ms, bound %.3f ms). RE-LEVELED: every stored pair shifted by the "
             + "step; the slope and its history are kept (%@)", tag, run.count, shift * 1e3,
             sd * 1e3, bound * 1e3,
             slopeInUse ? String(format: "slope %+.2f ppm IN USE", slopeFit * 1e6)

@@ -757,7 +757,7 @@ static const double kNDIAudioMaxPullSeconds = 0.250;
               frame.channel_stride_in_bytes > 0
                 ? (frame.channel_stride_in_bytes == tight
                      ? @"REPORTED and tightly packed — planes exact"
-                     : @"REPORTED and NOT tight — honoured, planes exact (a guess would have been wrong)")
+                     : @"REPORTED and NOT tight — honored, planes exact (a guess would have been wrong)")
                 : @"⚠️ NOT REPORTED (0) — falling back to no_samples*4",
               (frame.channel_stride_in_bytes == 0 && frames != want)
                 ? @" ⚠️⚠️ AND no_samples != want, so the fallback may be MISALIGNING every channel "

@@ -172,7 +172,7 @@ final class DNxHRVideoToolboxDecoder {
         }
         formatDescription = fd
         print("[DNX-VT] format description: " + (fileOwn != nil
-            ? "the file's own (ADHR/ACLR/colour as written)"
+            ? "the file's own (ADHR/ACLR/color as written)"
             : "synthesized (MXF-derived ADHR; the file carries none)"))
 
         // The file's resolved format: 10-bit biplanar video range at the source's own chroma

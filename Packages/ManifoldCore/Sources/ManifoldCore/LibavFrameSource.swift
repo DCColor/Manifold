@@ -335,7 +335,7 @@ public final class LibavFrameSource: @unchecked Sendable {
                 // Both land here, because both mean the same thing to the person watching: libav
                 // is about to decode this and the colour will be wrong.
                 print("[DNX-VT] DNxHR 4:4:4 with no usable plug-in decoder — libav will decode it "
-                    + "and the colour will be wrong. Telling the user.")
+                    + "and the color will be wrong. Telling the user.")
             }
         }
         // ── THE PRORES ROUTE: asked for by the engine, never decided here ──

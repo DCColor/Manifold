@@ -319,7 +319,7 @@ private final class ScopeModelStore: ObservableObject {
               let url = URL(string: raw) else { return }
         fired = true
         // The host only: a stream URL's path or query can carry a key (the `windowTitle` rule).
-        print("[DEBUG-DIAL] MANIFOLD_DEBUG_DIAL_URL set — dialling \(url.scheme ?? "?")://\(url.host ?? "?")/… in 2 s")
+        print("[DEBUG-DIAL] MANIFOLD_DEBUG_DIAL_URL set — dialing \(url.scheme ?? "?")://\(url.host ?? "?")/… in 2 s")
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { dial(url) }
     }
 }

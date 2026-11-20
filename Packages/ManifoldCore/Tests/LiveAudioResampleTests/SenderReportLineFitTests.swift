@@ -437,7 +437,7 @@ final class SenderReportLineFitTests: XCTestCase {
         XCTAssertEqual(snap.steps, 1)
         XCTAssertEqual(snap.unstableEpisodes, 0)
         XCTAssertEqual(sink.count(containing: "Δ STEPPED"), 1)
-        XCTAssertEqual(sink.count(containing: "RE-LEVELLED"), 1)
+        XCTAssertEqual(sink.count(containing: "RE-LEVELED"), 1)
         let p = s.videoPTS(600)
         XCTAssertEqual(fit.evaluate(atVideoTime: p)!.offset, s.trueOffset(atVideoPTS: p) + 0.080,
                        accuracy: 0.0005)
@@ -654,7 +654,7 @@ final class SenderReportLineFitTests: XCTestCase {
             XCTAssertEqual(slopeOutOfUseAfterStep, 0, label)
             XCTAssertEqual(snap.slopeFit, s.trueSlope, accuracy: noise > 0.001 ? 10e-6 : 0.2e-6, label)
             XCTAssertLessThanOrEqual((levelledBy ?? .infinity) - 900, 8, "re-levelled in 8 pairs: \(label)")
-            XCTAssertEqual(sink.count(containing: "RE-LEVELLED"), 1, label)
+            XCTAssertEqual(sink.count(containing: "RE-LEVELED"), 1, label)
             XCTAssertEqual(snap.state, .tracking, label)
         }
     }
@@ -684,7 +684,7 @@ final class SenderReportLineFitTests: XCTestCase {
         XCTAssertLessThanOrEqual((backOnLevelAt ?? .infinity) - 720, 10)
         XCTAssertEqual(fit.snapshot.state, .tracking)
         XCTAssertEqual(fit.snapshot.slopeFit, s.trueSlope, accuracy: 2e-6)
-        XCTAssertGreaterThanOrEqual(sink.count(containing: "RE-LEVELLED"), 1)
+        XCTAssertGreaterThanOrEqual(sink.count(containing: "RE-LEVELED"), 1)
     }
 
     // MARK: - Logging

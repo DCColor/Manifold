@@ -46,7 +46,7 @@ public enum MarkerLog {
 
     public static func imported(added: Int, duplicates: Int, occupied: Int = 0, outside: Int, unknownColors: Int,
                                 shiftHours: Int, dropFrameMismatch: Bool) -> String {
-        "[MARKERS] import edl added=\(added) duplicates=\(duplicates) occupied=\(occupied) outside=\(outside) unknown-colours=\(unknownColors) "
+        "[MARKERS] import edl added=\(added) duplicates=\(duplicates) occupied=\(occupied) outside=\(outside) unknown-colors=\(unknownColors) "
             + "shift=\(shiftHours)h df-mismatch=\(dropFrameMismatch ? "yes" : "no")"
     }
 

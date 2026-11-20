@@ -1904,7 +1904,7 @@ final class SRTFrameRouter {
             audioAxisFirstDivergenceLogged = true
             NSLog("[SRT-AUDIO] sample axis: after 1 buffer the source PTS is %+.4f ms from the "
                 + "sample-counted axis (%.0f samples). ZERO means the sender's PTS already tiled "
-                + "exactly; anything else is the sender's own quantisation, which the axis now "
+                + "exactly; anything else is the sender's own quantization, which the axis now "
                 + "absorbs.", divergence * 1000, divergence * sampleRate)
         }
 
@@ -2234,7 +2234,7 @@ final class SRTFrameRouter {
         return step == step.rounded()
             ? "a 1024-frame step is \(Int(step)) ticks, EXACT"
             : String(format: "a 1024-frame step is %.4f ticks, NOT EXACT — the sender's PTS is "
-                   + "quantised and cannot tile; the sample-counted axis absorbs it", step)
+                   + "quantized and cannot tile; the sample-counted axis absorbs it", step)
     }
 
     /// Retire the decode side. SESSION THREAD, from the same place the video decoder is torn down.
@@ -2370,7 +2370,7 @@ final class SRTFrameRouter {
         } else {
             NSLog("""
                   [SRT] startup anchor: CAP — no gap ≥ %.3fs in %.3fs / %d frame(s), so the \
-                  deferral hit its %@ bound and anchored on the frame in hand (today's behaviour, \
+                  deferral hit its %@ bound and anchored on the frame in hand (today's behavior, \
                   NOT a measured live edge). Nominal %@ — if the sender is genuinely faster than \
                   that, this is why. %@.
                   """, anchorGapThreshold, heldFor, deferredFrames,

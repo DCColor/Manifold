@@ -618,7 +618,7 @@ final class NDIService: ObservableObject {
         liveAudioSink = beginLiveAudio?(0)
         if liveAudioSink == nil {
             NSLog("[NDI-AUDIO] no engine seam wired — audio will be metered and SDI-capable but "
-                + "SILENT on the desktop (the pre-existing behaviour, not a new failure)")
+                + "SILENT on the desktop (the pre-existing behavior, not a new failure)")
         }
 
         // Pull AUDIO on its OWN thread, at real-time cadence, independent of the video tick.
@@ -1080,7 +1080,7 @@ final class NDIService: ObservableObject {
                                + "renderer queue bound %d",
                                delay * 1000,
                                deckLinkOwnsAudio ? "DeckLink owns audio — SDI unchanged, not held"
-                                                 : "desktop plays the programme — A/V 0 by construction",
+                                                 : "desktop plays the program — A/V 0 by construction",
                                lead * 1000, basis == .timecode ? "timecode skew" : "FrameSync audio depth",
                                depth * 1000,
                                renderer.maxQueuedOverride ?? renderer.defaultMaxQueued))
@@ -2032,7 +2032,7 @@ final class NDIService: ObservableObject {
         NSLog("%@", String(format: "[NDI-AUDIO] PTS continuity over %d buffer(s): mean residual "
                            + "%+.3f ms · mean |residual| %.3f ms (%.1f samples) · worst %+.3f ms "
                            + "(%.1f samples) · gaps %d / overlaps %d · mean |residual| after 90kHz "
-                           + "quantisation %.3f ms — buffer n+1 should start EXACTLY where n ended",
+                           + "quantization %.3f ms — buffer n+1 should start EXACTLY where n ended",
                            ptsSamples,
                            ptsResidualSum / Double(n) * 1000,
                            ptsResidualAbsSum / Double(n) * 1000,

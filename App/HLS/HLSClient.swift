@@ -1415,7 +1415,7 @@ final class HLSClient: ObservableObject {
         let declaredChanged = lastDeclaredCICP.map { $0 != codes } ?? true
         if declaredChanged {
             lastDeclaredCICP = codes
-            NSLog("%@", "[HLS] colour signalling: primaries=\(codes.0.map(String.init) ?? "—") "
+            NSLog("%@", "[HLS] color signaling: primaries=\(codes.0.map(String.init) ?? "—") "
                 + "transfer=\(codes.1.map(String.init) ?? "—") matrix=\(codes.2.map(String.init) ?? "—")"
                 + (codes == (1, 1, 1) ? " (Rec.709 SDR)" : ""))
         }
@@ -1478,7 +1478,7 @@ final class HLSClient: ObservableObject {
         let fourCC = Self.fourCC(CVPixelBufferGetPixelFormatType(buffer))
         let verdict = CVPixelBufferGetPixelFormatType(buffer) == Self.videoPixelFormat
             ? "— the app's decode contract, unchanged"
-            : "— ⚠️ NOT x420; the requested format was not honoured and a conversion is happening"
+            : "— ⚠️ NOT x420; the requested format was not honored and a conversion is happening"
         NSLog("%@", "[HLS] first frame \(width)×\(height) \(fourCC) \(verdict)")
     }
 

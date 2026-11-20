@@ -1269,8 +1269,8 @@ static void ManifoldWHEPLogSRRaw(BOOL isAudio, const ManifoldRTCPSenderReport *s
     // behaviour: changing it alters what we report about recovery, never what we do about it.
     NSLog(@"[WHEP-RTP] retransmit attribution: floor = RTT / %u. No MEDIA round trip is "
           @"obtainable on this transport (SR/DLSR runs the wrong way, libdatachannel has no RTCP "
-          @"XR, and SRTP replay kills a self-probe) — the only source is the signalling POST, "
-          @"always labelled COARSE. Without one there is NO floor and recoveries are counted as "
+          @"XR, and SRTP replay kills a self-probe) — the only source is the signaling POST, "
+          @"always labeled COARSE. Without one there is NO floor and recoveries are counted as "
           @"`unattributed` rather than guessed into a bucket.",
           policy.attributionFloorRttDivisor);
     NSLog(@"[WHEP-RTP] NACK control arm: %u per mille of declared-missing sequence numbers are "
@@ -1289,7 +1289,7 @@ static void ManifoldWHEPLogSRRaw(BOOL isAudio, const ManifoldRTCPSenderReport *s
     os_unfair_lock_lock(&_rtpLock);
     ManifoldH264DepacketizerSeedSignallingRttUs(_depacketizer, (uint64_t)(ms * 1000.0));
     os_unfair_lock_unlock(&_rtpLock);
-    NSLog(@"[WHEP-RTP] RTT seeded at %.1f ms from the signalling POST (COARSE — an HTTPS round "
+    NSLog(@"[WHEP-RTP] RTT seeded at %.1f ms from the signaling POST (COARSE — an HTTPS round "
           @"trip overstates the media path, and nothing better is obtainable — see "
           @"ManifoldRttSource).", ms);
 }
@@ -1472,8 +1472,8 @@ static void ManifoldWHEPLogSRRaw(BOOL isAudio, const ManifoldRTCPSenderReport *s
               vHaveCname ? [NSString stringWithFormat:@"\"%s\"", vCname] : @"(none)",
               (aHaveCname && vHaveCname)
                   ? (strcmp(aCname, vCname) == 0
-                        ? @"SAME — RFC 3550 declares these two streams synchronisable"
-                        : @"DIFFERENT — the sender does NOT declare these synchronisable")
+                        ? @"SAME — RFC 3550 declares these two streams synchronizable"
+                        : @"DIFFERENT — the sender does NOT declare these synchronizable")
                   : @"UNKNOWN (no SDES seen; reduced-size RTCP)");
     } else if (ready) {
         MD_SR_LOG(@"[WHEP-SR] a#%llu v#%llu  Δ = %+.3f ms  residual = %+.3f ms vs first pair",
@@ -1960,7 +1960,7 @@ static void ManifoldWHEPLogSRRaw(BOOL isAudio, const ManifoldRTCPSenderReport *s
     if (MD_DELTA(accessUnitsIncomplete) > 0) {
         NSLog(@"[WHEP-RTP]   SKIPPED %llu incomplete frame(s) (%llu interior, %llu head, %llu tail; "
               @"%llu would have been keyframes). NOT decode errors — these were never submitted. "
-              @"A frame missing a slice decodes to a visibly wrong band, which in a colour review "
+              @"A frame missing a slice decodes to a visibly wrong band, which in a color review "
               @"tool is worse than no frame at all, so the previous frame is held instead.",
               MD_DELTA(accessUnitsIncomplete), MD_DELTA(accessUnitsIncompleteInterior),
               MD_DELTA(accessUnitsIncompleteHead), MD_DELTA(accessUnitsIncompleteTail),

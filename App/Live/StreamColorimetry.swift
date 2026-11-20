@@ -162,10 +162,10 @@ struct StreamColorimetry: Equatable {
         let absent: String
         switch sps.reach {
         case .notAnSPS:            absent = "absent (not an SPS)"
-        case .malformed:           absent = "absent (SPS unreadable before the colour fields)"
+        case .malformed:           absent = "absent (SPS unreadable before the color fields)"
         case .noVUI:               absent = "absent (no VUI)"
         case .noVideoSignalType:   absent = "absent (no video_signal_type)"
-        case .noColourDescription: absent = "absent (no colour description)"
+        case .noColourDescription: absent = "absent (no color description)"
         case .colourDescription:   absent = "absent"
         }
         func axis(_ label: String, _ raw: Int?, _ a: Axis, _ name: (Int) -> String) -> String {

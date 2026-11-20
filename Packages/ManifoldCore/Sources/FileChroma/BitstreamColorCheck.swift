@@ -55,7 +55,7 @@ public struct BitstreamColorReport: Equatable, Sendable {
             verdict = "⚠️ DISAGREE on " + disagreements.map(\.axis.rawValue).joined(separator: ", ")
                     + " — container used, nothing changed"
         } else if bitstream.reach != .colourDescription {
-            verdict = "bitstream states no colour (\(bitstream.reach)) — nothing to compare"
+            verdict = "bitstream states no color (\(bitstream.reach)) — nothing to compare"
         } else {
             verdict = "agree"
         }

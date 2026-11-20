@@ -206,7 +206,7 @@ final class InterpretationLUTModel: ObservableObject {
                     NSLog("[LUT] loaded %@ — %@ · %@ (%@)", fileName, l.shapeDescription, mode.rawValue, timing)
                     if space != .auto { NSLog("[LUT] %@: output space %@, remembered by Recent LUTs", fileName, space.label) }
                     for line in l.ignored {
-                        NSLog("[LUT] %@: line %d, keyword “%@” not recognised — ignored", fileName, line.line, line.keyword)
+                        NSLog("[LUT] %@: line %d, keyword “%@” not recognized — ignored", fileName, line.line, line.keyword)
                     }
                     RecentLUTStore.shared.record(url, outputSpace: space)
                     self.push()

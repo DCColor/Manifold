@@ -323,7 +323,7 @@ final class WHEPFrameRouter {
         if audioReceiver != nil {
             NSLog("[WHEP-AUDIO] startAudio while a session is ALREADY RUNNING — a second answer "
                 + "without a teardown. Retiring the previous audio session and restarting; if this "
-                + "appears outside a renegotiation it is a signalling bug, not a recovery.")
+                + "appears outside a renegotiation it is a signaling bug, not a recovery.")
             stopAudio()
         }
         guard let begin = beginLiveAudio, let drift = liveAudioDrift else {
