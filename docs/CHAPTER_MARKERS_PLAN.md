@@ -1558,7 +1558,7 @@ recommended in §8. Not attended yet; not committed.
 
 ---
 
-## 15. Plan only: a "Chapter list" export (Robbie, 2026-11-17)
+## 15. A "Chapter list" export (Robbie, 2026-11-17; built 2026-11-20, §15.5)
 
 Not built. A fourth and fifth choice in Export Markers… (`App/Markers/MarkerFileIO.swift:18-25`, today Resolve EDL, CSV
 and Plain Text), written from **markers**, beside the existing three. It is the reverse of this plan's reader: Manifold's
@@ -1640,6 +1640,38 @@ markers out as chapters, for ffmpeg (and so Flip) or for a YouTube description.
   - a sentinel test that `MarkerLog` holds no title.
 - **About half a day.** No store or schema change.
 - Embedding the chapters into the media itself is **not** this. That is "Send markers to Flip" (`docs/ROADMAP_IDEAS.md`).
+
+### 15.5 As built (2026-11-20; not attended yet, not committed)
+
+- **D-C18 (Robbie, 2026-11-20): an unnamed marker's YouTube line shows the marker's timecode label** (`basis.label`, so
+  the file's start timecode and drop-frame, e.g. `00:01 01:00:01;01`). A name of spaces only counts as unnamed. The
+  notice counts them.
+- **YouTube's rules, checked 2026-11-20** against "Video Chapters", support.google.com/youtube/answer/9884579 (no
+  "last updated" date on the page): "Make sure that the first timestamp you list starts with 00:00"; "at least three
+  timestamps listed in ascending order"; "The minimum length for video chapters is 10 seconds." Confirmed: all three.
+  **UNKNOWN** (not on the page): whether `0:00` with one minute digit is accepted; how a chapter's length is measured (built:
+  to the next line in written seconds, the last to the video's exact end); any maximum count; any timestamp form beyond
+  the `00:00` example.
+- **Changed from §15.1: `MM:SS` under an hour** (`00:00`, `00:10`), the help page's own form, not `M:SS`. `H:MM:SS` from an
+  hour on is unchanged.
+- Every marker is written whatever the rules. A broken rule adds one sentence to the notice, counts only: "YouTube may not
+  show these chapters: no chapter at 00:00 (YouTube needs one); fewer than 3 chapters (YouTube needs 3); n chapters under
+  10 s (YouTube's minimum); n chapters share a second with the one before." Unconverted file markers are counted in both
+  formats' notices, as in Premiere's.
+- **Round trip (F-export):** frames and titles come back exactly through ffmpeg's `.mov` chapter track and `ChapterReader`
+  (AVFoundation agrees), escapes undone. **Finding: a ranged marker's `END` does not survive a gap.** The chapter track
+  has no gaps, so a ranged marker followed by a gap reads back running to the next marker (written 30–42, read 30–49).
+  Point markers' durations do round-trip. §15.2's "a re-read gives the same durations" holds only without gaps.
+- **Attended check fixes (Robbie, 2026-11-20):** on `resolve_chapters - prores.mov` a converted chapter carrying a stored
+  12 s duration overlapped the next chapter (`START=254 END=545`, next at 255). Each `END` is now
+  min(own end, next marker's `START`); the last keeps its own end, or the file's end for a point marker (`cappedEnds`
+  counted in the log). YouTube's length check measures line to line and the last line to the video's end, and never
+  uses a stored duration, so an overlap cannot lengthen a chapter there. Unconverted file markers (D-C5) add one notice
+  line to both formats: "n file markers not included: Convert them to include them."
+- Files: `Packages/ManifoldCore/Sources/Markers/MarkerChapterExport.swift` (new), `MarkerLog.swift` (`ffmeta`, `youtube`;
+  counts only), `App/Markers/MarkerFileIO.swift` (`Format` cases 4 and 5, appended). Tests:
+  `Tests/MarkersTests/MarkerChapterExportTests.swift` (12, golden files `Fixtures/chapters-*.ffmeta`, `Fixtures/youtube-*.txt`),
+  `ChapterReaderTests.testChapterListExportRoundTrip` on `Fixtures/r-export.mov` (made from `chapters-roundtrip-2398.ffmeta`).
 
 ---
 
