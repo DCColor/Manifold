@@ -1913,6 +1913,82 @@ and recovered on the next pull. C+ cannot cover it (`CARD_PULL_MARGIN.md` §18.3
 
 ---
 
+## ☐ FIX BUILT 2026-11-20, UNCOMMITTED, NOT YET SOAKED — 0.9.5 — the card's audio callback can stop mid-session: SDI picture without sound until output is restarted (night 7, found 2026-11-20)
+
+**What happened** (`SDI_AUDIO_NIGHT7.md` (a); `CARD_PULL_MARGIN.md` §20.4). Night 7, block 5 (59.94 SDI, ASUS, plain B, C+): at 04:51:38 the
+DeckLink SDK stopped calling `RenderAudioSamples`. The bridge logged `[SDI-AUDIO] !! no audio callback in the last 48 frames … callbacks
+16722, audio buffered 0` 4,139 times, to the end of the block (`n7-5994-sdi-bon-2.log:78876-865481`). The video callback ran every frame,
+with 0 late and 0 dropped, so SDI carried 55 min of picture without sound. 57 Plays and their seeks did not bring it back. The stop at the
+end of the block was normal.
+- **New.** It is the reverse of the silent start (`BLACKMAGIC_SILENT_START.md`: callbacks keep coming, the card consumes nothing). It is
+  not the default-output stall below (0 `[AUDIO-FLUSH]` lines, no device change in the unified log, the Mac's AVFoundation sound running).
+- **Cause UNKNOWN, card side.** Every lock the callback can take was taken by other threads after the stop, and all its loops are
+  bounded, so no call was stuck in our code. Either the SDK stopped calling, or a call was stuck in a driver call: the log cannot tell
+  which. System Events exited about 1 s before, but it exits in every block (6 of 6), and nothing in the app observes it.
+- **First occurrence.** 0 in every soak log since 0.9.3. The audio paths are unchanged from 0.9.4 to `e80dc2b`. No link to B or C+ found.
+
+**Fix, built 2026-11-20 (Robbie; Profile and Release build; not launched, not soaked):**
+- **Watchdog** (production code, like the renderer watchdog). `DeckLinkService.audioWatchdogTick`
+  (`App/DeckLink/DeckLinkService.swift:1365`) runs at 4 Hz on the service's queue, where every start and stop runs. While output runs
+  with sound (SDI audio enabled, SDI a destination) and the transport plays, a callback count that has not moved for 3 s logs
+  `[SDI-AUDIO-RECOVER] the card's audio callback stopped: …` with the state, then restarts the whole output. That is the silent-start
+  recovery's path, `restartWholeOutput` (`:1321`): stop, 0.5 s, start. At most once per 60 s. A second stop within 60 s logs
+  `[SDI-AUDIO-RECOVER] GAVE UP`, restarts nothing more until the operator stops or starts output, and shows a banner, "SDI sound stopped;
+  restart output" (`App/ContentView.swift:2745`). `[SDI-AUDIO-RECOVER] sound back` is logged when the restarted output's callbacks run.
+  The decision is a pure function, `SDIAudioWatchdog` (`Packages/ManifoldCore/Sources/OutputPacing/SDIAudioWatchdog.swift`), with 8
+  tests (`SDIAudioWatchdogTests`).
+- **Diagnostics.** The bridge stamps each entry into and each return from the callback (`App/DeckLink/DeckLinkBridge.mm:798`), and
+  `audioHealth` reads them (`:728`, `:3043`; `DeckLinkAudioHealth`, `DeckLinkBridge.h:120`). The detection line says entered and
+  returned, "a call IN FLIGHT for N s (stuck in the driver)" or "no call in flight (the SDK stopped calling)", the last entry and return,
+  the buffered audio, and whether video completions are still advancing. Export Diagnostics' PLAYBACK COUNTERS and the `[DIAG] playback
+  counters` line add "SDI audio stops" (stops, recovered by an output restart, given up; `App/PlaybackCounters.swift:47`, `:69`).
+- **Gate:** `rc-soak-report.py` check 1 (`Manifold-BUILD.md`, the 0.9.5 gate).
+
+**Open risk.** If a call is ever stuck inside the driver, the restart's `StopScheduledPlayback` / `SetAudioCallback(NULL)` may block the
+service's queue, and with it the quit's synchronous stop (`stopScheduledOutputForQuit`). Night 7's evidence is against that case: the
+block's own stop, 55 min after the stall, returned normally (`ScheduledPlaybackHasStopped 0.8 ms`). The next occurrence's detection
+line will say which case it was.
+
+**Still to do:** soak it. The stop has not been reproduced, so the restart path has been exercised only by the silent-start recovery.
+Ask Blackmagic with the next occurrence's in-flight answer (`BLACKMAGIC_SILENT_START.md`). Re-run 59.94 SDI blocks with plain B off, to
+separate B.
+
+---
+
+## ☐ FIX BUILT 2026-11-20, UNCOMMITTED, NOT YET SOAKED — 0.9.5 — after a seek while playing, Stage 2 could start the Mac sound on a stale picture line and SDI lost its sound until the next seek (night 7, found 2026-11-20)
+
+**What happened** (`SDI_AUDIO_NIGHT7.md` (b); `CARD_PULL_MARGIN.md` §20.4). Night 7, GOP block (1080p25 SDI), `n7-gop25-sdi-bon.log`: a seek
+to 978.16 s from 1165.03 s while playing (`:5674`) left two pre-seek frames moving on the card (slots 1448, 1449). The bridge confirmed a
+picture line on them (`picture line #2: φ 1106.96`, `:5693`). After the seek's renderer move, Stage 2's pending start takes any matched
+line (slot −1). It took this one, found the parked content 978.16 s "on the wire already" 186.6 s ago, and moved the Mac sound's clock
+186.6 s forward (`:5694`). The pump filled the renderer up to ≈1166.8 s, and the tap with it. The slip to the real line put the clock back
+(`+186718.57 ms off`, `:5904`), but the renderer still held 186 s of sound ahead of its clock, so it never asked for more. The tap stopped
+at 1166.805 s and SDI read nothing for 978–1043 s: 3.06 M samples, 65 s, through a Pause and a Play, until the seek at `:12970`. It was not
+a read limit: the reader was re-armed correctly at 978.16 s.
+- **Pre-existing.** The code dates from 0.9.3 (`31bca732`, `537a3516`). Stale latches after a seek while playing occur 2–8 times per GOP
+  or audio-only block since 0.9.3; night 7 is the only time two of those frames moved and formed a line. No link to B or C+.
+
+**Fix, built 2026-11-20 (Robbie; Profile and Release build; not launched, not soaked):**
+- **Refuse a line more than 1 s from the expected time.** `CardClockStage2Guard` (`Packages/ManifoldCore/Sources/CardClock/CardClockStage2Guard.swift`).
+  - **A start** (`FrameEngine.swift:1257`) whose wire time is more than 1 s from now, either way, is refused: one `[CARDLOCK] refused:
+    Stage 2 start on line #N …` line per line. Stage 2 stays pending, and the next line or the 1 s start timeout (start with the picture
+    clock) starts it. Every other late start in the soaks since 0.9.3 was at most 378.9 ms (44 starts).
+  - **A correction** (`:1367`) whose line puts the content on the wire more than 1 s from the picture clock is refused the same way,
+    `[CARDLOCK] refused: Stage 2 correction …`. The SDI picture trails the picture clock by the wire's lag, never by seconds. Night 7's
+    correct slip at `:5904` passes this check: its line put 978.33 s on the wire with the picture clock at about 978.4 s.
+- **Re-read after any jump over 1 s.** `soundClockMoved` (`:1307`). Any write that moves the Mac sound's clock more than 1 s reads the
+  sound again from the new time, through `readSoundAgain`, the re-read `daa09cb` uses for an automatic flush. It logs `[CARDLOCK] sound
+  clock moved … reading the sound again`, or "not re-read" with the reason (no file arm, or a renderer move in flight). It covers Stage 2's
+  start with the picture clock (`:1240`), the late start (`:1295`), the rate-mismatch re-anchor (`:1358`), the slip and coarse re-anchors
+  (`:1402`) and Stage 1b's re-anchor (`:1435`). A renderer queue left ahead of a moved clock can no longer stall the pump.
+- **Tests:** 7, from night 7's numbers (`CardClockStage2GuardTests`). Line #2 is refused (≈186.7 s late); line #3 starts 0.102 s late;
+  the soaks' largest legitimate late start passes; the bound is 1 s either way; the corrections and the re-read thresholds.
+- **Gate:** `rc-soak-report.py` checks 2 and 3 (`Manifold-BUILD.md`, the 0.9.5 gate).
+
+**Still to do:** soak a GOP block (stale latches are common there) and look for `[CARDLOCK] refused:` lines and re-reads.
+
+---
+
 ## ☐ LOW (not for 0.9.5): the first frame after a seek can take ~22 ms to render (`perform`), so the pacer misses one or two ticks at 59.94 (Robbie, 2026-11-20)
 
 **What happens.** The first render after a seek can take ~22 ms in `perform` (`performDisplayTick`'s work outside its present attempts,
@@ -4257,7 +4333,9 @@ recent frame at the vsync rather than per frame. Window only; SDI must stay as m
 - **Next:** about 10.5 h gate-off, with the freeze watch in the build, to settle whether it is pre-existing. **Done 2026-11-08: the first gate-off block froze after 0.28 h (§10.14). Pre-existing.**
 - **Not the Jump stall:** that stops the audio pump with the picture running.
 
-## ☐ OPEN 2026-11-07 — FIX BUILT 2026-11-10, VERIFIED UNATTENDED, UNCOMMITTED — PRE-EXISTING, IN 0.9.2 — a change of the system default output silences SDI audio until the session ends
+## ✅ FIXED 2026-11-10 in `daa09cb`, shipped in 0.9.3 — PRE-EXISTING, IN 0.9.2 — a change of the system default output silenced SDI audio until the session ended
+
+**Heading corrected 2026-11-20** (`SDI_AUDIO_NIGHT7.md`): it read "FIX BUILT 2026-11-10, VERIFIED UNATTENDED, UNCOMMITTED". The fix was committed as `daa09cb` ("fix(audio): resume feeding after an automatic renderer flush, so SDI audio survives a default-output change", 2026-11-10) and is in 0.9.3 and 0.9.4 (`FrameEngine.swift`, the `AVSampleBufferAudioRendererWasFlushedAutomatically` observer, `readSoundAgain`, `[AUDIO-FLUSH]`). Still open from below: the attended check that the Mac's own output follows the new default device.
 
 **In 1.0 scope (decided, Robbie, 2026-11-07), queued behind the card-lock picture freeze above.**
 

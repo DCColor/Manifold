@@ -248,6 +248,23 @@ the pins, but reproducing them takes real time.
           the end of the file, and a rate mismatch's cadence (`CardHoldFilter`). On nights 4 and 5's logs this rule gives exactly
           the gate's holds (night 5: 1, 0, 0, 0, 0, 0; night 4: 2, 1, 0, 0, 0), where the old counter read 40–165 per block. So
           on the soak, the `[DIAG] playback counters` line should equal the gate's hold count.
+        - **SDI sound continuity (Robbie, 2026-11-20, after night 7; `SDI_AUDIO_NIGHT7.md`; `BUGS.md`, the two SDI sound entries
+          of 2026-11-20):** `rc-soak-report.py` counts three more kinds of unrecovered event, on every block whose log has
+          `[SDI-AUDIO] runs path entered` (a file's sound on the card's timeline; other blocks read "n/a"):
+          1. **The card's audio callback stopped**, with no recovery within 10 s (`[SDI-AUDIO] !! no audio callback`, or more than 5
+             `DeckLink D3: frame` lines in a row with no `[SDI-AUDIO] runs:` line). A stop the SDI audio watchdog's output restart
+             recovered within 10 s is reported and allowed, like a renderer recovery. A watchdog give-up (`[SDI-AUDIO-RECOVER] GAVE
+             UP`) is unrecovered.
+          2. **Sustained missing sound while playing:** 3 judged `runs:` lines (one per second of stream) in a row each 4,800 missing
+             samples or more, or one of 24,000 or more; not judged with the gate silent or within 1 s after a Play, seek, loop or
+             step. Unrecovered if it ends only at a seek, a loop, a step, an output stop or the end of the log.
+          3. **A Stage 2 start more than 1 s into the SDI picture's run, or a re-anchor more than 1 s off**, unless check 2 found an
+             event within 10 s after it (the same incident, counted once).
+          On night 7's logs the gate is **FAIL, unrecovered 2** (block 5's callback stop, the GOP block's 62 s of missing sound); on
+          nights 5 and 6, and every earlier soak, the checks find nothing and the verdicts are unchanged. Since 0.9.3 no SDI block
+          had more than ~5,100 missing samples in one second, more than 1 s in a row at 4,800, or a run of more than 2 `D3: frame`
+          lines without a `runs:` line. Export Diagnostics' PLAYBACK COUNTERS and the `[DIAG] playback counters` line add "SDI audio
+          stops" (stops, recovered by an output restart, given up): on the soak these should match check 1.
         - **Kept from 0.9.4 (Robbie, 2026-11-19): the frame #0 start-drop exception.** Frame #0 of an output start reported
           Dropped, the known start-time drop (a card drop, not a hold; `BUGS.md`, "the first scheduled frame of an output start is
           now and then reported Dropped").

@@ -298,6 +298,11 @@ with `unrecovered 2`. Every earlier soak stays as it was (0 events by the scans 
 
 ## Corrections for a session in this repo (not made here)
 
+**Status 2026-11-20 (later):** made. The `BUGS.md` heading is corrected, (a) and (b) have entries with their fixes (built, uncommitted,
+not yet soaked), and the gate checks are in `rc-soak-report.py` and `Manifold-BUILD.md`. The fixes differ from the proposals above in two
+ways. The watchdog restarts after 3 s, not 1.6 s. Stage 2 refuses a line more than 1 s off in either direction, and refuses corrections
+too.
+
 - `BUGS.md` 4242 heading: "FIX BUILT 2026-11-10, VERIFIED UNATTENDED, UNCOMMITTED" → committed as `daa09cb` (2026-11-10), in 0.9.3. The
   "still to do" item (an attended check that the Mac's own output follows the new default device) is separate and is not answered here.
 - `CARD_PULL_MARGIN.md` §20.4, GOP paragraph: "Inference: after this seek, the tap kept its pre-seek read limit" → the cause is Stage 2
