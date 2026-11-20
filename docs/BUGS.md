@@ -2082,7 +2082,62 @@ not these. If a factor reproduces the misses, the present path under it needs it
 
 ---
 
-## ☐ AFTER 0.9.4: American English in log lines (Robbie, 2026-11-15)
+## ✅ FIXED 2026-11-20 (uncommitted): American English in log lines (Robbie, 2026-11-15)
+
+**Fixed:** all 42 log lines (43 words, 21 files) are American, and `check-us-spelling.py --logs` keeps them so.
+- **The words:** colour(s) → color(s), signalling → signaling, behaviour → behavior, synchronisable → synchronizable,
+  dialling → dialing, labelled/Labelling → labeled/Labeling, programme → program, honoured → honored,
+  quantisation/quantised → quantization/quantized, licence → license, recognised → recognized, synthesised → synthesized,
+  RE-LEVELLED → RE-LEVELED. Only the literal on each line changed. Identifiers stay as they are (`.colourDescription`,
+  `unrecognisedScheme`, the `colour` local in `[SCRUB-GEOM]`).
+- **The lines** (line numbers as of this fix):
+  - `App/ContentView.swift:322` `[DEBUG-DIAL] … dialing`
+  - `App/InterpretationLUT.swift:209` `[LUT] … not recognized`
+  - `App/ManifoldApp.swift:492` `[DEBUG-MENU] … REPLACES program audio`
+  - `App/MetalVideoRenderer.swift:2112` `no color management`; `:3772`, `:3779` `[EDR] color state #N installed …`;
+    `:3777` `previous color state`
+  - `App/Preferences.swift:933`, `:938` `[STREAMS] … not dialing`
+  - `App/HLS/HLSAudioTap.swift:803` `synthesized audio track`
+  - `App/HLS/HLSClient.swift:1418` `[HLS] color signaling:`; `:1481` `was not honored`
+  - `App/Live/StreamColorimetry.swift:165` `before the color fields`; `:168` `(no color description)`
+  - `App/NDI/NDIBridge.mm:760` `honored, planes exact`
+  - `App/NDI/NDIService.swift:621` `pre-existing behavior`; `:1083` `plays the program`; `:2035` `quantization`
+  - `App/SRT/SRTAudioDecoder.swift:613`, `:617` `bars are labeled`; `:621` `Labeling from it`
+  - `App/SRT/SRTFrameRouter.swift:1907` `quantization`; `:2237` `quantized and cannot tile`; `:2373` `today's behavior`
+  - `App/WebRTC/DataChannelBridge.m:1272`, `:1292` `the signaling POST`; `:1273` `labeled COARSE`; `:1475`, `:1476`
+    `synchronizable`; `:1963` `in a color review`
+  - `App/WebRTC/WHEPFrameRouter.swift:326` `a signaling bug`
+  - `FileChroma/BitstreamColorCheck.swift:58` `bitstream states no color`
+  - `LicenseRecord/LicenseRecordSync.swift:161`, `:162` `legacy license values`
+  - `LiveAudioResample/SenderReportLineFit.swift:374`, `:377` `synchronizable`; `:694` `RE-LEVELED`
+  - `ManifoldCore/DNxHRVideoToolboxDecoder.swift:175` `ACLR/color as written`
+  - `ManifoldCore/FrameEngine.swift:4569` `step 3 behavior`; `:5096` `pre-4b behavior`
+  - `ManifoldCore/LibavFrameSource.swift:338` `the color will be wrong`
+  - `Markers/MarkerLog.swift:49` `[MARKERS] import edl … unknown-colors=`
+- **Matchers changed (all of them):** `SenderReportLineFitTests.swift:440`, `:657`, `:687` count `RE-LEVELED`. No other
+  matcher matched any changed text. Searched: `Packages/*/Tests`, everything under `scripts/` (including `rc-soak.py`,
+  `rc-soak-report.py`, `rc-soak-ax.swift`, `soak/`, `decklink-loopback/`), the docs, regex forms (`colou?r`, `[sz]`), and
+  the scratch soak folders `~/Code/_scratch/manifold-pacerphase-ab{,3,4,5,6}` (`ab-check.py`, `ab-check-20261117.py`,
+  `soak.sh`, `common.sh`). The scratch scripts' only hit is `licence_prompts_denied`, the JSON key `rc-soak.py` writes,
+  which is not app log text and did not change. Doc mentions of the old text (`[HLS] colour signalling`, `[EDR] colour
+  state`, …) are in FIXED or SHIPPED entries, quoting past logs, and were left as recorded. Older logs keep the old
+  spellings: a search over logs from before this fix needs the old text.
+- **`check-us-spelling.py`:** removed the 9 `ALLOW` entries whose text is now American (`StreamColorimetry` ×2,
+  `SRTFrameRouter` quantised, `HLSClient` honoured, `DataChannelBridge` and `SenderReportLineFit` synchronisable,
+  `RE-LEVELLED`, `LicenseRecordSync`, `BitstreamColorCheck`). `--logs` scans exactly the text the default run skips;
+  a clock "tick" passes in both modes. `release-mac.sh`'s preflight runs `--logs` after the default run and fails the
+  release on a finding (`release-mac.sh:208-225`). Fix a finding together with every matcher of the old text.
+- **Checks:** `--logs` clean; run over a copy of HEAD it reports the 31 words not covered by ALLOW (the other 12 lines fall
+  to the default run once their ALLOW entries are gone). Profile build into `.build-cc` succeeded. `swift test` over
+  SenderReportLineFit, LicenseRecord, BitstreamColorCheck and Markers: 233 passed, 0 failed. `rc-soak-report.py` on night
+  7's six logs (`manifold-pacerphase-ab6`, `n7-*`) before and after: byte-identical output.
+- **Found and fixed:** the default run failed at HEAD, before this change, with 10 "tick" findings (clock ticks, American)
+  in `App/PresentTimingLog.swift`, `App/CardPullPhaseLog.swift:241` and `App/PlaybackCounters.swift:64`, from `d804fb8` and
+  `75b2761`. Fixed by narrowing the rule, not by ALLOW: "tick" is flagged only in its British checkbox sense (`TICK_UI`:
+  "tick the box", "tick only if", "is ticked", "ticked by default"; `untick*` always), and every run first checks the rules
+  against `SELF_CHECK_FAIL` / `SELF_CHECK_PASS`, exiting 2 if any string is judged wrong. The 10 strings are in the pass list.
+
+**The original entry:**
 
 `fbb735a` made every user-facing string American, and `scripts/check-us-spelling.py` now runs in `release-mac.sh`'s
 preflight and fails the release on a finding. **Log text is out of the check's scope on purpose**: a literal inside a log call
