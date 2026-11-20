@@ -5,7 +5,15 @@
 #                      difference of the pull's slot number #N; 1 in steady state). Fewer is a hold, more a skip. Not counted: pulls
 #                      within EXCL s after a Play, a seek or a loop toggle (the transport's own jump), the loop's wrap at the end of the
 #                      file, and the first STARTX s of the launch.
-#   renderer           [RENDERER-RECOVER] attempts, recovered ("picture moving again"), rebuilds, GAVE UP; [RENDERER-NEARMISS]
+#   renderer           the picture-freeze watchdog (docs/PICTURE_FREEZE_AUDIT.md): stalls (an "attempt 1" line; one per episode however
+#                      many re-arms), re-arm attempts, recovered ("picture moving again"), rebuilds, GAVE UP; [RENDERER-NEARMISS]. Each stall
+#                      and near-miss is listed per block with its line, time in the state, silence, outcome and hold. Since 0.9.5 the
+#                      watchdog recovers at WD_IN_STATE s in the state with no pump callback for WD_SILENCE s (was 0.5 s); a near-miss is a
+#                      state over WD_NEARMISS s that cleared by itself. A stall taken with under WD_OLD_SILENCE s of silence is marked
+#                      "sooner than the old 0.5 s wait": a recovery the old build would not yet have made, so the one to read if the
+#                      shorter wait ever recovers a state that would have cleared. Any stall in a soak is unexpected (none in 15.7 h of
+#                      release soaks); a GAVE UP is unrecovered. The last "[DIAG] playback counters" line's renderer counts are checked
+#                      against the log's.
 #   silent starts      "[SDI-AUDIO] !! output start" lines other than "started off its picture" (the §10.24 flush restart, counted on
 #                      its own); recovered when the whole-output restart's start then logs "started with its picture". A "NOT restarted"
 #                      line, or a restart that never starts with sound, is unrecovered. The frames held around the loop's wrap (a seek)
@@ -39,6 +47,8 @@ EXCL, STARTX, WRAP, WIN = 1.0, 20.0, 30, 10.0
 CB_RECOVER, CB_BACKSTOP = 10.0, 5
 MISS_RUN, MISS_BIG, MISS_STREAK = 4800, 24000, 3
 ST2_BOUND, ST2_MERGE = 1000.0, 10.0
+# The renderer watchdog's thresholds as built (RendererWatchdog.Thresholds.shipping), for the report's header and marks.
+WD_NEARMISS, WD_IN_STATE, WD_SILENCE, WD_OLD_SILENCE = 0.10, 0.15, 0.20, 0.5
 FRAME = {"1080p59.94": 1001 / 60000, "1080p23.98": 1001 / 24000, "2160p59.94": 1001 / 60000, "2160p23.98": 1001 / 24000,
          "1080p25": 1 / 25, "2160p25": 1 / 25}
 
@@ -47,6 +57,7 @@ def analyse(path, mode, length):
     sdi_sound_tracker.f = f
     playing = False; play_host = None; events = []; prev = None; first_host = None; host = 0.0; played = 0.0
     pending_recover = 0; silent = []; last_wrap = -1e9
+    stalls = []; nearmisses = []; diag = None
     snd = sdi_sound_tracker(); snd.f = f
     for ln, l in enumerate(open(path, errors="replace"), 1):
         snd.line(ln, l, host, events)
@@ -80,11 +91,34 @@ def analyse(path, mode, length):
                 if playing and play_host: played += h - play_host
                 playing = False; events.append(h); r["output steps"] += 1
             continue
-        if l.startswith("[RENDERER-RECOVER] attempt"): r["renderer recovery attempts"] += 1
-        elif l.startswith("[RENDERER-RECOVER] picture moving again"): r["renderer recoveries"] += 1
-        elif l.startswith("[RENDERER-RECOVER] REBUILD"): r["renderer rebuilds"] += 1
-        elif l.startswith("[RENDERER-RECOVER] GAVE UP"): r["renderer GAVE UP"] += 1
-        elif l.startswith("[RENDERER-NEARMISS]"): r["renderer near-misses"] += 1
+        if l.startswith("[RENDERER-RECOVER] attempt"):
+            r["renderer recovery attempts"] += 1
+            m = re.match(r"\[RENDERER-RECOVER\] attempt (\d+):.*?in the state ([\d.]+) s, no pump callback for ([\d.]+) s", l)
+            if m and int(m[1]) == 1:
+                r["renderer stalls"] += 1
+                stalls.append(dict(line=ln, host=host, in_state=float(m[2]), silence=float(m[3]), attempts=1, rebuilt=False, outcome="open"))
+            elif m and stalls: stalls[-1]["attempts"] = int(m[1])
+        elif l.startswith("[RENDERER-RECOVER] picture moving again"):
+            r["renderer recoveries"] += 1
+            m = re.search(r"first frame in (\d+) ms after the \S+, ([\d.]+) s after the stall began", l)
+            if stalls and stalls[-1]["outcome"] == "open":
+                stalls[-1]["outcome"] = "recovered"
+                if m: stalls[-1]["first_ms"] = int(m[1]); stalls[-1]["hold_s"] = float(m[2])
+        elif l.startswith("[RENDERER-RECOVER] REBUILD"):
+            r["renderer rebuilds"] += 1
+            if stalls: stalls[-1]["rebuilt"] = True
+        elif l.startswith("[RENDERER-RECOVER] GAVE UP"):
+            r["renderer GAVE UP"] += 1
+            if stalls: stalls[-1]["outcome"] = "GAVE UP"
+        elif l.startswith("[RENDERER-RECOVER] DISABLED"): r["renderer would recover (recovery off)"] += 1
+        elif l.startswith("[RENDERER-NEARMISS]"):
+            r["renderer near-misses"] += 1
+            m = re.search(r"for (\d+) ms, cleared by itself", l)
+            nearmisses.append(dict(line=ln, host=host, ms=int(m[1]) if m else None, past="past the recovery point" in l))
+        elif l.startswith("[DIAG] playback counters"):
+            m = re.search(r"renderer (\d+) stalls? \((\d+) recovered, (\d+) GAVE UP\), (\d+) re-arms?, (\d+) rebuilds?, (\d+) near-miss", l)
+            diag = dict(stalls=int(m[1]), recovered=int(m[2]), gave_up=int(m[3]), rearms=int(m[4]), rebuilds=int(m[5]),
+                        nearmisses=int(m[6])) if m else "old format"
         elif l.startswith("DeckLink: output start —"): r["output starts"] += 1
         elif l.startswith("[SDI-AUDIO] output start: the card's sound started with its picture"):
             r["starts with sound"] += 1
@@ -120,7 +154,32 @@ def analyse(path, mode, length):
         elif l.startswith("[TRANSPORT] pause") or l.startswith("[TRANSPORT] output"): playing = False; open_fz = None
     tot = {k: sum(s[k] for s in stopped) for k in ("late_edges", "missing", "relatches", "appended")}
     return dict(counts=dict(r), played_h=round(played / 3600, 3), freezes=fz, holds=holds, sdi_lines=dict(kinds), sdi_stopped=tot, silent=silent,
-                sdi_sound=snd.finish(host))
+                sdi_sound=snd.finish(host), stalls=stalls, nearmisses=nearmisses, diag=diag)
+
+def renderer_report(a):
+    """The picture-freeze watchdog's lines for one block: counts, each stall and near-miss, and the [DIAG] cross-check."""
+    c = a["counts"]
+    print(f"   renderer: stalls {c.get('renderer stalls', 0)} (recovered {c.get('renderer recoveries', 0)}, GAVE UP {c.get('renderer GAVE UP', 0)}), "
+          f"re-arm attempts {c.get('renderer recovery attempts', 0)}, rebuilds {c.get('renderer rebuilds', 0)}, near-misses "
+          f"{c.get('renderer near-misses', 0)}" + (f", would recover (recovery off) {c['renderer would recover (recovery off)']}"
+                                                   if c.get("renderer would recover (recovery off)") else ""))
+    for st in a["stalls"]:
+        sooner = st["silence"] < WD_OLD_SILENCE
+        print(f"     stall at line {st['line']} (host {st['host']:.3f}): in the state {st['in_state']:.3f} s, no callback {st['silence']:.3f} s"
+              f"{' (sooner than the old 0.5 s wait)' if sooner else ''}; {st['attempts']} re-arm(s){', rebuilt' if st['rebuilt'] else ''}; "
+              f"{st['outcome']}" + (f", picture moving {st['hold_s']:.3f} s after the stall began, first frame {st['first_ms']} ms after the "
+                                    f"last step" if "hold_s" in st else "") + "  !! UNEXPECTED")
+    for nm in a["nearmisses"]:
+        print(f"     near-miss at line {nm['line']} (host {nm['host']:.3f}): {nm['ms']} ms, cleared by itself"
+              f"{' (past the recovery point; recovery off)' if nm['past'] else ''}")
+    d = a["diag"]
+    if d == "old format":
+        print("   renderer [DIAG] line: older format (recoveries counted as attempts), not checked")
+    elif d:
+        log = dict(stalls=c.get("renderer stalls", 0), recovered=c.get("renderer recoveries", 0), gave_up=c.get("renderer GAVE UP", 0),
+                   rearms=c.get("renderer recovery attempts", 0), rebuilds=c.get("renderer rebuilds", 0), nearmisses=c.get("renderer near-misses", 0))
+        same = all(d[k] == log[k] for k in d)
+        print(f"   renderer [DIAG] line (last one): {d}; {'matches the log' if same else 'DIFFERS from the log ' + str(log) + ' (a stall after the last output stop is not in it)'}")
 
 class sdi_sound_tracker:
     """The three SDI sound continuity checks (header). Fed every line before analyse() reads it, with the newest [CADENCE] host and the
@@ -257,8 +316,7 @@ def main(d, labels):
         print(f"   freezes {len(a['freezes'])} (unrecovered {unrec_fz}); holds {nh}, skips {ns}")
         for h in a["holds"][:20]: print(f"     {h[0]} at host {h[1]:.3f}: pts {h[2]:.6f} → {h[3]:.6f}, slots +{h[4]}, frames {h[5]:+d}")
         for z in a["freezes"]: print(f"     freeze at host {z['host']:.3f}, pts {z['pts']}, recovered after {z['recovered_after_s']} s")
-        print(f"   renderer: attempts {c.get('renderer recovery attempts', 0)}, recovered {c.get('renderer recoveries', 0)}, rebuilds "
-              f"{c.get('renderer rebuilds', 0)}, GAVE UP {c.get('renderer GAVE UP', 0)}, near-misses {c.get('renderer near-misses', 0)}")
+        renderer_report(a)
         print(f"   output starts {c.get('output starts', 0)}, starts with sound {c.get('starts with sound', 0)}, silent starts {len(a['silent'])} "
               f"(recovered {sum(s['recovered'] for s in a['silent'])}, unrecovered {unrec_ss})")
         print(f"   SDI bridge: !! lines {a['sdi_lines'] or 'none'}; stopped totals {a['sdi_stopped']}")
@@ -283,12 +341,18 @@ def main(d, labels):
               f"dropped {c.get('window dropped', 0)} of {c.get('window presented', 0)} presented")
         if "regens" in meta: markers_report(meta, a, total)
         for k, v in c.items(): total[k] += v
+        total["renderer stalls sooner than 0.5 s"] += sum(1 for st in a["stalls"] if st["silence"] < WD_OLD_SILENCE)
         total["freezes"] += len(a["freezes"]); total["unrecovered freezes"] += unrec_fz; total["holds"] += nh; total["skips"] += ns
         total["silent starts"] += len(a["silent"]); total["unrecovered silent starts"] += unrec_ss
         for k, v in a["sdi_stopped"].items(): total["sdi " + k] += v
         total["sdi sound unrecovered"] += a["sdi_sound"]["unrecovered"]; total["sdi sound recovered"] += a["sdi_sound"]["recovered"]
         for k, v in a["sdi_lines"].items(): total["sdi !! " + k] += v
     print(f"== TOTAL: {allh:.2f} h played over {len(labels)} blocks")
+    print(f"== RENDERER WATCHDOG (recovers at {WD_IN_STATE * 1e3:.0f} ms in the state with no callback for {WD_SILENCE * 1e3:.0f} ms; "
+          f"near-miss over {WD_NEARMISS * 1e3:.0f} ms): stalls {total['renderer stalls']} (recovered {total['renderer recoveries']}, "
+          f"GAVE UP {total['renderer GAVE UP']}), sooner than the old 0.5 s wait {total['renderer stalls sooner than 0.5 s']}, "
+          f"near-misses {total['renderer near-misses']}" + ("  !! UNEXPECTED: read each stall above" if total["renderer stalls"]
+                                                            or total["renderer near-misses"] else ""))
     for k in sorted(total): print(f"   {k}: {total[k]}")
     unrec = (total["unrecovered freezes"] + total["unrecovered silent starts"] + total["renderer GAVE UP"] + total["silent-start recovery dropped"]
              + total["sdi sound unrecovered"])
