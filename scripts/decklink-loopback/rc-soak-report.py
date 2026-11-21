@@ -60,6 +60,10 @@
 #                         accepted (0.9.3: 6 h 07 min wall, 5.60 h playing); playing hours are printed beside it.
 #                      Checked beside it, not part of the verdict: the last "[DIAG] playback counters" line against the log (pacer missed
 #                      deadlines = [PACER] stopped; card holds while playing = the gate's holds; SDI audio stops = check 1's callback stops).
+#   zoom.us            recorded only, in no verdict (Robbie, 2026-11-21): the soak harness's zoom.us watch writes each zoom.us process's
+#                      appearance and disappearance (time, PID, process name) to <dir>/rig.log; listed per block (running at the block's
+#                      start, and every event from its start to its finish) and in a ZOOM.US line. A rig.log with no watch lines reads
+#                      "not recorded" (the harness before 2026-11-21 stopped the night instead).
 #   rc-soak-report.py <dir> <label>...     (labels without .log)
 import bisect, collections, datetime, json, re, sys
 EXCL, STARTX, WRAP, WIN = 1.0, 20.0, 30, 10.0
@@ -414,8 +418,36 @@ def markers_report(meta, a, total):
     total["markers blocks"] += 1
     return bool(ok)
 
+ZOOM_EV = re.compile(r"zoom\.us watch: (appeared|disappeared|present at start) pid (\d+) · (.+?) · at (\S+)\s*$")
+def zoom_events(d):
+    """The harness's zoom.us watch lines in <dir>/rig.log: (watched, [(time, kind, pid, name)]). Recorded only."""
+    try: lines = open(f"{d}/rig.log", errors="replace").read().splitlines()
+    except OSError: return False, []
+    ev = []
+    for l in lines:
+        m = ZOOM_EV.search(l)
+        if m:
+            try: ev.append((datetime.datetime.fromisoformat(m[4]), m[1], int(m[2]), m[3]))
+            except ValueError: pass
+    return any("zoom.us watch started" in l for l in lines), ev
+
+def zoom_block(meta, watched, ev):
+    if not watched: return "   zoom.us: not recorded (no zoom.us watch in rig.log)"
+    try: b, f = datetime.datetime.fromisoformat(meta["began"]), datetime.datetime.fromisoformat(meta["finished"])
+    except (KeyError, TypeError, ValueError): return "   zoom.us: block start or finish unknown, not placed"
+    alive = {}
+    for t, k, pid, name in ev:
+        if t >= b: break
+        if k == "disappeared": alive.pop(pid, None)
+        else: alive[pid] = (name, t)
+    inside = [e for e in ev if b <= e[0] <= f]
+    parts = [f"running at the start: " + (", ".join(f"pid {p} {n} (since {t:%H:%M:%S})" for p, (n, t) in alive.items()) or "none")]
+    parts.append("events in the block: " + (", ".join(f"{t:%H:%M:%S} {k} pid {p} {n}" for t, k, p, n in inside) or "none"))
+    return "   zoom.us (recorded only): " + " · ".join(parts)
+
 def main(d, labels):
     total = collections.Counter(); allh = 0.0; gate = []; g95 = []; wall = 0.0
+    zwatched, zev = zoom_events(d); zspans = []
     for lab in labels:
         try: meta = json.load(open(f"{d}/{lab}.json")); open(f"{d}/{lab}.log").close()
         except OSError: print(f"== {lab}: no record (the block stopped before its launch)"); continue
@@ -454,6 +486,9 @@ def main(d, labels):
                       f"{' (same incident as a missing-sound event)' if s2['merged'] else ' (UNRECOVERED event)'}")
         print(f"   late/dropped: card late {c.get('card late', 0)}, card dropped {c.get('card dropped', 0)}; window late {c.get('window late', 0)}, "
               f"dropped {c.get('window dropped', 0)} of {c.get('window presented', 0)} presented")
+        print(zoom_block(meta, zwatched, zev))
+        try: zspans.append((datetime.datetime.fromisoformat(meta["began"]), datetime.datetime.fromisoformat(meta["finished"])))
+        except (KeyError, TypeError, ValueError): pass
         mk = markers_report(meta, a, total) if "regens" in meta else None
         ub = (unrec_fz + unrec_ss + c.get("renderer GAVE UP", 0) + c.get("silent-start recovery dropped", 0) + a["sdi_sound"]["unrecovered"])
         gv, gd = gate095_block(a, meta, ub, mk); g95.append((lab, gv)); wall += wall_hours(meta)
@@ -466,6 +501,13 @@ def main(d, labels):
         total["sdi sound unrecovered"] += a["sdi_sound"]["unrecovered"]; total["sdi sound recovered"] += a["sdi_sound"]["recovered"]
         for k, v in a["sdi_lines"].items(): total["sdi !! " + k] += v
     print(f"== TOTAL: {allh:.2f} h played over {len(labels)} blocks")
+    if not zwatched:
+        print("== ZOOM.US (recorded only, in no verdict): not recorded (no zoom.us watch in rig.log)")
+    else:
+        app = [e for e in zev if e[1] != "disappeared"]
+        inb = [e for e in app if any(b <= e[0] <= f for b, f in zspans)]
+        print(f"== ZOOM.US (recorded only, in no verdict): appearances {len(app)} (in blocks {len(inb)}, outside {len(app) - len(inb)})"
+              + ("; " + ", ".join(f"{t:%H:%M:%S} {k} pid {p} {n}" for t, k, p, n in zev) if zev else ""))
     print(f"== RENDERER WATCHDOG (recovers at {WD_IN_STATE * 1e3:.0f} ms in the state with no callback for {WD_SILENCE * 1e3:.0f} ms; "
           f"near-miss over {WD_NEARMISS * 1e3:.0f} ms): stalls {total['renderer stalls']} (recovered {total['renderer recoveries']}, "
           f"GAVE UP {total['renderer GAVE UP']}), sooner than the old 0.5 s wait {total['renderer stalls sooner than 0.5 s']}, "
