@@ -526,3 +526,8 @@ Size guess: Medium
 Version: 0.9.6
 
 What: after a Play's first timed pull, the would-repeat test at a matched rate allows 0.5 ms past the half-frame band, so a Play that starts at the band's edge stops repeating a frame (`CARD_PULL_MARGIN.md` §21.4, §21.6); needs its own soak with `MANIFOLD_DECKLINK_CADENCE_LOG=2`.
+
+## Markers scope: comment lines option (1 / 2 / 3)
+Version: 0.9.6
+
+What: today the comment is one line, truncated, with the full text in the hover tooltip. An option for 1, 2 or 3 lines; more lines change row height.
