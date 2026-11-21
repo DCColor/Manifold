@@ -278,6 +278,178 @@ the pins, but reproducing them takes real time.
           (none in 15.7 h of release soaks): read each one before calling the gate. Export Diagnostics and the `[DIAG] playback
           counters` line now count stalls, not re-arm attempts ("1 stall (1 recovered, 0 GAVE UP), 3 re-arms, 0 rebuilds, 0
           near-misses"), and count GAVE UP; the report checks the last `[DIAG]` line against the log's counts.
+        - **0.9.5 rehearsal result (2026-11-20 18:50 – 23:08): `rc-soak-report.py` 0.9.5 GATE: FAIL.** Block 1 failed on one hold,
+          and the night stopped after 4 of 7 blocks, so the wall time is 4.08 h (under 6 h). Candidate: `.build-rc095-rehearsal`, a Profile
+          build of `fb9b1e6`, bundle 0.9.4 (27) (not bumped), ad-hoc linker-signed, sha256 `ed2ee35d2e65e5e6…`. The report came from the
+          working-tree `rc-soak-report.py` (modified 12:58, uncommitted). Chain, logs, `soak.out`, `soak.report`, `RIG.md`: 
+          `~/Code/_scratch/manifold-rc095-rehearsal/`. Every block exited 0 and was followed by a clean guard. **Why it stopped:** at
+          23:07:58, before block 5 (`r95-5994-sdi-2`), `soak.sh` found a zoom.us process and exited (`soak.out`: "!! a zoom.us process is
+          running: stopping"). Blocks `r95-5994-sdi-2`, `r95-2398-cmp-2` and `r95-ao48-sdi-2` did not run. 3.74 h playing, 252 Plays,
+          252 seeks, 84 loop wraps, 552,344 card pulls while playing, 0 missed slots.
+          | Block | 0.9.5 gate | Freezes | Holds / skips | Renderer stalls / near-misses | Output starts; silent starts | SDI !! lines | Card late / dropped | B1 (pacer missed − post-seek) | Window late / dropped |
+          |---|---|---|---|---|---|---|---|---|---|
+          | `r95-5994-sdi-1` 59.94 + sound, SDI | **FAIL** | 0 | **1** / 0 | 0 / 0 | 1 with sound; 0 | 8 appended edges | 0 / 0 | 0 − 0 = 0 | 18 / 6 of 201,091 |
+          | `r95-2398-cmp-1` 23.976 + sound, Computer | PASS | 0 | 0 / 0 | 0 / 0 | 1 with sound; 0 | none | 0 / 0 | 0 − 0 = 0 | 15 / 6 of 80,442 |
+          | `r95-ao48-sdi-1` WAV 48 kHz, SDI | PASS | 0 | 0 / 0 | 0 / 0 | 1 with sound; 0 | 14 appended edges | 0 / 0 | 0 − 0 = 0 | (no window picture) |
+          | `r95-gop25-sdi-1` long-GOP H.264 25p, SDI | PASS | 0 | 0 / 0 | 0 / 0 | 1 with sound; 0 | 3 appended edges | 0 / 0 | 1 − 0 = 1 (nothing subtractable) | 22 / 27 of 83,887 |
+          | **Total** | **FAIL** | **0** | **1 / 0** | **0 / 0** (0 re-arms, 0 GAVE UP) | 4; **0** | 25 appended edges | 0 / 0 | max 1 | 55 / 39 of 365,420 |
+          - **The hold (block 1, no renderer recovery, so it fails the gate):** `r95-5994-sdi-1.log` line 231206, `[CADENCE] #113767`
+            at host 596560.844 (about 19:35:09), content 11.61 s, 13 s after a loop and Play at 1,895 s. The card was handed pts
+            11.611600 twice (slots #113766, #113767). The next frame, 11.628283, was published to the card's ring
+            (`[CADENCE-SWAP]`, the ring publish, not the window's swap; corrected 2026-11-21) 9.35 ms before pull #113767's
+            `[CADENCE]` line, the same lead as the pulls before it. From pull #113768 on, each pull took the frame swapped one period earlier (about
+            27 ms behind the clock instead of about 10 ms). The SDI sound ended its run (`off the line on a timed pull`) and
+            re-latched from the held frame's last showing (latch #56). The Mac sound was re-anchored to new picture line #56, +16.67
+            ms off ("a slip", 1 so far). Card late 0, dropped 0. It was not in a Regenerate window: it came 95 s after Regenerate 3's
+            press and 64 s after its last thumbnail. It came 4 min after the CCC run ended. This is not the 0.9.4 "late window frame"
+            pattern, because the swap was not late. Why the pull handed the earlier frame: UNKNOWN. The `[DIAG]` card-holds counter
+            reads 1, which agrees with the gate.
+          - **Skips 0. Card drops 0:** the frame #0 start drop did not occur, and there are no other drops. Card late 0 in all blocks.
+          - **Renderer watchdog:** 0 stalls, 0 re-arms, 0 rebuilds, 0 GAVE UP, 0 near-misses, 0 "sooner than the old 0.5 s wait". The
+            last `[DIAG]` line matches the log in every block.
+          - **SDI sound** (on the three SDI blocks): 0 callback stops, 0 missing-sound events, 0 Stage 2 over 1 s, 0 Stage 2 refusals,
+            0 re-reads. Watchdog restarts 0, sound back 0, gave up 0. Unrecovered 0. Bridge totals: 0 late edges, 5 re-latches (2 / 0 / 0 /
+            3), 84,398 missing samples (18,669 / 0 / 61,889 / 3,840), and 25 edges appended by the card. Not counted as holds: 374
+            frames held around the loop's wrap.
+          - **B1:** pacer missed deadlines were 0, 0, 0 and 1 (`r95-gop25-sdi-1.log` line 196983, max interval 26.67 ms). No block had
+            `[PRESENT-TIMING]` lines, so nothing could be subtracted. Every block is ≤ 2, so **no block is UNDETERMINED**.
+          - **Markers: PASS.** On the 3 video blocks, 5 of 5 markers were loaded, the slot was open and 5 thumbnails were cached at the
+            start. There were 18 Regenerates; each removed 5 and remade 5 (90 in all). **0 were made while playing**: the first came
+            0.028–0.059 s after each Pause, and 0 were finished after Play. Around each press (±10 s): 0 holds, 0 skips, and 5 window
+            late/dropped in all (5994 regen 5; gop25 regen 2, 4, and 5 ×2). From each Pause to the last thumbnail + 10 s: 0 holds, 0
+            skips, 0 late/dropped. Setup at 19:00–19:03 confirmed 5 markers and 5 cached thumbnails on all three files.
+          - **CCC overlap:** 1 run, 19:30:00–19:31:07 (68 s, exit 0, `ccc.log`), inside block 1 (19:03:18–20:04:25). 0 holds, skips or
+            stalls during it. The block's one hold came 4 min later.
+          - **Rig checks** (`rig.log`), before setup and before each block: no zoom.us, capture closed, Scarlett the default output, no
+            `MANIFOLD_*` and no env, sha256 ok, slots `waveform | parade | markers`, window on the ASUS PA147 at 59.936 Hz, ad-hoc signing,
+            memory 84–85 % free, no thermal warnings. The LG ran at 3840×2160 @ 120 Hz. Each block ran with the standard environment only
+            (`MANIFOLD_DEBUG_TRANSPORT MANIFOLD_DECKLINK_CADENCE_LOG MANIFOLD_PLAYBACK_STATS`). Keychain prompts denied "tonight 0", but
+            the setup log has "licence prompt denied (1 this block)" for setup-5994 and setup-2398 (`soak.out` 19:00:54, 19:01:43), and
+            the per-setup counts read UNKNOWN. These do not agree. "SecurityAgent processes now" was 0 before setup and 1 before every
+            block. WindowServer ASEProcessing after each block: 3,280, 2,467, 0 and 2,548 per minute (6 per minute after setup).
+          - **Slot restore:** the slots were set to `waveform | parade | markers` (were `yrgb | meters | markers`; stash
+            `prefs-stash-20261120-185044.txt`). They were still that at the end and were restored to `yrgb | meters | markers` at 23:08:00.
+            A read of `com.graviton.manifold` on 2026-11-21 confirms `yrgb | meters | markers`.
+        - **Rehearsal follow-up (2026-11-21, read-only; no build, no launch, no git).** Three questions: the hold, zoom.us, and the
+          prompt tally. Paths are relative to `~/Code/_scratch/manifold-rc095-rehearsal/` unless named.
+          - **Logging the block had.** Standard soak logging includes `MANIFOLD_DECKLINK_CADENCE_LOG=1`, so the log has `[CADENCE]` (one
+            per pull) and `[CADENCE-SWAP]` (one per ring publish, `MetalVideoRenderer.swift:5957`). It has no `[PULLPHASE]` or
+            `[TICKPHASE]` (`=2` only) and no `[PRESENT-TIMING]`. The `[CADENCE]` host and clock are read after the fill's copy
+            (`DeckLinkService.swift:1227`, `MetalVideoRenderer.swift:508-513`), not at the pull itself.
+          - **The hold, reconstructed** (`r95-5994-sdi-1.log`):
+            - **Context.** The Play started at clock 1895.0 (line 226541) and wrapped at the file's end at host 596549.2: pulls
+              #113061–#113069 held the last frame, 1919.984733, which is the expected end-of-file wrap and not counted. Pull #113070
+              handed pts 0. The pacer re-set its reference at line 229750 (x_ref 3.913 ms). The C+ lead guard at line 229753
+              measured a pull phase of 9.047 ms and a lead of 5.134 ms, under P + 0.5 ms. It moved x_ref 3.913 → 0.500 ms (lead 8.547
+              ms) "at the guard band's edge", short of P + 0.5 = 8.84 ms. The 7 lead moves (net −3.413 ms, line 230473) are that move,
+              done in steps in the first ~0.1 s, and leave x_ref at 0.5 ms. After that: 0 lead moves, 0 establishment nudges, 0
+              outliers, 0 clamp hits; |x − x_ref| max 0.025 ms (line 231745). There was no transport event between the wrap and the
+              hold (11.6 s later) or until the Pause 13.2 s after it (line 232880).
+            - **The pull.** Slot #113767, clock 11.638513 (post-copy), handed 11.611600 a second time. 11.628283 was published at
+              596560.835049, 9.354 ms before the `[CADENCE]` line. Before the hold, every pull handed the newest published frame with
+              the clock 10.20–10.25 ms past it. From #113768 on, every pull handed the frame published one period earlier (26.84–26.94
+              ms behind the clock) until the Pause, with no further change. Card: late 0, dropped 0, buffered 5 in every count
+              (`DeckLink D3: frame 113760 — completed=113757 late=0 dropped=0 buffered=5`). Pacer: missed 0 (line 231743). Ring:
+              `tick → SDI ring` max 2.53 ms in the 10 s window around the hold (line 231744). The SDI sound re-latched (latch #56), and
+              card lock re-anchored the Mac sound +16.67 ms "(a slip)".
+            - **The would-repeat test, reconstructed from the code** (`MetalVideoRenderer.swift:6293-6380`). The target is clock −
+              (host − slotHost) − margin (`:6337`). slotHost is the minimum of the last 64 paced pulls' slot offsets (`:6314`). The
+              margin is the median of 32 pacer ticks + 10 ms = 18.34 ms. The band is half a card frame, 8.342 ms, at a matched rate
+              (`:6347`). Once the handed frame is the last one handed, the next frame is taken if `pts[next] ≤ target + band`
+              (`:6366`); otherwise the last frame is held (`:6373`). From the logged clock, host and slot offsets, next − target was
+              8.210 ms at #113766 and 8.212 ms at #113767: about 0.13 ms inside the band at both. Across the whole segment, the target
+              moved within ±0.015 ms of the frame grid. Earlier pulls with less headroom took the next frame. **So by what the log
+              records, #113767 should have taken 11.628283.** The repeat came from an input the log does not have: the pull's own host
+              and clock (the logged ones are after the copy), the margin's median tick at that pull, or whether 11.628283's ring
+              slot was visible to the pull when the pull read the ring. Which one: UNKNOWN.
+            - **Against the known mechanisms.**
+              - Crossing (a late window frame): not seen. The publish was on time, and the 10 s `tick → SDI ring` max was 2.53 ms.
+              - Pacer miss: no (missed 0).
+              - Renderer stall or near-miss: no.
+              - C+ lead move: not at the hold; the moves ended 11.5 s before it.
+              - Establishment nudge: none.
+              - Loop wrap: the wrap set this Play's phase 11.6 s earlier, but the hold was not at a wrap.
+              - The half-frame band: the closest known shape. The phase after the wrap sat near the band's edge, and the hold
+                moved the card one frame back for the rest of the Play. This is §10.30's edge hold (`CARD_PULL_MARGIN.md` §1.1), at
+                an 8.34 ms band. It is not proven: the reconstructed headroom, 0.13 ms, does not explain a repeat by itself.
+              - **Verdict: an edge hold of the half-frame band, with the trigger UNKNOWN. Not a new mechanism if the trigger turns
+                out to be one of the three unlogged inputs; otherwise new.**
+            - **Nights 6–7 (C+ and B on; `[PULLPHASE]` logged; 0 holds).** At 59.94, C+'s lead guard stopped "at the guard band's
+              edge" 4 times: `n6-5994-sdi-bon-2.log` lines 289492 and 506115, `n7-5994-sdi-bon-1.log` lines 364799 and 506097, with
+              leads 8.663, 8.658, 8.730 and 8.830 ms. Tonight's 8.547 ms (pull phase 9.047) is the lowest at 59.94 in the three nights.
+              In those 4 Plays every pull took the next frame through the band (`next-by-band`). Band headroom was 0.105–0.255 ms;
+              publish lead was never under 7.0 ms. Across all 237 night 6–7 segments at 59.94, no segment was under 0.1 ms, and 4 were
+              under 0.2 ms; 3 of those 4 are these lead-guard-edge Plays. Measured by `[PULLPHASE]` target, next and band per pull; scratch scripts
+              `segd.py`, `slack.py`, `edgeleads.py` and `headroom.py`, in this session's scratchpad. So tonight's Play matches nights
+              6–7's closest-to-edge Plays, which held 0 times. Lead-guard edges in general are common: 57 in the three nights' logs,
+              most at 23.976 and 25p.
+            - **This week's changes.**
+              - C+ default: plausibly involved. 3 of the 4 closest-to-edge Plays on nights 6–7, and this one, are Plays where C+'s
+                lead guard stopped at the guard band's edge. That is a correlation; the mechanism is not shown.
+              - Plain B: no sign (it changes the window's present, not the ring), and night 7 ran it in every block.
+              - The 200 ms watchdog: no stall or near-miss.
+              - The SDI audio watchdog: no restart.
+              - The Stage 2 guard: 0 refusals. The re-anchor followed the hold.
+              - Whether `deckLinkPullSlotLocked` changed between night 7's `e80dc2b` and `fb9b1e6`: UNKNOWN without git. The
+                check is `git diff e80dc2b fb9b1e6 -- App/MetalVideoRenderer.swift`.
+              - Nights 6–7 also ran heavier logging (`CADENCE_LOG=2`, `PRESENT_TIMING=1`), so the conditions were not identical.
+            - **What would have settled it:** `MANIFOLD_DECKLINK_CADENCE_LOG=2`. Its `[PULLPHASE] pull` record holds the pull's own
+              host and clock, the target, band, margin, handed frame, branch (`held` vs `next-by-band`), the next frame and whether it
+              was queued or converted, and the lead. One such line at #113767 names the branch and the input. `MANIFOLD_PRESENT_TIMING=1`
+              would add the tick's own timing. The release soak runs neither, by the gate's rules.
+          - **zoom.us at 23:07** (unified log, `launchd`):
+            - **What launched it:** `gui/501/us.zoom.updater` spawned `ZoomUpdater` (PID 30786) at 23:07:33.731 "because interval".
+              The source is `/Library/LaunchAgents/us.zoom.updater.plist`: `ZoomUpdater --update`, `StartInterval` 3600,
+              `RunAtLoad` false. Its executable is inside `/Applications/zoom.us.app/`, so `zoom_running` (`ps -axo comm= | grep -iF
+              zoom.us`, `common.sh:23`) matched it. The Zoom app itself did not launch.
+            - **It ran 5 times that night,** about 31 s each, about 31 s later each hour: 19:05:29 (PID 28275), 20:06:00 (28928),
+              21:06:31 (29555), 22:07:02 (30275) and 23:07:33 (30786). **All five were inside blocks:** 2–4 min into blocks 1–3, 13 s
+              into block 4, and the fifth in block 4's last 24 s. The harness checked only before each block, so it missed four and
+              stopped at the fifth (23:07:58). Every "zoom.us none" in `rig.log` was true only at the moment of the check.
+            - **Other Zoom items:**
+              - `/Library/LaunchAgents/us.zoom.updater.login.check.plist`: `--login-check`, `RunAtLoad`, so at login only.
+              - `/Library/LaunchDaemons/us.zoom.ZoomDaemon.plist`: an on-demand Mach service.
+              - Background items: the Zoom app's login item is "disabled".
+              - Nothing in `~/Library/LaunchAgents`, and not among the login items.
+              - Zoom's preferences (read-only): `us.zoom.updater.config.plist` `AU2_BackgroundUpdateTimeInterval` "12";
+                `us.zoom.xos.plist` `ZoomAutoUpdateState` "ZoomAutoUpdateStateReady".
+              - Whether Zoom's in-app auto-update setting stops the hourly launchd spawn: UNKNOWN. The plist schedules it regardless.
+            - **To prevent it for a soak without uninstalling** (Robbie runs these; not done here):
+              - Before the night: `launchctl bootout gui/$(id -u)/us.zoom.updater`. This unloads it until the next login and changes
+                no file.
+              - After the night: `launchctl bootstrap gui/$(id -u) /Library/LaunchAgents/us.zoom.updater.plist`.
+              - Or, persistently until undone: `launchctl disable gui/$(id -u)/us.zoom.updater`, later `launchctl enable …`.
+              - Either way, the harness now records zoom.us instead of stopping (below).
+          - **The prompt tally and SecurityAgent: a harness gap, and the prompts were real.**
+            - **Why the tally read 0:** `markers_setup` saves no `licence_prompts_denied` (`rc-soak.py:248`), so `afterblock` reads
+              UNKNOWN for each setup and adds nothing (`soak.sh:95-96`). The two "licence prompt denied" lines are real clicks on Deny
+              (`rc-soak.py:61`).
+            - **There were three dialogs, not two.** SecurityAgent logged "SC confirmation dialog detected" at 19:00:48 and 19:00:55
+              (setup-5994) and at 19:01:43 (setup-2398). `markers_setup` calls `deny_licence_prompt()` once, 7 s after launch
+              (`rc-soak.py:259`), so it never saw the second setup-5994 dialog. What closed it: UNKNOWN. Probably that launch's quit at
+              19:01:36; an inference.
+            - **No dialog in any block.** At each block launch, securityd connected to SecurityAgent (19:03:19, 20:04:28, 21:05:38,
+              22:06:50), but no dialog was logged, matching the 0 denials per block.
+            - **"SecurityAgent processes now: 1" is one resident process,** PID 27921, started on demand for the first setup prompt at
+              19:00:48. Its last log line was at 22:06:50, and it is not running now. `secagent` counts processes, not open windows
+              (`common.sh:24`), so the "1" does not mean a prompt was left open.
+          - **Harness change (Robbie, 2026-11-21): zoom.us is now recorded only, and the night continues.**
+            - `soak.sh` (rehearsal folder): `zoomcheck`, which stopped the night, is replaced by `zoomwatch`. It runs in the
+              background for the whole night, polls every 2 s, and writes `zoom.us watch: appeared` / `disappeared` / `present at
+              start` lines (time, PID, executable) to `rig.log` and `soak.out`. It stops in the EXIT trap, or by itself when
+              `soak.sh` is gone.
+            - The before-launch rig line now records the zoom.us processes found instead of asserting none.
+            - `common.sh`: adds `zoom_procs`.
+            - `RIG.md`: the two lines that described the old zoom.us check now describe this one.
+            - `rc-soak.py` had no zoom.us check, so it is unchanged.
+            - `rc-soak-report.py` (repo, uncommitted): a per-block `zoom.us (recorded only)` line (running at the block's start, and
+              every event in the block) and a `== ZOOM.US` line after TOTAL, in no verdict. A `rig.log` with no watch lines reads "not
+              recorded".
+            - **Checks:**
+              - `zsh -n` is clean.
+              - A dry run of the watch against a fake process list logged present-at-start, appear and disappear lines correctly.
+              - The report on the rehearsal folder is unchanged apart from the new "not recorded" lines.
+              - On a synthetic `rig.log` with the five runs above, all 5 were placed in blocks.
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---
