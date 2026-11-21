@@ -521,3 +521,8 @@ Also worth considering: whether all scopes need one shared queue, or whether eac
 its own timing measure. One shared queue is what makes the three-scope readings overlap.
 
 Size guess: Medium
+
+## Card pull: sticky would-repeat band
+Version: 0.9.6
+
+What: after a Play's first timed pull, the would-repeat test at a matched rate allows 0.5 ms past the half-frame band, so a Play that starts at the band's edge stops repeating a frame (`CARD_PULL_MARGIN.md` §21.4, §21.6); needs its own soak with `MANIFOLD_DECKLINK_CADENCE_LOG=2`.

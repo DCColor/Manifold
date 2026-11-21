@@ -1989,6 +1989,10 @@ a read limit: the reader was re-armed correctly at 978.16 s.
 
 ---
 
+## ☐ LOW — KNOWN LIMITATION, for the 0.9.5 release notes: rarely, one repeated frame at 59.94 SDI output (Robbie, 2026-11-21)
+
+A 59.94 Play that starts within ~0.1 ms of the card pull's would-repeat edge can repeat one frame once; the Play then runs one frame later (about 1 in 100 such Plays starts that close; 1 hold seen, the 0.9.5 rehearsal). The 0.9.5 gate allows one per night; the fix, a sticky would-repeat band, is for 0.9.6 (`CARD_PULL_MARGIN.md` §21; `ROADMAP_IDEAS.md`).
+
 ## ☐ LOW (not for 0.9.5): the first frame after a seek can take ~22 ms to render (`perform`), so the pacer misses one or two ticks at 59.94 (Robbie, 2026-11-20)
 
 **What happens.** The first render after a seek can take ~22 ms in `perform` (`performDisplayTick`'s work outside its present attempts,

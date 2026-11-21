@@ -2576,3 +2576,127 @@ Holds, skips, freezes, late/dropped, SDI and markers are the gate's (`soak.repor
   - whether the GOP block's post-seek repeat-tick miss should count under B1 (it does as written; it passes either way);
   - follow-ups, not made: a mid-session SDI-sound check in `rc-soak-report.py` (the `no audio callback` line and a missing-samples rate);
     the tap's read limit after a seek while playing; whether the audio-callback stop recurs, with B off.
+
+## 21. The rehearsal hold against C+'s choice: geometry, a C+ change, and a pull-side alternative (analysis 2026-11-21; nothing built)
+
+Read-only. No build, no launch; git only `log` and `diff`. The rehearsal hold is `Manifold-BUILD.md`, "0.9.5 rehearsal result" and its
+follow-up (`r95-5994-sdi-1.log` line 231206). Logs: nights 5–7 `~/Code/_scratch/manifold-pacerphase-ab4|ab5|ab6/` (`[PULLPHASE]` on),
+the rehearsal `~/Code/_scratch/manifold-rc095-rehearsal/` (`[PULLPHASE]` off). Scratch scripts (this session's scratchpad, not kept):
+`geom.py` (headroom and pull phase per Play), `wrap.py` (the phase across a wrap) and `replay.py` (held pulls near the band edge).
+
+### 21.1 The pull code is unchanged since night 7's binary
+
+`git diff e80dc2b..HEAD` shows the following:
+- **`App/MetalVideoRenderer.swift`:** plain B's DEBUG guards removed, and log spelling changes. It has no change to
+  `deckLinkPullSlotLocked` (`:6293-6380`: slot timeline `:6314`, target `:6337`, band `:6347`, would-repeat `:6366`, hold
+  `:6373`), `deckLinkPullMarginLocked` (`:5757`) or `noteDeckLinkTick` (`:5744`).
+- **`OutputPacing.swift`:** one doc comment. `PacerPhase.leadReference`, `leadSlack` and the follower's `leadStep` are unchanged.
+- **`PacerSwitches.swift`:** only `presentUntransacted`, the B default.
+
+The rehearsal candidate `fb9b1e6` therefore pulls and chooses x exactly as nights 6–7's `e80dc2b` did.
+
+### 21.2 Geometry
+
+Notation: F is the card frame, P = F/k the pacer tick, M = P + 10 ms the pull margin (the median tick + 10 ms), and B = F/2 the band
+at a matched rate. A is the slot's place past the handed frame's pts (fixed for a Play under card lock, §17.1). c is the tick → ring
+time and δ = host − slotHost. Then:
+
+- **Pull phase** pp = lead + x = A − c (§17.1). C+ sets lead(x) = pp − x, for x in its band [0.5, P − 0.5] ms.
+- **Would-repeat headroom.** While a Play runs in the next-by-band state (the handed frame is past the target and is taken
+  only through the band), H = target + B − pts[next] = A − δ − (M − B). In terms of the pull phase,
+  **H = pp − (M − B) + (c − δ)**. M − B is 10.00 ms at 59.94, 3.05 ms at 23.976 and 3.33 ms at 25.
+- **Measured offset c − δ, per Play** (`geom.py`; segment medians, next-by-band Plays, nights 5–7): +0.731 ms at 59.94
+  (379 Plays, range +0.32…+0.86); +0.796 at 23.976 (67 Plays); +0.919 at 25 (24 Plays). Against the pull phase printed on the
+  lead-guard line (the renderer's median), the five night 5–7 guard-edge Plays give +0.886…+1.039.
+- **H does not depend on x.** x appears in neither the target nor the frame grid.
+  - Measured: across 202 lead-guard moves on nights 5–7, H after the move differed from H before by a median of 0.015 ms.
+  - The one large difference (4.6 ms, `n6-5994-sdi-bon-1.log` from line 259429) is a seek that my segmenting missed (handed pts
+    464.9 → 867.2 between pulls 6 and 7). Within the Play after it, the guard moved x by 6.8 ms and the lead rose 1.7 → 9.5 ms
+    while H went 0.816 → 0.830 ms.
+  - Across wraps: the phase after a wrap is not set by A − x before it. (A_after − (A_before − x_before)) mod F is spread over
+    the whole frame at 59.94 (341 wraps; octile counts 37, 31, 38, 53, 51, 50, 44, 37 mod P).
+- **Wobble within a Play:** H dips below its Play's median by a median of 0.028 ms, p95 0.06, p99 0.09, max 0.121 (379 Plays).
+  The source is δ: clock − target swings about ±0.08 ms pull to pull (e.g. 18.36–18.54 ms at margin 18.34, same log). So a Play
+  whose H starts under about 0.1 ms can hold.
+
+| | 59.94 (k = 2) | 23.976 (k = 3) | 25 (k = 3) |
+|---|---|---|---|
+| P / B / M − B | 8.34 / 8.34 / 10.00 ms | 13.90 / 20.85 / 3.05 ms | 13.33 / 20.00 / 3.33 ms |
+| Guard reaches lead ≥ P + 0.5 iff | pp ≥ 9.34 ms | pp ≥ 14.90 ms | pp ≥ 14.33 ms |
+| Would-repeat edge (H = 0) at | pp ≈ 9.27 (segment scale), ≈ 9.07 (guard-line scale) | pp ≈ 2.25 | pp ≈ 2.41 |
+| Lead at that edge, x = 0.5 | ≈ 8.6–8.8 ms (measured 8.66–8.83; rehearsal 8.547) | ≈ 1.7 ms (measured min 1.305, `n6-2398` H 0.285) | ≈ 1.9 ms |
+
+**What the geometry shows:**
+- **At 59.94, "the guard cannot reach slack" and "H is small" are the same inequality on pp.** On the guard line's scale, the guard
+  stops at its edge exactly when H < ~0.27 ms. That is why every night 5–7 guard edge at 59.94 had H 0.098–0.255 ms (`n5-5994-sdi-boff-2`
+  0.098, `n6-5994-sdi-bon-2` 0.105 and 0.197, `n7-5994-sdi-bon-1` 0.116 and 0.255). It is also why the rehearsal's edge came with a
+  hold: its guard-line pp of 9.047 ms gives **H ≈ −0.07…+0.09 ms**, on the edge. The 0.13 ms in `Manifold-BUILD.md` came from the
+  `[CADENCE]` stamps, which are taken after the fill's copy; that reconstruction's bias is inferred, not measured. The correlation of
+  §20's edge Plays with C+ is a common cause (pp), not C+'s doing.
+- **At k = 3 the guard is at its edge for every Play with pp < 14.3–14.9 ms**, which is why edges are common at 23.976 and 25. There,
+  a Play near the would-repeat edge also has a small lead (~1.3–1.9 ms). Both margins are set by pp, and x moves neither toward
+  safety: it already gives the most lead.
+- **Which phase maximizes the distance from the would-repeat edge when slack is out of reach? None does better than another:** H is
+  the same for every x in the band. The distance from the crossing (lead − P) is largest at x = 0.5 ms, the band's edge.
+- **So "stop at the band edge" is never the worst choice.** It is the best for the crossing and neutral for the would-repeat edge.
+  Going under 0.5 ms would give more lead but would put the tick within the establishment guard's 0.5 ms of a due time (§15.3),
+  the dithering crossing that guard exists to stop.
+
+### 21.3 The C+ change, replayed: no effect
+
+**Proposed:** when lead ≥ P + 0.5 cannot be reached, choose x to maximize min(distance to the crossing guard, distance to the
+would-repeat edge).
+- **Its result:** the second distance is the same for every x (§21.2), so the rule picks x = 0.5 ms, which is today's choice. For a
+  guard that can reach slack it changes nothing, because H is again the same for every x.
+- **Replay:** there were 319 lead-guard lines in all: night 5 84, night 6 64, night 7 108 and the rehearsal 63. 69 of them stopped at
+  the band's edge (12, 11, 23 and 23). On every one the proposal gives today's x. **0 Plays
+  change, and none lands closer to an edge.** Latency: none. No-crossing guarantee: unchanged, since x is unchanged.
+- **The rule cannot help,** because nothing C+ controls moves H: not x within a Play (§21.2), and not x before a wrap (§21.2, the
+  wrap test).
+
+### 21.4 The smallest change that does reach the edge: a sticky would-repeat band (pull side, not C+)
+
+**The change:** after the first timed pull of a Play (the existing `wasTimed`, `MetalVideoRenderer.swift:6323`: the pull before was timed), the would-repeat
+test at a matched rate becomes `pts[next] <= target + band + 0.0005` (`:6366`). The establishing pull keeps the plain band. Rate
+mismatch (2 ms band) and the would-skip test (`:6367-6368`) are unchanged. This is one expression and no new state.
+
+**Effects:**
+- **Which frame is handed:** in steady state, the same frame as today on every pull that is not at the edge. A Play established within
+  0.5 ms of the edge keeps its phase through wobble (max 0.121 ms measured), where today it drops one frame back after the first pull
+  that wobbles past.
+- **Latency:** none in steady state. At the edge, the Play keeps today's lower-latency phase instead of falling one frame back.
+- **No-crossing guarantee: unchanged.** `next` is searched only among frames already in the ring (`:6360-6364`), so an unpublished
+  frame can never be chosen. The handed frame and its publish time are the same as today, so its lead is unchanged.
+- **Real drift** (a file with sound when card lock does not apply, `CARD_PULL_MARGIN.md` §1.2): the phase's one slip comes after 0.5 ms
+  more drift, no extra hold. At 20 ppm that is about 25 s later.
+- **Replay against nights 5–7** (`replay.py`, 18 blocks): held pulls whose next frame was in the ring and within 0.5 ms past the band:
+  - **Steady state: 0.**
+  - At establishment (the first ≤ 8 timed pulls after a Play, seek or wrap): 17. The sticky band does not apply to these, so they
+    are unchanged.
+  - **So 0 pulls change on nights 5–7, and no Play lands closer to an edge.** The other steady-state holds are untouched: "held
+    (ring)" with excess > 0.5 ms, and "held (nominal)" with no next frame in the ring.
+- **Rehearsal** (no `[PULLPHASE]`): its hold Play's H ≈ −0.07…+0.09 ms plus wobble ≤ 0.12 ms is inside 0.5 ms. So the change would
+  have kept #113767 on 11.628283. This is inferred from §21.2's calibration; the pull's own excess was not logged.
+- **Cost:** the pull code changes, so the 0.9.5 soak evidence (0.9.4's and nights 5–7's) no longer covers it as shipped. It needs
+  its own soak. `deckLinkPullSlotLocked` lives in the app target, so a unit test would first need the selection extracted into
+  `OutputPacing`.
+
+### 21.5 Verdict
+
+- **The C+ change: small and safe, but useless.** C+ has no lever on the would-repeat edge. Not recommended.
+- **The sticky would-repeat band: small (one expression), and safe by the replay.** It changes no pull on 18 blocks of nights 5–7,
+  leaves the no-crossing guarantee and latency as they are, and would have absorbed the rehearsal's hold (inferred).
+- **Open, for Robbie:** whether it goes into 0.9.5, which means a new soak, or 0.9.6. If not, whether the 0.9.5 gate treats an edge
+  hold of the half-frame band as a named exception, like 0.9.4's: about 1 Play in 100 at 59.94 starts within 0.1 ms of the edge
+  (H is uniform over (0, B]; 1 of 379 next-by-band Plays measured). Holds of this kind so far: 0 on nights 5–7 and 1 on the
+  rehearsal.
+
+### 21.6 Decision (Robbie, 2026-11-21)
+
+- **0.9.5 ships today's pull code.** The 0.9.5 gate gets a narrow exception: at most one edge-start hold per night, at 59.94, in a Play
+  whose C+ lead guard stopped at its band edge. `rc-soak-report.py` implements it; the wording is in `Manifold-BUILD.md`, 0.9.5 release
+  gate. Self-test: `~/Code/_scratch/manifold-rc095-rehearsal/tests/run-tests.sh`.
+- **The sticky would-repeat band (§21.4) is the 0.9.6 candidate,** with its own soak. That soak runs per-pull logging
+  (`MANIFOLD_DECKLINK_CADENCE_LOG=2`, `[PULLPHASE]`), so that each pull's branch, headroom and next-frame state are recorded. That is
+  needed to confirm the change does what §21.4 infers: no steady-state pull changes, and an edge-start Play keeps its phase.
+- `BUGS.md` carries it as a LOW known limitation for the 0.9.5 notes; `ROADMAP_IDEAS.md` lists the sticky band under 0.9.6.

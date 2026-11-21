@@ -45,7 +45,13 @@
 #                         dropped, SDI sound continuity);
 #                      2. 0 holds or skips for any cause except a renderer recovery: a hold or skip whose pull lies from the stall's start
 #                         (the attempt line's [CADENCE] host less its "no pump callback" time, − 0.05 s) to 0.5 s after the first pull
-#                         after "picture moving again" (night 7's rule, ab-check.py `causes`). A GAVE UP stall excuses nothing;
+#                         after "picture moving again" (night 7's rule, ab-check.py `causes`). A GAVE UP stall excuses nothing.
+#                         Or, once per night, the EDGE-START EXCEPTION (Robbie, 2026-11-21; CARD_PULL_MARGIN.md §21): a hold (not a
+#                         skip), the output 59.94 (k = 2), in a Play whose C+ lead guard stopped at its band edge: the first
+#                         "[PACER-PHASE] lead guard" line after the Play's "reference set" line says "at the guard band's edge" and its
+#                         lead after the move is < P + 0.5 ms. Its position (seconds since the last Play, seek or wrap) is printed,
+#                         never judged. The night's first such hold, in block order, passes; any further one fails. Every hold and
+#                         skip is printed with its class, its Play's lead-guard lead and P, and its position;
 #                      3. card drops: only the frame #0 start drop (the first completion after StartScheduledPlayback is `result 2 stream 0`
 #                         and it is the first Dropped line since that start; night 7's `card_drops`). Any other Dropped line fails. Card
 #                         late lines are reported. This reads the gate's named exception as excluding every other drop (night 7's reading);
@@ -78,6 +84,8 @@ PTMISS = re.compile(r"\[PRESENT-TIMING\] miss · host (\S+) · tick (\S+) ms · 
 PACER_STOP = re.compile(r"\[PACER\] stopped .*missed deadlines (\d+)")
 COMPL = re.compile(r"\[CADENCE\] completion result (\d+) stream (\d+) ")
 DROPPED = re.compile(r"DeckLink D3: !! Dropped at frame (\d+)")
+LEAD_GUARD = re.compile(r"\[PACER-PHASE\] lead guard · .*\(lead ([\d.]+) ms\).* · P ([\d.]+) ms")
+EDGE_MAX = 1   # edge-start exceptions allowed per night (Robbie, 2026-11-21)
 DIAG_PC = re.compile(r"\[DIAG\] playback counters .*pacer missed deadlines (\d+) · card holds while playing (\d+) · .*SDI audio (\d+) stops?, (\d+) recovered")
 # The renderer watchdog's thresholds as built (RendererWatchdog.Thresholds.shipping), for the report's header and marks.
 WD_NEARMISS, WD_IN_STATE, WD_SILENCE, WD_OLD_SILENCE = 0.10, 0.15, 0.20, 0.5
@@ -92,6 +100,9 @@ def analyse(path, mode, length):
     stalls = []; nearmisses = []; diag = None
     seeks = []; swaps = []; ptmiss = []; pacer_stop = None; drops = []; comps = 0; first_comp = None; drops_since = 0; diag_pc = None
     snd = sdi_sound_tracker(); snd.f = f
+    # The edge-start classifier's inputs: the C+ state of the Play in force (from its "[PACER-PHASE] reference set" line, which every
+    # Play, seek and wrap re-sets, and the first lead-guard line after it), and the last Play, seek or wrap (the pull's position).
+    cplus = None; last_pos = None
     for ln, l in enumerate(open(path, errors="replace"), 1):
         snd.line(ln, l, host, events)
         m = re.match(r"\[CADENCE\] #(\d+) host (\S+) pts (\S+)", l)
@@ -100,6 +111,9 @@ def analyse(path, mode, length):
             if first_host is None: first_host = host
             if pts == "nan": prev = None; continue
             pts = float(pts); cur = (n, host, pts)
+            if prev and pts < prev[2] - 1.0: last_pos = ("wrap", host)   # the file's end: the pts starts again
+            info = dict(since=None if last_pos is None else host - last_pos[1], since_kind=None if last_pos is None else last_pos[0],
+                        cplus=None if cplus is None else dict(cplus))
             if playing and prev and host - first_host > STARTX and not any(0 <= host - e <= EXCL for e in events[-4:]):
                 dslot = n - prev[0]; dn = round((pts - prev[2]) / f)
                 if dslot > 0 and dn != dslot:
@@ -107,8 +121,8 @@ def analyse(path, mode, length):
                     if wrap: r["wraps"] += 1; last_wrap = host
                     elif prev[2] > length - 0.5 or host - last_wrap <= EXCL:   # the loop's wrap is a seek: its frames held around it
                         r["holds at the loop's wrap (a seek, not counted)" if dn < dslot else "skips at the loop's wrap (a seek, not counted)"] += 1
-                    elif dn < dslot: holds.append(("hold", host, prev[2], pts, dslot, dn))
-                    else: holds.append(("skip", host, prev[2], pts, dslot, dn))
+                    elif dn < dslot: holds.append(("hold", host, prev[2], pts, dslot, dn, info))
+                    else: holds.append(("skip", host, prev[2], pts, dslot, dn, info))
                 if dslot > 1: r["missed slots"] += dslot - 1
                 if dslot > 0: r["pulls while playing"] += 1
             if stalls and stalls[-1].get("moved_line") and "moved_host" not in stalls[-1]: stalls[-1]["moved_host"] = host
@@ -116,6 +130,7 @@ def analyse(path, mode, length):
         if l.startswith("[TRANSPORT] "):
             m = re.search(r" host (\S+)", l); h = float(m[1]) if m else host
             w = l.split()[1]
+            if w in ("play", "seek"): last_pos = (w, h)
             if w == "play": playing = True; play_host = h; events.append(h); r["plays"] += 1
             elif w == "pause":
                 if playing and play_host: played += h - play_host
@@ -195,6 +210,12 @@ def analyse(path, mode, length):
         elif l.startswith("[PACER] stopped"):
             m = PACER_STOP.search(l)
             if m: pacer_stop = int(m[1])
+        elif l.startswith("[PACER-PHASE] reference set"):
+            cplus = dict(ref_line=ln, guard=None)
+        elif l.startswith("[PACER-PHASE] lead guard"):
+            m = LEAD_GUARD.search(l)
+            if m and cplus is not None and cplus["guard"] is None:   # the first after the reference: the Play's establishment
+                cplus["guard"] = dict(line=ln, lead=float(m[1]), P=float(m[2]), edge="at the guard band's edge" in l)
         else:
             m = re.match(r"\[PLAYBACK-STATS\] t=\S+ presented=(\d+) dropped=(\d+) late=(\d+)", l)
             if m: r["window presented"] += int(m[1]); r["window dropped"] += int(m[2]); r["window late"] += int(m[3])
@@ -225,18 +246,42 @@ def post_seek_perform(miss, seeks, swaps):
 
 def miss_deadlines(miss): return max(1, round(miss["next"] / miss["P"]) - 1)
 
-def gate095_block(a, meta, unrec_block, markers_ok):
-    """The 0.9.5 gate's rows for one block (header). Returns (verdict PASS/FAIL/UNDETERMINED, [detail strings])."""
-    c = a["counts"]; out = []; v = "PASS"
+def edge_start(h, meta):
+    """The edge-start exception's conditions other than the night's count (Manifold-BUILD.md, 0.9.5 gate, amended 2026-11-21): a hold
+    (not a skip), the output 59.94 (k = 2: the guard line's P is half the card frame), in a Play whose first lead-guard line after its
+    reference stopped at the guard band's edge with lead < P + 0.5 ms. The pull's position is reported, never judged."""
+    g = (h[6].get("cplus") or {}).get("guard") if len(h) > 6 else None
+    k2 = meta["mode"].endswith("p59.94")
+    return bool(h[0] == "hold" and k2 and g and g["edge"] and g["lead"] < g["P"] + 0.5
+                and abs(g["P"] * 2 - FRAME[meta["mode"]] * 1e3) < 0.05)
+
+def hold_line(h, cls):
+    i = h[6] if len(h) > 6 else {}
+    cp = i.get("cplus"); g = cp and cp["guard"]
+    play = ("no C+ reference in force" if not cp else f"C+ lead guard: none after the reference at line {cp['ref_line']} (lead already ≥ P + 0.5 ms)"
+            if not g else f"C+ lead guard at line {g['line']}: lead {g['lead']:.3f} ms, P {g['P']:.2f} ms, "
+            + ("stopped at the band edge (< P + 0.5 ms)" if g["edge"] else "reached P + 0.5 ms"))
+    pos = "position UNKNOWN" if i.get("since") is None else f"{i['since']:.3f} s after the {i['since_kind']} (reported, not judged)"
+    return f"     {h[0]} at host {h[1]:.3f}: {cls} · {play} · {pos}"
+
+def gate095_block(a, meta, unrec_block, markers_ok, edge_budget):
+    """The 0.9.5 gate's rows for one block (header). Returns (verdict PASS/FAIL/UNDETERMINED, [detail strings], [hold lines]).
+    `edge_budget` is shared by the night's blocks, in order: the first edge-start hold passes, any later one fails."""
+    c = a["counts"]; out = []; v = "PASS"; lines = []
     def fail(): nonlocal v; v = "FAIL"
     if a["freezes"] or unrec_block: fail()
     out.append(f"freezes {len(a['freezes'])}, unrecovered {unrec_block}")
     wins = [(st["host"] - st["silence"] - 0.05, st["moved_host"] + 0.5) for st in a["stalls"] if "moved_host" in st]
-    exc = [h for h in a["holds"] if any(lo <= h[1] <= hi for lo, hi in wins)]
-    bad = [h for h in a["holds"] if h not in exc]
+    exc = []; edge = []; bad = []
+    for h in a["holds"]:
+        if any(lo <= h[1] <= hi for lo, hi in wins): exc.append(h); lines.append(hold_line(h, "renderer recovery (allowed)"))
+        elif edge_start(h, meta) and edge_budget["left"] > 0:
+            edge_budget["left"] -= 1; edge.append(h); lines.append(hold_line(h, "edge-start exception (allowed, the night's first)"))
+        elif edge_start(h, meta): bad.append(h); lines.append(hold_line(h, "edge-start, but not the night's first: FAILS"))
+        else: bad.append(h); lines.append(hold_line(h, "other: FAILS"))
     if bad: fail()
-    out.append("holds/skips other than a renderer recovery " + (", ".join(f"{h[0]} at host {h[1]:.3f}" for h in bad) or "none")
-               + f"; in a renderer recovery {len(exc)}")
+    out.append("holds/skips other than a renderer recovery or the edge-start exception " + (", ".join(f"{h[0]} at host {h[1]:.3f}" for h in bad) or "none")
+               + f"; in a renderer recovery {len(exc)}; edge-start exception {len(edge)}")
     other = [d for d in a["drops"] if not d["start_drop"]]
     if other: fail()
     out.append(f"card dropped {len(a['drops'])} (frame #0 start drop: " + (", ".join(f"line {d['line']} frame {d['frame']}" for d in a["drops"] if d["start_drop"]) or "none")
@@ -268,7 +313,7 @@ def gate095_block(a, meta, unrec_block, markers_ok):
         same = d["pacer"] == stop and d["card_holds"] == nh and d["sdi_stops"] == cb
         out.append(f"[DIAG] check: pacer {d['pacer']} vs {stop}, card holds {d['card_holds']} vs the gate's holds/skips {nh}, SDI audio stops "
                    f"{d['sdi_stops']} vs callback stops {cb}: {'agree' if same else 'DIFFER'} (checked, not in the verdict)")
-    return v, out
+    return v, out, lines
 
 def wall_hours(meta):
     try: return (datetime.datetime.fromisoformat(meta["finished"]) - datetime.datetime.fromisoformat(meta["began"])).total_seconds() / 3600
@@ -448,6 +493,7 @@ def zoom_block(meta, watched, ev):
 def main(d, labels):
     total = collections.Counter(); allh = 0.0; gate = []; g95 = []; wall = 0.0
     zwatched, zev = zoom_events(d); zspans = []
+    edge_budget = {"left": EDGE_MAX}
     for lab in labels:
         try: meta = json.load(open(f"{d}/{lab}.json")); open(f"{d}/{lab}.log").close()
         except OSError: print(f"== {lab}: no record (the block stopped before its launch)"); continue
@@ -491,8 +537,9 @@ def main(d, labels):
         except (KeyError, TypeError, ValueError): pass
         mk = markers_report(meta, a, total) if "regens" in meta else None
         ub = (unrec_fz + unrec_ss + c.get("renderer GAVE UP", 0) + c.get("silent-start recovery dropped", 0) + a["sdi_sound"]["unrecovered"])
-        gv, gd = gate095_block(a, meta, ub, mk); g95.append((lab, gv)); wall += wall_hours(meta)
+        gv, gd, hl = gate095_block(a, meta, ub, mk, edge_budget); g95.append((lab, gv)); wall += wall_hours(meta)
         print(f"   0.9.5 gate: {gv} — " + " · ".join(gd))
+        if hl: print("   0.9.5 gate, each hold or skip by class:"); [print(x) for x in hl]
         for k, v in c.items(): total[k] += v
         total["renderer stalls sooner than 0.5 s"] += sum(1 for st in a["stalls"] if st["silence"] < WD_OLD_SILENCE)
         total["freezes"] += len(a["freezes"]); total["unrecovered freezes"] += unrec_fz; total["holds"] += nh; total["skips"] += ns
@@ -529,8 +576,8 @@ def main(d, labels):
     vs = [v for _, v in g95]
     hours_ok = wall >= GATE_HOURS
     g = "FAIL" if "FAIL" in vs or not hours_ok or not vs else "UNDETERMINED" if "UNDETERMINED" in vs else "PASS"
-    print(f"== 0.9.5 GATE (Manifold-BUILD.md: 0 freezes, 0 unrecovered events, 0 holds for any cause except a renderer recovery, card drops "
-          f"only the frame #0 start drop, B1 pacer missed deadlines ≤ {B1_MAX} per block less post-seek perform, markers, at least "
+    print(f"== 0.9.5 GATE (Manifold-BUILD.md: 0 freezes, 0 unrecovered events, 0 holds for any cause except a renderer recovery "
+          f"or {EDGE_MAX} edge-start hold per night (59.94, C+ lead guard at its band edge), card drops only the frame #0 start drop, B1 pacer missed deadlines ≤ {B1_MAX} per block less post-seek perform, markers, at least "
           f"{GATE_HOURS:.0f} h): {g} — blocks " + ", ".join(f"{lab} {v}" for lab, v in g95)
           + f" · wall {wall:.2f} h ({'≥' if hours_ok else '<'} {GATE_HOURS:.0f} h), playing {allh:.2f} h")
 

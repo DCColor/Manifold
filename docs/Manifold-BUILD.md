@@ -229,7 +229,8 @@ the pins, but reproducing them takes real time.
           regen 5). That is in line with each block's own background rate (119 late/dropped frames in 4.65 h of video blocks,
           about 4.3 expected in 30 × 20 s). From each Pause to its last thumbnail + 10 s: 0 holds, 0 skips, 0 late/dropped.
       - **0.9.5 release gate (Robbie, 2026-11-19, after `CARD_PULL_MARGIN.md` §18 and two attended checks on the LG; amended
-        2026-11-20 after nights 6 and 7, §19–§20): 0 holds for any cause, except a renderer recovery. Crossing-caused holds: 0,
+        2026-11-20 after nights 6 and 7, §19–§20; amended 2026-11-21, the edge-start exception below): 0 holds for any cause, except a
+        renderer recovery and at most one edge-start hold per night. Crossing-caused holds: 0,
         with no exception.** The 0.9.4 exception "a late window frame repeated once (either destination)" is retired: its mechanism,
         the crossing, is fixed by C+ (`BUGS.md`, the card pull's margin, FIXED 2026-11-19). The scaled-display exception ("pacer-caused
         hold from a present overrun on a scaled display, recovered") is removed (2026-11-20): plain B fixes it (`BUGS.md`, "on a scaled
@@ -268,6 +269,27 @@ the pins, but reproducing them takes real time.
         - **Kept from 0.9.4 (Robbie, 2026-11-19): the frame #0 start-drop exception.** Frame #0 of an output start reported
           Dropped, the known start-time drop (a card drop, not a hold; `BUGS.md`, "the first scheduled frame of an output start is
           now and then reported Dropped").
+        - **Added 2026-11-21 (Robbie): the edge-start exception, at most one per night.** 0.9.5 ships today's pull code; the fix,
+          the sticky would-repeat band, is for 0.9.6 (`CARD_PULL_MARGIN.md` §21). As `rc-soak-report.py` implements it
+          (`edge_start`, `gate095_block`):
+          - **It passes** a hold (a pull that hands the frame handed last; not a skip) when all of these are true:
+            1. the block's output mode is 59.94 (`1080p59.94` or `2160p59.94`, k = 2: the lead-guard line's P is half the card frame,
+               within 0.05 ms);
+            2. it is in a Play whose C+ lead guard stopped at its band edge. The Play is the one whose `[PACER-PHASE] reference set`
+               line is the last before the hold; every Play, seek and wrap sets a new one. The first `[PACER-PHASE] lead guard` line
+               after that reference (the establishment) says "at the guard band's edge", and its lead after the move is < P + 0.5 ms;
+            3. it is the night's first such hold, in block order.
+          - **It fails**, as before the exception: any other hold or skip not in a renderer recovery, and a second edge-start hold
+            in the same night.
+          - **Reported for every hold and skip, never judged:** its class, its Play's lead-guard lead and P (or that the Play had no
+            lead-guard line, i.e. lead already ≥ P + 0.5 ms), and its position, in seconds since the last Play, seek or wrap.
+          - **Measured rate (nights 5–7, `CARD_PULL_MARGIN.md` §21.2):** 1 of 379 Plays at 59.94 in the next-by-band state started
+            within 0.1 ms of the would-repeat edge. 1 hold of this kind is known: the rehearsal's (above), which is classified
+            edge-start (lead 8.547 ms, P 8.34 ms, 11.6 s after the wrap; its block reads PASS under the exception, and the night
+            still FAILS on 4.08 h wall time).
+          - **Self-test** (`~/Code/_scratch/manifold-rc095-rehearsal/tests/run-tests.sh`, outside the repo): the rehearsal hold is
+            the edge-start exception; the same hold moved to a full-lead Play fails; a second edge-start hold in a night fails; and
+            nights 5–7 keep every per-block 0.9.5 verdict.
         - **The renderer watchdog's detection wait is 200 ms, was 500 ms (decided Robbie, 2026-11-20; `BUGS.md`, the picture
           freeze; `PICTURE_FREEZE_AUDIT.md` §6).** It recovers once the state has lasted 150 ms with no pump callback for 200 ms. A
           state over 100 ms that clears by itself is still a near-miss, not a recovery: the 100–150 ms band is kept for it. Basis:
@@ -362,6 +384,10 @@ the pins, but reproducing them takes real time.
               records, #113767 should have taken 11.628283.** The repeat came from an input the log does not have: the pull's own host
               and clock (the logged ones are after the copy), the margin's median tick at that pull, or whether 11.628283's ring
               slot was visible to the pull when the pull read the ring. Which one: UNKNOWN.
+              **Superseded 2026-11-21 (`CARD_PULL_MARGIN.md` §21.2):** calibrated on nights 5–7's `[PULLPHASE]`, the lead guard's
+              pull phase (9.047 ms) puts this Play's headroom at about −0.07…+0.09 ms, on the edge. Within-Play wobble reaches
+              0.12 ms, so an edge hold of the half-frame band needs no unlogged trigger. The 0.13 ms above came from `[CADENCE]`
+              stamps taken after the copy (bias inferred, not measured).
             - **Against the known mechanisms.**
               - Crossing (a late window frame): not seen. The publish was on time, and the 10 s `tick → SDI ring` max was 2.53 ms.
               - Pacer miss: no (missed 0).
