@@ -28,6 +28,9 @@ struct MarkersScopeView: View {
 
     /// The slot's thumbnails (§4.4): on unless turned off in the gear.
     @AppStorage("manifold.markers.slotThumbnails") private var showThumbnails = true
+    /// The slot's text size (gear, and Settings ▸ Scopes & Guides): one stored value, read live. Medium is the slot as it was.
+    @AppStorage(MarkerTextSize.key) private var textSize: MarkerTextSize = MarkerTextSize.defaultSize
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
 #if DEBUG
@@ -36,7 +39,7 @@ struct MarkersScopeView: View {
         VStack(spacing: 0) {
             HStack(spacing: 4) {
                 ScopeSlotHeader(name: "MARKERS", suffix: headerSuffix, selection: slotSelection)
-                ScopeGear(title: "Markers", help: "Thumbnails, colors shown, start timecode") { gearContent }
+                ScopeGear(title: "Markers", help: "Thumbnails, text size, colors shown, start timecode") { gearContent }
                 Spacer(minLength: 4)
                 if let i = model.inPoint { markChip("IN \(label(i))") }
                 if let o = model.outPoint { markChip("OUT \(label(o))") }
@@ -46,7 +49,7 @@ struct MarkersScopeView: View {
 
             ZStack {
                 Color.black
-                MarkerListBody(model: model, engine: engine, style: .slot, showThumbnails: showThumbnails)
+                MarkerListBody(model: model, engine: engine, style: .slot, showThumbnails: showThumbnails, metrics: textSize.metrics)
             }
             MarkerNotice(model: model)
         }
@@ -71,12 +74,23 @@ struct MarkersScopeView: View {
 
     private func label(_ f: Int) -> String { model.basis?.label(f) ?? "—" }
 
+    /// One line always: in a narrow slot, or at Large, the chip shrinks to 70 % and then truncates, never wraps out of the
+    /// 22 pt header (which would clip it).
     private func markChip(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+        let m = textSize.metrics
+        return Text(text)
+            .font(.system(size: m.chip, weight: .semibold, design: .monospaced))
+            .lineLimit(1).minimumScaleFactor(0.7)
             .foregroundStyle(.white.opacity(0.75))
-            .padding(.horizontal, 4).padding(.vertical, 1)
+            .padding(.horizontal, m.chipPaddingH).padding(.vertical, m.chipPaddingV)
             .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 2))
+    }
+
+    /// Mark ▸ Show Marker List's own action (`ShowMarkerListMenuItem`): `openWindow` on the one Markers `Window` scene, which
+    /// opens it, or brings it to the front when it is already open. The help names the menu item's current key, if any.
+    private var openEditorHelp: String {
+        let key = ShortcutCenter.shared.registry.label(for: .showMarkerList).map { " (\($0))" } ?? ""
+        return "Open the Markers window, as Mark ▸ Show Marker List does\(key)"
     }
 
     @ViewBuilder
@@ -87,7 +101,16 @@ struct MarkersScopeView: View {
             .disabled(!model.isActive || (model.markers.isEmpty && model.chapters.isEmpty))
             .help("Make this file's marker and chapter thumbnails again (not while playing)")
         MarkerColorFilter(model: model)
+        ScopeGearSectionHeader("Text size")
+        Picker("Text size", selection: $textSize) {
+            ForEach(MarkerTextSize.allCases) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .help("The size of the marker list's text and rows in this scope. Also in Settings ▸ Scopes & Guides.")
         ScopeGearSectionHeader("Markers")
+        Button("Open Markers Editor") { openWindow(id: MarkersWindowScene.windowID) }
+            .help(openEditorHelp)
         Button("Import Markers…") { model.presentImport() }.disabled(!model.isActive)
         Button("Export Markers…") { model.presentExport() }.disabled(!model.isActive || model.markers.isEmpty)
         // D-C17a: offered when the file has no tmcd and no container timecode — so also over a user-data or XMP start.
@@ -193,6 +216,8 @@ struct MarkerListBody: View {
     @ObservedObject var engine: FrameEngine
     let style: Style
     let showThumbnails: Bool
+    /// The slot style's sizes (`MarkerTextSize`); the window style keeps its own.
+    var metrics: MarkerSlotMetrics = .medium
 
     @State private var selection: Set<MarkerListRow.ID> = []
     @State private var anchor: MarkerListRow.ID?
@@ -246,7 +271,7 @@ struct MarkerListBody: View {
                 LazyVStack(spacing: 0) {
                     ForEach(shown) { r in
                         row(r)
-                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .padding(.horizontal, 6).padding(.vertical, style == .slot ? metrics.rowPadding : 2)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(background(r.id, isCurrent: r.id == current))
                             .contentShape(Rectangle())
@@ -386,24 +411,38 @@ struct MarkerListBody: View {
         return slot ? .white.opacity(0.75) : .secondary
     }
 
+    // The slot rows take every size from `metrics` (MarkerTextSize; Medium is the slot as it was). The timecode and the
+    // duration are one line always: in a narrow slot they shrink to 70 % and then truncate instead of wrapping, and the
+    // timecode is the last to give way. At Medium in a slot wide enough for the row, nothing changes.
+
+    private func slotTimecode(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: metrics.timecode, design: .monospaced))
+            .lineLimit(1).minimumScaleFactor(0.7).layoutPriority(1)
+            .foregroundStyle(.white.opacity(0.85))
+    }
+
+    private func slotDuration(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: metrics.duration, design: .monospaced))
+            .lineLimit(1).minimumScaleFactor(0.7)
+            .foregroundStyle(.white.opacity(0.5))
+    }
+
     private func chapterSlotRow(_ c: MappedChapter) -> some View {
-        HStack(alignment: .center, spacing: 6) {
-            if showThumbnails { MarkerThumb(thumbnails: model.thumbnails, frame: c.frame, height: 32) }
-            Text(label(c.frame))
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.85))
+        HStack(alignment: .center, spacing: metrics.rowSpacing) {
+            if showThumbnails { MarkerThumb(thumbnails: model.thumbnails, frame: c.frame, height: metrics.thumbnail) }
+            slotTimecode(label(c.frame))
             Image(systemName: c.kind.symbolName)
-                .font(.system(size: 8))
+                .font(.system(size: metrics.swatch))
                 .foregroundStyle(chapterTint(c, slot: true))
-                .frame(width: 8, height: 8)
+                .frame(width: metrics.swatch, height: metrics.swatch)
             Text(c.title.isEmpty ? "—" : c.title)
-                .font(.system(size: 11))
+                .font(.system(size: metrics.name))
                 .foregroundStyle(.white.opacity(c.title.isEmpty ? 0.35 : 0.75))
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Text(chapterDuration(c))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.5))
+            slotDuration(chapterDuration(c))
         }
     }
 
@@ -430,25 +469,21 @@ struct MarkerListBody: View {
     }
 
     private func slotRow(_ m: Marker) -> some View {
-        HStack(alignment: .center, spacing: 6) {
-            if showThumbnails { MarkerThumb(thumbnails: model.thumbnails, frame: m.frame, height: 32) }
-            Text(label(m.frame))
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.85))
-            Circle().fill(m.color.swatch).frame(width: 8, height: 8)
+        HStack(alignment: .center, spacing: metrics.rowSpacing) {
+            if showThumbnails { MarkerThumb(thumbnails: model.thumbnails, frame: m.frame, height: metrics.thumbnail) }
+            slotTimecode(label(m.frame))
+            Circle().fill(m.color.swatch).frame(width: metrics.swatch, height: metrics.swatch)
             VStack(alignment: .leading, spacing: 1) {
                 Text(m.name.isEmpty ? "—" : m.name)
-                    .font(.system(size: 11))
+                    .font(.system(size: metrics.name))
                     .foregroundStyle(.white.opacity(m.name.isEmpty ? 0.35 : 0.9))
                     .lineLimit(1)
                 if let first = m.notes.split(whereSeparator: \.isNewline).first {
-                    Text(first).font(.system(size: 10)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
+                    Text(first).font(.system(size: metrics.notes)).foregroundStyle(.white.opacity(0.5)).lineLimit(1)
                 }
             }
             Spacer(minLength: 4)
-            Text(m.duration == 1 ? "" : durationText(m))
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.5))
+            slotDuration(m.duration == 1 ? "" : durationText(m))
         }
     }
 

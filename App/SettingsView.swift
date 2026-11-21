@@ -545,6 +545,8 @@ private struct ScopesSettingsPane: View {
     @AppStorage(Preferences.graticuleBrightnessKey) private var graticuleBrightness: Double =
         Preferences.defaultGraticuleBrightness
     @AppStorage("scopeScale") private var scopeScale: ScopeScale = .bit10
+    /// The Markers scope's text size: the same stored value as its gear's control, read live by both.
+    @AppStorage(MarkerTextSize.key) private var markerTextSize: MarkerTextSize = MarkerTextSize.defaultSize
 
     // Framing-guide styling (defaults reproduce Pass 1's look).
     @AppStorage("guideDarkenOpacity") private var guideDarkenOpacity = 0.85
@@ -590,6 +592,11 @@ private struct ScopesSettingsPane: View {
                 SettingsCaption("Graticule brightness sets the lines in every scope; at its lowest the lines are off and "
                                 + "the labels stay. Each scope's own intensity and trace color are in its header, in the "
                                 + "scopes tray.")
+                Picker("Marker text size", selection: $markerTextSize) {
+                    ForEach(MarkerTextSize.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                SettingsCaption("The size of the marker list's text and rows in the Markers scope. Also in that scope's gear.")
             }
 
             // The guides popover's order and names (Robbie, 2026-10-29): Broadcast safe zones, Frame guide, Social safe
