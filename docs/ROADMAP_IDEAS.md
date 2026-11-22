@@ -531,3 +531,8 @@ What: after a Play's first timed pull, the would-repeat test at a matched rate a
 Version: 0.9.6
 
 What: today the comment is one line, truncated, with the full text in the hover tooltip. An option for 1, 2 or 3 lines; more lines change row height.
+
+## Soak harness: stable accessibility identifiers for the controls it drives
+Version: 0.9.6
+
+What: give the controls the release soak drives stable accessibility identifiers (`.accessibilityIdentifier`, never shown, never translated), and have `scripts/decklink-loopback/rc-soak-ax.swift` find them by identifier, not by tooltip or title. Today the helper finds the Markers scope gear by its exact tooltip (`gearHelps`) and Regenerate Thumbnails by its title. 82e39bc added "text size" to the gear's tooltip, so the 0.9.5 final soak (2026-11-21) never found the gear: all 30 Regenerates went unpressed and the night failed on markers only (`Manifold-BUILD.md`, final-soak markers follow-up). This is the second break from tooltip text after the colours → colors change (4067abb). In scope: the Markers gear, Regenerate Thumbnails, and the other gear items the helper may press (Open Markers Editor, text size). Worth considering: the menu items `rc-soak.py` clicks by title (File ▸ Start/Stop DeckLink Output, File ▸ Close All, Mark ▸ Add Marker), and the window `linkpace-ax place` finds by title. Keep the tooltip match as a fallback for older binaries. A unit or UI test should pin the identifiers so a copy edit cannot break the soak again.

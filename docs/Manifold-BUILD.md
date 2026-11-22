@@ -476,6 +476,78 @@ the pins, but reproducing them takes real time.
               - A dry run of the watch against a fake process list logged present-at-start, appear and disappear lines correctly.
               - The report on the rehearsal folder is unchanged apart from the new "not recorded" lines.
               - On a synthetic `rig.log` with the five runs above, all 5 were placed in blocks.
+        - **0.9.5 final soak result (2026-11-21 23:26 – 2026-11-22 06:46): `rc-soak-report.py` 0.9.5 GATE: FAIL, on markers only.**
+          Candidate: `.build-rc095`, a Profile build of `7b909e3`, bundle 0.9.5 (27), ad-hoc linker-signed, sha256 `e21902114072e34d…`
+          (`RIG.md`). Chain, logs, `soak.out`, `soak.report`: `~/Code/_scratch/manifold-rc095-final/`. All 7 blocks ran. Wall time 7.13 h,
+          6.53 h playing. GATE (0.9.3 rule): PASS, with 0 freezes, 0 unrecovered, 0 holds, 0 skips. Card late 0, dropped 0. Renderer: 0 stalls,
+          0 near-misses. B1: 0 in every block. The two ao48 blocks pass the 0.9.5 gate. The five video blocks fail it only on `markers FAIL`
+          (`soak.report:24, 48, 83, 107, 131`). MARKERS line: regenerates 30, made while playing 0, blocks failing 5, and near them
+          holds+skips 0, late/dropped 9 (`soak.report:179`).
+        - **Final-soak markers follow-up (2026-11-22, read-only; no build, no launch, no git beyond log/diff).** Paths are relative to
+          `~/Code/_scratch/manifold-rc095-final/` unless named.
+          - **What failed: Regenerate was never pressed. The 9 late/dropped are not why the check failed.** The MARKERS verdict is
+            `blocks failing == 0 and made while playing == 0` (`rc-soak-report.py:568`). A block fails when the slot was not found or a
+            Regenerate was not good (pressed with `ax_rc` 0, the app's n = 5, 5 remade, 0 while playing; `:437`, `:448-449`). Late/dropped is
+            only printed (`:571-572`). Every block reads `Markers slot NOT FOUND`, and all 30 Regenerates read `no-gear`: app n = None,
+            removed 0, remade 0 (`soak.report:11-22` and the same in each video block). Setup had already failed on all three files
+            (`soak.out:13-27`: "no-markers-slot", then "!! marker setup NOT ok: the blocks run, markers recorded as failing").
+          - **Cause: 82e39bc changed the gear's tooltip, and the soak's AX helper matches that tooltip exactly.** `rc-soak-ax` finds the
+            gear by AXHelp in a fixed set: "Thumbnails, colors shown, start timecode" or "… colours shown …"
+            (`scripts/decklink-loopback/rc-soak-ax.swift:12, 26`). 82e39bc changed it to "Thumbnails, text size, colors shown, start timecode"
+            (`App/Markers/MarkersScopeView.swift:42`; it was `:39` at `5bad8d3`). This is the same failure 4067abb fixed for the colours →
+            colors change ("soak driver accepts new tooltip"). The installed helper `build/decklink-loopback/rc-soak-ax` was built 2026-11-15.
+          - **1. What late/dropped counts.** `rc-soak.py` stamps each line on the host clock when it reads it (0.25 s poll;
+            `rc-soak.py:182-186`). It counts three things: `DeckLink D3: !! DisplayedLate` (card late), `DeckLink D3: !! Dropped` (card dropped),
+            and every `[PLAYBACK-STATS]` line with dropped + late > 0 (the window, summed as one "window dropped/late" count). Pacer missed
+            deadlines are not counted. "Near" is the sum of two windows per Regenerate: ±10 s around the press (`WIN = 10.0`,
+            `rc-soak-report.py:75, 445`), and from the next Pause to the last thumbnail + 10 s (`:446-447`). Here the second window is empty
+            because no Pause was tracked: `ax_rc` 3 ends tracking at once (`rc-soak.py:214`).
+          - **2. The 9 (8 log lines, one with n = 2).** All are window counts. None is a card line, so none is on SDI. All 8 came while
+            playing; none came while paused. Each lands at a transport jump that the hold counter already excludes:
+
+            | Block | Regenerate | Log line | Kind | ms from press | Transport |
+            |---|---|---|---|---|---|
+            | `f95-5994-sdi-1` | 4 | 569898 | window late 1 | +1862 | playing; loop wrap (pts 0.000) |
+            | `f95-2398-cmp-1` | 2 | 116843 | window late 1 | −9281 | playing; loop wrap (pts 0.000) |
+            | `f95-2398-cmp-1` | 5 | 294173 | window dropped 1 | −3110 | playing; 0.1 s after a seek |
+            | `f95-gop25-sdi-1` | 2 | 121767 | window late 1 | −8777 | playing; loop wrap (pts 0.480) |
+            | `f95-gop25-sdi-1` | 5 | 306347 | window dropped 1 + late 1 | −2061 | playing; 1.0 s after a seek |
+            | `f95-5994-sdi-2` | 5 | 711143 | window dropped 1 | −3095 | playing; 0.1 s after a seek |
+            | `f95-2398-cmp-2` | 2 | 116849 | window late 1 | −9027 | playing; loop wrap (pts 0.000) |
+            | `f95-2398-cmp-2` | 4 | 235775 | window late 1 | +2122 | playing; loop wrap (pts 0.000) |
+
+            Six of the eight came before the press, and nothing was pressed in any case. They are possibly visible on the desktop viewer
+            (the ASUS) as one dropped or late frame at a seek or a wrap. They are not on SDI: card late 0 and card dropped 0 all night.
+          - **3. Earlier nights, same rule.** The check and its windows are unchanged since 4067abb (2026-11-15). 2c09586 changed only the
+            gate line, and 5bad8d3..7b909e3 touches only the gate and edge-start code (`git diff`). The current script over each folder gives:
+            rehearsal (`manifold-rc095-rehearsal`) PASS, 18 Regenerates, late/dropped 5. Night 5 (`manifold-pacerphase-ab4`) PASS, 24, 6.
+            Night 6 (`ab5`) PASS, 24, 4. Night 7 (`ab6`) PASS, 30, 7. 0.9.4 soak (`manifold-rc094-soak`) PASS, 30, 6. On those nights the
+            slot was open and every Regenerate was pressed. Per window that is 0.17–0.28, against 0.30 tonight, with no Regenerate at all.
+          - **4. 82e39bc and Regenerate.** `git diff 5bad8d3..7b909e3 -- App/Markers/MarkersScopeView.swift` changes no line about
+            regenerate or the thumbnailer. The button is unchanged (`MarkersScopeView.swift:100`). Thumbnail height now comes from
+            `metrics.thumbnail`, which is only the view's `.frame(height:)` on an image already made (`MarkerThumb`, `:546-565`). Medium is
+            exactly 32 (`Packages/ManifoldCore/Sources/Markers/MarkerTextSize.swift:60`), the old literal. 82e39bc cannot change Regenerate's
+            timing. Its only effect on the soak is the tooltip.
+          - **5. Background rate.** Every window late/dropped of the night (124 frames) falls in one of two places: 0–1 s after a seek
+            (87), or 25 s after Play in the 50 s play step, the loop wrap (37). Seeks made while playing give one 63 % of the time (66/105);
+            seeks made while paused never do (0/210). Each press waits until 3 s after a transport step while playing (`REGEN_CLEAR`,
+            `rc-soak.py:28, 203`), so its ±10 s window takes in a seek made while playing or a wrap almost every time. Per hot spot, the
+            rate inside the windows (seeks 4/5, wraps 3/6) is in line with the rate outside them (seeks made while playing 66/105, wraps
+            34/99). A naive per-hour comparison (48/h near against 19/h background) overstates the effect, because the windows are
+            phase-locked to those jumps. No Regenerate ran, so the night is itself the control.
+          - **6. Verdict: (c), as a harness break, not a product or timing defect.** 82e39bc's tooltip change hid the gear from
+            `rc-soak-ax`, so Regenerate was not tested on 7b909e3. It is not (a): no Regenerate ran, and the 9 match nights with real ones. The
+            9 are also a small (b): the "near" count includes window frames at seeks and wraps, which the hold counter excludes. It is in
+            no verdict.
+            **Recommendation for 0.9.5** (Robbie's call; to be done in a session in this repo):
+            1. Add the new tooltip to `gearHelps`, or better, find the gear by a stable accessibility identifier, and rebuild `rc-soak-ax`.
+            2. Check `rc-soak-ax <pid> gear` returns 0 against the 7b909e3 candidate, then run `markers-setup` on the three files.
+            3. Re-run the markers part of the gate on the same binary. The other gate items passed tonight on the unchanged sha256. Whether a
+               markers-only run (the five video blocks with markers) is enough, or the full 6 h night is needed, is Robbie's decision.
+            4. Make a failed marker setup stop the night (`soak.sh`), rather than "the blocks run, markers recorded as failing". That
+               cost this night.
+            5. Optional: report the near-Regenerate late/dropped against matched seek and wrap hot spots, or exclude the EXCL s after a
+               transport step, as holds already do.
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---

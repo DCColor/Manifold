@@ -1,15 +1,19 @@
 // rc-soak-ax: the Markers slot's gear, by accessibility only (no keystrokes, no pointer, no screenshots). For rc-soak.py.
 //   rc-soak-ax <pid> gear     exit 0 when the Markers slot's gear is on screen (the slot is open), 3 when not
 //   rc-soak-ax <pid> regen    gear ▸ Regenerate Thumbnails, then the gear again to close its popover
-// The gear is found by its tooltip (AXHelp), "Thumbnails, colors shown, start timecode" (App/Markers/MarkersScopeView.swift:37),
-// which only the Markers slot's gear carries. "colours shown" is accepted too: builds before fbb735a (American English) spell it so.
+// The gear is found by its tooltip (AXHelp), which only the Markers slot's gear carries. Since 82e39bc (0.9.5 marker text size) it is
+// "Thumbnails, text size, colors shown, start timecode" (App/Markers/MarkersScopeView.swift:42). The older spellings are accepted too, so
+// one helper drives both binaries: "Thumbnails, colors shown, start timecode" (fbb735a..82e39bc) and "… colours shown …" (before
+// fbb735a, British English). Matching tooltip text is fragile (the 0.9.5 final soak never found the gear); ROADMAP_IDEAS.md 0.9.6 has
+// stable accessibility identifiers for the controls the harness drives.
 // Build: swiftc -O -o build/decklink-loopback/rc-soak-ax scripts/decklink-loopback/rc-soak-ax.swift
 import AppKit
 import ApplicationServices
 
 let a = CommandLine.arguments
 guard a.count == 3, let pid = pid_t(a[1]) else { print("rc-soak-ax <pid> gear|regen"); exit(2) }
-let gearHelps: Set<String> = ["Thumbnails, colors shown, start timecode", "Thumbnails, colours shown, start timecode"], regenTitle = "Regenerate Thumbnails"
+let gearHelps: Set<String> = ["Thumbnails, text size, colors shown, start timecode", "Thumbnails, colors shown, start timecode",
+                               "Thumbnails, colours shown, start timecode"], regenTitle = "Regenerate Thumbnails"
 
 func attr(_ e: AXUIElement, _ n: String) -> AnyObject? { var v: AnyObject?; return AXUIElementCopyAttributeValue(e, n as CFString, &v) == .success ? v : nil }
 func find(_ e: AXUIElement, depth: Int = 0, _ match: (AXUIElement) -> Bool) -> AXUIElement? {
