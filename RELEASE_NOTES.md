@@ -5,6 +5,19 @@ which parses the section matching the version being released and puts the entrie
 manifest as a `notes` array. Keep entries short — they render in an update dialog, not on a
 changelog page. Format notes are at the bottom.
 
+## 0.9.5
+
+- Repeated frames on SDI during playback are now very rare, at 23.976, 25 and 59.94, including with a display running at a scaled resolution. Very rarely, one frame can still repeat at the start of a Play at 59.94.
+- If the card stops asking for SDI sound during playback, Manifold restarts the output after 3 seconds. If it happens again within a minute, Manifold shows "SDI sound stopped; restart output": stop and start output to bring the sound back.
+- Fixed: very rarely, after a seek during playback, SDI's sound could stay silent for about a minute while the picture played.
+- If the picture stops updating, Manifold now recovers in about 0.2 seconds instead of about 0.4.
+- Manifold reads the markers embedded in a file: QuickTime chapter tracks, MP4 chapters, and Premiere Pro's Comment and Chapter markers. They show beside your own and can't be edited. Mark ▸ Convert All File Markers to Markers, or a file marker's right-click menu, makes editable markers. View ▸ Show File Markers hides them.
+- File ▸ Export Markers… can write Premiere Pro (XML). In Premiere, File ▸ Import opens it as a sequence holding your clip with its markers, at the file's own timecode. Every marker arrives as a Comment marker, and Manifold's 16 colors map to the nearest of Premiere's 8.
+- Export Markers… can also write a chapter list for ffmpeg or for a YouTube description, timed from the file's first frame. Manifold says if a YouTube list breaks one of YouTube's chapter rules. Only converted file markers are exported.
+- Manifold now finds a file's start timecode in QuickTime metadata and Premiere's XMP when it has no timecode track or container timecode. The marker start timecode can replace a start found there.
+- Scopes: a new YRGB Parade, brighter graticules, and Settings ▸ Scopes & Guides ▸ Scopes ▸ Graticule brightness. If you preferred the old look, lower Graticule brightness.
+- The Markers slot's gear menu has Open Markers Editor and a text size (Small, Medium, Large), also in Settings ▸ Scopes & Guides ▸ Scopes. Hovering a row in the Markers list now shows its details.
+
 ## 0.9.4
 
 - Markers: press M to mark the frame on screen, even while playing. A marker has a name, notes, keywords, a duration and one of Resolve's 16 colors. There is one marker per frame. ⇧M edits a marker, ⌥M adds one and opens it for editing, and I and O mark a span.
