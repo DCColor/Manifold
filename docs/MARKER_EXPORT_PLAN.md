@@ -9,6 +9,9 @@ Read-only audit, 2026-11-17. No code was changed, nothing was built or launched.
 - The Final Cut (§2) and Avid (§3) sections stay as research for the next build. Robbie will first supply sample files
   with embedded markers from both apps.
 
+**Updated 2026-11-25:** Joey's Media Composer samples and Abba's Final Cut document are read in §10–§15 (read-only; nothing
+built or launched). Where §10–§15 disagree with §2–§3, §10–§15 are newer. New label **S:** seen in those samples.
+
 **Sources.**
 
 - **This repo:** the files cited inline.
@@ -799,3 +802,339 @@ Line counts are estimates from the existing EDL writer (`ResolveEDL.swift`, 328 
    audio layouts (P2). Clip markers are not needed.
 10. **Final Cut and Avid: next build,** after Robbie's sample files. E1 (no to-dos) is decided for then; E4 is
     deferred. §2 and §3 keep the research.
+
+## 10. Avid Media Composer: Joey's samples (2026-11-25)
+
+**Files** in `~/Code/Manifold/fixtures/markers/avid/` (outside the repo; read-only). Marker text and the user name are
+not quoted here beyond what a field needs.
+
+| File | What it is | Size |
+|---|---|---|
+| `AVID MARKERS TEXT.txt` | Markers window ▸ Export Markers, text. 4 lines | 173 B |
+| `AVID MARKERS XML.xml` | The same 4 markers as marker XML | 15 412 B |
+| `MARKER TEST.aaf` | The sequence as AAF. Writer: "Avid Media Composer 25.12.2" (a UTF-16 string in the file) | 643 072 B |
+| `Screenshot 2026-11-24 at 4.19.23 PM.png` | Markers window over the timeline | 1289×752 |
+
+### 10.1 What the screenshot shows (S)
+
+- **Markers window columns:** #, colour, User, Marker Name, TC, End, Track, Part, Creation Date, Comment. Marker Name is
+  there, so this is the 2024.6+ layout (§3).
+- **Four markers**, one per track: TC1 (timecode track, Green), V1 (Green), V2 (Yellow), A1 (Red). All one user, all
+  created 11/20/2026 3:11 PM. **Marker Name is empty on all four**, Part is empty, each comment is its track's name.
+- **End = TC + 1 frame** on every row (e.g. `…:10:23` → `…:11:00`). So End is exclusive, and a length of 1 is a
+  one-frame marker.
+- **Rate:** frame numbers reach 23 and roll to 00, so the sequence is 24 or 23.976. Which one, and DF/NDF: **UNKNOWN**
+  (no field in the TXT or XML says). The ruler suggests a 10:00:00:00 start: **UNKNOWN**, not stated in any file.
+- Every TXT and XML field below matches what the window shows, row for row. Nothing shown in the window is missing from
+  the XML except Part (empty here). The TXT lacks the creation date.
+
+### 10.2 The tab-delimited text (S)
+
+`od -c` of the file:
+
+- **ASCII, LF line endings, a final LF, no BOM, no header line.** One line per marker, sorted by TC.
+- **8 tab-separated columns:**
+
+| # | Column | Sample | How it's known |
+|---|---|---|---|
+| 1 | User | the Avid login | matches the User column |
+| 2 | TC | `10:10:10:23` (`:` separators) | matches TC |
+| 3 | Track | `TC1`, `V1`, `V2`, `A1` | matches Track |
+| 4 | Colour | `Green`, `Yellow`, `Red` | matches the swatch |
+| 5 | Comment | the track name; **two of the four end in a space** | matches Comment |
+| 6 | Length | `1` | End − TC |
+| 7 | *(empty)* | — | **Inferred: Marker Name**, empty in the window. UNKNOWN until a named marker |
+| 8 | Colour again | same as column 4 | **Inferred: the 16-colour name**, column 4 the legacy 8. UNKNOWN until a new colour (Pink, Denim…) |
+
+- The trailing spaces match the `/13` in the XML (§10.3): **inferred** that the comment had a carriage return and the
+  TXT writes it as a space. UNKNOWN until J1.
+- A tab or line break inside a comment cannot survive this format.
+- **Duration** is column 6, in frames.
+
+### 10.3 The marker XML (S)
+
+- **Envelope** (`AVID MARKERS XML.xml:1-7`): `<?xml version="1.0" encoding="UTF-8" standalone="no" ?>`, `<!DOCTYPE
+  Avid:StreamItems SYSTEM "AvidSettingsFile.dtd">` (the DTD is not supplied), `<Avid:StreamItems
+  xmlns:Avid="http://www.avid.com">`, `<Avid:XMLFileData>`, `DomainMagic` = `Domain`, `DomainKey` = `1480739396x`.
+  - Frame.io writes `DomainKey` as `58424a44` (REF). That is the same number, 0x58424A44, in hex. Media Composer's form
+    is decimal with a trailing `x`. Manifold copies Media Composer's.
+- **ASCII, LF, no BOM, no CR anywhere.** Non-ASCII handling is UNKNOWN (Frame.io uses `&#183;`, REF).
+- **One `<AvClass id="ATTR">` per marker,** in TC order, each with `__OMFI:ATTR:NumItems` = **12** (`:9`) and a `<List
+  id="OMFI:ATTR:AttrRefs">` of 12 `<ListElem>`s plus **one trailing empty `<ListElem/>`** (`:71`).
+- Each `<ListElem>` holds `OMFI:ATTB:Kind` (`1` int, `2` string), `OMFI:ATTB:Name`, and `OMFI:ATTB:IntAttribute` or
+  `OMFI:ATTB:StringAttribute`.
+- **The 12 attributes, in Media Composer's order:**
+
+| Attribute | Kind | Sample | Meaning |
+|---|---|---|---|
+| `_ATN_CRM_ID` (`:13`) | string | `060a2b34…-c50f` | SMPTE-UMID-style id. Its tail is a machine identifier (privacy, §13) |
+| `_ATN_CRM_LONG_CREATE_DATE` | int | `1795205469` | Unix seconds = 2026-11-20 20:11 UTC = the window's 3:11 PM US Eastern |
+| `_ATN_CRM_USER` | string | the login | User |
+| `_ATN_CRM_DATE` (`:28-29`) | string | `11//20//2026` | the window shows `11/20/2026`: **`/` is written `//`** |
+| `_ATN_CRM_TIME` | string | `15:11` | local 24 h |
+| `_ATN_CRM_COLOR_EXTENDED` (`:38`) | string | `Green` | the 16-colour name (2024.6+) |
+| `_ATN_CRM_COLOR` | string | `Green` | the legacy 8-colour name |
+| `_ATN_CRM_COM` (`:49`) | string | track name, two ending **`/13`** | Comment |
+| `_ATN_CRM_LONG_MOD_DATE` | int | Unix seconds | modified |
+| `_ATN_CRM_TC` (`:58`) | string | `10:10:10:23` | **a timecode string** |
+| `_ATN_CRM_TRK` | string | `TC1`, `V1`, `V2`, `A1` | Track |
+| `_ATN_CRM_LENGTH` (`:68`) | int | `1` | duration in frames |
+
+- **`/` is an escape character (inferred):** `//` is a literal slash (the date), and `/13` is character 13, a carriage
+  return. The TXT's trailing spaces sit on the same two markers. Neither is confirmed: **J1**.
+- **No Marker Name attribute** appears, because every name was empty. Its key (likely `_ATN_CRM_NAME`, a guess) and
+  where it goes in the order: **UNKNOWN until J1**.
+- **Differences from Frame.io's Avid XML (REF, MARKERS_PLAN §0.3):** Frame.io writes 7 attributes (no ID, DATE, TIME,
+  COLOR_EXTENDED, LONG_MOD_DATE), `NumItems` 7, and **`_ATN_CRM_TC` as a frame count** (`286`). Media Composer 25.12
+  writes a timecode string. Whether Media Composer imports Frame.io's frame-count form: **UNKNOWN** (J3).
+- **No rate, no sequence name, no start timecode anywhere in the file.** The import takes the TC string in the receiving
+  sequence's own rate.
+
+### 10.4 The AAF (S, string scan only)
+
+- A Structured Storage file. Its strings name `CommentMarker` (10), `DescriptiveMarker` (1), `EventMobSlot` (1), and
+  the same `_ATN_CRM_*` keys four times each (`_ATN_CRM_TIME` three times). So **AAF markers are CommentMarkers in an
+  event slot carrying the same tagged values as the XML**. The XML loses nothing the AAF has for markers.
+- It also holds 13 `file://` URLs with a network host (media locations), the clip and sequence names, and the user
+  (§13).
+- **AAF stays out.** A writer needs a Structured Storage and AAF object model (no library here, nothing may be
+  installed), a whole composition and mob references to media. It would carry no marker field the XML lacks. No strong
+  case.
+
+### 10.5 Recommendation: write the marker XML
+
+- **XML, not TXT, for the first build.**
+  - It carries the 16-colour name *and* the legacy name (Avid's own recommendation, §3), the comment with an escape for
+    line breaks, and the length.
+  - The TXT has two inferred columns, can't carry a tab or a break, and Avid says it drops Marker Name and the extended
+    colours (§3, DOC).
+  - TXT is cheap (~60 lines) and kept in reserve: build it only if J2 shows the XML failing on some Media Composer
+    version (AV1).
+- **Write Media Composer 25.12's shape, not Frame.io's**: the same envelope, attribute order, `NumItems`, trailing empty
+  `<ListElem/>`, LF, no BOM.
+- **Attributes Manifold writes (11):** all of §10.3's except `_ATN_CRM_ID` (Frame.io omits it; Media Composer assigns
+  ids; whether it requires one is **UNKNOWN**, J2). `NumItems` = 11. If J2 rejects that, generate an id of the same
+  shape.
+
+### 10.6 Field map (Manifold → Avid XML)
+
+| Manifold | Avid | Rule |
+|---|---|---|
+| `frame` | `_ATN_CRM_TC` | `basis.label(frame)`: the file's start TC (or the override) + frame, `HH:MM:SS:FF`. DF separator (`;` or `:`) **UNKNOWN** (J1 with a DF sequence) |
+| `duration` | `_ATN_CRM_LENGTH` | frames, as is (End = TC + LENGTH, §10.1). Whether import keeps length > 1: **UNKNOWN** (J2) |
+| `name` | Marker Name | Key UNKNOWN (J1). **Until then, name goes into the comment** (AV4) |
+| `notes` | `_ATN_CRM_COM` | Line breaks flattened to one space (as Premiere) until J2 shows `/13` imports as a break. `/` → `//` |
+| `keywords` | — | Lost, or appended as `[a, b]` with the existing checkbox (E2's rule) |
+| `color` | `_ATN_CRM_COLOR_EXTENDED` + `_ATN_CRM_COLOR` | §10.7 |
+| — | `_ATN_CRM_USER` | **`Manifold`** (AV3). Never the macOS user |
+| — | `_ATN_CRM_TRK` | **`V1`** (AV2) |
+| `created`, `modified` | `LONG_CREATE_DATE`, `LONG_MOD_DATE`, `DATE`, `TIME` | Unix seconds; `MM//DD//YYYY` and `HH:MM` local, as in the sample. Locale dependence **UNKNOWN** |
+
+**Edge cases.**
+
+- **Empty name and empty notes:** `_ATN_CRM_COM` written empty. Media Composer's acceptance of an empty comment is
+  **UNKNOWN** (every sample comment had text; J2).
+- **Empty name, notes present:** the comment is the notes alone.
+- **Name and notes (until AV4 is settled):** `name — notes` in the comment; name alone when there are no notes.
+- **Escaping:** XML `& < > "` as entities; `/` → `//`; non-ASCII as numeric references (`&#233;`), as Frame.io does,
+  until J1 shows what Media Composer writes for an accent.
+- **The start TC must equal the receiving sequence's.** Markers go on a sequence, not a source clip (§3, forum). The
+  export notice says: "Import onto a sequence that starts at 01:00:00:00" (the file's start, or the override).
+- **A sequence with no V1** (audio-only): the import fails or drops the marker, UNKNOWN (J2).
+
+### 10.7 Colours: Manifold's 16 → Avid's 16
+
+Avid's 16 (§3, DOC excerpt): legacy White, Red, Yellow, Green, Cyan, Blue, Magenta, Black; 2024.6 adds Purple, Violet,
+Pink, Denim, Forest, Orange, Gold, Grey. **The sample confirms only `Green`, `Yellow`, `Red` and their capitalisation**;
+the other spellings and every swatch value are UNKNOWN until J1.
+
+| Manifold | `COLOR_EXTENDED` | `COLOR` (legacy) | Note |
+|---|---|---|---|
+| Blue | Blue | Blue | same name |
+| Cyan | Cyan | Cyan | same name |
+| Green | Green | Green | same name (S) |
+| Yellow | Yellow | Yellow | same name (S) |
+| Red | Red | Red | same name (S) |
+| Pink | Pink | Magenta | same name |
+| Purple | Purple | Magenta | same name |
+| Fuchsia | Magenta | Magenta | nearest |
+| Rose | Pink | Magenta | **shares Pink** |
+| Lavender | Violet | Magenta | nearest |
+| Sky | Denim | Cyan | nearest light blue |
+| Mint | Forest | Green | nearest second green |
+| Lemon | Gold | Yellow | nearest second yellow |
+| Sand | Orange | Yellow | nearest |
+| Cocoa | Orange | Red | **shares Orange**; Avid has no brown |
+| Cream | White | White | nearest |
+
+- 14 Avid colours are used; Black and Grey never. Two pairs collapse (Rose/Pink, Cocoa/Sand), counted in the notice.
+- **The legacy column is a guess.** J1 shows what Media Composer itself writes in `_ATN_CRM_COLOR` for each new colour;
+  that replaces this column.
+- Import (§12) uses the reverse: Avid's 13 chromatic names to their row's Manifold colour; Black, Grey → Cream (nearest
+  neutral, UNKNOWN fit), White → Cream.
+
+### 10.8 Size and tests
+
+- **Writer:** `AvidMarkerXML.export`, pure, Markers target: ~160 lines. TXT writer if AV1 says so: ~60.
+- **Unit tests (~200 lines):** golden files per §6.2's cases; a **structure test against Joey's XML** (attribute set,
+  order, `NumItems`, trailing `<ListElem/>`, envelope; skips when the fixture is absent; compares structure, never
+  values); escaping (`/`, `//`, `&`, CR, LF, tab, emoji, accents); DF labels across minute and hour; the colour table;
+  log sentinel (counts only).
+- **Attended, Joey, Media Composer 25.12.2:**
+  - **J1, a second reference export** (from Joey, before the writer is designed in detail): a 29.97 DF sequence with
+    one marker per colour (16), one **named** marker, one ranged marker (30 frames), one comment with a line break,
+    one with `/`, one with an accent, and one with nothing typed. Export XML and TXT. Settles the Marker Name key, the
+    16 spellings and legacy fallbacks, DF separators, `/13`, non-ASCII, TXT columns 7–8.
+  - **J2, import Manifold's XML** onto a sequence cut from `mk-2997df-tc.mov` (we send the fixture; Joey's own media
+    not needed). Count, frames against the burn-in, colours, length, a `/13` comment, an empty comment, a file with no
+    `_ATN_CRM_ID`. Record any error message word for word.
+  - **J3, import Frame.io's XML** (frame-count TC) onto any sequence: does Media Composer accept it? This says whether
+    Frame.io's form is a usable fallback.
+  - **J4, an older Media Composer** (pre-2024.6) if Joey has one: import J2's file; colours should fall back to legacy.
+
+## 11. Final Cut Pro: Abba's document (2026-11-25)
+
+**File:** `~/Code/Manifold/fixtures/markers/fcpx/Final Cut Pro Markers A Technical Overview for Manifold.docx` (read
+with `textutil`). It is a **research write-up** (bylined Abba Shapiro, 2026-11-25), citing Apple, Intelligent
+Assistance, FCP Cafe and others. **It is not an FCPXML exported from Final Cut**, so it is documentation, not a sample:
+§2's prerequisite (a real FCP export) is still open (FC4). Its claims are labelled **ABBA** below and are not
+re-verified here.
+
+### 11.1 What it adds to §2
+
+- **Versions (ABBA):** FCP **13.0 writes FCPXML 1.15**; 12.0 wrote 1.14, 11.0 1.13. §2's "current FCP is 12.4" is
+  out of date. FCP exports the current or the previous DTD version. Whether it **imports** 1.10: not stated, UNKNOWN.
+- **DTDs (ABBA):** Apple publishes only 1.10 online; each later DTD ships inside the FCP app bundle. FCP 13 also has an
+  undocumented `Contents/MacOS/fcptool` with `xml validate` (FCP Cafe). On a Mac with FCP, that validates Manifold's
+  file without an import.
+- **Marker kinds (ABBA, matches §2 DOC):**
+  - Standard: `marker` with no `completed` (blue).
+  - To-do: `marker completed="0"` (red). Completed: `completed="1"` (green).
+  - Chapter: `chapter-marker`, with optional `posterOffset` (orange). Whether `posterOffset` is relative to the marker
+    or on the clip's timeline is unknown even to Abba.
+- **Placement (ABBA):** markers attach to clips only, never to `sequence` or `spine`. Allowed parents: `asset-clip`,
+  `clip`, `ref-clip`, `sync-clip`, `mc-clip`, `video`, `audio`, `title`, `gap`, `transition`.
+- **Time (ABBA):** rational seconds; a marker's `start` is on its clip's local timeline;
+  timeline position = clip `offset` + (marker `start` − clip `start`), applied at each nesting level. `tcStart` and
+  `tcFormat` on the sequence give the timeline's start TC and DF/NDF.
+- **Colours:** none, types only (as §2).
+- **Delivered files (ABBA):** FCP writes **chapter markers only**, as a QuickTime chapter text track, when "Include
+  chapter markers" is on. No XMP, no sidecar, nothing in source media.
+
+### 11.2 Recommendation: FCPXML 1.10, one browser clip in an event
+
+Unchanged from §2, with two amendments:
+
+- **Smallest import:** `<fcpxml>` → `<resources>` (one `<format>`, one `<asset>` with a `<media-rep>`) → `<event>` → one
+  `<asset-clip>` holding the markers (§2's file). No project, no spine: markers ride on the clip and follow it into any
+  timeline it is edited into (FC2).
+- **Version:** 1.10 stays the target (the only DTD readable here). If FCP 13 refuses it, or `fcptool xml validate`
+  flags it, move to 1.13 (oldest one FCP 13 might still export, readable from the app bundle on Abba's Mac) (FC3).
+
+**Frame rates and DF:** `frameDuration` per §2 (`1001/24000s` … `1/60s`); `tcFormat="DF"` on the `asset-clip` for
+29.97/59.94 DF. Marker `start` = asset `start` + frame × frameDuration, exact. Asset `start` = the file's own start TC
+in seconds (§4.2; E4's override still deferred).
+
+### 11.3 Field map (Manifold → FCPXML)
+
+| Manifold | FCPXML | Rule |
+|---|---|---|
+| `frame` | `start` | asset start + frame × frameDuration |
+| `duration` | `duration` | frames × frameDuration. Whether FCP keeps > 1 frame: UNKNOWN (F3) |
+| `name` | `value` (required) | Empty name: write `value=""`. Whether FCP accepts it: UNKNOWN (B0/F3). Fallback: first line of the notes, else `Marker` |
+| `notes` | `note` | Breaks as `&#10;`; kept: UNKNOWN (F3) |
+| `keywords` | `<keyword>` range over the marker's span | as §2 |
+| "chapter" keyword | `chapter-marker` | as §4.3 |
+| `color` | — | **Dropped and counted** (FC1). Option: also write the colour name as a keyword range, so an editor can filter by it |
+| type | `marker`, no `completed` | E1: never a to-do |
+
+### 11.4 Size, tests, UNKNOWNs
+
+- **Writer:** ~260 lines, tests ~300 (§7, unchanged).
+- **Unit tests:** §6.2's FCP items, plus empty-name handling and the colour-keyword option if FC1 takes it.
+- **Attended, Abba (FCP 13.0):**
+  - **B0, a real reference export** (needed before code): a project with one clip of `mk-2997df-tc.mov`, holding one
+    standard, one to-do, one completed and one chapter marker, a ranged marker, a two-line note, and a marker whose
+    name was cleared. File ▸ Export XML at 1.15 and at the previous version; also Share a `.mov` with chapter markers
+    on. Save to `~/Code/Manifold/fixtures/markers/fcpx/`.
+  - **B1:** `fcptool xml validate` on Manifold's golden 1.10 files, if the tool runs; then §6.3's F1–F6 in FCP 13.
+- **UNKNOWN until B0/F1–F6:** 1.10 import in FCP 13; nameless `<format>`; empty `value`; duration > 1 frame; note line
+  breaks; asset `start` that disagrees with the media (F2); audio attribute mismatch (F4); offline media (F6); 59.94 DF.
+
+## 12. Reading markers from Avid and Final Cut
+
+| Source | Exists? | Manifold today | Size |
+|---|---|---|---|
+| **FCP chapter markers in a delivered `.mov`/`.mp4`** | Yes (ABBA): a QuickTime chapter text track | Already read by the chapter layer (CHAPTER_MARKERS_PLAN §11.6, §14) | **None** beyond a fixture from B0 and one test that its chapters appear |
+| FCP standard/to-do markers in delivered media | **No** (ABBA) | — | — |
+| **FCPXML import** (an editor sends their export) | Yes | No | **Large: ~350 lines + ~300 tests.** Walk nested clips, apply `offset`/`start` per level, map the project timeline onto the opened file via `tcStart`; refuse `timeMap`/`conform-rate` with a notice. Types map to Manifold colours (to-do → Red, completed → Green, chapter → "chapter" keyword). MarkersExtractor (open source) is a reference to read, not copy (its licence UNKNOWN) |
+| **Avid markers embedded in delivered MXF/MOV** | **UNKNOWN.** AAF holds them as CommentMarkers (§10.4); whether Media Composer writes them into an exported OP1a MXF or a QuickTime is not documented and not in any sample. libav's MXF demuxer exposes no markers | No | Ask Joey for an OP1a MXF and a MOV export of the marker sequence (J5). If present: an own MXF KLV parse, **large (~500+ lines)**; if absent, nothing |
+| **Avid marker XML / TXT import** | Yes (§10) | No | **Small: ~150 lines + ~150 tests** for XML, ~60 for TXT. TC strings → frames through the opened file's basis (`StartTimecode`), which must share the sequence's start; neither file carries a rate, so the file's rate is assumed and stated in the notice |
+| AAF import | Yes | No | Out: same reasons as §10.4 |
+
+**So reading is import of their export files**, except FCP chapters, which Manifold already reads. Nothing from either
+app resembles Premiere's XMP.
+
+## 13. Privacy and fixtures
+
+**Nothing is at risk today:** all five sample files sit in `~/Code/Manifold/fixtures/`, outside the repo. The risk is
+copying them into `docs/markers/`.
+
+| File | Holds | Commit? |
+|---|---|---|
+| Avid TXT | the Avid login (every line); comments are track names | **Reduced copy only** |
+| Avid XML | the login (4×); `_ATN_CRM_ID`s whose tail looks like a VM network adapter id (a machine identifier); timestamps | **Reduced copy only** |
+| Avid AAF | 13 network `file://` URLs (host, share, folders), the client clip name, sequence and bin names, the login | **Never.** No reduced form (binary; no AAF tool here) |
+| Screenshot | the login, the client clip name, bin and sequence names | **Never.** §10.1 records what it shows |
+| Abba's `.docx` | research text and Abba's byline; no client data | Not needed: §11 summarises it. Commit only if Abba agrees |
+
+**Proposed reduced fixtures** (as D14 did for Frame.io), in `docs/markers/avid-reference/`:
+
+- `avid-mc25.12.txt`: the TXT byte for byte (tabs, trailing spaces, LF) with the login replaced by `editor`.
+- `avid-mc25.12.xml`: the XML with the login replaced by `editor` and each `_ATN_CRM_ID` replaced by the same shape
+  filled with zeros and a counter. Everything else byte for byte (`//`, `/13`, order, envelope).
+- J1's and B0's exports get the same treatment before any copy enters the repo; B0's FCPXML also has its `media-rep`
+  paths replaced with `file:///fixtures/…`.
+- Made by a sed script recorded in that folder's README, run on a copy; originals never touched.
+
+## 14. Decisions (Robbie, 2026-11-25)
+
+**All accepted as recommended.** P1 is done: `docs/markers/avid-reference/avid-mc25.12.txt` and `avid-mc25.12.xml`,
+made as its README records (login → `editor`, ids → counter; sizes unchanged).
+
+| # | Question | Decision |
+|---|---|---|
+| AV1 | Avid format: XML, TXT, or both? | **XML only.** TXT only if J2/J4 show a version that needs it |
+| AV2 | Track for every marker | **`V1`** (every video sequence has it; `TC1` needs a timecode track) |
+| AV3 | User field | **`Manifold`**, never the macOS user name |
+| AV4 | Marker Name before its key is known | **Wait for J1** before the writer is designed; if it can't wait, name goes into the comment as `name — notes` |
+| AV5 | Line breaks in comments | **Flatten** until J2 shows `/13` imports as a break |
+| FC1 | FCP colours | **Drop and count** in the notice; colour-as-keyword as an opt-in later if wanted |
+| FC2 | FCP file shape | **One asset-clip in an event**, no project |
+| FC3 | FCPXML version | **1.10**; 1.13 if FCP 13 or `fcptool` refuses it |
+| FC4 | Is Abba's document enough to start? | **No:** it's research. B0 (a real FCP 13 export) still comes first, as §2 required |
+| R1 | Import of Avid XML / FCPXML | **Avid XML import with the Avid writer** (small, shares the parser); FCPXML import later, only if colourists receive them |
+| R2 | Ask Joey for a delivered MXF/MOV (J5) | **Yes**, one export, to close §12's embedded-marker question |
+| P1 | Commit reduced Avid TXT/XML per §13; never the AAF or PNG | **Yes** |
+
+## 15. Summary (2026-11-25)
+
+1. **Avid samples (Media Composer 25.12.2, Joey):** 4 one-frame markers on TC1, V1, V2, A1; TXT, XML, AAF and the
+   screenshot agree field for field. No file states a rate or start timecode.
+2. **Avid: write the marker XML** in Media Composer's own shape: 11 of its 12 `_ATN_CRM_*` attributes (no ID),
+   `_ATN_CRM_TC` as a TC string (not Frame.io's frame count), `LENGTH` in frames, user `Manifold`, track `V1`.
+3. **Avid colours:** both `COLOR_EXTENDED` (16) and legacy `COLOR` (8) are written; Manifold's 16 map onto 14 of Avid's,
+   two pairs shared. Only Green, Yellow, Red spellings are confirmed.
+4. **Avid escapes (inferred):** `/` → `//`, a carriage return → `/13`; TXT turns the return into a space. Confirmed by J1.
+5. **Avid UNKNOWNs:** Marker Name key, DF separator, non-ASCII, `/13` on import, ID required, empty comment, length > 1.
+   J1 (Joey's second export) and J2 (import of ours) settle them. **AAF is out**: same marker fields, far more work.
+6. **FCP: Abba's file is a research document, not an FCPXML export.** It confirms §2's model and adds FCP 13 / FCPXML
+   1.15, DTDs in the app bundle, and `fcptool xml validate`. A real export (B0) is still needed before code.
+7. **FCP: FCPXML 1.10, one asset-clip in an event,** markers as `marker` (standard, never to-do) and `chapter-marker`
+   for the "chapter" keyword; colours dropped and counted; keywords kept as keyword ranges.
+8. **Reading:** FCP chapters in delivered files are already read by the chapter layer. Everything else is import of
+   export files: Avid XML small (~150 + 150), FCPXML large (~350 + 300). Avid markers in delivered MXF/MOV: UNKNOWN (J5).
+9. **Privacy:** the AAF (network paths, client clip name) and the screenshot must never be committed; TXT and XML go in
+   only as reduced copies with the login and ids replaced.
+10. **Decisions:** AV1–AV5, FC1–FC4, R1–R2, P1 in §14, all accepted as recommended (2026-11-25); the reduced Avid
+    fixtures are in `docs/markers/avid-reference/`.

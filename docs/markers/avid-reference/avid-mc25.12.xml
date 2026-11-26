@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<!DOCTYPE Avid:StreamItems SYSTEM "AvidSettingsFile.dtd">
+<Avid:StreamItems xmlns:Avid="http://www.avid.com">
+
+  <Avid:XMLFileData>
+    <AvProp name="DomainMagic" type="string">Domain</AvProp>
+    <AvProp name="DomainKey" type="char4">1480739396x</AvProp>
+    <AvClass id="ATTR">
+      <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">12</AvProp>
+      <List id="OMFI:ATTR:AttrRefs">
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_ID</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">060a2b340101010501010f1013-000000-0000000000000001-000000000000-0000</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205469</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">editor</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">11//20//2026</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TIME</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">15:11</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR_EXTENDED</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Green</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Green</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">TIMECODE TRACK/13</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_MOD_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205482</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">10:10:10:23</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">TC1</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+        </ListElem>
+        <ListElem/>
+      </List>
+    </AvClass>
+    <AvClass id="ATTR">
+      <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">12</AvProp>
+      <List id="OMFI:ATTR:AttrRefs">
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_ID</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">060a2b340101010501010f1013-000000-0000000000000002-000000000000-0000</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205486</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">editor</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">11//20//2026</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TIME</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">15:11</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR_EXTENDED</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Green</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Green</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_MOD_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205488</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">10:12:15:20</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V1</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+        </ListElem>
+        <ListElem/>
+      </List>
+    </AvClass>
+    <AvClass id="ATTR">
+      <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">12</AvProp>
+      <List id="OMFI:ATTR:AttrRefs">
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_ID</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">060a2b340101010501010f1013-000000-0000000000000003-000000000000-0000</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205491</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">editor</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">11//20//2026</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TIME</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">15:11</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR_EXTENDED</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Yellow</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Yellow</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V2</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_MOD_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205496</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">10:13:59:21</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">V2</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+        </ListElem>
+        <ListElem/>
+      </List>
+    </AvClass>
+    <AvClass id="ATTR">
+      <AvProp id="ATTR" name="__OMFI:ATTR:NumItems" type="int32">12</AvProp>
+      <List id="OMFI:ATTR:AttrRefs">
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_ID</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">060a2b340101010501010f1013-000000-0000000000000004-000000000000-0000</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_CREATE_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205501</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_USER</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">editor</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">11//20//2026</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TIME</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">15:11</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR_EXTENDED</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Red</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COLOR</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">Red</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_COM</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">A1/13</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LONG_MOD_DATE</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1795205505</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TC</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">10:15:27:14</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">2</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_TRK</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:StringAttribute" type="string">A1</AvProp>
+        </ListElem>
+        <ListElem>
+          <AvProp id="ATTR" name="OMFI:ATTB:Kind" type="int32">1</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:Name" type="string">_ATN_CRM_LENGTH</AvProp>
+          <AvProp id="ATTR" name="OMFI:ATTB:IntAttribute" type="int32">1</AvProp>
+        </ListElem>
+        <ListElem/>
+      </List>
+    </AvClass>
+  </Avid:XMLFileData>
+
+</Avid:StreamItems>

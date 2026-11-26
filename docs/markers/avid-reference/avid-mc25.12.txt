@@ -1,0 +1,4 @@
+editor	10:10:10:23	TC1	Green	TIMECODE TRACK 	1		Green
+editor	10:12:15:20	V1	Green	V1	1		Green
+editor	10:13:59:21	V2	Yellow	V2	1		Yellow
+editor	10:15:27:14	A1	Red	A1 	1		Red
