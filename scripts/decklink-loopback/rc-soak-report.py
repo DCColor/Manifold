@@ -60,7 +60,9 @@
 #                         `perform`, a new-frame tick, a [TRANSPORT] seek ≤ 0.5 s before it and no [CADENCE-SWAP] between (night 7's
 #                         `post_seek_perform`; its deadlines are the next interval in periods less one). Without [PRESENT-TIMING] lines
 #                         (MANIFOLD_PRESENT_TIMING unset, as on a release soak) nothing can be subtracted: a block with ≤ 2 passes, a
-#                         block with more is UNDETERMINED (it may be post-seek renders the log cannot name), and so is the gate;
+#                         block with more is UNDETERMINED (it may be post-seek renders the log cannot name), and so is the gate.
+#                         Then the report also says where each miss lies, from the 10 s [PACER] windows (b1_locate: one interval in
+#                         the link's run after a seek, by [RENDER-PERF] and [IDLE]); printed only, never subtracted (2026-11-25);
 #                      5. markers, on every block run with markers (the MARKERS line);
 #                      and in all: 6. at least 6 h, judged on wall time (block start → finish, from <label>.json), as 0.9.3 and 0.9.4 were
 #                         accepted (0.9.3: 6 h 07 min wall, 5.60 h playing); playing hours are printed beside it.
@@ -82,6 +84,10 @@ ST2_BOUND, ST2_MERGE = 1000.0, 10.0
 B1_MAX, PS_WINDOW, GATE_HOURS = 2, 0.5, 6.0
 PTMISS = re.compile(r"\[PRESENT-TIMING\] miss · host (\S+) · tick (\S+) ms · next interval (\S+) ms \(P (\S+) ms\) · (\S+) tick · attempts: (.*?) · overran: (.+?) (\S+) ms")
 PACER_STOP = re.compile(r"\[PACER\] stopped .*missed deadlines (\d+)")
+# B1 without [PRESENT-TIMING]: where the misses lie (reported, never subtracted; b1_locate).
+PACER10 = re.compile(r"\[PACER\] .* P ([\d.]+) ms · intervals 10 s: n=\d+ median \S+ p99 \S+ max ([\d.]+) ms · missed (\d+)")
+IDLE_STOP = re.compile(r"\[IDLE\] display link stopped .*after (\d+) ticks")
+RPERF = re.compile(r"\[RENDER-PERF\] n=\d+ tickMs=[\d.]+/([\d.]+)\(x(\d+)\)")
 COMPL = re.compile(r"\[CADENCE\] completion result (\d+) stream (\d+) ")
 DROPPED = re.compile(r"DeckLink D3: !! Dropped at frame (\d+)")
 LEAD_GUARD = re.compile(r"\[PACER-PHASE\] lead guard · .*\(lead ([\d.]+) ms\).* · P ([\d.]+) ms")
@@ -99,6 +105,7 @@ def analyse(path, mode, length):
     pending_recover = 0; silent = []; last_wrap = -1e9
     stalls = []; nearmisses = []; diag = None
     seeks = []; swaps = []; ptmiss = []; pacer_stop = None; drops = []; comps = 0; first_comp = None; drops_since = 0; diag_pc = None
+    pacer10 = []; idle = []; rperf = []; tlines = []
     snd = sdi_sound_tracker(); snd.f = f
     # The edge-start classifier's inputs: the C+ state of the Play in force (from its "[PACER-PHASE] reference set" line, which every
     # Play, seek and wrap re-sets, and the first lead-guard line after it), and the last Play, seek or wrap (the pull's position).
@@ -130,6 +137,7 @@ def analyse(path, mode, length):
         if l.startswith("[TRANSPORT] "):
             m = re.search(r" host (\S+)", l); h = float(m[1]) if m else host
             w = l.split()[1]
+            tlines.append((ln, w))
             if w in ("play", "seek"): last_pos = (w, h)
             if w == "play": playing = True; play_host = h; events.append(h); r["plays"] += 1
             elif w == "pause":
@@ -210,6 +218,15 @@ def analyse(path, mode, length):
         elif l.startswith("[PACER] stopped"):
             m = PACER_STOP.search(l)
             if m: pacer_stop = int(m[1])
+        elif l.startswith("[PACER] ") and "intervals 10 s:" in l:
+            m = PACER10.match(l)
+            if m: pacer10.append((ln, float(m[1]), float(m[2]), int(m[3])))
+        elif l.startswith("[IDLE] display link stopped"):
+            m = IDLE_STOP.match(l)
+            if m: idle.append((ln, int(m[1])))
+        elif l.startswith("[RENDER-PERF] "):
+            m = RPERF.match(l)
+            if m: rperf.append((ln, float(m[1]), int(m[2])))
         elif l.startswith("[PACER-PHASE] reference set"):
             cplus = dict(ref_line=ln, guard=None)
         elif l.startswith("[PACER-PHASE] lead guard"):
@@ -233,7 +250,32 @@ def analyse(path, mode, length):
     tot = {k: sum(s[k] for s in stopped) for k in ("late_edges", "missing", "relatches", "appended")}
     return dict(counts=dict(r), played_h=round(played / 3600, 3), freezes=fz, holds=holds, sdi_lines=dict(kinds), sdi_stopped=tot, silent=silent,
                 sdi_sound=snd.finish(host), stalls=stalls, nearmisses=nearmisses, diag=diag,
-                seeks=sorted(seeks), swaps=sorted(swaps), ptmiss=ptmiss, pacer_stop=pacer_stop, drops=drops, diag_pc=diag_pc)
+                seeks=sorted(seeks), swaps=sorted(swaps), ptmiss=ptmiss, pacer_stop=pacer_stop, drops=drops, diag_pc=diag_pc,
+                pacer10=pacer10, idle=idle, rperf=rperf, tlines=tlines)
+
+def b1_locate(a):
+    """B1 without [PRESENT-TIMING] lines: where the block's missed deadlines lie, from the 10 s [PACER] windows. Reported, never
+    subtracted: B1's subtraction needs the overrunning step to be `perform`, which only [PRESENT-TIMING] names. A window's misses are
+    placed in a post-seek link run when one interval explains them all (missed = round(max / P) − 1), a [RENDER-PERF] line since the
+    window before has the same tick max (± 0.1 ms) over a run whose tick count equals the [IDLE] stop before it, and the last
+    [TRANSPORT] line before that stop is a seek. Returns (deadlines placed in post-seek runs, deadlines in 10 s windows, [strings])."""
+    out = []; post = 0; total = 0; prev_w = 0
+    for wl, P, mx, missed in a["pacer10"]:
+        if missed:
+            total += missed; what = "not placed"
+            if missed == max(1, round(mx / P) - 1):
+                for pl, pmx, n in a["rperf"]:
+                    if prev_w < pl <= wl and abs(pmx - mx) <= 0.1:
+                        stop = max((i for i in a["idle"] if i[0] < pl), default=None)
+                        tr = stop and max((t for t in a["tlines"] if t[0] < stop[0]), default=None)
+                        if stop and stop[1] == n and tr and tr[1] == "seek":
+                            what = (f"one {mx:.2f} ms interval, in the {n}-tick link run after the seek at line {tr[0]} "
+                                    f"([RENDER-PERF] line {pl}, link stopped at line {stop[0]})")
+                            post += missed
+                        break
+            out.append(f"line {wl}: {missed} (10 s window, max {mx:.2f} ms): {what}")
+        prev_w = wl
+    return post, total, out
 
 def post_seek_perform(miss, seeks, swaps):
     """B1's re-statement (night 7's ab-check.py): overran `perform`, a new-frame tick, a seek ≤ PS_WINDOW s before, no swap between."""
@@ -300,6 +342,10 @@ def gate095_block(a, meta, unrec_block, markers_ok, edge_budget):
         else:
             detail += f" — over {B1_MAX} with no [PRESENT-TIMING] lines: post-seek renders cannot be named (UNDETERMINED)"
             if v == "PASS": v = "UNDETERMINED"
+        if not a["ptmiss"] and stop:
+            post, total, where = b1_locate(a)
+            detail += (f"; where (reported, not subtracted: no step is named): {post} of {stop} in post-seek link runs"
+                       + ("" if total == stop else f", 10 s windows sum to {total}") + " — " + "; ".join(where))
         if ps: detail += "; post-seek perform misses (reported): " + ", ".join(f"line {m['line']} perform {m['ms']:.1f} ms, {miss_deadlines(m)} deadline(s), {1e3 * (m['host'] - s):.0f} ms after the seek" for m, s in ps)
         out.append(detail)
     if markers_ok is False: fail()

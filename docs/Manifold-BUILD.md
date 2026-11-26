@@ -548,6 +548,22 @@ the pins, but reproducing them takes real time.
                cost this night.
             5. Optional: report the near-Regenerate late/dropped against matched seek and wrap hot spots, or exclude the EXCL s after a
                transport step, as holds already do.
+        - **0.9.5 baseline 2 (2026-11-25 11:09 – 18:17): GATE PASS; 0.9.5 GATE UNDETERMINED, on B1 in one block only.** The shipped 0.9.5 (28),
+          Developer ID, the same bytes as `/Applications/Manifold.app` (sha256 `2ca349fbeb04853d…`), run from `.build-r095-28/`. Chain, logs,
+          `RIG.md`, `soak.report`: `~/Code/_scratch/manifold-095-baseline2/`. (The first baseline night froze behind the launch update alert,
+          `BUGS.md`.)
+          - **Night:** all 7 blocks ran, each exit 0 with a clean guard. Wall 7.13 h, 6.53 h playing. 0 freezes, holds, skips, renderer stalls,
+            card late and card drops. Markers PASS (30 Regenerates, 0 made while playing). 0 update alerts, 0 licence prompts (`rig.log`).
+          - **Not PASS: `b95b-5994-sdi-1` B1,** with `[PACER] stopped` 4 > 2 and no `[PRESENT-TIMING]` lines, so the rule cannot subtract (`soak.report:24`).
+            The 4 are two 25.0 ms intervals of 2 deadlines each (10 s windows at lines 126913, 358599). Each fell in the display link's run after
+            a seek made while paused (seek lines 124680, 358078; `[RENDER-PERF]` 124939, 358334).
+          - **They are inferred to be post-seek first-frame renders, but not named.** Night 7's subtracted miss (`CARD_PULL_MARGIN.md` §20.3) has the
+            same sequence: a seek from pause, a 62-tick run, 25.02 ms, and the new frame's `[TICKPHASE]` 43–51 ms after the seek. `rc-soak-report.py`
+            now prints this placement (uncommitted). The verdict is unchanged. Open, for Robbie: accept B1 on this evidence, or re-run the
+            block with `MANIFOLD_PRESENT_TIMING=1`.
+          - **`[PULLPHASE]`, both 59.94 blocks:** 126 Plays, 74 next-by-band establishments, 0 within 0.1 ms of the would-repeat edge, 0 held pulls in
+            steady state while playing (`CARD_PULL_MARGIN.md` §21.7). All 10 launches ran licence startup twice (2 × `[LICENSE] state: LICENSED
+            (Standard)`; `BUGS.md`, the launch update alert entry, C).
 - [ ] After the release: commit the `CURRENT_PROJECT_VERSION` bump the script wrote
 
 ---

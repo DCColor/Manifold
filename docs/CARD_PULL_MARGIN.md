@@ -2700,3 +2700,42 @@ mismatch (2 ms band) and the would-skip test (`:6367-6368`) are unchanged. This 
   (`MANIFOLD_DECKLINK_CADENCE_LOG=2`, `[PULLPHASE]`), so that each pull's branch, headroom and next-frame state are recorded. That is
   needed to confirm the change does what §21.4 infers: no steady-state pull changes, and an edge-start Play keeps its phase.
 - `BUGS.md` carries it as a LOW known limitation for the 0.9.5 notes; `ROADMAP_IDEAS.md` lists the sticky band under 0.9.6.
+
+### 21.7 Replay on the 0.9.5 baseline 2 night (2026-11-25; read-only)
+
+Both 59.94 SDI blocks of `~/Code/_scratch/manifold-095-baseline2/` (`b95b-5994-sdi-1`, `-2`), the shipped 0.9.5 (28), with
+`MANIFOLD_DECKLINK_CADENCE_LOG=2` (`[PULLPHASE]` on). The definitions are §21.2 and §21.4's: a segment is one run of timed pulls, the
+logger's "play" (a Play, a loop wrap or a seek while playing each start one, `App/CardPullPhaseLog.swift:200`). Its `[PULLPHASE] play`
+line gives `u` = handed − target at the establishing pull (`:226-227`), so a next-by-band establishment has H₀ = B − u. Steady-state H
+is target + band − handed on each next-by-band pull after the first 8 timed pulls. A held pull is a timed pull handed the same frame
+again; "establishment" means within the first 8 timed pulls of its segment. Scratch script: this session's scratchpad `pullreplay.py`
+(not kept). H uses the printed band 8.34 ms; B = F/2 = 8.3417 ms, so it reads about 0.002 ms low.
+
+| | `5994-sdi-1` | `5994-sdi-2` | Both |
+|---|---|---|---|
+| Plays (`[TRANSPORT] play`) | 63 | 63 | **126** |
+| Segments (play lines): established due / next-by-band | 105: 65 / 40 | 105: 71 / 34 | 210: 136 / **74** |
+| Next-by-band with H₀ < 0.1 ms (started within 0.1 ms of the would-repeat edge) | 0 | 0 | **0** |
+| H₀ in [0.1, 0.5) ms | 2 (0.11 at line 118114; 0.43 at 405666) | 2 (0.28 at 323530; 0.15 at 693230) | 4 |
+| Steady-state H, lowest per segment | 0.093 ms (segment from line 118067, at line 123614) | 0.148 ms (segment from 693184) | 1 segment under 0.1 ms, 4 under 0.5 ms |
+| Held pulls: at the loop's wrap (next 1920.000, nominal; timed pull 1500–1506) | 133 | 131 | 264 |
+| Held pulls: establishment, next nominal | 88 | 86 | 174 |
+| Held pulls: establishment, next in the ring | 13 | 15 | 28 |
+| Held pulls: after the first 8 timed pulls, next in the ring | 0 | 1 (line 516853, at a Pause) | 1 |
+| **Held pulls in steady state while playing** | **0** | **0** | **0** |
+
+- **Expected near-edge starts:** §21.5's estimate (H uniform over (0, B]) gives 74 × 0.1 / 8.34 ≈ 0.9. **0 were seen.** Night total
+  so far with `[PULLPHASE]`: 1 of 453 next-by-band segments (nights 5–7: 1 of 379; tonight: 0 of 74).
+- **The closest segment did not hold.** The segment from `5994-sdi-1` line 118067 began at a loop wrap (no `[TRANSPORT]` line between
+  the previous segment and it). Its C+ lead guard stopped at the band's edge (pull phase 9.102 ms, lead 8.602 ms after the move). H₀ was
+  0.11 ms, and steady-state H dipped to 0.093 ms at line 123614. It ran 1490 timed pulls with 0 holds
+  (`[PULLPHASE] summary … holds 0`) until the Pause. This is the §21.2 geometry: guard at its edge and H small together. Wobble of about
+  0.02 ms took it no closer to the edge.
+- **The one ring hold after establishment is a Pause, not steady state.** `5994-sdi-2` line 516853 (timed pull 2694, next 316.115800
+  in the ring, 0.415 ms past the band). The pull came 1.3 ms after `[TRANSPORT] pause` (host 56204.857402 → 56204.858714). The clock
+  had stopped (clock 316.125419 on every pull after it). The gate's hold counter excludes it (EXCL after a transport step).
+- **Sticky band (§21.4), replayed:** **0 steady-state pulls change while playing.** Of the held pulls with the next frame in the ring
+  and within 0.5 ms past the band, 3 are establishing pulls (timed pull 1: sdi-1 line 464688, 0.229 ms; sdi-2 382556, 0.167 ms;
+  528884, 0.257 ms), which §21.4 leaves on the plain band. The fourth is the Pause pull above. As on nights 5–7, the change would not
+  alter one pull of steady playback.
+- The gate reads holds 0 and skips 0 on both blocks (`soak.report:2-3`, and the same for `5994-sdi-2`), which agrees with the 0 steady-state holds here.
