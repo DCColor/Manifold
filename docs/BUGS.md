@@ -1780,6 +1780,46 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
+## ☐ 0.9.6, NOT BUILT: the launch update alert freezes the app until clicked, and licence startup runs twice (Robbie, 2026-11-25; found on the 0.9.5 baseline soak)
+
+**What happened.** The 0.9.5 baseline night (`~/Code/_scratch/manifold-095-baseline/`, 2026-11-25) launched the 0.9.5 (27)
+candidate after 0.9.5 (28) had shipped. The launch check logged `[UPDATE] update available — 0.9.5 (build 28)` at 00:30:00.375
+(`setup-5994.log:15`) and put up its alert. The app then did nothing until someone clicked it at 10:41:27 (`[UPDATE] user chose Not
+now`, `:22`): no file opened, no `[MARKERS]` line, and the harness's Quit by PID timed out (`soak.out`, exit 5). The night stopped
+12 minutes in, and the build sat frozen for 10 h 11 min. The final soak (2026-11-21) never saw the alert because the server still had
+build 27 ("up to date", `../manifold-rc095-final/setup-5994.log:15`). Same launch: **two** licence keychain prompts (securityd
+"displaying keychain prompt" at 00:30:00.112 and 00:30:07.424, unified log), two `[LICENSE] state` lines (`setup-5994.log:23`, `:31`).
+`rc-soak.py` denied only the first. The keychain was not the hang: the licence read is off the main thread (since 2026-09-09, below)
+and returned `USER_CANCELED` 2 ms after the first Deny.
+
+**A — the launch update alert as a sheet (small, about 20–30 lines, `App/UpdateChecker.swift`).** `presentUpdateAvailable` calls
+`NSAlert.runModal()` (`UpdateChecker.swift:259`), which is application-modal: on the launch path (`ManifoldApp.swift:185`) it freezes
+the whole app until clicked, including playback set-up, file opens and a Quit event. Present it with `beginSheetModal(for:)` on the
+key window on the launch path. The menu's Check for Updates… can keep `runModal`. No licensing rule touched.
+
+**C — run licence startup once per process (small, about 5 lines and a test, `App/ManifoldApp.swift:180` / `LicenseManager.bootstrap`).**
+`.task { await license.bootstrap() }` sits on the `WindowGroup` content, which runs once per window, and `bootstrap` has no
+once-guard (the stream-secret migration beside it has one). The baseline launch ran it twice: two keychain reads, two prompts. Why
+the second ran on that launch and not on the final soak's is UNKNOWN (the final night's unified log has rotated away). Guard it as
+the migration is guarded.
+
+**B — a timeout on the launch keychain read (PARKED: medium, about 50–80 lines and 3–4 tests, `LicenseManager.swift`).** The read
+is off the main thread but unbounded: an unanswered prompt leaves the state undetermined for as long as the dialog stays up. Race
+`gatherAtLaunch` against a timer (about 20 s); on timeout take the existing refusal path (hold state, write nothing, `isUsable` on the
+fault) and apply a late result through the normal path. The call itself cannot be cancelled. **Needs a decision first:** a late key
+read still runs `recordLaunchAndEvaluate`, which WRITES the trial clock (`firstLaunch`, `lastSeen`, possibly `voided`), after the app
+has already published a hold. The trial is Manifold's own (not the shared `license.js` client), so it should not need to start in
+`license.js`; confirm.
+
+**Harness (scripts, not app): let older candidates soak.** `rc-soak.py` should, after each launch, click the alert's "Not now" on that
+PID by accessibility (a named button, no keystrokes), and keep denying licence prompts every second until the launch's `[LICENSE]
+state:` line appears, not once (`deny_licence_prompt`, `rc-soak.py:54`, called once at :134 / :259 and every 30 s only while
+playing). Also a pre-soak check: the candidate's version/build against the live manifest (`https://releases.graviton.tools/manifold/manifest`,
+`UpdateChecker.swift:27`), warning when the candidate is older. The baseline 2 soak (`~/Code/_scratch/manifold-095-baseline2/`) does the
+deny loop, the manifest warning and a stop on `[UPDATE] update available` in `soak.sh` / `common.sh`; it does not click "Not now".
+
+---
+
 ## ✅ FIXED 2026-11-19 by C+ (the default since 0.9.5): the card pull's margin over the window swap is under one refresh in many Plays, so one late frame is a repeat (Robbie, 2026-11-16)
 
 **Closed (Robbie, 2026-11-19).** The fix is option C, the pacer's phase held against the frame grid, which removes the crossings,
