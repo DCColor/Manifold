@@ -441,7 +441,7 @@ held back until after release, and the numbered defect entries follow.
      Manifold's 1080i59.94, on both builds (every frame `sizeMismatch`; 2026-10-27 the same driver read 1080i59.94
      and 0 different). Something else was feeding that input; the cabling was not touched. 655 / 655 tests (+1);
      13 warnings, identical to `bc735c3`'s. Defaults dictionary-equal to the snapshot after deleting 10 window-frame
-     keys; licence keys present (3), never read or written.
+     keys; license keys present (3), never read or written.
    ✅ **NDI flyout and guides order (Robbie, 2026-10-29).** Built and run unattended 2026-10-29, commit
    `cb7d8a1` (base `6b286da`; predictions, drivers, the scratch NDI SDK sender and every log in
    `build/ndi-menu-1029/`):
@@ -480,7 +480,7 @@ held back until after release, and the numbered defect entries follow.
      SDI: the frames Manifold sent (v210 dumps, both interlaced fixtures) byte-identical; late = 0 dropped = 0.
      **Not measured: the loop on the wire.** The capture input still locks to a 2160p23.98 signal (every frame
      `sizeMismatch`, both builds), as on 2026-10-28. Defaults dictionary-equal to the snapshot after deleting 14
-     window-frame keys and writing one back; streamBookmarks unchanged; licence keys present (5), never read or written.
+     window-frame keys and writing one back; streamBookmarks unchanged; license keys present (5), never read or written.
    - **Driver note:** reading a submenu's AX children makes AppKit send it `menuWillOpen`, which the watcher counts
      as the NDI list opening, so it starts discovery (as VoiceOver opening it would). The drivers never walk into an
      `AXMenu` except to open the NDI flyout on purpose.
@@ -501,7 +501,7 @@ held back until after release, and the numbered defect entries follow.
    - Control set 216 / 216 files byte-identical to `cb7d8a1`; SDI frames sent (v210 dumps, both interlaced
      fixtures) byte-identical, late = 0 dropped = 0; the wire not measured (the capture input still locks to
      2160p23.98, every frame `sizeMismatch`). Defaults dictionary-equal to the snapshot after deleting 20 window-frame
-     keys and writing one back; streamBookmarks unchanged; licence keys present (5), never read or written.
+     keys and writing one back; streamBookmarks unchanged; license keys present (5), never read or written.
    - **Driver note:** a driver that closes every window before quitting (`drv.py`) leaves the next launch with no
      window (SwiftUI restores none); the P1 drivers open one through File ▸ New Window when none appears.
    - 750 / 750 tests. 13 warning locations, identical to `cb7d8a1`'s.
@@ -845,7 +845,7 @@ Also off-limits: `ColorimetryOverride` (was `NDIColorimetryOverride`), `Colorime
 `docs/COLOR_MANAGEMENT_FINDINGS.md`, `docs/color-fixtures/`, `App/Licenses/`, `App/LicenseManager.swift`,
 `App/Live/SourceColorimetry+App.swift` (was `App/NDI/NDIColorInfo.swift`),
 and every `LICENSE` / `LICENCE` filename inside `ThirdParty/` and `App/Licenses/` — those are
-third-party artifacts and their names are part of the licence obligation, not our prose.
+third-party artifacts and their names are part of the license obligation, not our prose.
 
 **`AboutWindow.swift:347` is the trap in one line**, and worth reading before starting:
 
@@ -861,7 +861,7 @@ British user-facing strings.
 ### Surfaces to cover
 
 Menu items · error and alert messages · tooltips and `.help(…)` · the About panel (including the
-attribution and licence tiers) · the diagnostics export · release notes · the Stream Sources and
+attribution and license tiers) · the diagnostics export · release notes · the Stream Sources and
 inspector labels · the manual, when it exists.
 
 ### Known doc hits to fix with it
@@ -1780,16 +1780,16 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ 0.9.6, NOT BUILT: the launch update alert freezes the app until clicked, and licence startup runs twice (Robbie, 2026-11-25; found on the 0.9.5 baseline soak)
+## ☐ 0.9.6, NOT BUILT: the launch update alert freezes the app until clicked, and license startup runs twice (Robbie, 2026-11-25; found on the 0.9.5 baseline soak)
 
 **What happened.** The 0.9.5 baseline night (`~/Code/_scratch/manifold-095-baseline/`, 2026-11-25) launched the 0.9.5 (27)
 candidate after 0.9.5 (28) had shipped. The launch check logged `[UPDATE] update available — 0.9.5 (build 28)` at 00:30:00.375
 (`setup-5994.log:15`) and put up its alert. The app then did nothing until someone clicked it at 10:41:27 (`[UPDATE] user chose Not
 now`, `:22`): no file opened, no `[MARKERS]` line, and the harness's Quit by PID timed out (`soak.out`, exit 5). The night stopped
 12 minutes in, and the build sat frozen for 10 h 11 min. The final soak (2026-11-21) never saw the alert because the server still had
-build 27 ("up to date", `../manifold-rc095-final/setup-5994.log:15`). Same launch: **two** licence keychain prompts (securityd
+build 27 ("up to date", `../manifold-rc095-final/setup-5994.log:15`). Same launch: **two** license keychain prompts (securityd
 "displaying keychain prompt" at 00:30:00.112 and 00:30:07.424, unified log), two `[LICENSE] state` lines (`setup-5994.log:23`, `:31`).
-`rc-soak.py` denied only the first. The keychain was not the hang: the licence read is off the main thread (since 2026-09-09, below)
+`rc-soak.py` denied only the first. The keychain was not the hang: the license read is off the main thread (since 2026-09-09, below)
 and returned `USER_CANCELED` 2 ms after the first Deny.
 
 **A — the launch update alert as a sheet (small, about 20–30 lines, `App/UpdateChecker.swift`).** `presentUpdateAvailable` calls
@@ -1797,7 +1797,7 @@ and returned `USER_CANCELED` 2 ms after the first Deny.
 the whole app until clicked, including playback set-up, file opens and a Quit event. Present it with `beginSheetModal(for:)` on the
 key window on the launch path. The menu's Check for Updates… can keep `runModal`. No licensing rule touched.
 
-**C — run licence startup once per process (small, about 5 lines and a test, `App/ManifoldApp.swift:180` / `LicenseManager.bootstrap`).**
+**C — run license startup once per process (small, about 5 lines and a test, `App/ManifoldApp.swift:180` / `LicenseManager.bootstrap`).**
 `.task { await license.bootstrap() }` sits on the `WindowGroup` content, which runs once per window, and `bootstrap` has no
 once-guard (the stream-secret migration beside it has one). The baseline launch ran it twice: two keychain reads, two prompts. Why
 the second ran on that launch and not on the final soak's is UNKNOWN (the final night's unified log has rotated away). Guard it as
@@ -1812,11 +1812,174 @@ has already published a hold. The trial is Manifold's own (not the shared `licen
 `license.js`; confirm.
 
 **Harness (scripts, not app): let older candidates soak.** `rc-soak.py` should, after each launch, click the alert's "Not now" on that
-PID by accessibility (a named button, no keystrokes), and keep denying licence prompts every second until the launch's `[LICENSE]
+PID by accessibility (a named button, no keystrokes), and keep denying license prompts every second until the launch's `[LICENSE]
 state:` line appears, not once (`deny_licence_prompt`, `rc-soak.py:54`, called once at :134 / :259 and every 30 s only while
 playing). Also a pre-soak check: the candidate's version/build against the live manifest (`https://releases.graviton.tools/manifold/manifest`,
 `UpdateChecker.swift:27`), warning when the candidate is older. The baseline 2 soak (`~/Code/_scratch/manifold-095-baseline2/`) does the
 deny loop, the manifest warning and a stop on `[UPDATE] update available` in `soak.sh` / `common.sh`; it does not click "Not now".
+
+---
+
+## ☐ 0.9.6 UI polish (from the manual outline) (Robbie, 2026-11-27)
+
+**Source.** The read-only manual planning pass over `cec4c30` (`docs/manual/OUTLINE.md`, 2026-11-27) and the first two chapter
+drafts. Every item was read from code, not seen in a running build; "verify" marks the ones whose runtime behavior must be
+confirmed before a fix. **The manual's rule (Robbie, 2026-11-27):** where the app uses two names for one thing, the manual uses
+the name on screen in the main place it's used, and the inconsistency is listed here. Ranked: real bugs, then wrong text, then
+naming and wording, then behavior that is hard to explain. Items 45-47 came from drafting the chapters; 48-49 were added 2026-11-27 from the same pass.
+
+### 1. Real bugs
+
+1. **The antenna button with an SRT, web or HLS stream live.** Its tooltip says "Streaming — <name> — click to stop", but a
+   click runs `connectLive(.ndi …)`: `connectNDIFirstSource` retires the stream that is playing and connects the first NDI
+   source instead. Only an NDI source is stopped by the click. `App/ContentView.swift:2851-2858` (toggle), `:2366-2369`
+   (tooltip); `App/Live/LiveSource.swift:242-246`. verify.
+2. **NDI failures are silent.** NDI publishes no error, so no banner appears; the only state is the checkmark in the NDI
+   submenu and the green antenna. `App/Live/LiveSource.swift:176`; `App/ContentView.swift:2541-2547`.
+3. **Export Frame never confirms and never reports a failure.** It saves with no dialog and no notice of where; a failed PNG
+   write goes only to the log. `App/MetalVideoRenderer.swift:6731-6732` (failure), `:6408-6462` (save path). Share Frame failures
+   only beep: `App/FrameShare.swift:102-114`.
+
+### 2. Wrong text
+
+4. **The A/V menu prints its keys as fixed text** ("Sound later +1 ms ⌥]", "⇧⌥]"…), but those shortcuts can be rebound in
+   Keyboard Shortcuts, so the menu can name the wrong key. The tooltip does the same. `App/Live/LiveAudioOffset.swift:264-269`
+   (menu), `:226` (tooltip); catalog `Packages/ManifoldCore/Sources/ShortcutRegistry/ShortcutCatalog.swift:362-369`.
+5. **The Markers window's Export… tooltip** says "Export Markers… (Resolve EDL, CSV or text)"; there are six formats.
+   `App/Markers/MarkersWindow.swift:107` vs `App/Markers/MarkerFileIO.swift:20-31`.
+6. **"A/V ▸ Calibrate…" reads as a menu-bar path,** but A/V is a control-bar menu shown only while a stream plays. In the
+   settings import result (`App/SettingsTransferUI.swift:790`) and in the Sync and Color Guide (*The workflow at a glance*,
+   *Calibrating, step by step*). Say "the A/V menu in the controls".
+
+### 3. Naming and wording
+
+**One thing, several names**
+
+7. Display modes: "macOS" (control face) / "As macOS Shows It" (Color menu); "Reference" / "Reference (BT.1886)"; "Bypass" /
+   "Bypass — No Color Management". `App/DisplayTransformControl.swift:172-199`; `App/DisplayTransform.swift:85-87`.
+8. Tag overrides: "Reset to File's Tags" / "Reset to Stream's Tags" (control) vs "Reset Tags to Source" (Color menu); "Next Tag
+   Override" exists only in the menu. And the menu bar's **Color** menu (display modes) is not the control bar's color control
+   (interpretation). `App/Live/LiveColorOverride.swift:430`; `App/DisplayTransform.swift:218-226`.
+9. Captions (button tooltip) / Subtitles (menus) / Timed Text (Inspector). `App/ContentView.swift:2403-2408, 3287`;
+   `App/InspectorPanel.swift:183`.
+10. The Markers window: "Show Marker List" (menu) / "Open Markers Editor" (scope gear) / "Markers" (window title). File markers:
+    "File Markers" / "Chapters" (Inspector) / "From File" (filter). `ShortcutCatalog.swift:285, 295, 327`;
+    `App/Markers/MarkersScopeView.swift:69, 112, 190`; `App/Markers/MarkersWindow.swift:79`.
+11. "Web Stream" (stream list) vs "WHEP stream" (tooltips and the "… is running in …" banner). `StreamBookmark.swift:32-39`
+    (`Packages/ManifoldCore/Sources/StreamBookmarkModel/`) vs `App/Live/LiveSource.swift:116`.
+12. "Download Sync Clips…" (Help) vs "Download ProRes Sync Clips…" (A/V menu), same link. `App/ManifoldApp.swift:294`;
+    `App/Live/LiveAudioOffset.swift:293`.
+13. Keeping the controls visible three ways: "Pin controls" (button) / "Always Show Controls" (View menu) / "Docked (fixed bar)"
+    (Settings). `App/ContentView.swift:3611`; `ShortcutCatalog.swift:318`; `App/Preferences.swift:38-50`.
+14. Scopes: "Scopes tray" (tooltip) vs "Show/Hide Scopes" (menu); picker "Audio Meters" / "YRGB Parade" vs headers "METERS" /
+    "YRGB"; "Reset parade to RGB" vs "Reset parades to color" for one setting. `App/ContentView.swift:21-31, 3572`;
+    `App/ParadeScope.swift:281`; `App/YRGBScope.swift:260`.
+15. Four frame exports in two menus: Export Frame…, Share Frame… / Share Frame (SDR)… (the title changes with the picture),
+    Export Frame for Support…. `App/ManifoldApp.swift:324-327, 302`; `App/FrameShare.swift:31-37`.
+16. "Export Settings…" moves only keyboard shortcuts and saved streams, not the settings in the window it sits in.
+    `App/SettingsView.swift:365`.
+17. Refresh: "Refresh metadata" (button) / "Refresh Metadata" (More) / tooltip "click to reload". `App/ContentView.swift:3280, 3755-3759`.
+18. The color control's face says "Declared / Assumed / Overridden"; the transform chain says "tagged / assumed / partly assumed /
+    overridden"; the status row says "Tagged …". An override is "Override 9·1·6", a LUT output is "Custom 9·1·6".
+    `App/Live/LiveColorOverride.swift:540-544, 615-619, 721, 765`; `Colorimetry.swift:97-100`; `InterpretationLUT.swift:59-61`.
+
+**Engineering words a user can see**
+
+19. Transform chain: "CICP 1-1-1", "declared to the layer", "rTRC", "x422", "v210 … (halfband)", "headroom 8.97 of 8.97".
+    `App/DisplayChainModel.swift:258-268, 328`; `Packages/ManifoldCore/Sources/ColorimetryModel/ChromaFormat.swift:215-217`;
+    `HeadroomReadout.swift:56`.
+20. Inspector: "nclc", "Full Chroma: Full-swing (spec) / Resolve", "Clean Aperture", "MaxCLL / MaxFALL". `App/InspectorPanel.swift:87,
+    156-158, 457-460`.
+21. DeckLink: "connector mapping", "Grayed: inactive in the card's current connector mapping"; "Follow source" is defined only in
+    Settings captions; the Signal row's "10-bit 4:2:2", "MaxCLL / MaxFALL", "(0 = unknown)". `App/ContentView.swift:2237-2306`;
+    `App/SettingsView.swift:708-709`; `DeckLinkConnectorMapping.swift:55-69`; `OutputSignal.swift:254-271`.
+22. SRT errors quote the library (a "(…)" suffix, reject reasons) and say "SRT is UDP…", "listener", "caller", "keyframe",
+    "MPEG-TS". `App/SRT/SRTSession.m:725-740, 792`; `App/SRT/SRTClient.swift:339-342, 1109`.
+23. Errors that don't say what to do: WHEP "Couldn't start the connection." / "Couldn't negotiate the stream with the server." /
+    "The connection to the stream failed."; HLS passes the system's text through; "Couldn't save the diagnostics file." plus raw
+    error; "The markers could not be written there."; Keychain messages with an OSStatus in brackets.
+    `App/WebRTC/WHEPClient.swift:189, 316, 712`; `App/HLS/HLSClient.swift:1104`; `App/DiagnosticsExport.swift:1048-1049`;
+    `App/Markers/MarkerFileIO.swift:158`; `App/LicenseManager.swift:557-562, 763-776`.
+24. Scope headers: "*" marks a forced scale and is explained nowhere; "gr Rec. 709 · box 75"; "Skintone axis (I)"; "SAMPLE peak".
+    `App/WaveformScope.swift:357-366`; `App/VectorscopeScope.swift:441, 468`; `App/AudioMeterScope.swift:884`.
+25. Settings: "Raster size for new windows" (its caption brings in points and Retina scaling), "Graticule brightness", "Master scope
+    intensity" (sliders with no number), "IRE (0–100)" beside code values, "Scope Scale" in title case unlike its neighbors.
+    `App/SettingsView.swift:336-341, 569-594`.
+26. Option names that don't say what they do: "Automatic (fit on open)" vs "Fit to Screen"; "Outside (darken) color" (outside the
+    frame guide); "Social safe zones"; "1:1 pixels" (larger pictures are still scaled down); "SDI (follows video)".
+    `App/RasterSize.swift:58-79`; `App/SettingsView.swift:614-616, 622, 709`; `SDIOutputMode.swift:66`.
+27. Fields: "Weave", "Deinterlace", "TFF" in the chain readout. `Packages/ManifoldCore/Sources/FileScan/FieldView.swift:73-76`;
+    `App/DisplayChainModel.swift:253`.
+
+**Vendor or server wording**
+
+28. A web-stream refusal shows the server's own response body, so the wording varies by server. `App/WebRTC/WHEPClient.swift:585-589`.
+29. The EDL import alert names Frame.io; the card-busy message names DaVinci Resolve; HLS notes say "Apple's player owns the audio".
+    `App/Markers/MarkerFileIO.swift:208`; `Packages/ManifoldCore/Sources/DeckLinkRefusal/DeckLinkRefusal.swift:20`;
+    `App/Live/LiveAudioOffset.swift:47`.
+
+### 4. Behavior that is hard to explain
+
+**State the user can't see**
+
+30. No transport shows a "Connecting…" state; SRT's "Connected, but…" comes only after a grace period. No "Connecting" string in
+    App; `App/SRT/SRTClient.swift:1100-1126`.
+31. Connection banners hide after 9 s, possibly before they're read. `App/ContentView.swift:2840`.
+32. Most menu items never gray out; when they can't act they beep, so the menu never says why. `App/Shortcuts/ShortcutCenter.swift:153-155`.
+33. File ▸ Start/Stop DeckLink Output appears with no card, and its title never says whether output is on. With no card, behavior
+    UNKNOWN. `App/ManifoldApp.swift:339`.
+34. Trial days left appear only in Settings ▸ License; nothing warns before the "trial has ended" screen.
+35. Help ▸ Export Diagnostics… presents its sheet from a player window; with no window open, UNKNOWN. `App/ContentView.swift:978-979`.
+36. The Inspector's Range override (Auto / Full / Legal) changes the picture with no badge or title marker. `App/InspectorPanel.swift:147-155`.
+37. The floating bar hides the Bypass, COMPARING and A/V badges after 2 s; full screen shows none of the title markers either.
+    `App/WindowDeck.swift:399-417`.
+
+**Settings whose reach is surprising**
+
+38. Framing guides and View ▸ Show Markers / Show File Markers are app-wide, while the scopes tray is per window.
+    `App/FramingGuide.swift:25-44`; `App/Markers/MarkCommands.swift:44-67`.
+39. One vertical-scale setting drives Waveform, Parade and YRGB; the parade color well turns both parades one color.
+    `App/WaveformScope.swift:318-320`; `App/ParadeScope.swift:271-281`; `App/YRGBScope.swift:251-260`.
+40. "Raster size for new windows" never changes open windows and silently follows the last window set; "Controls", next to it,
+    changes every open window. `App/SettingsView.swift:286-305`.
+41. "Audio at launch" (Settings) and "Audio destination" (DeckLink menu) share option names, but one is saved and the other lasts
+    the session. `SDIOutputMode.swift:61-64`; `App/ContentView.swift:2246-2256`.
+42. Safe zones: on/off and percentages in the Framing Guides popover, colors and widths in Settings. Scope Scale is set only in
+    Settings and applies to SDR only (a scope on Auto switches to PQ or HLG regardless). "Use Manifold" per file type can't be
+    undone from Manifold. `App/FramingGuide.swift:168-232`; `App/SettingsView.swift:425, 569, 604-628`; `App/WaveformScope.swift:340-351`.
+
+**Keys**
+
+43. Bare letters next to ⌘ letters: I / ⌘I, O / ⌘O, L / ⌘L, and M / ⌥M / ⇧M / ⌃⌘M beside macOS's ⌘M. Full screen: the menu shows
+    fn-F, while Manifold's ⌘F / ⌃⌘F are in no menu. Previous/Next Marker carry "· ⇧↑ / ⇧↓" inside their titles, unlike every other
+    item. `ShortcutCatalog.swift:225-331`; `App/Markers/MarkCommands.swift:29-30`.
+44. Mute / Unmute ⌥⌘↓ is marked "UNVERIFIED" in the catalog. `ShortcutCatalog.swift:370-371`.
+
+**Found while drafting the chapters**
+
+45. **The two time readouts have no labels.** Clicking the right-hand one cycles timecode, frame count and elapsed time, but nothing
+    on screen says which is showing, so a frame count and a timecode can't always be told apart. `App/ContentView.swift:3845-3850,
+    3870-3875`.
+46. **Delete vs Remove for a marker:** "Delete Marker" (Mark menu, right-click) but "Remove Marker" (marker window).
+    `App/Markers/MarkCommands.swift:27`; `App/Markers/MarkerEditorSheet.swift:115`.
+47. **"Keyword" label, several keywords:** the marker window's field is "Keyword" with the hint "Separate keywords with commas"; the
+    list column says "Keywords". `App/Markers/MarkerEditorSheet.swift:95-96`; `App/Markers/MarkersScopeView.swift:531-558`.
+
+48. **Stale caption (wrong text, rank with section 2).** Settings ▸ DeckLink Output ▸ Audio at launch says "Audio-only files play on the
+    Mac until a later update." Since 0.9.3 an audio-only file goes to SDI and HDMI with its card and sound, by default
+    (`App/WindowDeck.swift:1336-1348`, `FrameEngine.sdiSoundOnCardTimeline`, `Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift:965`).
+    `App/SettingsView.swift:702`.
+49. **A second WHEP stream while one is connected: the code comment says the refusal is silent; the code no longer is.**
+    `App/Live/LiveSource.swift:250-255` says `WHEPClient.connect` "early-outs on `guard session == nil`, logs, and shows nothing".
+    `App/WebRTC/WHEPClient.swift:155-166` now sets `lastError` = "A web stream is already connected — disconnect it before connecting
+    another.", which reaches the shared connection banner. What is left: (a) the stale comment in `LiveSource.swift`; (b) the message
+    says "web stream" while the manual and tooltips say WHEP (item 11); (c) the `WHEPClient` comment says the banner stands until
+    dismissed, but the shared banner hides after 9 s (`App/ContentView.swift:2840`, item 31). verify (c) in a build.
+
+**Notes for whoever fixes these (not UI).** Two code comments disagree with the catalog: `App/Markers/MarkCommands.swift:18` (Show
+Markers ⇧⌥⌘M; the catalog has no default) and `App/Shortcuts/ShortcutCenter.swift:259-260` (Inspector ⌥⌘S; the catalog has ⌘I).
+Install NDI Runtime… / NDI Downloads Page… / Download Pro Video Formats… appear in the app menu only on Macs missing them
+(`App/ManifoldApp.swift:251-276`), so screenshots differ between machines.
 
 ---
 
@@ -2213,13 +2376,13 @@ quantisation/quantised 3, licence 2, recognised 1, synthesised 1, levelled 1. By
 **The audit and the decisions are in `docs/PRIVACY_AUDIT.md`.** It is the input to the privacy
 policy, and the policy may not describe behaviour that has not shipped. Robbie split the fixes into
 stages on 2026-10-19:
-- **P1**, this entry: the licence data, the network disk cache, logs, diagnostics and NDI discovery.
+- **P1**, this entry: the license data, the network disk cache, logs, diagnostics and NDI discovery.
 - **P2**, stream secrets in `streamBookmarks` (audit item 2): built 2026-10-23, below.
 - **Later stages:** the licensing port to the shared client's rules (item 7), and shipping Release
   rather than Profile (item 8).
 
 **What P1 changed:**
-- **Licence data.** `license.email` and `license.machineId` are no longer written to the
+- **License data.** `license.email` and `license.machineId` are no longer written to the
   preferences plist. They live only in the Keychain `activationRecord`.
   - `LicenseRecordSync` (Packages/ManifoldCore/Sources/LicenseRecord) removes each plist value only
     after the record has been read back and holds the same value. If the Keychain read fails, it
@@ -2237,11 +2400,11 @@ stages on 2026-10-19:
       them in that window, as on 2026-10-27 (the `xctrace --launch` case, below). ~~Robbie opened 0.8.4 that day~~
       **Corrected 2026-10-29 (Robbie):** he was not using 0.8.4 when the values were rewritten. A test driver started
       it: *Test drivers launched the installed 0.8.4*, below. The exact launch time is UNKNOWN.
-    - They stayed through every launch of the latency trials (2026-10-28 18:51–23:58): each launch had its licence
+    - They stayed through every launch of the latency trials (2026-10-28 18:51–23:58): each launch had its license
       prompt Denied and logged `[LICENSE] state: KEYCHAIN UNREADABLE (OSStatus -128 …)` and `legacy license values
       left in place … (license.email, license.machineId): the license could not be read from the Keychain`. That is
       `LicenseRecordSync` behaving as specified.
-    - **The current build removes them on its next normal launch where the licence Keychain read is allowed**
+    - **The current build removes them on its next normal launch where the license Keychain read is allowed**
       (prompt Allowed, or a build that does not prompt), provided each value equals the activation record's
       (`LicenseRecordSync.swift:116–133`). If 0.8.4 rewrote the same values, which is what 2026-10-27 showed,
       that launch logs `removed license.email and license.machineId …`. If they differ, it logs `… kept in the
@@ -2254,7 +2417,7 @@ stages on 2026-10-19:
       2026-10-29 (Robbie) to the drivers' by-path and by-name Quit events**: *Test drivers launched the installed
       0.8.4*, below. Which call at 23:58:05 did it is still UNKNOWN.
 - **Network disk cache.**
-  - The licence, update-check, WHEP and HLS-playlist requests go through `PrivateURLSession`
+  - The license, update-check, WHEP and HLS-playlist requests go through `PrivateURLSession`
     (ephemeral, `urlCache = nil`).
   - `Cache.db`, its `-wal`/`-shm` and `fsCachedData` are removed at every launch.
   - **Decided 2026-10-19:** the process's default `URLCache.shared` is memory-only from launch
@@ -2290,7 +2453,7 @@ stages on 2026-10-19:
     forwarding proxy that adds `menuWillOpen` and notifies the key window.
 - **New debug hook:** `MANIFOLD_DIAG_EXPORT_PATH`, on the pre-ship removal list above.
 
-**Predictions and results** (unsigned Profile build in `.build-cc`; the licence Keychain prompt was
+**Predictions and results** (unsigned Profile build in `.build-cc`; the license Keychain prompt was
 Denied each time, so the real install only ever ran the read-failed path):
 
 | # | Prediction | Result |
@@ -2307,7 +2470,7 @@ Denied each time, so the real install only ever ran the read-failed path):
 
 **Open:**
 - P8 against a real NDI sender (2026-10-20).
-- The migration's success path on the real install, with a signed build. Back up the licence
+- The migration's success path on the real install, with a signed build. Back up the license
   Keychain items first.
 - `NDIMenuOpenWatcher` relies on SwiftUI giving the submenu a delegate that tolerates being wrapped.
   **Safety net added 2026-10-19:** every tracking pass records whether it attached. The NDI list,
@@ -2392,9 +2555,9 @@ items.
 - **The runs were headless.** `MANIFOLD_DEBUG_STREAMS_SELFTEST` runs in `ManifoldApp.init`, straight
   after `LogTap.install`, and exits. That is before licensing, before any window, and before the cache
   and NDI installs.
-- **Why headless:** an unsigned build that reaches licensing reads the licence Keychain items and
+- **Why headless:** an unsigned build that reaches licensing reads the license Keychain items and
   raises an authorization prompt, which the brief said to stop on. A signed build would instead run
-  P1's licence migration on the real install.
+  P1's license migration on the real install.
 - **The seed** is 11 synthetic pre-P2 bookmarks and 4 pre-P2 items:
   - SRT with the passphrase in the item; inline (pre-Keychain); both (stale item); none, with an IPv6
     host; an empty item.
@@ -2403,7 +2566,7 @@ items.
   - A web entry with an item.
   - Every secret carries `P2SEED`; hosts are `example.invalid`.
 - **The real data**, read-only:
-  - The defaults domain was snapshotted before any build, licence keys removed (presence only) and
+  - The defaults domain was snapshotted before any build, license keys removed (presence only) and
     `streamBookmarks` as a hash only.
   - The real Keychain items were recorded by attributes only (`security dump-keychain` without `-d`,
     filtered to Manifold's services, digested).
@@ -2422,8 +2585,8 @@ items.
 | D | Killed after 3 Keychain writes: plist untouched; the rerun converges on the uninterrupted result | **PASS**: exit 3; plist byte-identical to the seed (`597e61f0…`); entries 1–3 in the new format. Rerun: 8 moved, 3 linked, 0 kept. Plist (`fe804470…`), item values and dials equal a fresh uninterrupted run's |
 | E | A second run changes nothing | **PASS**: 0 Keychain writes, 0 reads, plist and item hashes unchanged, no log line |
 | F | Delete removes the item; rename keeps it | **PASS**: delete, item present → absent, 11 others present. Rename (twice) and edit-via-Show-saved-URL: same account, same dial hash |
-| G | No seeded secret in the captured log, raw or redacted | **PASS**: 0 in all 8 runs' logs; 0 hosts either. The full report was not built headless: `LicenseContext` reads the licence Keychain |
-| H | Real defaults dictionary-equal to the snapshot; `streamBookmarks` hash unchanged | **PASS** for everything this session ran. `streamBookmarks` `4466c076…` unchanged; licence keys absent before and after; 1,532 keys. **One key changed, not by this session:** the `.build-cc` build's `NSWindow Frame …-AppWindow-1` moved by (20, 8) pt — the window state of PID 10944, which exited during the run. The self-test exits before any window exists. Left as Robbie's app wrote it. |
+| G | No seeded secret in the captured log, raw or redacted | **PASS**: 0 in all 8 runs' logs; 0 hosts either. The full report was not built headless: `LicenseContext` reads the license Keychain |
+| H | Real defaults dictionary-equal to the snapshot; `streamBookmarks` hash unchanged | **PASS** for everything this session ran. `streamBookmarks` `4466c076…` unchanged; license keys absent before and after; 1,532 keys. **One key changed, not by this session:** the `.build-cc` build's `NSWindow Frame …-AppWindow-1` moved by (20, 8) pt — the window state of PID 10944, which exited during the run. The self-test exits before any window exists. Left as Robbie's app wrote it. |
 | I | Real Keychain items unchanged (presence only) | **PASS**: license 4, streams 3, attribute digest `a8b38b88…` before and after. 0 sandbox items remain |
 | J | `swift test` | **PASS**: 602 / 602 (588 + 14 new), 0 warnings |
 | K | Warnings unchanged | **PASS**: the Profile build's 11 compiler warnings are identical to HEAD's, built from a `git archive` of `9bedbe6`. The one in a changed file (`LicenseManager.swift`, `Outcome: Sendable`) is pre-existing; P2 changed a comment there |
@@ -2458,16 +2621,16 @@ items.
   (`KeychainStore.swift`). By the same mechanism an unsigned build's items would not. So the real
   migration should be done by a team-signed build.
   - ✅ **Signed upgrade path PASSED, 2026-10-29 (Robbie, rehearsal on a Mac that had never had
-    Manifold).** Signed 0.8.4 (build 19) set up with a licence and an SRT bookmark with a passphrase,
-    then signed, notarized 0.9.0 (build 20) installed over it: no Keychain prompt, the licence kept
+    Manifold).** Signed 0.8.4 (build 19) set up with a license and an SRT bookmark with a passphrase,
+    then signed, notarized 0.9.0 (build 20) installed over it: no Keychain prompt, the license kept
     without re-entry, and the SRT bookmark carried over (P2 migration by the signed build) and
     connected. This is the path testers take.
   - ⚠️ **But on Robbie's own Mac the same signed build 20 prompts** (attended step 5, 2026-10-29): a
     login-keychain password prompt for `tools.graviton.manifold.license` at launch. Denied; the
-    licence held, nothing written or cleared, as designed. Measured from the items' ACLs (`security
+    license held, nothing written or cleared, as designed. Measured from the items' ACLs (`security
     dump-keychain -a`, no secret data): every item carries `teamid:8UQ7MDM87B` in its partition list,
     and build 20's designated requirement is identical to 0.8.4's. The prompt is the legacy
-    trusted-application list: `activationRecord` (last written 2026-10-28 19:39, the licence-port
+    trusted-application list: `activationRecord` (last written 2026-10-28 19:39, the license-port
     test session) and six of the seven migrated stream items (written 2026-10-24 20:06 by P2's
     migration in a dev Profile build) do not list the Developer ID requirement, so any signed build
     is prompted for them. `storedLicenseKey`, both trial items and the July stream item, written by
@@ -2488,7 +2651,7 @@ items.
 > - **The items** (`tools.graviton.manifold.streams`, attributes only): one per entry, 7 / 7, all last written in the
 >   same second, 2026-10-24 20:06:07 UTC. The two SRT items were created on 2026-09-21 (0.8.x passphrases) and
 >   rewritten then; the other five were created then. Nothing has modified them since (the test sessions, the
->   licence live test and the stream-chroma runs of 2026-10-28 included), and the list hash has not moved since.
+>   license live test and the stream-chroma runs of 2026-10-28 included), and the list hash has not moved since.
 > - **One orphan item**, referenced by no bookmark: created and last modified 2026-07-26, a pre-P2 passphrase of a
 >   stream deleted long ago. **Left in place** (deleting it gains nothing, and it is not provably unused).
 > - Which launch it was is UNKNOWN: `scripts/run.sh` overwrites `~/Desktop/manifold-run.log` at each launch, no
@@ -2516,14 +2679,14 @@ items.
    defaults export com.graviton.manifold /Volumes/ManifoldP2Backup/manifold-before-P2.plist &&
    python3 -c 'import plistlib,hashlib; d=plistlib.load(open("/Volumes/ManifoldP2Backup/manifold-before-P2.plist","rb")); print(hashlib.sha256(d["streamBookmarks"]).hexdigest()[:8], "license.email" in d, "license.machineId" in d)'
    ```
-   - Expect `4466c076 False False`. (The licence keys have been absent since P1. Never restore them.)
+   - Expect `4466c076 False False`. (The license keys have been absent since P1. Never restore them.)
    - The three existing stream items hold your SRT passphrases. The migration rewrites them only
      after it can read the new value back. They cannot be exported without exposing them, so for
      rollback B have each sender's passphrase to hand (the OBS profiles).
 2. **Launch a team-signed Profile build of this change**, normally (Finder or `open`), with no
    `MANIFOLD_DEBUG_*` variables. A signed build is needed because an unsigned one prompts for each
    existing item and creates items a signed build may later prompt for.
-   - **It also runs P1's licence migration success path on this Mac**, still open in P1's list.
+   - **It also runs P1's license migration success path on this Mac**, still open in P1's list.
    - If a "wants to use your confidential information stored in tools.graviton.manifold.streams"
      prompt appears anyway, press **Allow** (not Always Allow), and note how many appeared.
 3. **Check:**
@@ -3097,7 +3260,7 @@ it, or quits, the card should hold black whatever its idle setting, and the last
   - **Unchanged:** a mode change and an audio-format re-establish stop the bridge without a black frame; a file or
     source change at the same mode never stops the output. The card's idle-output setting is not touched.
 - **Measured on the SDI loop** (`build/black-stop`, predictions written first; every probe read device 0's input SDI;
-  idle black and pass-through as found; defaults restored dictionary-equal, licence keys never in a snapshot):
+  idle black and pass-through as found; defaults restored dictionary-equal, license keys never in a snapshot):
   - **All six stop paths** (stop paused at 1080p25 PQ and playing at 2160p23.98 PQ; window close on HLG and on P3 PQ
     playing; quit on 2160p PQ and on 1080p PQ playing): the frame after the last picture is **black, byte-exact**
     (FNV-1a `cdfb2ef4aca3db25` / `dc26a9fb9e290325`), **Rec.709 · EOTF 0 · flag clear, no ST 2108-1**, and it is the
@@ -3703,7 +3866,7 @@ censuses: `build/file-leak/`. Item: `100aa4f`'s note "scope publishes grow with 
 
 - **Defaults:** the drivers wrote nothing (tray and slots from launch arguments; the Inspector is `@State`). The 105
   `NSWindow Frame …` keys the runs added were read and deleted one by one, stopping at the first failure; the key set
-  equals the snapshot (licence keys stripped, presence only: 3 present before and after, never read out or written).
+  equals the snapshot (license keys stripped, presence only: 3 present before and after, never read out or written).
   One value differs: `NSOSPLastRootDirectory`, the open panel's folder bookmark, re-encoded by AppKit for the same
   folder (`/Volumes/DCCOLOR/TEST FLIP`). Left as is. File ▸ Open Recent now lists the control-set files, as it did
   before this run.
@@ -3814,8 +3977,8 @@ before the tree matrix: `build/scope-perf/predictions.md`. Drivers, logs and sum
     2026-10-27** (the entry above, commit `16b6a63`): it was not one window. `open -a` gave each
     file its own window, and every window's scopes re-sampled on every defaults write in the process.
   - Defaults: the drivers wrote nothing (tray and slots from launch arguments). The 74 `NSWindow Frame …` keys the runs
-    added were read and deleted one by one; the domain is dictionary-equal to the snapshot (licence keys stripped from
-    both). **Licence keys:** the first launch of a 3c9d17a-code build ran the P1 migration (`[LICENSE] removed
+    added were read and deleted one by one; the domain is dictionary-equal to the snapshot (license keys stripped from
+    both). **License keys:** the first launch of a 3c9d17a-code build ran the P1 migration (`[LICENSE] removed
     license.email and license.machineId … (the Keychain record was read back and matches)`), and a tree launch at 00:40
     logged the same removal again. The only thing that ran in between and could have written them back was the
     installed `/Applications/Manifold.app` (0.8.4), which `xctrace --launch` started by name instead of the build.
@@ -3926,7 +4089,7 @@ it. A 9:16 picture was therefore at least 720 × 1280 on any screen, and the scr
     picture is untested; an AX width change from 720 × 569 jumps to 760 × 1351. The window as seen (no screenshots), and
     HDR on the LG by eye.
   - Defaults dictionary-equal to the snapshot after deleting 33 window-frame keys (read first); `streamBookmarks`
-    unchanged; licence keys present (3), never read or written.
+    unchanged; license keys present (3), never read or written.
 
 **Fixtures** (`build/orient-1029/mkfix.sh`, gitignored): one 640 × 360 encode per codec, rewrapped by stream copy with each
 matrix, so every orientation of a set carries byte-identical coded pixels. H.264 4:2:0 (AVFoundation), DNxHR HQ 4:2:2 (libav)
@@ -4799,7 +4962,7 @@ surface already in the tree (the reference surface, `ContentView.swift:1162`). N
 **`docs/color-fixtures/sweep.sh`** quits Manifold with `pkill -f "MacOS/Manifold"` (lines 108 and 140), which matches every
 Manifold process by path, the installed `/Applications/Manifold.app` included, and opens the wedge with `open -a "$APP"` (by path).
 It prefers the installed app (`find_app`), because it was written for the DMG install on the MacBook Air (`AIR-COLOUR-TEST.md`).
-On the Mac Studio the installed copy rewrites licence values in the real plist when it is launched or quit that way (privacy P1).
+On the Mac Studio the installed copy rewrites license values in the real plist when it is launched or quit that way (privacy P1).
 `manifold-proc.sh` refuses the installed app by design, so the script cannot simply call it.
 
 **`scripts/soak/repro/run.sh`** sends ⌘N (line 59) and ⌃⌥D (line 85) through `System Events … keystroke`. A keystroke goes to the
@@ -4842,7 +5005,7 @@ to `private`: its visibility no longer matters.
 `frame-keys-before.json`). The **1,623** type-derived player keys (names containing `Manifold.ContentView`), and nothing else, were
 each read and then deleted, stopping at the first failure (none failed). No Manifold was running (`manifold-proc.sh guard`).
 **Domain 1,698 → 76 keys; window-frame keys 1,628 → 6** (`GoToSheet`, `NSColorPanel`, `about`, the Settings window,
-`keyboard-shortcuts`, `player-AppWindow-1`). `streamBookmarks` hash unchanged; licence keys present before and after (3), by
+`keyboard-shortcuts`, `player-AppWindow-1`). `streamBookmarks` hash unchanged; license keys present before and after (3), by
 presence only. The installed 0.9.0's own key was among the 1,623, so `/Applications/Manifold.app` opens its window at the default
 frame once.
 
@@ -4965,7 +5128,7 @@ sources…" until it is opened again in a key window. Not a privacy leak; a usab
 
 **Found:** Robbie, 2026-10-29. **Effect:** the installed `/Applications/Manifold.app` (0.8.4) ran without anyone
 opening it, and rewrote `license.email` and `license.machineId` into the real plist after P1 builds had removed
-them (2026-10-27, 2026-10-28; privacy P1's licence item, above). It could have done anything else 0.8.4 does on
+them (2026-10-27, 2026-10-28; privacy P1's license item, above). It could have done anything else 0.8.4 does on
 launch, including saving the stream list without `secretRef` (the P2 note).
 
 **Cause.** Drivers addressed Manifold by name or path, which goes through Launch Services, with Launch Services
@@ -12762,7 +12925,7 @@ documentation; what was verified here is that it works at the target we actually
 
 | Option | Verdict |
 |---|---|
-| **AudioToolbox `AudioConverter`** | **CHOSEN.** No dependency, no build change, no licence entry. |
+| **AudioToolbox `AudioConverter`** | **CHOSEN.** No dependency, no build change, no license entry. |
 | Vendor `libopus` | **Rejected.** A whole new vendored dependency — build script, provenance, `THIRD_PARTY_NOTICES` — for something the OS already does. |
 | `--enable-decoder=opus` in vendored FFmpeg | **Rejected.** Viable, but costs a full rebuild of all five dylibs plus the five-consumer verification pass, for a second decoder no call site would use. |
 
@@ -14340,7 +14503,7 @@ not an answer.
 |---|---|
 | `LicenseGate` | rendered the opaque, hit-capturing `LicenseGateView` — the accusation itself |
 | `LicenseSettingsSection.statusRow` | final `else` rendered **"Trial expired"** in Settings |
-| the control block under it | fell into its `else` and offered **"Deactivate on this machine"** — proposing to tear down a licence never confirmed to exist. Needed a third branch rendering neither control, not a clause on the first |
+| the control block under it | fell into its `else` and offered **"Deactivate on this machine"** — proposing to tear down a license never confirmed to exist. Needed a third branch rendering neither control, not a clause on the first |
 | `DiagnosticsExport.LicenseContext` | wrote a confident, wrong **`TRIAL EXPIRED`** into a tester's diagnostics file — a support artefact that reads as evidence |
 
 That last row is why this change was **independently correct before any async work**: the
@@ -16521,7 +16684,7 @@ each has its reasoning written at the site:
 - **`DeckLinkService.swift` (2 keys) — `defaults write` affordances**, `manifold.decklink.manualOutputMode`
   and the audio trim key. They are operator escape hatches, documented as such, and not Settings
   rows.
-- **`LicenseManager.swift` (5 `license.*` keys) — licence state, not user preference.** It is
+- **`LicenseManager.swift` (5 `license.*` keys) — license state, not user preference.** It is
   stored the same way and it is not the same kind of thing. Worth leaving where it is; worth
   knowing it is not in the preferences inventory.
 
