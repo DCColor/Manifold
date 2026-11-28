@@ -173,9 +173,9 @@ enum LiveSource: CaseIterable {
     /// usually one that already tore itself down when it failed.
     private func clearBanner() {
         switch self {
-        // NDI publishes no `lastError` — its failures are log-only, so it has no banner to retire.
-        // If that changes, this switch stops compiling, which is the point.
-        case .ndi: break
+        // NDI publishes a `lastError` since 0.9.6 (connect failures used to be log-only). Adding a source still makes this
+        // switch stop compiling, which is the point.
+        case .ndi: NDIService.shared.clearError()
         case .web: WHEPClient.shared.clearError()
         case .srt: SRTClient.shared.clearError()
         case .hls: HLSClient.shared.clearError()
@@ -247,9 +247,12 @@ enum LiveSource: CaseIterable {
 
     /// WHEP / WebRTC.
     ///
-    /// `except: .web` PRESERVES TODAY'S WEB→WEB BEHAVIOUR EXACTLY, which is a refusal:
-    /// `WHEPClient.connect` early-outs on `guard session == nil`, logs, and shows nothing. That is
-    /// a known gap and it is deliberately NOT closed here — SRT's equivalent refusal was removed in
+    /// `except: .web` PRESERVES TODAY'S WEB→WEB BEHAVIOR EXACTLY, which is a refusal:
+    /// `WHEPClient.connect` early-outs on `guard session == nil`, logs, and sets its `lastError`, so the
+    /// window's connection banner says "A web stream is already connected — disconnect it before
+    /// connecting another." (corrected 0.9.6: this comment said it showed nothing, which stopped being
+    /// true when WHEPClient's refusal was made visible). A swap rather than a refusal is deliberately
+    /// NOT done here — SRT's equivalent refusal was removed in
     /// the same pass because a bounded, joinable teardown makes an SRT swap safe to define, and
     /// WHEP's teardown is the one that cannot be joined (see the ORDER note in `SRTClient.disconnect`).
     /// Making web→web a swap is a real change to WHEP's lifecycle, not a side effect of arbitration.

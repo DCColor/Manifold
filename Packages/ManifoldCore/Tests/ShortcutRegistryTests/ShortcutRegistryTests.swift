@@ -23,6 +23,33 @@ final class ShortcutRegistryTests: XCTestCase {
         ShortcutRegistry(store: ShortcutStore(defaults: defaults), layout: USKeyLayout(), debugTierEnabled: { _ in debug })
     }
 
+    // MARK: Menu titles that name their key (the A/V menu, Previous/Next Marker)
+
+    /// The A/V menu's titles come from the registry (docs/BUGS.md, 0.9.6 UI polish item 4): the defaults, a rebind, a removed key.
+    func testHintNamesTheBoundKeyAndFollowsARebind() {
+        let r = registry(debug: false)
+        XCTAssertEqual(r.hint("Sound later +1 ms", .audioLater1), "Sound later +1 ms · ⌥]")
+        XCTAssertEqual(r.hint("Sound earlier −1 ms", .audioEarlier1), "Sound earlier −1 ms · ⌥[")
+        XCTAssertEqual(r.hint("Sound later +10 ms", .audioLater10), "Sound later +10 ms · ⌥⇧]")
+        XCTAssertEqual(r.hint("Sound earlier −10 ms", .audioEarlier10), "Sound earlier −10 ms · ⌥⇧[")
+
+        XCTAssertTrue(r.assign(KeyChord.code(KeyCode.rightBracket, [.control, .shift]), to: .audioLater1))
+        XCTAssertEqual(r.hint("Sound later +1 ms", .audioLater1), "Sound later +1 ms · ⌃⇧]")
+
+        XCTAssertTrue(r.assign(nil, to: .audioLater1))
+        XCTAssertEqual(r.hint("Sound later +1 ms", .audioLater1), "Sound later +1 ms")
+
+        XCTAssertTrue(r.reset(.audioLater1))
+        XCTAssertEqual(r.hint("Sound later +1 ms", .audioLater1), "Sound later +1 ms · ⌥]")
+    }
+
+    /// Previous/Next Marker keep their titles through the move of `hint` into the registry.
+    func testHintForMarkerNavigation() {
+        let r = registry()
+        XCTAssertEqual(r.hint("Previous Marker", .previousMarker), "Previous Marker · ⇧↑")
+        XCTAssertEqual(r.hint("Next Marker", .nextMarker), "Next Marker · ⇧↓")
+    }
+
     // MARK: Catalog invariants
 
     func testEveryActionIsInTheCatalogOnceAndTitled() {

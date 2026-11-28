@@ -271,7 +271,7 @@ the pins, but reproducing them takes real time.
           now and then reported Dropped").
         - **Added 2026-11-21 (Robbie): the edge-start exception, at most one per night.** 0.9.5 ships today's pull code; the fix,
           the sticky would-repeat band, was for 0.9.6 and is now deferred past 1.0 (Robbie, 2026-11-27; `CARD_PULL_MARGIN.md` §21.6),
-          so whether the 1.0 gate keeps this exception is open (not decided). As `rc-soak-report.py` implements it
+          and the 1.0 gate keeps this exception unchanged (Robbie, 2026-11-27). As `rc-soak-report.py` implements it
           (`edge_start`, `gate095_block`):
           - **It passes** a hold (a pull that hands the frame handed last; not a skip) when all of these are true:
             1. the block's output mode is 59.94 (`1080p59.94` or `2160p59.94`, k = 2: the lead-guard line's P is half the card frame,

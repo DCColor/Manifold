@@ -104,7 +104,7 @@ private struct MarkersWindowContent: View {
             }
             ToolbarItem {
                 Button("Export…") { model.presentExport() }
-                    .help("Export Markers… (Resolve EDL, CSV or text)")
+                    .help("Export Markers… (Resolve, Premiere Pro, CSV, plain text or a chapter list)")
                     .disabled(!model.isActive || model.markers.isEmpty)
             }
         }

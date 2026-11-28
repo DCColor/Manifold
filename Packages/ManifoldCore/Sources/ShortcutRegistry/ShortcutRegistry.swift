@@ -75,6 +75,14 @@ public final class ShortcutRegistry: ObservableObject {
         KeyLabel.label(chord, layout: layout) + (def?.dispatch == .hold ? " (hold)" : "")
     }
 
+    /// A menu title that names its key: "Previous Marker · ⇧↑", or the bare text when the action has no key. For menu items
+    /// that can't carry a key equivalent (⇧ + an arrow) or must not (the control bar's A/V menu, whose keys the transport key
+    /// monitor owns). Read from the registry, so it follows a rebind (docs/BUGS.md, 0.9.6 UI polish item 4).
+    public func hint(_ text: String, _ id: ShortcutID) -> String {
+        guard let l = label(for: id) else { return text }
+        return "\(text) · \(l)"
+    }
+
     /// Labels for tooltips: "Pin controls (⌥⌘T)", or the bare text when the action has no key.
     public func helpText(_ text: String, _ id: ShortcutID) -> String {
         guard let l = label(for: id) else { return text }

@@ -155,8 +155,10 @@ final class WHEPClient: ObservableObject {
         // BUT IT REFUSES VISIBLY. It used to return after an NSLog, so from the user's side picking
         // a second bookmark did nothing whatsoever: no picture change, no message, no sign the click
         // had registered — indistinguishable from a bug, and unlike SRT's old refusal this pair is
-        // reachable in RELEASE, from the shipping bookmark menu. The banner stands until the user
-        // dismisses it or starts another attempt: nothing clears `lastError` on the strength of the
+        // reachable in RELEASE, from the shipping bookmark menu. The message is cleared by the user
+        // dismissing the banner, by another attempt, or by the banner's own 9 s auto-hide
+        // (`ContentView.connectErrorBanner`; corrected 0.9.6, this said it stood until dismissed).
+        // Nothing clears `lastError` on the strength of the
         // EXISTING stream continuing to play, because that stream is the reason for the message,
         // not evidence against it.
         guard session == nil else {

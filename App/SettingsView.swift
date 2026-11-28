@@ -699,7 +699,9 @@ private struct DeckLinkSettingsPane: View {
                     ForEach(DeckLinkAudioDestination.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                SettingsCaption("Audio-only files play on the Mac until a later update.")
+                // Was "Audio-only files play on the Mac until a later update.", stale since 0.9.3 sent audio-only files to SDI
+                // (docs/BUGS.md, 0.9.6 UI polish item 48).
+                SettingsCaption("Audio-only files follow this too: with SDI, their sound goes out with a card showing the file's details.")
                 Picker("SDI scaling", selection: $deckLinkScaling) {
                     ForEach(SDIScaling.allCases, id: \.self) { Text($0.label).tag($0) }
                 }

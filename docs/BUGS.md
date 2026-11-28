@@ -1780,7 +1780,7 @@ measured behaviour, or buys nothing for users, close to a release. Each entry sa
 
 ---
 
-## ☐ 0.9.6, NOT BUILT: the launch update alert freezes the app until clicked, and license startup runs twice (Robbie, 2026-11-25; found on the 0.9.5 baseline soak)
+## ☐ 0.9.6, A AND C BUILT 2026-11-27 (uncommitted, attended check pending), B PARKED: the launch update alert freezes the app until clicked, and license startup runs twice (Robbie, 2026-11-25; found on the 0.9.5 baseline soak)
 
 **What happened.** The 0.9.5 baseline night (`~/Code/_scratch/manifold-095-baseline/`, 2026-11-25) launched the 0.9.5 (27)
 candidate after 0.9.5 (28) had shipped. The launch check logged `[UPDATE] update available — 0.9.5 (build 28)` at 00:30:00.375
@@ -1792,12 +1792,12 @@ build 27 ("up to date", `../manifold-rc095-final/setup-5994.log:15`). Same launc
 `rc-soak.py` denied only the first. The keychain was not the hang: the license read is off the main thread (since 2026-09-09, below)
 and returned `USER_CANCELED` 2 ms after the first Deny.
 
-**A — the launch update alert as a sheet (small, about 20–30 lines, `App/UpdateChecker.swift`).** `presentUpdateAvailable` calls
+**A — the launch update alert as a sheet (small, about 20–30 lines, `App/UpdateChecker.swift`).** ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). `presentUpdateAvailable` takes `userInitiated`; at launch it uses `beginSheetModal(for:)` on the key, main or first visible window (`launchSheetWindow`), falling back to `runModal` only when no window is up (logged). The menu path is unchanged. `presentUpdateAvailable` calls
 `NSAlert.runModal()` (`UpdateChecker.swift:259`), which is application-modal: on the launch path (`ManifoldApp.swift:185`) it freezes
 the whole app until clicked, including playback set-up, file opens and a Quit event. Present it with `beginSheetModal(for:)` on the
 key window on the launch path. The menu's Check for Updates… can keep `runModal`. No licensing rule touched.
 
-**C — run license startup once per process (small, about 5 lines and a test, `App/ManifoldApp.swift:180` / `LicenseManager.bootstrap`).**
+**C — run license startup once per process (small, about 5 lines and a test, `App/ManifoldApp.swift:180` / `LicenseManager.bootstrap`).** ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). `LaunchOnce` (`Packages/ManifoldCore/Sources/LicenseRecord/LaunchOnce.swift`, 5 tests in `LaunchOnceTests`) is claimed first thing in `bootstrap`; a later window logs `[LICENSE] startup already ran this launch — skipped for this window`. No license rule or shared-client code touched.
 `.task { await license.bootstrap() }` sits on the `WindowGroup` content, which runs once per window, and `bootstrap` has no
 once-guard (the stream-secret migration beside it has one). The baseline launch ran it twice: two keychain reads, two prompts. Why
 the second ran on that launch and not on the final soak's is UNKNOWN (the final night's unified log has rotated away). Guard it as
@@ -1830,22 +1830,22 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
 
 ### 1. Real bugs
 
-1. **The antenna button with an SRT, web or HLS stream live.** Its tooltip says "Streaming — <name> — click to stop", but a
+1. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). `toggleStreaming` stops any live source this window owns (`activeLiveSource != nil`), as Disconnect does. **The antenna button with an SRT, web or HLS stream live.** Its tooltip says "Streaming — <name> — click to stop", but a
    click runs `connectLive(.ndi …)`: `connectNDIFirstSource` retires the stream that is playing and connects the first NDI
    source instead. Only an NDI source is stopped by the click. `App/ContentView.swift:2851-2858` (toggle), `:2366-2369`
    (tooltip); `App/Live/LiveSource.swift:242-246`. verify.
-2. **NDI failures are silent.** NDI publishes no error, so no banner appears; the only state is the checkmark in the NDI
+2. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). `NDIService.lastError` / `clearError()`, set on runtime missing, no source found within 5 s, and a failed connect; cleared by a fresh attempt and a successful start; shown in `connectErrorBanner` after HLS and cleared with the others (and by `LiveSource.clearBanner`). Connection loss after a successful start is not covered. **NDI failures are silent.** NDI publishes no error, so no banner appears; the only state is the checkmark in the NDI
    submenu and the green antenna. `App/Live/LiveSource.swift:176`; `App/ContentView.swift:2541-2547`.
-3. **Export Frame never confirms and never reports a failure.** It saves with no dialog and no notice of where; a failed PNG
+3. **HELD from batch 1 (2026-11-27): needs `MetalVideoRenderer.writeFrameExport`, which batch 1 may not touch.** **Export Frame never confirms and never reports a failure.** It saves with no dialog and no notice of where; a failed PNG
    write goes only to the log. `App/MetalVideoRenderer.swift:6731-6732` (failure), `:6408-6462` (save path). Share Frame failures
    only beep: `App/FrameShare.swift:102-114`.
 
 ### 2. Wrong text
 
-4. **The A/V menu prints its keys as fixed text** ("Sound later +1 ms ⌥]", "⇧⌥]"…), but those shortcuts can be rebound in
+4. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). Titles and tooltip read the registry (`ShortcutRegistry.hint`, moved from `ShortcutCenter.hint`, tests in `ShortcutRegistryTests`). The 10 ms keys now print as the registry writes them, ⌥⇧] / ⌥⇧[. **The A/V menu prints its keys as fixed text** ("Sound later +1 ms ⌥]", "⇧⌥]"…), but those shortcuts can be rebound in
    Keyboard Shortcuts, so the menu can name the wrong key. The tooltip does the same. `App/Live/LiveAudioOffset.swift:264-269`
    (menu), `:226` (tooltip); catalog `Packages/ManifoldCore/Sources/ShortcutRegistry/ShortcutCatalog.swift:362-369`.
-5. **The Markers window's Export… tooltip** says "Export Markers… (Resolve EDL, CSV or text)"; there are six formats.
+5. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). Now "Export Markers… (Resolve, Premiere Pro, CSV, plain text or a chapter list)". **The Markers window's Export… tooltip** says "Export Markers… (Resolve EDL, CSV or text)"; there are six formats.
    `App/Markers/MarkersWindow.swift:107` vs `App/Markers/MarkerFileIO.swift:20-31`.
 6. **"A/V ▸ Calibrate…" reads as a menu-bar path,** but A/V is a control-bar menu shown only while a stream plays. In the
    settings import result (`App/SettingsTransferUI.swift:790`) and in the Sync and Color Guide (*The workflow at a glance*,
@@ -1960,16 +1960,16 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
 45. **The two time readouts have no labels.** Clicking the right-hand one cycles timecode, frame count and elapsed time, but nothing
     on screen says which is showing, so a frame count and a timecode can't always be told apart. `App/ContentView.swift:3845-3850,
     3870-3875`.
-46. **Delete vs Remove for a marker:** "Delete Marker" (Mark menu, right-click) but "Remove Marker" (marker window).
+46. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). The marker window's button is now "Delete Marker". **Delete vs Remove for a marker:** "Delete Marker" (Mark menu, right-click) but "Remove Marker" (marker window).
     `App/Markers/MarkCommands.swift:27`; `App/Markers/MarkerEditorSheet.swift:115`.
-47. **"Keyword" label, several keywords:** the marker window's field is "Keyword" with the hint "Separate keywords with commas"; the
+47. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). The label is now "Keywords". **"Keyword" label, several keywords:** the marker window's field is "Keyword" with the hint "Separate keywords with commas"; the
     list column says "Keywords". `App/Markers/MarkerEditorSheet.swift:95-96`; `App/Markers/MarkersScopeView.swift:531-558`.
 
-48. **Stale caption (wrong text, rank with section 2).** Settings ▸ DeckLink Output ▸ Audio at launch says "Audio-only files play on the
+48. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). Now "Audio-only files follow this too: with SDI, their sound goes out with a card showing the file's details." **Stale caption (wrong text, rank with section 2).** Settings ▸ DeckLink Output ▸ Audio at launch says "Audio-only files play on the
     Mac until a later update." Since 0.9.3 an audio-only file goes to SDI and HDMI with its card and sound, by default
     (`App/WindowDeck.swift:1336-1348`, `FrameEngine.sdiSoundOnCardTimeline`, `Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift:965`).
     `App/SettingsView.swift:702`.
-49. **A second WHEP stream while one is connected: the code comment says the refusal is silent; the code no longer is.**
+49. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). (a) and the WHEPClient comment corrected; (b) is batch 2 naming; (c) still to verify. **A second WHEP stream while one is connected: the code comment says the refusal is silent; the code no longer is.**
     `App/Live/LiveSource.swift:250-255` says `WHEPClient.connect` "early-outs on `guard session == nil`, logs, and shows nothing".
     `App/WebRTC/WHEPClient.swift:155-166` now sets `lastError` = "A web stream is already connected — disconnect it before connecting
     another.", which reaches the shared connection banner. What is left: (a) the stale comment in `LiveSource.swift`; (b) the message
@@ -2104,7 +2104,8 @@ and recovered on the next pull. C+ cannot cover it (`CARD_PULL_MARGIN.md` §18.3
   `cb.commit()`, not in one commit with it (`WINDOW_PRESENT_PATH.md` §7.4 option 1). That can show one composite in the wrong colour state,
   or a one-frame EDR or tone step, at a Display Transform, LUT or colour-space change.
 - **Stretched frames during a live resize.** The same split applies to a new drawable size.
-- **The window may not keep up with 100 or 119.88 fps files at 120 Hz.** Under B the present gate admits a present only with at most one
+- **The window may not keep up with 100 or 119.88 fps files at 120 Hz.** **A known limitation for 1.0 (Robbie, 2026-11-27):** it stays in
+  the release notes' known limitations, and no 1.0 work is planned for it. Under B the present gate admits a present only with at most one
   already waiting, at any display rate, to keep a drawable spare (`WindowPresentTiming.presentsWaitingLimit(displayPeriod:keepSpareDrawable:)`),
   where B off allows two above 60 Hz. At a frame rate near the display's, the window can drop presents. The card is not affected.
 - **One unexplained window hold of ~0.5 s** (a gate timeout), in attended run 2 at an HDR-mode OS ↔ Bypass switch with output on
@@ -2112,7 +2113,10 @@ and recovered on the next pull. C+ cannot cover it (`CARD_PULL_MARGIN.md` §18.3
   timeouts under B on night 7, in 30 Regenerates; night 6's one B-on gate timeout fell inside a Regenerate, like its two B-off ones,
   `CARD_PULL_MARGIN.md` §19.4). A soak makes no Display Transform switches, so the soaks neither confirm nor rule out run 2's case.
 
-**Option A** (`docs/WINDOW_PRESENT_PATH.md`), which takes the window's present off the pacer's tick altogether, stays the 0.9.6 plan.
+**Option A** (`docs/WINDOW_PRESENT_PATH.md`), which takes the window's present off the pacer's tick altogether, is **deferred past 1.0
+(Robbie, 2026-11-27)**. It is no longer in the 0.9.6 plan. `ROADMAP_IDEAS.md`, *Window presents on its own display link (option A)*, has
+the triggers that would bring it back: testers report SDI repeats in playback, or the window's drops at 100/119.88 fps on a 120 Hz display
+with output on start to matter.
 
 ---
 
@@ -2192,9 +2196,11 @@ a read limit: the reader was re-armed correctly at 978.16 s.
 
 ---
 
-## ☐ LOW — KNOWN LIMITATION, for the 0.9.5 release notes: rarely, one repeated frame at 59.94 SDI output (Robbie, 2026-11-21)
+## ☐ LOW — KNOWN LIMITATION, for the 0.9.5 and 1.0 release notes: rarely, one repeated frame at 59.94 SDI output (Robbie, 2026-11-21)
 
-A 59.94 Play that starts within ~0.1 ms of the card pull's would-repeat edge can repeat one frame once; the Play then runs one frame later (about 1 in 100 such Plays starts that close; 1 hold seen, the 0.9.5 rehearsal). The 0.9.5 gate allows one per night; the fix, a sticky would-repeat band, is for 0.9.6 (`CARD_PULL_MARGIN.md` §21; `ROADMAP_IDEAS.md`).
+A 59.94 Play that starts within ~0.1 ms of the card pull's would-repeat edge can repeat one frame once; the Play then runs one frame later (about 1 in 100 such Plays starts that close; 1 hold seen, the 0.9.5 rehearsal). The 0.9.5 gate allows one per night. The fix, a sticky would-repeat band, is **deferred past 1.0 (Robbie, 2026-11-27)**, no longer 0.9.6;
+it comes back if edge-start holds at 59.94 are seen outside the rehearsal (`CARD_PULL_MARGIN.md` §21.6–§21.7; `ROADMAP_IDEAS.md`,
+*Card pull: sticky would-repeat band*).
 
 ## ☐ LOW (not for 0.9.5): the first frame after a seek can take ~22 ms to render (`perform`), so the pacer misses one or two ticks at 59.94 (Robbie, 2026-11-20)
 

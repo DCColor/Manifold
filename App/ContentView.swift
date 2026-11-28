@@ -2658,9 +2658,9 @@ struct ContentView: View {
     ///
     /// ONE BANNER FOR EVERY TRANSPORT. They cannot all be connecting at once — `LiveSource` is what
     /// guarantees that — so there is at most one message to show, and the order is age, not
-    /// priority: WHEP, then SRT, then HLS. ALL are cleared on dismissal so a stale message from
-    /// another transport cannot re-appear behind this one. (NDI publishes no `lastError`; its
-    /// failures are log-only, which is why it is absent here and `break`s in `clearBanner`.)
+    /// priority: WHEP, then SRT, then HLS, then NDI. ALL are cleared on dismissal so a stale message from
+    /// another transport cannot re-appear behind this one. NDI joined in 0.9.6 (its connect failures
+    /// were log-only until then; docs/BUGS.md, 0.9.6 UI polish item 2), after HLS.
     ///
     /// THAT PREMISE IS NOW ENFORCED RATHER THAN ASSERTED. It was written when `retireActive` was
     /// merely the convention, and two call sites (⌃⌥D, ⌃⌥H) went around it — so a live WHEP
@@ -2803,7 +2803,7 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var connectErrorBanner: some View {
-        if let message = whep.lastError ?? srt.lastError ?? hls.lastError ?? engine.playbackNotice {
+        if let message = whep.lastError ?? srt.lastError ?? hls.lastError ?? ndi.lastError ?? engine.playbackNotice {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -2813,7 +2813,7 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button {
-                    whep.clearError(); srt.clearError(); hls.clearError()
+                    whep.clearError(); srt.clearError(); hls.clearError(); ndi.clearError()
                     engine.playbackNotice = nil
                 } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -2841,15 +2841,20 @@ struct ContentView: View {
                 guard !Task.isCancelled else { return }
                 whep.clearError()
                 srt.clearError()
+                ndi.clearError()
                 engine.playbackNotice = nil
             }
         }
     }
 
-    /// The streaming button's main-click action (and File ▸ Connect to First NDI Source / Disconnect Live Source funnel through the same
-    /// NDIService calls): stop when streaming, quick-connect the first discovered source otherwise.
+    /// The antenna button. With ANY live source in this window, a click stops it, as the tooltip says ("— click to stop"), the
+    /// same as the menu's Disconnect and File ▸ Disconnect Live Source. With none, it connects the first NDI source.
+    ///
+    /// It used to stop only NDI: with an SRT, WHEP or HLS stream playing, `activeLiveSource == .ndi` was false, so the click
+    /// fell through to `connectNDIFirstSource`, which retired the stream and connected NDI instead (docs/BUGS.md, 0.9.6 UI
+    /// polish item 1).
     private func toggleStreaming() {
-        if activeLiveSource == .ndi {
+        if activeLiveSource != nil {
             DeckRegistry.shared.retireLiveIfOwned(by: deck)
         } else {
             DeckRegistry.shared.connectLive(.ndi, from: deck) {

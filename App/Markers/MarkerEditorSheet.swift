@@ -92,7 +92,7 @@ struct MarkerEditorSheet: View {
                         .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(.separator))
                 }
                 GridRow {
-                    Text("Keyword")
+                    Text("Keywords")
                     TextField("Separate keywords with commas", text: $keywordsText)
                         .textFieldStyle(.roundedBorder)
                 }
@@ -112,7 +112,7 @@ struct MarkerEditorSheet: View {
             if let refusal { Text(refusal).font(.caption).foregroundStyle(.red) }
             HStack {
                 if !isNew {
-                    Button("Remove Marker", role: .destructive) {
+                    Button("Delete Marker", role: .destructive) {
                         model.delete([draft.id])
                         model.cancelEditor()
                     }

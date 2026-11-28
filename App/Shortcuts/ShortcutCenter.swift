@@ -146,7 +146,7 @@ final class ShortcutCenter: KeyDispatchHost {
 
     /// "Mode · ⌥⌘X" for a heading or label that teaches its key, or plain "Mode" while the action has none.
     static func hint(_ text: String, _ id: ShortcutID) -> String {
-        shared.registry.label(for: id).map { "\(text) · \($0)" } ?? text
+        shared.registry.hint(text, id)
     }
 
     /// A menu item's action. Beeps when this window cannot do it now, as a disabled shortcut always did.

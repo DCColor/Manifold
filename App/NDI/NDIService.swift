@@ -158,6 +158,25 @@ final class NDIService: ObservableObject {
     /// tooltip and the checkmark on the active row in the picker. Main-thread only.
     @Published private(set) var connectedSourceName: String?
 
+    /// A connection failure to show in the window's banner, as SRT, WHEP and HLS do (docs/BUGS.md, 0.9.6 UI polish item 2:
+    /// NDI failures were log-only, so a click that found nothing, or a source that refused, changed nothing on screen).
+    /// Set where a connect attempt fails; cleared by a fresh attempt, a successful start, and `clearError()`.
+    @Published private(set) var lastError: String?
+
+    /// Dismiss a shown connection error (the banner's close button, and `LiveSource` when another source takes over).
+    func clearError() { lastError = nil }
+
+    /// What the banner says. Plain words; the source name is the one the NDI menu already shows.
+    enum ConnectFailure {
+        static let runtimeMissing = "The NDI runtime isn’t installed. Install it in Settings ▸ Sources, then reopen Manifold."
+        static func noSource(within seconds: Int) -> String {
+            "No NDI source found on this network within \(seconds) seconds. Check that an NDI sender is running and on the same network."
+        }
+        static func couldNotConnect(to name: String) -> String {
+            "Couldn’t connect to “\(name)”. Check that the NDI sender is still running."
+        }
+    }
+
     /// NDI sources currently visible on the network, for the toolbar picker. Refreshed on a light
     /// timer while discovery is held (startDiscovery/stopDiscovery) — which, since privacy P1, is
     /// from the first time the NDI source list is opened, never merely while a control is on
@@ -460,6 +479,7 @@ final class NDIService: ObservableObject {
     /// cannot be constructed outside LiveSource.swift, so no other call site compiles. Any live
     /// WHEP or SRT source has been retired by the time this runs.
     func connectToFirstSource(arbitratedBy arbitration: LiveSource.Arbitration) {
+        lastError = nil   // a fresh attempt: retire any earlier failure's banner
         if let first = discoveredSources.first {
             connect(to: first, arbitratedBy: arbitration)
             return
@@ -476,6 +496,7 @@ final class NDIService: ObservableObject {
         guard NDIBridge.loadRuntime() else {
             // Graceful absence: the runtime isn't there, the app keeps working, the trigger says so.
             NSLog("[NDI] runtime unavailable — trigger is a no-op (see the [NDI] log above for why)")
+            lastError = ConnectFailure.runtimeMissing
             return
         }
 
@@ -496,6 +517,7 @@ final class NDIService: ObservableObject {
                     // source that Manifold was looking for one specific product.
                     NSLog("[NDI] no source found on this network within \(Int(discoveryTimeout))s — "
                           + "check that an NDI sender is running and on the same subnet")
+                    self.lastError = ConnectFailure.noSource(within: Int(discoveryTimeout))
                     return
                 }
                 self.start(with: connected)
@@ -520,9 +542,11 @@ final class NDIService: ObservableObject {
         }
         guard NDIBridge.loadRuntime() else {
             NSLog("[NDI] runtime unavailable — cannot connect to \"\(LogRedaction.ndiSourceName(source.name))\"")
+            lastError = ConnectFailure.runtimeMissing
             return
         }
 
+        lastError = nil   // a fresh attempt: retire any earlier failure's banner
         isConnecting = true
         NSLog("[NDI] connecting to \"\(LogRedaction.ndiSourceName(source.name))\"…")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -532,6 +556,7 @@ final class NDIService: ObservableObject {
                 self.isConnecting = false
                 guard let connected else {
                     NSLog("[NDI] failed to connect to \"\(LogRedaction.ndiSourceName(source.name))\"")
+                    self.lastError = ConnectFailure.couldNotConnect(to: source.name)
                     return
                 }
                 // Switching sources: drop the old receiver WITHOUT flipping isConnected/empty state,
@@ -549,6 +574,7 @@ final class NDIService: ObservableObject {
         // before any renderer repointing below. Harmless when no file is loaded, and on an NDI→NDI
         // switch (the old receiver is already gone; there is no file to retire).
         onWillActivateStream?()
+        lastError = nil   // connected: nothing to report
         bridge = connected
         frameCount = 0
         lastRateLogTime = Self.monotonicNow()

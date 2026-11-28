@@ -26,6 +26,7 @@ import SwiftUI
 import AppKit
 import ManifoldCore
 import StreamBookmarkModel
+import ShortcutRegistry
 
 // MARK: - The session value, per window
 
@@ -193,6 +194,8 @@ final class LiveAudioOffsetModel: ObservableObject {
 /// one element in `ContentView`'s control bar with no modifiers.
 struct AudioOffsetControl: View {
     @ObservedObject var model: LiveAudioOffsetModel
+    /// The nudge keys in the titles and tooltip come from here, so they follow a rebind in Keyboard Shortcuts.
+    @ObservedObject private var shortcuts = ShortcutCenter.shared.registry
     /// The window's calibration mode, opened from this menu (§19.10).
     let calibration: SyncCalibrationModel
 
@@ -224,8 +227,19 @@ struct AudioOffsetControl: View {
         }
         .help(model.isAvailable
               ? "Audio offset for this stream: \(LiveAudioOffsetModel.text(model.sessionMs)). "
-                + "Positive = sound later. ⌥] / ⌥[ = ±1 ms, with ⇧ = ±10 ms."
+                + "Positive = sound later." + nudgeKeysHelp
               : LiveAudioOffsetModel.hlsNote)
+    }
+
+    /// The tooltip's key sentence, from the registry: " ⌥] / ⌥[ = ±1 ms, ⇧⌥] / ⇧⌥[ = ±10 ms." A pair with a key missing is
+    /// left out; with no keys at all, nothing.
+    private var nudgeKeysHelp: String {
+        func pair(_ later: ShortcutID, _ earlier: ShortcutID, _ amount: String) -> String? {
+            guard let l = shortcuts.label(for: later), let e = shortcuts.label(for: earlier) else { return nil }
+            return "\(l) / \(e) = ±\(amount)"
+        }
+        let parts = [pair(.audioLater1, .audioEarlier1, "1 ms"), pair(.audioLater10, .audioEarlier10, "10 ms")].compactMap { $0 }
+        return parts.isEmpty ? "" : " " + parts.joined(separator: ", ") + "."
     }
 
     /// ⚠️ THE STANDING INDICATOR, whenever O ≠ 0. A filled cyan capsule, so it reads as a SETTING
@@ -263,10 +277,12 @@ struct AudioOffsetControl: View {
     private var menuContent: some View {
         // The keys are named in the titles, NOT bound here: a key equivalent on a control-bar
         // menu's item would be a second claimant for the chord (TransportKeyMonitor handles it).
-        Button("Sound later +1 ms      ⌥]") { model.nudge(byMs: 1) }
-        Button("Sound earlier −1 ms    ⌥[") { model.nudge(byMs: -1) }
-        Button("Sound later +10 ms     ⇧⌥]") { model.nudge(byMs: 10) }
-        Button("Sound earlier −10 ms   ⇧⌥[") { model.nudge(byMs: -10) }
+        // The names come from the registry, so a rebind shows here; they were fixed text until 0.9.6
+        // (docs/BUGS.md, 0.9.6 UI polish item 4). An action with no key shows its title alone.
+        Button(shortcuts.hint("Sound later +1 ms", .audioLater1)) { model.nudge(byMs: 1) }
+        Button(shortcuts.hint("Sound earlier −1 ms", .audioEarlier1)) { model.nudge(byMs: -1) }
+        Button(shortcuts.hint("Sound later +10 ms", .audioLater10)) { model.nudge(byMs: 10) }
+        Button(shortcuts.hint("Sound earlier −10 ms", .audioEarlier10)) { model.nudge(byMs: -10) }
         Divider()
         Button("Reset to 0 ms") { model.set(0) }
             .disabled(model.sessionMs == 0)

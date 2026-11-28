@@ -54,6 +54,8 @@ An orange message at the top of the picture says what went wrong, for example:
 - "Connected, but no video is arriving from the sender.": the connection works, but the sender isn't sending yet.
 - "The stream stopped sending video (the broadcaster may have ended it).": the stream ended at the sender.
 - "That stream is not playing yet — it connected, but no video has started after … seconds. Still trying." (HLS).
+- "No NDI source found on this network within 5 seconds." or "Couldn't connect to “…”." (NDI): check that the NDI
+  sender is running and on the same network.
 
 Messages close on their own after a few seconds. See *Troubleshooting* for more.
 

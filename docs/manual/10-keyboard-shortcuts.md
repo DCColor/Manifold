@@ -90,7 +90,7 @@ Rec. 709 / Source Primaries Graticule**, **Vectorscope: 75% / 100% / Both Boxes*
 | Volume Up / Volume Down | ⌘↑ / ⌘↓ |
 | Mute / Unmute | ⌥⌘↓ |
 | Audio Later by 1 ms / Audio Earlier by 1 ms (live streams) | ⌥] / ⌥[ |
-| Audio Later by 10 ms / Audio Earlier by 10 ms (live streams) | ⇧⌥] / ⇧⌥[ |
+| Audio Later by 10 ms / Audio Earlier by 10 ms (live streams) | ⌥⇧] / ⌥⇧[ |
 
 ### File
 

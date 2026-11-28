@@ -36,14 +36,14 @@ In the marker window you can set:
 - **Time** and **Duration.** Type them as you would a timecode: digits fill from the right, so 100 is one second and
   1 is one frame. Start with + or − to move or lengthen by an amount. **End** shows where the marker finishes.
 - **Name** and **Notes.**
-- **Keyword.** Separate keywords with commas.
+- **Keywords.** Separate them with commas.
 - **Color.** One of 16: Blue, Cyan, Green, Yellow, Red, Pink, Purple, Fuchsia, Rose, Lavender, Sky, Mint, Lemon,
   Sand, Cocoa and Cream. These are DaVinci Resolve's marker colors.
 
 If you've set an In and Out, **Set Time and Duration from In and Out** makes the marker cover that span. Click
 **Done** to keep your changes.
 
-**To delete a marker,** go to it and choose **Mark ▸ Delete Marker**, click **Remove Marker** in the marker window,
+**To delete a marker,** go to it and choose **Mark ▸ Delete Marker**, click **Delete Marker** in the marker window,
 or select it in the Markers list and press Delete.
 
 Changes to markers can be undone with **Edit ▸ Undo** (⌘Z).
