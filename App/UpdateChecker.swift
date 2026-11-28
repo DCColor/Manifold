@@ -96,7 +96,7 @@ final class UpdateChecker {
         switch comparison {
         case .orderedAscending:
             NSLog("[UPDATE] update available — %@ (build %@)", manifest.version, manifest.build)
-            Self.presentUpdateAvailable(manifest: manifest, local: local)
+            Self.presentUpdateAvailable(manifest: manifest, local: local, userInitiated: userInitiated)
         case .orderedSame, .orderedDescending:
             NSLog("[UPDATE] up to date — server has %@ (build %@)", manifest.version, manifest.build)
             if userInitiated { Self.presentUpToDate(local: local) }
@@ -222,7 +222,12 @@ final class UpdateChecker {
 
     // MARK: - Dialogs
 
-    private static func presentUpdateAvailable(manifest: Manifest, local: (version: String, build: String)) {
+    /// AT LAUNCH, A SHEET ON THE WINDOW; FROM THE MENU, A MODAL ALERT. `runModal()` is application-modal: on the launch path
+    /// it froze the whole app until clicked, playback set-up, file opens and a Quit event included (the 0.9.5 baseline soak sat
+    /// frozen for 10 h, docs/BUGS.md 0.9.6 part A). A sheet blocks only its window. Manifold ▸ Check for Updates… keeps
+    /// `runModal()`: the user asked, and there may be no player window to hang a sheet on.
+    private static func presentUpdateAvailable(manifest: Manifest, local: (version: String, build: String),
+                                               userInitiated: Bool) {
         let alert = NSAlert()
         // A build-only bump is the COMMON tester case (0.5.0 build 4 → 0.5.0 build 5). Titling that
         // "Manifold 0.5.0 is available" to someone already running 0.5.0 reads as a bug, so the
@@ -256,12 +261,28 @@ final class UpdateChecker {
         // after the buttons exist, because that is when the alert has a window to ask about.
         accessory?.declineFirstResponder(in: alert)
 
-        if alert.runModal() == .alertFirstButtonReturn {
-            NSLog("[UPDATE] opening download page")
-            NSWorkspace.shared.open(downloadURL)
-        } else {
-            NSLog("[UPDATE] user chose Not now")
+        let finish: (NSApplication.ModalResponse) -> Void = { response in
+            if response == .alertFirstButtonReturn {
+                NSLog("[UPDATE] opening download page")
+                NSWorkspace.shared.open(downloadURL)
+            } else {
+                NSLog("[UPDATE] user chose Not now")
+            }
         }
+        if !userInitiated, let window = launchSheetWindow() {
+            alert.beginSheetModal(for: window, completionHandler: finish)
+        } else {
+            if !userInitiated { NSLog("[UPDATE] no window to attach the update sheet to — showing it as an alert") }
+            finish(alert.runModal())
+        }
+    }
+
+    /// The window the launch sheet hangs on: the key window, else the main window, else the first visible window that can take
+    /// a sheet and has none already. nil only when no window is up.
+    private static func launchSheetWindow() -> NSWindow? {
+        if let w = NSApp.keyWindow, w.attachedSheet == nil, w.isVisible { return w }
+        if let w = NSApp.mainWindow, w.attachedSheet == nil, w.isVisible { return w }
+        return NSApp.windows.first { $0.isVisible && $0.attachedSheet == nil && $0.canBecomeMain && !($0 is NSPanel) }
     }
 
     /// Menu path only — never shown at launch.
