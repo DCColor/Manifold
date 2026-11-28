@@ -59,7 +59,7 @@ The Markers list shows every marker in the file, with a thumbnail of its frame. 
 window of its own.
 
 - **In the scopes:** open the scopes (⌥⌘S), click a scope's name and choose **Markers**.
-- **In its own window:** choose **Mark ▸ Show Marker List** (⌃⌘M). The **Markers** window follows the window you're
+- **In its own window:** choose **Mark ▸ Show Markers Window** (⌃⌘M). The **Markers** window follows the window you're
   playing in.
 
 In the list:
@@ -77,7 +77,7 @@ The gear in the Markers scope has more:
 - The color swatches show only markers of the colors you choose. **Show All** shows every marker again.
 - **Text size** (Small, Medium, Large) makes the list easier to read in a small scope. It's also **Marker text size**
   in **Settings ▸ Scopes & Guides**.
-- **Open Markers Editor** opens the Markers window.
+- **Show Markers Window** opens the Markers window.
 - **Import Markers…** and **Export Markers…**: see below.
 
 The Markers window has the same controls in its toolbar: **Filter by Color**, **Regenerate Thumbnails**,

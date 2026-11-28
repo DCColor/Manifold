@@ -122,7 +122,7 @@ readouts are always in the same mode, so one tag is enough.
 | 34 | Trial days | Shown only in Settings ▸ License (`App/LicenseManager.swift:93, 125`) | A one-line notice at launch when 3 days or fewer are left: **"3 days left in your trial."** | Nothing warns before "Your Manifold trial has ended" (`App/LicenseManager.swift:951`). |
 | 35 | Export Diagnostics with no window | Help ▸ Export Diagnostics… (`App/ManifoldApp.swift:300`) | No rename; verify it works with no window open | UNKNOWN today (BUGS.md item 35). |
 | 36 | Range override | Inspector "Range" Auto / Full / Legal (`App/InspectorPanel.swift:147`) changes the picture with no marker | Add **"Range: Full (set)"** to the title markers when not Auto | Same rule as color overrides: a changed picture is never silent. |
-| 37 | Badges that hide | Floating bar hides Bypass / COMPARING / A/V badges after 2 s; full screen shows no title markers (`App/WindowDeck.swift:458` for COMPARING in the title) | Keep the badges while the state is on; in full screen show them in the corner | A state that's on should stay visible. |
+| 37 | Badges that hide | Floating bar hides Bypass / COMPARING / A/V badges after 2 s; full screen shows no title markers (`App/WindowDeck.swift:458` for COMPARING in the title) | ~~Keep the badges while the state is on; in full screen show them in the corner~~ Withdrawn 2026-11-28 (Robbie): nothing is drawn over the picture. Badges on the bar and markers in the title only; full screen shows none | A state that's on should stay visible, but never over the picture. |
 
 ## Keys (items 43–44)
 

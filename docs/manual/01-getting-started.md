@@ -56,9 +56,9 @@ A new window shows "Open a file — or connect a stream", with two buttons:
 Once something is playing, the controls appear in a bar at the bottom of the picture. The bar fades after a couple of
 seconds; move the pointer over the window to bring it back.
 
-**To keep the controls showing,** click the pin at the right end of the bar (**Pin controls**), or choose
+**To keep the controls showing,** click the pin at the right end of the bar (**Always show controls**), or choose
 **View ▸ Always Show Controls** (⌥⌘T). To give the controls their own bar below the picture instead, choose
-**Manifold ▸ Settings…**, click **General** and set **Controls** to **Docked (fixed bar)**.
+**Manifold ▸ Settings…**, click **General** and set **Controls** to **Below the picture**.
 
 #### The controls
 
@@ -71,20 +71,20 @@ Hold the pointer over any button to see its name. From left to right in a wide w
 | Mute | Mutes the sound. Hold the pointer here to show the volume slider. | below |
 | Loop playback | Plays the file over and over. | below |
 | Framing guides | Safe zones and aspect ratio guides over the picture. | *Scopes and framing guides* |
-| Captions | Shows subtitles from an .srt file. | *Opening files* |
+| Subtitles | Shows subtitles from an .srt file. | *Opening files* |
 | Inspector | Shows details about the file: format, color, audio tracks. | *Opening files* |
 | Edit in Flip | Opens the file in Flip, if you have it. | *Opening files* |
-| Refresh metadata | Reads the file again, for example after it changed on disk. | *Opening files* |
+| Refresh metadata | Reads the file's metadata again, for example after it changed on disk. | *Opening files* |
 | Export Frame… | Saves the frame on screen as an image. | *Export* |
 | Share Frame… | Sends the frame on screen through the macOS share menu. | *Export* |
 | Audio track | Chooses which audio track you hear, when the file has more than one. | *Opening files* |
-| Scopes tray | Shows the scopes below the picture. | *Scopes and framing guides* |
+| Show or hide scopes | Shows the scopes below the picture. | *Scopes and framing guides* |
 | DeckLink output | Starts and stops SDI or HDMI output. | *SDI and HDMI output* |
 | Streaming | Connects and disconnects live streams and NDI sources. | *Live streams* |
-| Color interpretation | Shows the file's color and lets you correct it or load a LUT. | *Color and display modes* |
+| Tags | Shows the file's color tags and lets you correct them or load a LUT. | *Color and display modes* |
 | Display transform | How the picture is shown on your screen: macOS, Reference or Bypass. | *Color and display modes* |
 | A/V | Moves a live stream's sound earlier or later. Shown only while a stream plays. | *Live streams* |
-| Pin controls | Keeps the controls showing. | above |
+| Always show controls | Keeps the controls showing. | above |
 
 In a narrower window, some of these move into the **More** menu (**…**) so the rest still fit. When something in the
 More menu is on, such as loop or subtitles, its icon turns to the highlight color.

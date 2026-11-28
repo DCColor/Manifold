@@ -18,7 +18,8 @@ found, for example "1 device (Desktop Video 16.4.0)".
 
 ### Start and stop output
 
-Click **DeckLink output** (the TV button) in the controls, or press **⇧⌘D** (**File ▸ Start/Stop DeckLink Output**).
+Click **DeckLink output** (the TV button) in the controls, or press **⇧⌘D** (**File ▸ Start DeckLink Output**; it reads
+**Stop DeckLink Output** while output is on, and is dimmed when there's no device to use).
 The button turns green while output is on. Do the same again to stop.
 
 To start output whenever Manifold opens, turn on **Enable output on launch** in **Settings ▸ DeckLink Output**.
@@ -29,21 +30,21 @@ Click the arrow beside the TV button:
 
 - **Output device:** which device, or which connector, to use. A connector your card's setup has made unusable is
   dimmed, with the reason.
-- **Audio destination:** **SDI (follows video)** sends the sound with the picture. **Computer** plays it on the Mac.
+- **Audio destination:** **SDI, with the picture** sends the sound with the picture. **Computer** plays it on the Mac.
   This lasts until you quit. To set where sound goes each time Manifold opens, use **Audio at launch** in
   **Settings ▸ DeckLink Output**.
-- **Output mode:** **Follow source** picks a mode that matches the file's size and frame rate. Or choose a mode
+- **Output mode:** **Match source** picks a mode that matches the file's size and frame rate. Or choose a mode
   yourself, such as 1080p23.98 or 2160p25.
 
 Under **Signal**, the menu shows what's going out, for example "1080p23.98 · 10-bit 4:2:2 · Rec. 709 · SDR", and any
 warning about the source, such as a frame rate with no matching output mode.
 
-#### How Follow source picks a mode
+#### How Match source picks a mode
 
 In **Settings ▸ DeckLink Output**:
 
 - **SDI scaling:** **Fit to mode** picks the closest-size mode at the source's frame rate and scales the picture to
-  fill it, keeping its shape, with black around it. **1:1 pixels** picks the smallest mode that holds the picture
+  fill it, keeping its shape, with black around it. **1:1 pixels (scale down only if larger)** picks the smallest mode that holds the picture
   without scaling; a picture larger than every mode is scaled down.
 - **SDI output modes:** **HD/UHD only**, or **Include DCI** to add 2048×1080 and 4096×2160.
 
@@ -61,7 +62,7 @@ In **Settings ▸ DeckLink Output**:
 
 ### Sound and live streams
 
-With **SDI (follows video)**, the SDI sound follows the audio track you've chosen, and a live stream's audio offset
+With **SDI, with the picture**, the SDI sound follows the audio track you've chosen, and a live stream's audio offset
 moves it too. See *Live streams*.
 
 ### If output stops or won't start
@@ -69,7 +70,7 @@ moves it too. See *Live streams*.
 | Message | What to do |
 |---|---|
 | "DeckLink output is in use by another application (for example DaVinci Resolve)." | Quit or stop output in the other app, then start output again. |
-| "… is inactive in the card's current connector mapping." | Choose another device under Output device, or change the mapping in Desktop Video Setup, then start output again. |
+| "… isn't active in the card's current setup." | Choose another device under Output device, or change the card's setup in Blackmagic Desktop Video Setup, then start output again. |
 | "SDI sound stopped; restart output" | Stop output and start it again. |
 | "DeckLink output is running in “…”. Turn it off there to play here." | Another window has the output. Stop it there, or play in that window. |
 

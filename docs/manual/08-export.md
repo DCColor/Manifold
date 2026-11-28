@@ -47,4 +47,4 @@ YouTube or ffmpeg chapter list. See *Markers*.
 
 ### Move your settings to another Mac
 
-See *Settings*: **Export Settings…** moves your keyboard shortcuts and saved streams.
+See *Settings*: **Export Shortcuts and Streams…** moves your keyboard shortcuts and saved streams.

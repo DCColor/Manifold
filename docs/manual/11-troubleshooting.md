@@ -30,7 +30,7 @@ screen. It includes the picture, so share it only with people allowed to see the
 
 ### Color
 
-- **"It looks different in QuickTime."** Switch to **As macOS Shows It** (⌥⌘1). Very saturated PQ colors can still
+- **"It looks different in QuickTime."** Switch to **macOS** (⌥⌘1). Very saturated PQ colors can still
   differ slightly from QuickTime; colors your display can show match.
 - **"The scopes didn't change when I switched modes."** That's right: scopes measure the picture, not your screen.
 - **"An override is grayed out."** PQ and HLG need Rec. 2020 or P3-D65 primaries, so other combinations can't be
@@ -49,9 +49,9 @@ For more, see the Sync and Color Guide's *Quick answers*.
 | "Nothing answered at …" (SRT) | The sender isn't running, or a firewall is blocking it. Check the address and port. |
 | "Connected, but no video is arriving from the sender." | The connection works, but the sender isn't sending yet. |
 | "That stream is … — Manifold's SRT support is H.264 and HEVC only." | Set the sender to H.264 or HEVC. |
-| "The stream server refused the connection" (WHEP) | The server turned Manifold away. Often the broadcast hasn't started; the message may include the server's reason. |
+| "The stream server refused the connection" (web stream) | The server turned Manifold away. Often the broadcast hasn't started; the message may include the server's reason. |
 | "Couldn't find a network route to the stream (it may be behind a firewall)." | Check your network and firewall. |
-| The message disappeared before you read it | Messages close after a few seconds. Connect again to see it. |
+| A message disappeared before you read it | Errors stay until you close them. Notices, such as a file playing without its audio, close after a few seconds; open the file again to see one again. |
 | Sound and picture are out of sync | Calibrate the stream. See *Live streams*. |
 | "Can move sound earlier by at most … ms on this stream right now." | Correct the rest at the sender. |
 
@@ -64,7 +64,7 @@ Interlaced streams go out over SDI as progressive, with both fields in each fram
 | "Desktop Video not installed" or "too old" | Install or update Blackmagic Desktop Video from **Settings ▸ DeckLink Output**, then open Manifold again. |
 | "No device detected" | Connect the device and check Blackmagic's Desktop Video Setup sees it. |
 | "DeckLink output is in use by another application" | Stop output in the other app, such as DaVinci Resolve. |
-| "… is inactive in the card's current connector mapping" | Choose another device, or change the mapping in Desktop Video Setup. |
+| "… isn't active in the card's current setup" | Choose another device, or change the card's setup in Blackmagic Desktop Video Setup. |
 | "SDI sound stopped; restart output" | Stop output and start it again. |
 | The DeckLink button is dimmed | Another window has the output, or Desktop Video needs attention. Hold the pointer over the button to see why. |
 | The monitor shows black | A still image sends black. Otherwise, check the Signal section of the DeckLink menu for a warning. |

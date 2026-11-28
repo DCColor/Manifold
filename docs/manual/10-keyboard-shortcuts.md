@@ -4,7 +4,8 @@ These are Manifold's default keys. You can change most of them: see *Change a sh
 shortcut as it's set on your Mac, choose **Help ▸ Keyboard Shortcuts…**.
 
 Keys without ⌘ (such as M, I, O and N) work when the picture has the focus. While you type in a text field, they're
-just letters.
+just letters. Some sit beside a ⌘ key on the same letter (I and ⌘I, O and ⌘O, L and ⌘L, M and ⌘M): the bare letters
+follow editing apps, where I and O mark In and Out and J, K and L shuttle.
 
 ### Transport
 
@@ -34,7 +35,7 @@ These work on files. Live streams have no transport.
 | Previous Marker / Next Marker | ⇧↑ / ⇧↓ |
 | Mark In / Mark Out | I / O |
 | Clear In and Out | ⌥X |
-| Show Marker List | ⌃⌘M |
+| Show Markers Window | ⌃⌘M |
 | Convert All File Markers to Markers | none |
 
 ### Timecode entry
@@ -57,7 +58,7 @@ These can't be changed.
 | Show/Hide Inspector | ⌘I |
 | Show/Hide File Name | N |
 | Always Show Controls | ⌥⌘T |
-| Enter or Exit Full Screen | ⌘F (⌃⌘F also works) |
+| Enter or Exit Full Screen | ⌘F, or ⌃⌘F (the key View ▸ Enter Full Screen shows) |
 | Show Markers / Show File Markers | none |
 
 ### Scopes
@@ -74,14 +75,14 @@ Rec. 709 / Source Primaries Graticule**, **Vectorscope: 75% / 100% / Both Boxes*
 
 | Action | Key |
 |---|---|
-| As macOS Shows It | ⌥⌘1 |
-| Reference (BT.1886) | ⌥⌘2 |
-| Bypass — No Color Management | ⌥⌘3 |
+| macOS | ⌥⌘1 |
+| Reference | ⌥⌘2 |
+| Bypass | ⌥⌘3 |
 | Show/Hide Transform Chain | ⌥⌘4 |
 | Hold to compare macOS and Reference | C (hold) |
 | Hold to compare with Bypass | ⇧C (hold) |
 | Hold to compare with the LUT off | ⌥C (hold) |
-| Next Tag Override / Reset Tags to Source | none |
+| Next Tag Override / Reset to File's Tags | none |
 
 ### Audio
 
@@ -106,7 +107,7 @@ Rec. 709 / Source Primaries Graticule**, **Vectorscope: 75% / 100% / Both Boxes*
 | Action | Key |
 |---|---|
 | Disconnect Live Source | ⌥⌘⌫ |
-| Start/Stop DeckLink Output | ⇧⌘D |
+| Start/Stop DeckLink Output (the menu says Start or Stop) | ⇧⌘D |
 
 ### Change a shortcut
 
@@ -123,4 +124,4 @@ macOS uses itself can't be chosen.
 - **Search shortcuts** finds an action by name or key. **Find by Key** shows what a key does: click it, then press the
   key.
 
-To use your shortcuts on another Mac, see *Settings*: Export Settings….
+To use your shortcuts on another Mac, see *Settings*: Export Shortcuts and Streams….

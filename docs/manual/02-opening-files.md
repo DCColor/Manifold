@@ -65,7 +65,7 @@ a track in the Inspector. The speakers, the audio meters and SDI output all foll
 For an interlaced file, a **Fields** control appears beside the display control, and **Color ▸ Fields** has the same
 choices:
 
-- **Weave** shows both fields together, as stored.
+- **Both fields (Weave)** shows both fields together, as stored.
 - **Field 1** and **Field 2** show one field at a time.
 - **Deinterlace** shows a deinterlaced picture.
 
@@ -74,10 +74,10 @@ stored. While a single field is showing, the picture is labeled, for example "FI
 
 ### Subtitles
 
-1. Click **Captions** in the controls (or choose **More ▸ Subtitles ▸ Load Subtitles…**).
+1. Click **Subtitles** in the controls (or choose **More ▸ Subtitles ▸ Load Subtitles…**).
 2. Choose an .srt file.
 
-Click **Captions** again to hide or show them. The arrow beside it has **Load different subtitles…**, **Clear
+Click **Subtitles** again to hide or show them. The arrow beside it has **Load different subtitles…**, **Clear
 subtitles** and the position: **Title-safe** or **Bottom edge**.
 
 ### Window size and full screen
@@ -85,15 +85,16 @@ subtitles** and the position: **Title-safe** or **Bottom edge**.
 - **View ▸ 100%** (⌘1), **75%** (⌘2), **50%** (⌘3) and **25%** (⌘4) size the picture against the file's own size.
   **Fit to Screen** (⌘0) makes it as large as the screen allows. Drag the window's edge for any other size.
 - **Press ⌘F** to enter or leave full screen.
-- **Press N** to show or hide the file name over the picture (**View ▸ Show/Hide File Name**).
+- **Press N** to show or hide the file name over the picture (**View ▸ Show/Hide File Name**). It also shows Bypass, a tag correction and a range setting when one is on.
 
-To choose the size new windows open at, choose **Manifold ▸ Settings…**, click **General** and set **Raster size for
+To choose the size new windows open at, choose **Manifold ▸ Settings…**, click **General** and set **Window size for
 new windows**.
 
 ### When the file changes
 
 If the file changes on disk while it's open, the **Refresh metadata** button turns to the highlight color. Click it to
-read the file again.
+read the file's metadata again: its tags, timecode and the Inspector. If the color tags changed, the picture follows
+them. A file whose picture or sound was rewritten needs opening again.
 
 **Edit in Flip** opens the file in Flip, which edits a file's color tags, timecode, audio layout and other metadata and
 writes them back to the file. If Flip isn't installed, Manifold offers to get it. When you come back, click **Refresh

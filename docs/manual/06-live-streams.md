@@ -4,8 +4,8 @@ Manifold plays live sources as well as files:
 
 - **NDI** sources on your network.
 - **SRT** streams (addresses that start with srt://).
-- **WHEP** streams (https:// addresses): low-delay streams over the web. In OBS, the matching output is called
-  WHIP.
+- **Web streams** (https:// addresses): low-delay streams over the web. The standard they use is called WHEP; in OBS,
+  the matching output is called WHIP.
 - **HLS** streams (addresses that contain .m3u8).
 
 A live stream has no scrubber, and markers aren't available on it.
@@ -26,7 +26,7 @@ Local Network.
 **NDI needs the NDI runtime.** If the menu says "NDI runtime not installed", choose **Manifold ▸ Settings…**, click
 **Sources**, click **Install NDI Runtime…**, install it and open Manifold again.
 
-### Connect an SRT, WHEP or HLS stream
+### Connect an SRT, web or HLS stream
 
 **To save a stream so you can connect with one click:**
 
@@ -60,7 +60,7 @@ An orange message at the top of the picture says what went wrong, for example:
   after it connected. Manifold disconnects after 5 seconds without it, as it does for a stream that stops. Connect to
   it again when it's back.
 
-Messages close on their own after a few seconds. See *Troubleshooting* for more.
+An error stays until you close it or try again. See *Troubleshooting* for more.
 
 ### Sound and picture sync
 

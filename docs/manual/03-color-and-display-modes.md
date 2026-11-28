@@ -18,19 +18,20 @@ Click **Display transform** in the controls, or use the **Color** menu:
 
 | Mode | Use it to | Keys |
 |---|---|---|
-| **As macOS Shows It** | See what your client sees in QuickTime, Safari and most Mac apps. This is the default. | ⌥⌘1 |
+| **macOS** | See what your client sees in QuickTime, Safari and most Mac apps. This is the default. | ⌥⌘1 |
 | **Reference** | Judge the picture as a reference monitor shows it (BT.1886). | ⌥⌘2 |
 | **Bypass** | Send the picture to the screen with no color management at all, for diagnostics. | ⌥⌘3 |
 
-The control shows the mode in use: **macOS**, **Reference** or **Bypass**. A window in Bypass also says so in its
-title.
+The control and the Color menu use the same three names, with a second line that says what each is. A window in Bypass
+also says so in its title, and while the controls are hidden, windowed or in full screen, **BYPASS** stays in the
+picture's top-right corner.
 
-As macOS Shows It looks lighter than a reference monitor for Rec. 709 video. That's the familiar "QuickTime looks
+macOS mode looks lighter than a reference monitor for Rec. 709 video. That's the familiar "QuickTime looks
 washed out" difference, and it's what your client sees. *Detail: the guide's "The three display transforms".*
 
 ### Hold to compare
 
-- **Hold C** to see the other of As macOS Shows It and Reference.
+- **Hold C** to see the other of macOS and Reference.
 - **Hold ⇧C** to see Bypass.
 - **Hold ⌥C** to see the picture without its LUT.
 
@@ -71,7 +72,7 @@ These settings are remembered for each display, and they apply to SDR in Referen
 PQ and HLG files show as HDR when HDR is on for the display in macOS. The **Headroom** line in the Transform chain
 panel says how much brightness the display offers.
 
-- In **As macOS Shows It**, macOS fits the HDR picture to your display, as QuickTime does.
+- In **macOS** mode, macOS fits the HDR picture to your display, as QuickTime does.
 - In **Reference**, HDR is shown at its true brightness, and anything brighter than the display can show clips.
 - **The scopes always show the file**, whatever the mode.
 
@@ -79,14 +80,22 @@ panel says how much brightness the display offers.
 
 ### Fix a file that's tagged wrong
 
-If a file or stream says the wrong color, or none, correct it from **Color interpretation** in the controls:
+If a file or stream says the wrong color, or none, correct it from **Tags** in the controls:
 
-1. Click **Color interpretation**.
+1. Click **Tags**.
 2. Choose the right color: **Rec.709 (SDR)**, **Rec.2020 PQ (HDR10)**, **Rec.2020 HLG**, **P3-D65 PQ** or
    **Rec.2020 SDR**.
 
-**Auto** goes back to what the file says. **Reset to File's Tags** (or **Reset to Stream's Tags**) does the same.
+**Auto** goes back to what the file says. **Reset to File's Tags** (or **Reset to Stream's Tags**) does the same, in
+the control and in the Color menu.
 The control and the window title show when a correction is on, and the scopes and SDI output follow it.
+
+If a file's video range is wrong, set **Range** in the Inspector (⌘I) to **Full** or **Legal**. While it isn't
+**Auto**, the Inspector's Range line reads "→ Full (set)" in yellow and the window title adds "Range: Full (set)".
+**Auto** goes back to what the file says. Like a tag correction, it lasts until you open another file.
+
+With the file name showing (**N**), Bypass, a tag correction and a range setting appear after the name, in the
+title's words.
 
 - On a file, a correction lasts until you open another file.
 - On a saved stream, choose **Save … to “stream name”** to use it every time you connect.
@@ -95,7 +104,7 @@ The control and the window title show when a correction is on, and the scopes an
 
 ### Use a LUT
 
-1. Click **Color interpretation** and choose **Load LUT…**.
+1. Click **Tags** and choose **Load LUT…**.
 2. Choose a .cube file.
 
 The LUT changes the picture, so the scopes, SDI output and exported frames see it too. It stays on when you open
@@ -110,7 +119,7 @@ LUTs made to calibrate one particular monitor aren't supported here. *Detail: th
 
 ### Quick answers
 
-- **"It looks different in QuickTime."** Switch to **As macOS Shows It** to see what QuickTime shows. Hold **C** to
+- **"It looks different in QuickTime."** Switch to **macOS** to see what QuickTime shows. Hold **C** to
   compare with Reference.
 - **"I want to judge the grade on my desk display."** Use **Reference**, and set up **This display** honestly.
 - **"The scopes didn't change when I switched modes."** That's right. Scopes measure the picture, not your screen.

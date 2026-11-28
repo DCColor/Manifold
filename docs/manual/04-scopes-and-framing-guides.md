@@ -2,7 +2,7 @@
 
 ### Show the scopes
 
-Click **Scopes tray** in the controls, or press **⌥⌘S** (**View ▸ Show/Hide Scopes**). Three scopes appear in a strip
+Click **Show or hide scopes** in the controls, or press **⌥⌘S** (**View ▸ Show/Hide Scopes**). Three scopes appear in a strip
 below the picture, and the window grows to make room.
 
 - **To change a scope,** click its name at the top left and choose another.
@@ -37,7 +37,7 @@ Most scopes have, along their top edge:
 
 The scale follows the picture: SDR is shown in code values or IRE, PQ in nits, and HLG in percent and nits. In the
 gear, under **Vertical scale · transfer**, you can choose **Auto (follow source)** or a fixed scale. One setting covers
-all three scopes. A star (*) after the scale in the header means you've chosen a fixed scale.
+all three scopes. "(set)" after the scale in the header means you've chosen a fixed scale.
 
 Under **Reference markers**, turn on **Marker 1** or **Marker 2** and type a level to draw a line at it.
 
@@ -50,7 +50,7 @@ In the gear:
 
 - **Graticule reference:** **Fixed 709 (reference)** or **Source primaries**.
 - **Target boxes:** **75%**, **100%**, or **75% + 100%**.
-- **Graticule extras:** **Outer ring ticks** and **Skintone axis (I)**.
+- **Graticule extras:** **Outer ring ticks** and **Skin tone line**.
 - **Reference markers:** type a color (for example #FF8000 or 255,128,0) to mark where it falls.
 
 #### CIE
@@ -68,9 +68,9 @@ not true peaks.
 
 Choose **Manifold ▸ Settings…** and click **Scopes & Guides**:
 
-- **Scope Scale:** **8-bit (0–255)**, **10-bit (0–1023)** or **IRE (0–100)**, for SDR pictures.
-- **Master scope intensity:** brightens or dims every scope's trace.
-- **Graticule brightness:** how bright the scale lines are. At the lowest setting the lines go and the labels stay.
+- **Scope scale:** **8-bit (0–255)**, **10-bit (0–1023)** or **IRE (0–100)**, for SDR pictures.
+- **Scope brightness:** brightens or dims every scope's trace.
+- **Grid brightness:** how bright the scale lines (the graticule) are. At the lowest setting the lines go and the labels stay.
 - **Marker text size:** the size of the Markers list.
 
 ### Framing guides
@@ -82,7 +82,7 @@ Click **Framing guides** in the controls (or **More ▸ Framing Guides…**) to 
 - **Frame guide:** darkens the picture outside an aspect ratio and outlines it. Choose 1.33, 1.66, 1.77, 1.85, 2.0,
   2.35, 2.39 or 2.40, a social ratio (9:16, 1:1, 4:5, 2:3 or 3:2), or **Custom** with your own width and height.
   **None** turns it off.
-- **Social safe zones:** lines that mark where a platform puts its buttons and captions. Choose a **Platform preset**
+- **Social media safe zones:** lines that mark where a platform puts its buttons and captions. Choose a **Platform preset**
   (TikTok, Reels or Shorts), or choose **Custom / Manual** and set **Top** and **Bot** yourself.
 
 Framing guides apply to every window.

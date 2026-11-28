@@ -1836,11 +1836,11 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
    (tooltip); `App/Live/LiveSource.swift:242-246`. verify.
 2. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). `NDIService.lastError` / `clearError()`, set on runtime missing, no source found within 5 s, and a failed connect; cleared by a fresh attempt and a successful start; shown in `connectErrorBanner` after HLS and cleared with the others (and by `LiveSource.clearBanner`). ✅ Connection loss after a successful start: BUILT 2026-11-27, uncommitted, attended check pending (batch 2). `NDIService` polls `NDIBridge.connectionCount` (`NDIlib_recv_get_no_connections`) once a second on main, off the frame pull; a count that was above zero and then holds at zero for 5 s (`ConnectionLossWatch`, SRT's peer-idle timeout; tests in `LiveConnectionWatchTests`) disconnects through `disconnect()` and sets `ConnectFailure.lost` ("The NDI source “…” stopped sending…"), as SRT and WHEP end a dropped stream. A receiver that never connects after `start(with:)` is still not covered. **NDI failures are silent.** NDI publishes no error, so no banner appears; the only state is the checkmark in the NDI
    submenu and the green antenna. `App/Live/LiveSource.swift:176`; `App/ContentView.swift:2541-2547`.
-3. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 2; the one approved `MetalVideoRenderer` change: `writeFrameExport` and its new `onFrameSaved` hook). Every save ends in `ContentView.frameSaveBanner` (`WindowDeck.frameSaveNotice`, `FrameSaveNotice` in FrameShareFormat): "Saved “<file>”." with Show in Finder (6 s), or a failure diagnosed from the folder (missing, not writable, disk full, unknown) that says what to do (9 s). Export Frame for Support gets the same banner. The per-clip folder's fallback is now the banner's second sentence instead of a separate `playbackNotice`. Share Frame: a share that can't be prepared, or a service failure other than Cancel, shows the banner instead of beeping (`ShareFailure`). Tests in `FrameSaveNoticeTests`. **Export Frame never confirms and never reports a failure.** It saves with no dialog and no notice of where; a failed PNG
+3. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 2; the one approved `MetalVideoRenderer` change: `writeFrameExport` and its new `onFrameSaved` hook). Every save ends in `ContentView.frameSaveBanner` (`WindowDeck.frameSaveNotice`, `FrameSaveNotice` in FrameShareFormat): "Saved “<file>”." with Show in Finder (6 s), or a failure diagnosed from the folder (missing, not writable, disk full, unknown) that says what to do (9 s). Export Frame for Support gets the same banner. The per-clip folder's fallback is now the banner's second sentence instead of a separate `playbackNotice`. Share Frame: a share that can't be prepared, or a service failure other than Cancel, shows the banner instead of beeping (`ShareFailure`). Tests in `FrameSaveNoticeTests`. Batch 3 (2026-11-27): the file name is on its own line, one line, truncated in the middle, never inside a sentence (a wrapped name was hyphenated); a failure stands until closed (D7). **Export Frame never confirms and never reports a failure.** It saves with no dialog and no notice of where; a failed PNG
    write goes only to the log. `App/MetalVideoRenderer.swift:6731-6732` (failure), `:6408-6462` (save path). Share Frame failures
    only beep: `App/FrameShare.swift:102-114`.
 
-50. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 2). **The connection banner's 9 s auto-hide cleared WHEP, SRT and NDI
+50. ✅ BUILT (batch 2, `b9b1483`); SUPERSEDED by D7 in batch 3: errors no longer hide on a timer at all. **The connection banner's 9 s auto-hide cleared WHEP, SRT and NDI
     messages and `playbackNotice`, but not HLS,** so an HLS message stood until closed by hand (the close button did clear it).
     The close button and the timer now call one function, `ContentView.clearConnectErrorBanner`. `App/ContentView.swift`
     (`connectErrorBanner`).
@@ -1860,66 +1860,66 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
 
 **One thing, several names**
 
-7. Display modes: "macOS" (control face) / "As macOS Shows It" (Color menu); "Reference" / "Reference (BT.1886)"; "Bypass" /
+7. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D6: "macOS" / "Reference" / "Bypass" in the Color menu, the control and the registry; the second line ("What your client will see", "BT.1886, as a reference monitor shows it", "No color management") is `DisplayTransformMode.menuSubtitle`, set as `NSMenuItem.subtitle` by `MenuKeyKeeper` and shown in the control's pulldown. Display modes: "macOS" (control face) / "As macOS Shows It" (Color menu); "Reference" / "Reference (BT.1886)"; "Bypass" /
    "Bypass — No Color Management". `App/DisplayTransformControl.swift:172-199`; `App/DisplayTransform.swift:85-87`.
-8. Tag overrides: "Reset to File's Tags" / "Reset to Stream's Tags" (control) vs "Reset Tags to Source" (Color menu); "Next Tag
+8. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). Color ▸ Reset reads "Reset to File’s Tags" / "Reset to Stream’s Tags" by the key window's source (`DisplayTransformMenuState.interpretationIsStream`); the control-bar control is "Tags" in its tooltip and the manual. "Next Tag Override" left as it is: the proposal left it open (add to the control or drop from the menu), still to decide. Tag overrides: "Reset to File's Tags" / "Reset to Stream's Tags" (control) vs "Reset Tags to Source" (Color menu); "Next Tag
    Override" exists only in the menu. And the menu bar's **Color** menu (display modes) is not the control bar's color control
    (interpretation). `App/Live/LiveColorOverride.swift:430`; `App/DisplayTransform.swift:218-226`.
-9. Captions (button tooltip) / Subtitles (menus) / Timed Text (Inspector). `App/ContentView.swift:2403-2408, 3287`;
+9. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D1: Subtitles (button tooltip, Inspector header); the menu already said Subtitles. Captions (button tooltip) / Subtitles (menus) / Timed Text (Inspector). `App/ContentView.swift:2403-2408, 3287`;
    `App/InspectorPanel.swift:183`.
-10. The Markers window: "Show Marker List" (menu) / "Open Markers Editor" (scope gear) / "Markers" (window title). File markers:
+10. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Show Markers Window" in the Mark menu and the scope gear. D4: "File Markers" / "From File" KEPT (they include Premiere Comment markers, which aren't chapters). The Markers window: "Show Marker List" (menu) / "Open Markers Editor" (scope gear) / "Markers" (window title). File markers:
     "File Markers" / "Chapters" (Inspector) / "From File" (filter). `ShortcutCatalog.swift:285, 295, 327`;
     `App/Markers/MarkersScopeView.swift:69, 112, 190`; `App/Markers/MarkersWindow.swift:79`.
-11. "Web Stream" (stream list) vs "WHEP stream" (tooltips and the "… is running in …" banner). `StreamBookmark.swift:32-39`
+11. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D2: "Web stream" on screen (stream list, `LiveSource.displayLabel`); "web stream (WHEP)" once, in the add-stream sheet's caption. Also closes 49(b). "Web Stream" (stream list) vs "WHEP stream" (tooltips and the "… is running in …" banner). `StreamBookmark.swift:32-39`
     (`Packages/ManifoldCore/Sources/StreamBookmarkModel/`) vs `App/Live/LiveSource.swift:116`.
-12. "Download Sync Clips…" (Help) vs "Download ProRes Sync Clips…" (A/V menu), same link. `App/ManifoldApp.swift:294`;
+12. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Download Sync Clips…" in the A/V menu too. "Download Sync Clips…" (Help) vs "Download ProRes Sync Clips…" (A/V menu), same link. `App/ManifoldApp.swift:294`;
     `App/Live/LiveAudioOffset.swift:293`.
-13. Keeping the controls visible three ways: "Pin controls" (button) / "Always Show Controls" (View menu) / "Docked (fixed bar)"
+13. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D3: the pin's tooltip says "Always show controls"; Settings ▸ General ▸ Controls option is "Below the picture". Keeping the controls visible three ways: "Pin controls" (button) / "Always Show Controls" (View menu) / "Docked (fixed bar)"
     (Settings). `App/ContentView.swift:3611`; `ShortcutCatalog.swift:318`; `App/Preferences.swift:38-50`.
-14. Scopes: "Scopes tray" (tooltip) vs "Show/Hide Scopes" (menu); picker "Audio Meters" / "YRGB Parade" vs headers "METERS" /
+14. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). Tooltip "Show or hide scopes"; headers "AUDIO METERS" / "YRGB PARADE" match the picker; both parade resets read "Reset parade colors". Scopes: "Scopes tray" (tooltip) vs "Show/Hide Scopes" (menu); picker "Audio Meters" / "YRGB Parade" vs headers "METERS" /
     "YRGB"; "Reset parade to RGB" vs "Reset parades to color" for one setting. `App/ContentView.swift:21-31, 3572`;
     `App/ParadeScope.swift:281`; `App/YRGBScope.swift:260`.
-15. Four frame exports in two menus: Export Frame…, Share Frame… / Share Frame (SDR)… (the title changes with the picture),
+15. KEPT (Robbie, 2026-11-27): "Export Frame for Support…" is not renamed. No change. Four frame exports in two menus: Export Frame…, Share Frame… / Share Frame (SDR)… (the title changes with the picture),
     Export Frame for Support…. `App/ManifoldApp.swift:324-327, 302`; `App/FrameShare.swift:31-37`.
-16. "Export Settings…" moves only keyboard shortcuts and saved streams, not the settings in the window it sits in.
+16. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Export Shortcuts and Streams…" / "Import Shortcuts and Streams…" (row label "Move to another Mac", the sheet and panel titles). "Export Settings…" moves only keyboard shortcuts and saved streams, not the settings in the window it sits in.
     `App/SettingsView.swift:365`.
-17. Refresh: "Refresh metadata" (button) / "Refresh Metadata" (More) / tooltip "click to reload". `App/ContentView.swift:3280, 3755-3759`.
-18. The color control's face says "Declared / Assumed / Overridden"; the transform chain says "tagged / assumed / partly assumed /
+17. NOT RENAMED (batch 3 finding). `FrameEngine.reinspect` (`Packages/ManifoldCore/Sources/ManifoldCore/FrameEngine.swift:1873`) re-reads the metadata and timecode only; it rebuilds the decode only when a color tag changed (video) or the audio changed (audio-only), refreshes only the AVFoundation rows for a routed file, and re-reads a still in full. It does not reload the whole file, so "Refresh Metadata" stays; the tooltips now say "click to refresh its metadata" instead of "click to reload". Refresh: "Refresh metadata" (button) / "Refresh Metadata" (More) / tooltip "click to reload". `App/ContentView.swift:3280, 3755-3759`.
+18. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Tagged / Assumed / Overridden" on the face (`SourceColorimetry.tier`, the file face); a LUT's output reads "LUT output 9·1·6" (`PictureCodes.outputLabel`). The color control's face says "Declared / Assumed / Overridden"; the transform chain says "tagged / assumed / partly assumed /
     overridden"; the status row says "Tagged …". An override is "Override 9·1·6", a LUT output is "Custom 9·1·6".
     `App/Live/LiveColorOverride.swift:540-544, 615-619, 721, 765`; `Colorimetry.swift:97-100`; `InterpretationLUT.swift:59-61`.
 
 **Engineering words a user can see**
 
-19. Transform chain: "CICP 1-1-1", "declared to the layer", "rTRC", "x422", "v210 … (halfband)", "headroom 8.97 of 8.97".
+19. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D9: the chain's source line already led with plain words ("Rec. 709 · … — CICP 1-1-1"); the macOS line, the PQ/HLG verdict and the SDI chroma tail now lead with words and keep the code in brackets. Headroom left (UNKNOWN row, not re-read). Transform chain: "CICP 1-1-1", "declared to the layer", "rTRC", "x422", "v210 … (halfband)", "headroom 8.97 of 8.97".
     `App/DisplayChainModel.swift:258-268, 328`; `Packages/ManifoldCore/Sources/ColorimetryModel/ChromaFormat.swift:215-217`;
     `HeadroomReadout.swift:56`.
-20. Inspector: "nclc", "Full Chroma: Full-swing (spec) / Resolve", "Clean Aperture", "MaxCLL / MaxFALL". `App/InspectorPanel.swift:87,
+20. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Color tags (nclc)", "Full range (as the spec says)", "Clean aperture"; MaxCLL and MaxFALL have tooltips. Inspector: "nclc", "Full Chroma: Full-swing (spec) / Resolve", "Clean Aperture", "MaxCLL / MaxFALL". `App/InspectorPanel.swift:87,
     156-158, 457-460`.
-21. DeckLink: "connector mapping", "Grayed: inactive in the card's current connector mapping"; "Follow source" is defined only in
+21. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Grayed out: not active in the card's current setup (Blackmagic Desktop Video Setup)", and the three refusal messages in the same words; "Match source" for Follow source (menu, Settings captions); MaxCLL/MaxFALL "not stated" instead of "(0 = unknown)". Log lines keep "Follow source". DeckLink: "connector mapping", "Grayed: inactive in the card's current connector mapping"; "Follow source" is defined only in
     Settings captions; the Signal row's "10-bit 4:2:2", "MaxCLL / MaxFALL", "(0 = unknown)". `App/ContentView.swift:2237-2306`;
     `App/SettingsView.swift:708-709`; `DeckLinkConnectorMapping.swift:55-69`; `OutputSignal.swift:254-271`.
-22. SRT errors quote the library (a "(…)" suffix, reject reasons) and say "SRT is UDP…", "listener", "caller", "keyframe",
+22. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "SRT is UDP…" replaced by what to check; the keyframe message reads "waiting for the sender’s first full picture". SRT errors quote the library (a "(…)" suffix, reject reasons) and say "SRT is UDP…", "listener", "caller", "keyframe",
     "MPEG-TS". `App/SRT/SRTSession.m:725-740, 792`; `App/SRT/SRTClient.swift:339-342, 1109`.
-23. Errors that don't say what to do: WHEP "Couldn't start the connection." / "Couldn't negotiate the stream with the server." /
+23. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). Each named error now ends with a next step (WHEP ×3, diagnostics save, markers write); the Keychain OSStatus left the three license messages (it is in the log and in Export Diagnostics). Errors that don't say what to do: WHEP "Couldn't start the connection." / "Couldn't negotiate the stream with the server." /
     "The connection to the stream failed."; HLS passes the system's text through; "Couldn't save the diagnostics file." plus raw
     error; "The markers could not be written there."; Keychain messages with an OSStatus in brackets.
     `App/WebRTC/WHEPClient.swift:189, 316, 712`; `App/HLS/HLSClient.swift:1104`; `App/DiagnosticsExport.swift:1048-1049`;
     `App/Markers/MarkerFileIO.swift:158`; `App/LicenseManager.swift:557-562, 763-776`.
-24. Scope headers: "*" marks a forced scale and is explained nowhere; "gr Rec. 709 · box 75"; "Skintone axis (I)"; "SAMPLE peak".
+24. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "(set)" for a forced scale; "graticule … · boxes 75%"; "Skin tone line"; "sample peak". Scope headers: "*" marks a forced scale and is explained nowhere; "gr Rec. 709 · box 75"; "Skintone axis (I)"; "SAMPLE peak".
     `App/WaveformScope.swift:357-366`; `App/VectorscopeScope.swift:441, 468`; `App/AudioMeterScope.swift:884`.
-25. Settings: "Raster size for new windows" (its caption brings in points and Retina scaling), "Graticule brightness", "Master scope
+25. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Window size for new windows", "Scope brightness" and "Grid brightness" (each now shows its value, "1.0×"), "Scope scale". "IRE (0–100)" kept. Settings: "Raster size for new windows" (its caption brings in points and Retina scaling), "Graticule brightness", "Master scope
     intensity" (sliders with no number), "IRE (0–100)" beside code values, "Scope Scale" in title case unlike its neighbors.
     `App/SettingsView.swift:336-341, 569-594`.
-26. Option names that don't say what they do: "Automatic (fit on open)" vs "Fit to Screen"; "Outside (darken) color" (outside the
+26. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Fit when opened", "Color outside the guide" / "Opacity outside the guide", "Social media safe zones", "1:1 pixels (scale down only if larger)", "SDI, with the picture". Option names that don't say what they do: "Automatic (fit on open)" vs "Fit to Screen"; "Outside (darken) color" (outside the
     frame guide); "Social safe zones"; "1:1 pixels" (larger pictures are still scaled down); "SDI (follows video)".
     `App/RasterSize.swift:58-79`; `App/SettingsView.swift:614-616, 622, 709`; `SDIOutputMode.swift:66`.
-27. Fields: "Weave", "Deinterlace", "TFF" in the chain readout. `Packages/ManifoldCore/Sources/FileScan/FieldView.swift:73-76`;
+27. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Both fields (Weave)" in the Fields menu and pulldown. The chain readout's interlaced prefix says "top field first" / "bottom field first" (`SourceScan.chainPrefix`); log lines keep TFF/BFF. Fields: "Weave", "Deinterlace", "TFF" in the chain readout. `Packages/ManifoldCore/Sources/FileScan/FieldView.swift:73-76`;
     `App/DisplayChainModel.swift:253`.
 
 **Vendor or server wording**
 
-28. A web-stream refusal shows the server's own response body, so the wording varies by server. `App/WebRTC/WHEPClient.swift:585-589`.
-29. The EDL import alert names Frame.io; the card-busy message names DaVinci Resolve; HLS notes say "Apple's player owns the audio".
+28. LEFT (Robbie, 2026-11-27): UNKNOWN row, re-read before changing. A web-stream refusal shows the server's own response body, so the wording varies by server. `App/WebRTC/WHEPClient.swift:585-589`.
+29. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D8: Frame.io and the HLS "Apple’s player owns the audio" reason removed; "for example DaVinci Resolve" kept in the card-busy message. The EDL import alert names Frame.io; the card-busy message names DaVinci Resolve; HLS notes say "Apple's player owns the audio".
     `App/Markers/MarkerFileIO.swift:208`; `Packages/ManifoldCore/Sources/DeckLinkRefusal/DeckLinkRefusal.swift:20`;
     `App/Live/LiveAudioOffset.swift:47`.
 
@@ -1927,16 +1927,16 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
 
 **State the user can't see**
 
-30. No transport shows a "Connecting…" state; SRT's "Connected, but…" comes only after a grace period. No "Connecting" string in
+30. BATCH 4 (Robbie, 2026-11-27): a new feature, not a rename. No transport shows a "Connecting…" state; SRT's "Connected, but…" comes only after a grace period. No "Connecting" string in
     App; `App/SRT/SRTClient.swift:1100-1126`.
-31. Connection banners hide after 9 s, possibly before they're read. `App/ContentView.swift:2840`.
-32. Most menu items never gray out; when they can't act they beep, so the menu never says why. `App/Shortcuts/ShortcutCenter.swift:153-155`.
-33. File ▸ Start/Stop DeckLink Output appears with no card, and its title never says whether output is on. With no card, behavior
+31. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D7: a transport's error stands until closed or replaced; `playbackNotice` keeps its 9 s timer; a frame-save failure stands, a "Saved" banner hides after 6 s. Supersedes batch 2's item 50 (the timer clearing HLS). Also makes 49(c)'s "stands until dismissed" true. Connection banners hide after 9 s, possibly before they're read. `App/ContentView.swift:2840`.
+32. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D10: File, View and Color items that can't act are grayed out while a menu is open (`MenuAvailability`, computed at menu open and emptied at close, so a closed menu never swallows a key). Fix 2026-11-28, before commit (retest passed): File ▸ Export Frame and Share Frame were never grayed in an empty window. Their gate was `mediaKind.feedsRenderer`, and an empty window is `.none`, which feeds the renderer (a live stream is `.none` with a picture). Both now ask `WindowDeck.hasPicture` (a source, and one that reaches the renderer) (`App/ContentView.swift`, `installShortcutHandlers`). A still stays grayed: it never reaches the renderer (`docs/STILLS_AND_AUDIO_ONLY_PLAN.md` §2, §3.2), and 0.9.5 (`d498f32`) couldn't export one either. Exporting a still is OPEN, awaiting Robbie's decision (2026-11-28). Most menu items never gray out; when they can't act they beep, so the menu never says why. `App/Shortcuts/ShortcutCenter.swift:153-155`.
+33. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). "Start DeckLink Output" / "Stop DeckLink Output" by state (`DeckLinkMenuItem`); grayed, and a beep on ⇧⌘D, when the driver can't output (no card), stopping always allowed. File ▸ Start/Stop DeckLink Output appears with no card, and its title never says whether output is on. With no card, behavior
     UNKNOWN. `App/ManifoldApp.swift:339`.
-34. Trial days left appear only in Settings ▸ License; nothing warns before the "trial has ended" screen.
-35. Help ▸ Export Diagnostics… presents its sheet from a player window; with no window open, UNKNOWN. `App/ContentView.swift:978-979`.
-36. The Inspector's Range override (Auto / Full / Legal) changes the picture with no badge or title marker. `App/InspectorPanel.swift:147-155`.
-37. The floating bar hides the Bypass, COMPARING and A/V badges after 2 s; full screen shows none of the title markers either.
+34. BATCH 4 (Robbie, 2026-11-27): a new feature. Trial days left appear only in Settings ▸ License; nothing warns before the "trial has ended" screen.
+35. UNCHANGED in batch 3: no rename proposed; still to verify with no window open. Help ▸ Export Diagnostics… presents its sheet from a player window; with no window open, UNKNOWN. `App/ContentView.swift:978-979`.
+36. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). The window title adds " — Range: Full (set)" / "Legal (set)" while the Inspector's Range is not Auto (files). Batch 3 check (2026-11-28): FAILED, setting Range to Full added nothing to the title. The marker was driven only by a deferred `engine.$rangeOverride` subscription (`DeckHostView.observeTitleInputs`); why that did not update the title is UNKNOWN (read from code, the chain looks complete, and the build held the change). Fix: the Inspector now sets the range through `WindowDeck.setRangeOverride`, which updates the title at once, as `FileColorOverride.set`, `setDisplayTransform` and the LUT do, and logs `[RANGE] override → Full (title marker on|off)`. The subscription stays as a backstop. Retest (2026-11-28): the title marker works (Window menu). Then (Robbie): show it also (a) in the Inspector's Range row, "→ Full (set)" in yellow, the override colour, and (b) in the file name overlay (N), which showed only the name and now adds the Bypass, Range and color override markers. One source of the words: `RangeOverride.setLabel` / `.marker` (FrameEngine.swift) and `WindowDeck.titleMarkers`, which the title joins and the overlay filters. Built, retest pending. The Inspector's Range override (Auto / Full / Legal) changes the picture with no badge or title marker. `App/InspectorPanel.swift:147-155`.
+37. ✅ BUILT 2026-11-28, uncommitted, attended check pending (batch 3 retest). History: the batch 3 corner badges (Bypass, COMPARING, A/V; `ContentView.standingMarkers`) were removed on 2026-11-28 (Robbie: nothing drawn over the picture; retest passed). Then, same day (Robbie): **the Bypass marker only comes back**, styled like the field-view marker (dark capsule, amber "BYPASS", `BypassCornerMarker` in `App/ContentView.swift`), top-right, below the field-view marker when both are up. Shown while Bypass is on and the floating bar is hidden, windowed or in full screen; not during a hold (the picture isn't in Bypass then). Logs `[BYPASS] corner marker shown/hidden`. COMPARING and A/V stay on the bar only. The field-view marker is unchanged. The floating bar hides the Bypass, COMPARING and A/V badges after 2 s; full screen shows none of the title markers either.
     `App/WindowDeck.swift:399-417`.
 
 **Settings whose reach is surprising**
@@ -1955,14 +1955,14 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
 
 **Keys**
 
-43. Bare letters next to ⌘ letters: I / ⌘I, O / ⌘O, L / ⌘L, and M / ⌥M / ⇧M / ⌃⌘M beside macOS's ⌘M. Full screen: the menu shows
+43. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D11: keys kept, explained in the shortcuts chapter; View ▸ Enter Full Screen shows ⌃⌘F (`MenuKeyKeeper.keepFullScreenKey`); Previous/Next Marker titles no longer carry their keys. Bare letters next to ⌘ letters: I / ⌘I, O / ⌘O, L / ⌘L, and M / ⌥M / ⇧M / ⌃⌘M beside macOS's ⌘M. Full screen: the menu shows
     fn-F, while Manifold's ⌘F / ⌃⌘F are in no menu. Previous/Next Marker carry "· ⇧↑ / ⇧↓" inside their titles, unlike every other
     item. `ShortcutCatalog.swift:225-331`; `App/Markers/MarkCommands.swift:29-30`.
-44. Mute / Unmute ⌥⌘↓ is marked "UNVERIFIED" in the catalog. `ShortcutCatalog.swift:370-371`.
+44. UNCHANGED in batch 3: no rename proposed; the key still to verify in a build. Mute / Unmute ⌥⌘↓ is marked "UNVERIFIED" in the catalog. `ShortcutCatalog.swift:370-371`.
 
 **Found while drafting the chapters**
 
-45. **The two time readouts have no labels.** Clicking the right-hand one cycles timecode, frame count and elapsed time, but nothing
+45. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 3, naming decisions). D5 option A: a TC / FRAMES / TIME tag over the right-hand readout, and a tooltip ("Timecode — click for frames"). **The two time readouts have no labels.** Clicking the right-hand one cycles timecode, frame count and elapsed time, but nothing
     on screen says which is showing, so a frame count and a timecode can't always be told apart. `App/ContentView.swift:3845-3850,
     3870-3875`.
 46. ✅ BUILT 2026-11-27, uncommitted, attended check pending (batch 1). The marker window's button is now "Delete Marker". **Delete vs Remove for a marker:** "Delete Marker" (Mark menu, right-click) but "Remove Marker" (marker window).
@@ -1980,6 +1980,9 @@ naming and wording, then behavior that is hard to explain. Items 45-47 came from
     another.", which reaches the shared connection banner. What is left: (a) the stale comment in `LiveSource.swift`; (b) the message
     says "web stream" while the manual and tooltips say WHEP (item 11); (c) the `WHEPClient` comment says the banner stands until
     dismissed, but the shared banner hides after 9 s (`App/ContentView.swift:2840`, item 31). verify (c) in a build.
+50. BATCH 4 (Robbie, 2026-11-28): in full screen the scopes tray goes to a fixed size and can't be dragged taller. Seen in the
+    batch 3 attended check. Cause UNKNOWN. A place to start, not verified: the divider's ceiling is `deck.sizer.maxChromeHeight`
+    (`App/ContentView.swift`, `clampedTrayHeight`), which is "how tall the window can grow", and a full-screen window can't grow.
 
 **Notes for whoever fixes these (not UI).** Two code comments disagree with the catalog: `App/Markers/MarkCommands.swift:18` (Show
 Markers ⇧⌥⌘M; the catalog has no default) and `App/Shortcuts/ShortcutCenter.swift:259-260` (Inspector ⌥⌘S; the catalog has ⌘I).
