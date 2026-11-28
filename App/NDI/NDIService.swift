@@ -8,6 +8,7 @@ import DisplayProviders
 import ColorimetryModel   // SourceColorimetry, ColorimetryOverride
 import PrivacyRedaction   // LogRedaction.ndiSourceName — the sending host is withheld from the log (privacy P1)
 import SourceListOrder    // how a poll is folded into the list shown (the NDI flyout jitter, 2026-10-29)
+import LiveConnectionWatch   // when a started connection counts as lost (0.9.6 UI polish, batch 2 fix 3)
 
 /// STEP A: minimal NDI receive — prove NDI integrates and that frames reach Manifold's Metal
 /// display path. Discovery, a receiver on the first source found, a FrameSync pull on the display
@@ -160,7 +161,8 @@ final class NDIService: ObservableObject {
 
     /// A connection failure to show in the window's banner, as SRT, WHEP and HLS do (docs/BUGS.md, 0.9.6 UI polish item 2:
     /// NDI failures were log-only, so a click that found nothing, or a source that refused, changed nothing on screen).
-    /// Set where a connect attempt fails; cleared by a fresh attempt, a successful start, and `clearError()`.
+    /// Set where a connect attempt fails, and when a started connection is lost (`ConnectFailure.lost`, batch 2 fix 3);
+    /// cleared by a fresh attempt, a successful start, and `clearError()`.
     @Published private(set) var lastError: String?
 
     /// Dismiss a shown connection error (the banner's close button, and `LiveSource` when another source takes over).
@@ -175,6 +177,41 @@ final class NDIService: ObservableObject {
         static func couldNotConnect(to name: String) -> String {
             "Couldn’t connect to “\(name)”. Check that the NDI sender is still running."
         }
+        /// A connection that had started, then lost its sender (batch 2 fix 3). Worded as SRT's and WHEP's dropped stream.
+        static func lost(_ name: String) -> String {
+            "The NDI source “\(name)” stopped sending (it may have been closed or left the network). Connect to it again when it’s back."
+        }
+    }
+
+    /// The sender count, polled once a second while connected (`NDIBridge.connectionCount`). NDI says nothing when a sender
+    /// goes away after the connection started: FrameSync keeps repeating the last frame, so the picture froze with the
+    /// antenna green and no banner. A count held at zero for the watch's grace (5 s, SRT's peer-idle timeout) now ends the
+    /// session through `disconnect()` with `ConnectFailure.lost`, as SRT and WHEP end a dropped stream (docs/BUGS.md, 0.9.6
+    /// UI polish, batch 2 fix 3). On main, off the frame pull. Started by `start(with:)`, stopped by `tearDownReceiver()`.
+    private var lossTimer: Timer?
+    private var lossWatch = ConnectionLossWatch()
+
+    private func startLossWatch() {
+        lossTimer?.invalidate()
+        lossWatch = ConnectionLossWatch()
+        lossTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.checkConnection()   // a main-run-loop timer: main thread, as every NDIService state change is
+        }
+    }
+
+    private func stopLossWatch() {
+        lossTimer?.invalidate()
+        lossTimer = nil
+    }
+
+    private func checkConnection() {
+        guard let bridge, isConnected else { return }
+        guard lossWatch.observe(connections: Int(bridge.connectionCount()), now: Self.monotonicNow()) else { return }
+        let name = connectedSourceName ?? bridge.sourceName
+        NSLog("[NDI] sender \"\(LogRedaction.ndiSourceName(name))\" gone for %.0fs after the connection started — disconnecting",
+              lossWatch.grace)
+        disconnect()                          // stops this timer (tearDownReceiver)
+        lastError = ConnectFailure.lost(name)
     }
 
     /// NDI sources currently visible on the network, for the toolbar picker. Refreshed on a light
@@ -652,6 +689,7 @@ final class NDIService: ObservableObject {
 
         isConnected = true
         connectedSourceName = connected.sourceName
+        startLossWatch()
         NSLog("[NDI] receiving from \"\(LogRedaction.ndiSourceName(connected.sourceName))\" — video on the display tick, audio on a dedicated pump")
     }
 
@@ -735,6 +773,7 @@ final class NDIService: ObservableObject {
         // Stop the audio pump and JOIN it BEFORE tearing down the receiver: the pump calls into the
         // framesync instance, so it must be fully exited before the bridge destroys it (below).
         stopAudioPump()
+        stopLossWatch()
         renderer?.onDisplayTick = nil
         bridge?.disconnect()
         bridge = nil

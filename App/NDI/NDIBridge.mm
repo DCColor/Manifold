@@ -793,6 +793,12 @@ static const double kNDIAudioMaxPullSeconds = 0.250;
                                  queueDepthAtPull:queueDepth];
 }
 
+- (int)connectionCount {
+    NDIReceiver *receiver = _receiver;
+    if (!gNDI || !receiver || !receiver->_recv || !gNDI->recv_get_no_connections) return 0;
+    return gNDI->recv_get_no_connections(receiver->_recv);
+}
+
 - (void)disconnect {
     // Just drop our reference. Any frame still in flight holds the receiver alive and will free
     // itself against a live framesync instance; the last release tears everything down in order.

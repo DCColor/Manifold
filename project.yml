@@ -235,6 +235,10 @@ targets:
       # `swift test` reaches it. Used by App/NDI/NDIService.swift only.
       - package: ManifoldCore
         product: SourceListOrder
+      # When a started NDI connection counts as lost (docs/BUGS.md, 0.9.6 UI polish, batch 2 fix 3) — a leaf target so
+      # `swift test` reaches the grace rule. Used by App/NDI/NDIService.swift only.
+      - package: ManifoldCore
+        product: LiveConnectionWatch
       # A file's picture orientation and the player window's size solve (docs/BUGS.md, iPhone clips, 2026-10-29) — a
       # leaf target so `swift test` reaches both. Used by MetalVideoRenderer, WindowSizer and WindowDeck.
       - package: ManifoldCore

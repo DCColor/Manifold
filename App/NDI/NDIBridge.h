@@ -250,6 +250,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Non-blocking; safe to call from the audio pump thread.
 - (nullable NDIAudioFrame *)captureAudioFrameForInterval:(double)seconds;
 
+/// How many senders this receiver is connected to right now (`NDIlib_recv_get_no_connections`: "normally 0 or 1").
+/// 0 also before the first connection, after `disconnect`, and with no runtime. NOT part of the frame pull: NDIService
+/// polls it once a second on main to notice a sender that went away after the connection started, which FrameSync hides
+/// by repeating the last frame (docs/BUGS.md, 0.9.6 UI polish, batch 2 fix 3). Non-blocking.
+- (int)connectionCount;
+
 /// Tear down the receiver. The underlying framesync/recv instances are destroyed once the last
 /// outstanding NDIVideoFrame is also released (see the lifetime note on NDIVideoFrame).
 - (void)disconnect;

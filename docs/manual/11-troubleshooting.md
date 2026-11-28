@@ -45,6 +45,7 @@ For more, see the Sync and Color Guide's *Quick answers*.
 |---|---|
 | No NDI sources appear, or "No NDI source found on this network within 5 seconds." | Check that an NDI sender is running on the same network, that **Settings ▸ Sources** shows the NDI runtime installed, and that Manifold is allowed in System Settings ▸ Privacy & Security ▸ Local Network. |
 | "Couldn't connect to “…”." (NDI) | Check that the NDI sender is still running, then choose it again. |
+| "The NDI source “…” stopped sending" (NDI) | The source closed or left the network after it connected. When it's back, choose it again. |
 | "Nothing answered at …" (SRT) | The sender isn't running, or a firewall is blocking it. Check the address and port. |
 | "Connected, but no video is arriving from the sender." | The connection works, but the sender isn't sending yet. |
 | "That stream is … — Manifold's SRT support is H.264 and HEVC only." | Set the sender to H.264 or HEVC. |

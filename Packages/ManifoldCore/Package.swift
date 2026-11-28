@@ -81,6 +81,7 @@ let package = Package(
         // Linked by the APP target directly (project.yml): the NDI source list's order and change test (the
         // NDI flyout jitter, 2026-10-29).
         .library(name: "SourceListOrder", targets: ["SourceListOrder"]),
+        .library(name: "LiveConnectionWatch", targets: ["LiveConnectionWatch"]),
         // Linked by the APP target directly (project.yml) and used by ManifoldCore: a file's picture orientation (the
         // display matrix reduced to one of eight) and the player window's size solve (docs/BUGS.md, iPhone clips, 2026-10-29).
         .library(name: "PictureGeometry", targets: ["PictureGeometry"]),
@@ -758,6 +759,23 @@ let package = Package(
             name: "SourceListOrderTests",
             dependencies: ["SourceListOrder"],
             path: "Tests/SourceListOrderTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        // When a live connection that had started counts as lost: NDI's receiver connection count held at zero past a grace
+        // period (docs/BUGS.md, 0.9.6 UI polish, batch 2 fix 3). No imports, so `swift test` reaches it.
+        .target(
+            name: "LiveConnectionWatch",
+            path: "Sources/LiveConnectionWatch",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
+        .testTarget(
+            name: "LiveConnectionWatchTests",
+            dependencies: ["LiveConnectionWatch"],
+            path: "Tests/LiveConnectionWatchTests",
             swiftSettings: [
                 .swiftLanguageMode(.v5)
             ]

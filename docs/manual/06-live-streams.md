@@ -56,6 +56,9 @@ An orange message at the top of the picture says what went wrong, for example:
 - "That stream is not playing yet — it connected, but no video has started after … seconds. Still trying." (HLS).
 - "No NDI source found on this network within 5 seconds." or "Couldn't connect to “…”." (NDI): check that the NDI
   sender is running and on the same network.
+- "The NDI source “…” stopped sending (it may have been closed or left the network)." (NDI): the source went away
+  after it connected. Manifold disconnects after 5 seconds without it, as it does for a stream that stops. Connect to
+  it again when it's back.
 
 Messages close on their own after a few seconds. See *Troubleshooting* for more.
 
