@@ -50,11 +50,21 @@ public enum HeadroomReadout {
 
     public static let sdrModeText = "display is in SDR mode"
 
+    /// The figures are multiples of SDR white, written with "×" so the unit is on screen (0.9.6 naming item 19, Robbie,
+    /// 2026-11-28). Three cases, judged at the readout's precision:
+    ///
+    ///   • all of it in use:  "HDR headroom 8.97× (all of it)"
+    ///   • part of it:        "HDR headroom 2.50× of 8.97×"
+    ///   • none in use:       "HDR headroom 8.97× available, none in use" (the §6.7 state: never read as an SDR display)
+    ///
+    /// Was "headroom 8.97 of 8.97" and "… — none granted" until 0.9.6.
     public static func text(_ h: EDRHeadroom?) -> String {
         guard let h else { return "no screen" }
         if h.isSDRMode { return sdrModeText }
-        let figures = "headroom " + format(h.current) + " of " + format(h.potential)
-        return h.isGranted ? figures : figures + " — none granted"
+        let potential = format(h.potential) + "×"
+        guard h.isGranted else { return "HDR headroom " + potential + " available, none in use" }
+        if format(h.current) == format(h.potential) { return "HDR headroom " + potential + " (all of it)" }
+        return "HDR headroom " + format(h.current) + "× of " + potential
     }
 
     /// Two decimal places, without Foundation (this target has no Foundation dependency in its API).

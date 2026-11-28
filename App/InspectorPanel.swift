@@ -1,6 +1,6 @@
 import SwiftUI
 import ManifoldCore
-import FileScan   // FieldView — the Window View row (interlaced I4)
+import FileScan   // FieldView — the Window View row (interlaced I4); FileNameText — the File Name row
 import PictureGeometry   // the Orientation row (docs/BUGS.md, iPhone clips, 2026-10-29)
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision row (0.9.1)
 import AudioFileInfo      // AudioCardText — the audio-only rows
@@ -43,12 +43,7 @@ struct InspectorPanel: View {
                 audioOnlyRows(m)
             } else if let m = metadata {
                 SectionHeader("File Name")
-                Text(m.fileName)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.bottom, 8)
+                FileNameValue(name: m.fileName)
 
                 Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
 
@@ -211,12 +206,7 @@ struct InspectorPanel: View {
     /// §5.2). The format and the card's other words come from `AudioOnlyFacts`, so the two agree.
     @ViewBuilder private func audioOnlyRows(_ m: VideoMetadata) -> some View {
         SectionHeader("File Name")
-        Text(m.fileName)
-            .font(.system(.caption, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.92))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 8)
+        FileNameValue(name: m.fileName)
 
         Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
 
@@ -242,12 +232,7 @@ struct InspectorPanel: View {
     /// A still's rows (docs/STILLS_AND_AUDIO_ONLY_PLAN.md §4.3). GPS, camera serial and owner tags are never read into them.
     @ViewBuilder private func stillRows(_ still: StillImageInfo) -> some View {
         SectionHeader("File Name")
-        Text(still.fileName)
-            .font(.system(.caption, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.92))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.bottom, 8)
+        FileNameValue(name: still.fileName)
 
         Divider().overlay(.white.opacity(0.15)).padding(.bottom, 6)
 
@@ -318,6 +303,23 @@ struct InspectorPanel: View {
     private func hasFileInfo(_ m: VideoMetadata) -> Bool {
         m.software != nil || m.creator != nil || m.creationDate != nil
             || m.fileCreatedDate != nil || m.fileModifiedDate != nil
+    }
+}
+
+/// The File Name row's value: the whole name, wrapping at any character and NEVER HYPHENATED (docs/BUGS.md, 0.9.6 UI
+/// polish batch 4 item 1). SwiftUI hyphenated a wrapped name ("Stere-o_Textless"), a name the file does not have; the
+/// zero-width break opportunities from `FileNameText` leave it nothing to hyphenate. VoiceOver reads the plain name.
+private struct FileNameValue: View {
+    let name: String
+
+    var body: some View {
+        Text(FileNameText.wrappable(name))
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.92))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 8)
+            .accessibilityLabel(name)
     }
 }
 

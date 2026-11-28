@@ -32,6 +32,7 @@ import AppKit
 import Combine
 import UniformTypeIdentifiers
 import LUTCube
+import FileScan   // FileNameText — a file name in the refusal banner wraps without a hyphen
 import ColorimetryModel   // ColorimetryOverride, PictureCodes: the output space (L2)
 
 /// D1: trilinear or tetrahedral, for every window. Stored only once the user chooses: until then the key is
@@ -241,7 +242,14 @@ final class InterpretationLUTModel: ObservableObject {
         let text = "Couldn’t load “\(fileName)”: " + reason + " Nothing was loaded. " + still
         NSLog("[LUT] banner: %@", text)
         guard let engine = deck?.engine else { NSLog("[LUT] ⚠️ no engine on this window — the refusal is in the log only"); return }
-        engine.playbackNotice = text
+        // The banner's copy lets the two file names wrap at any character and never hyphenates them (`FileNameText`,
+        // docs/BUGS.md, 0.9.6 UI polish batch 4 item 1): a name inside a sentence was broken mid-word with a hyphen. The
+        // log line above keeps the plain text.
+        var shown = text.replacingOccurrences(of: "“\(fileName)”", with: "“\(FileNameText.wrappable(fileName))”")
+        if let name, name != fileName {
+            shown = shown.replacingOccurrences(of: "“\(name)”", with: "“\(FileNameText.wrappable(name))”")
+        }
+        engine.playbackNotice = shown
     }
 }
 

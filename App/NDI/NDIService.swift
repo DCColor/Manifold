@@ -354,7 +354,10 @@ final class NDIService: ObservableObject {
     private var audioShouldRun = false
     private var audioThreadFinished: DispatchSemaphore?   // pump signals on exit; stop() joins on it
 
-    private var isConnecting = false
+    /// A connect is in flight: discovery for the quick connect, or the receiver being made for a picked source. Set and
+    /// cleared on main, around the background connect. Published since 0.9.6 so the antenna pulses and its tooltip reads
+    /// "Connecting to <name>…" (docs/BUGS.md, 0.9.6 UI polish item 30; `ConnectingText`); it was a private guard before.
+    @Published private(set) var isConnecting = false
     /// Discovery loop state (main thread). REFERENCE-COUNTED: more than one view can want discovery
     /// running (the toolbar streaming control and the empty-state "Connect Stream…"), and during the
     /// connect transition both are briefly on screen at once. Counting means the finder keeps running

@@ -542,6 +542,24 @@ final class WindowSizer: NSObject, NSWindowDelegate {
         // they chose a size defined as "as large as fits, chrome included".
         // `sourceSize != nil` for the same reason `rasterContentWidth` insists on it: with no
         // picture there is no policy in force, so the ordinary answer below is the right one.
+        // ── FULL SCREEN: THE SAME ANSWER AS FIT, FOR THE SAME REASON (docs/BUGS.md, 0.9.6 UI polish item 50) ──────────
+        //
+        // A full-screen window is the screen's size and cannot grow, and SwiftUI's `.aspectRatio(.fit)` letterboxes the
+        // picture inside whatever the chrome leaves (`windowWillResize` returns the proposal untouched there). So the
+        // picture is DEFINED by the chrome, as under Fit, and the answer below is the stuck control Fit's note describes:
+        // the full-width picture's height subtracted from the screen's height left room for the tray it already had, or
+        // only the floor on a picture as wide as the screen, so the divider could not be dragged taller. Measured against
+        // the smallest legal picture instead, as Fit is, the tray travels as it does windowed and the picture pays for
+        // it inside the screen. Measured against the window's own content height, which in full screen is the screen's
+        // (`visibleFrame`, which `maximumContentSize` reads, is not a full-screen window's frame).
+        if window.styleMask.contains(.fullScreen), sourceSize != nil {
+            let floor: WindowFit.Floor = aspect < 1 ? .picture : .window
+            let smallestPicture = VideoBox.height(
+                width: WindowFit.floorWidth(floor, aspect: aspect, minContent: window.contentMinSize), aspect: aspect)
+            let contentHeight = window.contentRect(forFrameRect: window.frame).height
+            return max(contentHeight - smallestPicture, 0)
+        }
+
         if case .fitToScreen = raster, sourceSize != nil {
             // A VERTICAL picture's smallest is the picture floor (2026-10-29): measured against the window's 720-pt
             // minimum width, a 9:16 picture is 1280 tall and the tray would have no travel at all on a laptop. Every

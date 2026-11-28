@@ -2043,6 +2043,21 @@ final class DeckRegistry {
         return source.displayLabel
     }
 
+    /// The name THIS deck's live claim was made with: a saved stream's name, an NDI source's name, or a host for a pasted
+    /// address; nil when it owns no live source or claimed without a name (NDI's quick connect, before discovery finds a
+    /// source). Unlike `liveLabel`, no transport-name floor: the connecting tooltip says "the first NDI source" for nil
+    /// (`ConnectingText`, docs/BUGS.md, 0.9.6 UI polish item 30). Never a URL, for `connectLive`'s reason.
+    @MainActor
+    func liveClaimName(for deck: WindowDeck) -> String? {
+        let id = ObjectIdentifier(deck)
+        let owned = claims.first { key, claim in
+            if case .live = key { return claim.deck == id }
+            return false
+        }
+        guard let label = owned?.value.label, !label.isEmpty else { return nil }
+        return label
+    }
+
     /// Retire this deck's live source. A no-op when this deck has none — which is what makes it
     /// safe on the file-open paths, where the old code called the blanket `LiveSource.retireActive`
     /// and would now tear down a stream belonging to a different window.

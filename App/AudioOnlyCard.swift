@@ -12,6 +12,7 @@
 import SwiftUI
 import ManifoldCore
 import AudioFileInfo
+import FileScan   // FileNameText — the name wraps without a hyphen
 
 /// The words on the card, from the engine's facts. The Inspector reads the same lines, so the two cannot disagree.
 struct AudioOnlyFacts: Equatable {
@@ -66,12 +67,15 @@ struct AudioOnlyCard: View {
                     .padding(.bottom, 4)
                     .accessibilityHidden(true)
             }
-            Text(name)
+            // Two lines, then truncated in the middle; wrapped at any character and never hyphenated (`FileNameText`,
+            // docs/BUGS.md, 0.9.6 UI polish batch 4 item 1). VoiceOver reads the plain name.
+            Text(FileNameText.wrappable(name))
                 .font(.title3.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.95))
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .multilineTextAlignment(.center)
+                .accessibilityLabel(name)
             if let facts = AudioOnlyFacts(engine: engine) {
                 line(facts.format)
                 line(facts.channels)

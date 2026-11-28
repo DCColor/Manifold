@@ -41,6 +41,7 @@ import Combine
 import Foundation
 import QuartzCore      // CACurrentMediaTime — the monotonic host clock the media watchdog measures on
 import PrivacyRedaction // LogRedaction — the selected ICE pair's addresses are withheld (privacy P1)
+import LiveConnectionWatch // ServerRefusal — a refused offer in Manifold's words first (0.9.6 naming item 28)
 
 final class WHEPClient: ObservableObject {
 
@@ -55,6 +56,11 @@ final class WHEPClient: ObservableObject {
     /// failure/close, so it cannot stick true. Main-thread only — connect()/disconnect() assert
     /// main and the pc-state callback is delivered on main, which is what @Published requires.
     @Published private(set) var isConnected = false
+
+    /// A connect is in flight: set when this client dials, cleared when its transport is up (DTLS: the pc state reaches `.connected`) or the attempt
+    /// ends (every failure ends in `disconnect()`, which clears it). The antenna pulses and its tooltip reads "Connecting
+    /// to <name>…" while it is set (docs/BUGS.md, 0.9.6 UI polish item 30; `ConnectingText`). Main thread only.
+    @Published private(set) var isConnecting = false
 
     /// User-facing connection error, published so the UI can surface a failed connect without the
     /// user reading the Xcode log. Carries the SERVER'S OWN message where there is one (e.g.
@@ -281,6 +287,7 @@ final class WHEPClient: ObservableObject {
         // empty state would flash over the black takeover screen until DTLS comes up. Cleared on
         // every teardown/failure path — see disconnect() and onConnectionState.
         isConnected = true
+        isConnecting = true
         startDecodeStatsTimer()
 
         session.onIceState = { [weak self] state, name in
@@ -307,6 +314,7 @@ final class WHEPClient: ObservableObject {
                 // begins flowing into the depacketizer the moment SRTP keys are derived.
                 // Recovery (including .disconnected→.connected) — stand down the stuck-disconnect backstop.
                 self.cancelDisconnectBackstop()
+                self.isConnecting = false
                 self.lastError = nil   // success — clear any error from an earlier attempt
                 NSLog("[WHEP] connected — ICE + DTLS established in %@. Transport is up.", self.elapsed())
                 NSLog("[WHEP] watching for RTP — the [WHEP-RTP] lines below are step 3a's checkpoint")
@@ -519,29 +527,6 @@ final class WHEPClient: ObservableObject {
 
     // MARK: - Signalling (WHEP: POST offer → 201 + answer)
 
-    /// Turn a server error-response BODY into a user-facing line, or nil if there is nothing usable.
-    /// Prefers a known human field from a JSON body, else the trimmed plain text (Cloudflare's 409 is
-    /// plain "Live broadcast not started yet"). Length-capped. The body is the SERVER's own text — it
-    /// does not carry our endpoint URL — and it is never concatenated with the URL.
-    private static func serverMessage(fromBody body: String) -> String? {
-        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        func cap(_ s: String) -> String {
-            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t.count > 200 ? String(t.prefix(200)) + "…" : t
-        }
-        if trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            for key in ["errorDescription", "error", "message", "detail", "reason"] {
-                if let s = obj[key] as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {
-                    return cap(s)
-                }
-            }
-            return nil   // JSON with no known human field — don't dump raw JSON at the user
-        }
-        return cap(trimmed)
-    }
-
     private func postOffer(_ offer: String, to endpoint: URL) async {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -585,10 +570,10 @@ final class WHEPClient: ObservableObject {
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "<binary>"
             NSLog("[WHEP] FAILED at POST — HTTP %d: %@", http.statusCode, String(body.prefix(500)))
-            // Surface the SERVER'S message where it has one (e.g. Cloudflare's "Live broadcast not
-            // started yet" on 409 — it tells the user the fix); else a clear status-coded generic.
-            let message = Self.serverMessage(fromBody: body)
-                ?? "The stream server refused the connection (HTTP \(http.statusCode))."
+            // MANIFOLD'S SENTENCE FIRST, THEN THE SERVER'S WORDS, QUOTED AND SHORTENED (0.9.6 naming item 28,
+            // `ServerRefusal`). The body used to BE the banner, so its wording changed with the server; it is still
+            // quoted where it says something useful (a 409's "Live broadcast not started yet" tells the user the fix).
+            let message = ServerRefusal.message(status: http.statusCode, body: body)
             await MainActor.run { self.lastError = message; self.disconnect() }
             return
         }
@@ -754,6 +739,7 @@ final class WHEPClient: ObservableObject {
         // leave `isConnected` stuck true. Stand down the .disconnected backstop in the same breath,
         // so it can never fire after teardown has already run (both are main-thread only).
         isConnected = false
+        isConnecting = false
         cancelDisconnectBackstop()
         guard let session else { return }
         NSLog("[WHEP] tearing down (+%@)", elapsed())

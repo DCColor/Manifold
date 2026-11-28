@@ -8,6 +8,7 @@ import SettingsTransfer   // SettingsFile.isSettingsFile — a settings file is 
 import ColorimetryModel   // DolbyVisionConfig — the Dolby Vision banner (0.9.1)
 import DeckLinkRefusal    // DeckLinkConnectorMapping — the greyed sub-devices' note
 import Markers            // StartTimecodeSource — the readout's source indicator (CHAPTER_MARKERS_PLAN §13)
+import LiveConnectionWatch  // ConnectingText — the antenna while a connect is in flight (0.9.6 item 30)
 
 enum ReadoutMode: CaseIterable { case source, frame, elapsed }
 
@@ -381,6 +382,8 @@ struct ContentView: View {
     @State private var pinned = false
     @State private var showInspector = false
     @State private var showFileNameOverlay = false
+    /// The trial's launch notice while this window shows it (`trialNoticeBanner`; docs/BUGS.md, 0.9.6 UI polish item 34).
+    @State private var trialNotice: String?
     @State private var showGetFlipSheet = false
     @State private var showGuidesPanel = false
     /// Where Share Frame…'s sheet hangs from in this window (FrameShare.swift).
@@ -551,6 +554,22 @@ struct ContentView: View {
         if srt.isConnected { return .srt }
         if hls.isConnected { return .hls }
         return nil
+    }
+
+    /// THIS window's live connect, while it is still in flight: the transport this deck claimed, while that client says it
+    /// is connecting (docs/BUGS.md, 0.9.6 UI polish item 30). From the dial until the transport is up or the attempt ends.
+    /// NDI is connecting before it is connected; SRT, WHEP and HLS are already `isConnected` (they take the display at
+    /// dial), so this is what tells the antenna they are not live yet. Reads the observed clients, so it invalidates.
+    private var connectingLive: LiveSource? {
+        guard let source = DeckRegistry.shared.liveSource(for: deck) else { return nil }
+        let connecting: Bool
+        switch source {
+        case .ndi: connecting = ndi.isConnecting
+        case .web: connecting = whep.isConnecting
+        case .srt: connecting = srt.isConnecting
+        case .hls: connecting = hls.isConnecting
+        }
+        return connecting ? source : nil
     }
 
     var body: some View {
@@ -1348,6 +1367,8 @@ struct ContentView: View {
                     .background(.black.opacity(0.6), in: Capsule())
                     .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
                     .padding(.top, 24)
+                    // Room at the sides, so a long name truncates inside the window instead of running to its edges.
+                    .padding(.horizontal, 24)
                     .transition(.opacity)
             }
         }
@@ -1404,11 +1425,22 @@ struct ContentView: View {
                 arbitrationNotice
                 connectErrorBanner
                 frameSaveBanner
+                trialNoticeBanner
                 deckLinkRefusalBanner
                 sdiSoundStoppedBanner
                 dolbyVisionBanner
             }
+            // One window takes the trial notice (`LicenseManager.takeTrialNotice`). ASYNC, because `$trialNotice` fires in
+            // `willSet`: inside the sink the property still holds the old value, and a take there would find nothing. On
+            // subscribe it fires with the current value, so a window opened after the license answered can still take it.
+            .onReceive(LicenseManager.shared.$trialNotice) { value in
+                guard value != nil else { return }
+                DispatchQueue.main.async {
+                    if let text = LicenseManager.shared.takeTrialNotice() { trialNotice = text }
+                }
+            }
         }
+        .animation(.easeInOut(duration: 0.25), value: trialNotice)
         .animation(.easeInOut(duration: 0.25), value: whep.lastError)
         .animation(.easeInOut(duration: 0.25), value: deck.frameSaveNotice)
         .animation(.easeInOut(duration: 0.2), value: showInspector)
@@ -2372,13 +2404,19 @@ struct ContentView: View {
         // GREEN EXACTLY WHILE THIS WINDOW'S LIVE SOURCE IS CONNECTED, whichever transport (green = live; Robbie,
         // 2026-10-27). Was `== .ndi`, so an SRT, WHEP or HLS stream never lit it (checklist item 2). `activeLiveSource`
         // is the same predicate `hasSource` and the Disconnect item use: connected, and this window's.
-        let mine = activeLiveSource != nil
+        // CONNECTING (0.9.6 item 30): white, pulsing, and "Connecting to <name>…" until the transport is up or the attempt
+        // ends. Not green: SRT, WHEP and HLS are `isConnected` from the dial, so `mine` alone lit green before anything came.
+        let connecting = !arbitrated && connectingLive != nil
+        let mine = activeLiveSource != nil && !connecting
         return HStack(spacing: 2) {
             Button { toggleStreaming() } label: {
                 Image(systemName: "antenna.radiowaves.left.and.right")
+                    .symbolEffect(.pulse, options: .repeating, isActive: connecting)
             }
             .foregroundStyle(mine ? Color.green : .white.opacity(arbitrated ? 0.35 : 0.9))
             .help(arbitrated ? (deck.gate.reason ?? "Streaming is in another window")
+                  : connecting
+                  ? ConnectingText.tooltip(name: DeckRegistry.shared.liveClaimName(for: deck))
                   : mine
                   ? "Streaming — \(DeckRegistry.shared.liveLabel(for: deck) ?? activeLiveSource?.displayLabel ?? "live") — "
                     + keys.helpText("click to stop", .disconnectLive)
@@ -2717,6 +2755,45 @@ struct ContentView: View {
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.22)))
             .padding(.top, 16)
             .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// The trial's launch notice, "3 days left in your trial." (docs/BUGS.md, 0.9.6 UI polish item 34): once per launch, in
+    /// the one window that took it from `LicenseManager`. A NOTICE, so it hides on the notices' 9 s timer (naming decision
+    /// D7) and is styled as one: neutral, like the arbitration notice, not the orange of an error. Its own banner, not
+    /// `playbackNotice`, which is per file and carries the orange triangle.
+    @ViewBuilder private var trialNoticeBanner: some View {
+        if let text = trialNotice {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "clock")
+                    .foregroundStyle(.white.opacity(0.75))
+                Text(text)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button {
+                    trialNotice = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.55))
+                .accessibilityLabel("Close")
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.22)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .task(id: text) {
+                // The guard keeps a cancelled sleep from clearing the notice early (see `connectErrorBanner`).
+                try? await Task.sleep(nanoseconds: 9_000_000_000)
+                guard !Task.isCancelled else { return }
+                trialNotice = nil
+            }
+            .onAppear { NSLog("[LICENSE] trial notice shown") }
         }
     }
 
@@ -3400,11 +3477,11 @@ struct ContentView: View {
             .disabled(engine.mediaKind != .video)
             Section {
                 Button(keys.helpText("Export Frame…", .exportFrame)) { metalRenderer?.exportCurrentFrame() }
-                    .disabled(engine.mediaKind != .video)
+                    .disabled(!canExportFrame)
                 // Directly below Export Frame (Robbie, 2026-11-15): the same image, through the share sheet, which hangs
                 // from this More control.
                 Button(keys.helpText(ShareLabel.title(pictureIsHDR: deck.pictureIsHDR), .shareFrame)) { shareFrame() }
-                    .disabled(engine.mediaKind != .video)
+                    .disabled(!canExportFrame)
                 Button("Framing Guides…") { showGuidesPanel = true }
                 if includesLoop {
                     Toggle(keys.helpText("Loop Playback", .loop),
@@ -3639,8 +3716,14 @@ struct ContentView: View {
             Image(systemName: "square.and.arrow.down")
         }
         .help(keys.helpText("Export Frame…", .exportFrame))
-        .disabled(engine.mediaKind != .video)
+        .disabled(!canExportFrame)
     }
+
+    /// Export Frame and Share Frame can act: THE SAME RULE AS File ▸ Export Frame, Share Frame and their keys
+    /// (`installShortcutHandlers`, `.exportFrame` / `.shareFrame`): a renderer, and a picture in it (`WindowDeck.hasPicture`).
+    /// The bar's buttons and More's items used `mediaKind != .video`, which a live stream (`.none`) fails, so they were off
+    /// for every stream while the menu and the keys exported it (docs/BUGS.md, 0.9.6 UI polish, batch 4 item 3).
+    private var canExportFrame: Bool { metalRenderer != nil && deck.hasPicture }
 
     /// Share Frame… (ACTION), in Full beside Export (Robbie, 2026-11-15): the standard share symbol, and the share sheet hangs
     /// from this button, as it does when File ▸ Share Frame… is chosen while Full is on screen (FrameShare.swift). Compact
@@ -3650,7 +3733,7 @@ struct ContentView: View {
             Image(systemName: "square.and.arrow.up")
         }
         .help(keys.helpText(ShareLabel.title(pictureIsHDR: deck.pictureIsHDR), .shareFrame))
-        .disabled(engine.mediaKind != .video)
+        .disabled(!canExportFrame)
         .background(ShareAnchorView { [shareAnchor] in shareAnchor.shareButton = $0 })
     }
 
@@ -4184,8 +4267,20 @@ private struct FileNameOverlayText: View {
 
     private static let kinds: Set<WindowDeck.TitleMarker.Kind> = [.color, .range, .bypass]
 
+    /// ONE LINE: the name truncated in the middle, so it is never wrapped and hyphenated (docs/BUGS.md, 0.9.6 UI polish
+    /// batch 4 item 1), and the markers after it in full, since they are what changed the picture.
     var body: some View {
         let markers = deck.titleMarkers.filter { Self.kinds.contains($0.kind) }.map(\.text)
-        Text(([name] + markers).joined(separator: " — "))
+        HStack(spacing: 0) {
+            Text(name)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if !markers.isEmpty {
+                Text(" — " + markers.joined(separator: " — "))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }

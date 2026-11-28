@@ -687,6 +687,11 @@ final class HLSClient: ObservableObject {
     /// control bar and the empty state follow a connect. Never dips across an HLS→HLS swap.
     @Published private(set) var isConnected = false
 
+    /// A connect is in flight: set when this client dials, cleared when its transport is up (AVFoundation's `.readyToPlay`: `armPlayback`) or the attempt
+    /// ends (every failure ends in `disconnect()`, which clears it). The antenna pulses and its tooltip reads "Connecting
+    /// to <name>…" while it is set (docs/BUGS.md, 0.9.6 UI polish item 30; `ConnectingText`). Main thread only.
+    @Published private(set) var isConnecting = false
+
     /// The connect banner's message, or nil. Same contract as WHEP's and SRT's: set on failure,
     /// deliberately NOT cleared by our own teardown (a message about a failure must outlive the
     /// teardown that failure caused), retired by the next attempt or by `clearError()`.
@@ -1026,6 +1031,7 @@ final class HLSClient: ObservableObject {
         startHeartbeat()
 
         isConnected = true
+        isConnecting = true
         NSLog("%@", "[HLS] \(isSwap ? "swapped to" : "connecting to") a stream — waiting for "
             + "readyToPlay before arming the pull; AVFoundation owns the pacing")
     }
@@ -1049,6 +1055,7 @@ final class HLSClient: ObservableObject {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let renderer, armedAt == 0 else { return }   // once per connection
         armedAt = Self.monotonicNow()
+        isConnecting = false
 
         // THE PULL. Same seam NDI uses, and the reason is the same: AVFoundation holds the frames
         // and hands over whatever is current when we ask, so asking on OUR display tick is what
@@ -1667,6 +1674,7 @@ final class HLSClient: ObservableObject {
         // connect that failed before a pull existed — can never leave `isConnected` stuck true.
         // Same ordering rule as WHEP's and SRT's.
         isConnected = false
+        isConnecting = false
         // Give the file path its providers back on BOTH exits, after the pull hook is off, so a
         // held save is always released. A no-op when nothing is held. Not in `retirePull`: that is
         // also the swap path, which keeps this client's providers for the pull it starts next.

@@ -17,18 +17,21 @@ final class HeadroomReadoutTests: XCTestCase {
         XCTAssertEqual(HeadroomReadout.text(EDRHeadroom(current: 1.0, potential: 1.00005)), "display is in SDR mode")
     }
 
-    /// HDR on, granted: "headroom 8.97 of 8.97" — the §6.11 S4 wording, from the measured 8.965394 (§6.7).
+    /// HDR on, granted: the §6.11 S4 line in 0.9.6's words (naming item 19), from the measured 8.965394 (§6.7). All of it
+    /// reads "(all of it)" at the readout's precision; part of it names both figures. "×" carries the unit.
     func testGrantedReadsCurrentOfPotential() {
         XCTAssertEqual(HeadroomReadout.text(EDRHeadroom(current: 8.965394, potential: 8.965394)),
-                       "headroom 8.97 of 8.97")
+                       "HDR headroom 8.97× (all of it)")
+        XCTAssertEqual(HeadroomReadout.text(EDRHeadroom(current: 8.9661, potential: 8.9681)),
+                       "HDR headroom 8.97× (all of it)")
         XCTAssertEqual(HeadroomReadout.text(EDRHeadroom(current: 2.5, potential: 8.965394)),
-                       "headroom 2.50 of 8.97")
+                       "HDR headroom 2.50× of 8.97×")
     }
 
     /// HDR on, nothing granted: the §6.7 measurement. Must not read as an SDR display.
     func testOfferedButNotGrantedSaysSo() {
         let text = HeadroomReadout.text(EDRHeadroom(current: 1.0, potential: 8.965394))
-        XCTAssertEqual(text, "headroom 1.00 of 8.97 — none granted")
+        XCTAssertEqual(text, "HDR headroom 8.97× available, none in use")
         XCTAssertNotEqual(text, HeadroomReadout.sdrModeText)
     }
 

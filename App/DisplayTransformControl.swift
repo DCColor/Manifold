@@ -300,7 +300,7 @@ struct DisplayChainReadout: View {
             }
             row("Chroma",    model.chain.chroma)
             if let lut = model.chain.lut {
-                row("LUT", Text(lut).foregroundColor(model.chain.lutApplied ? Self.assertion : .secondary))
+                lutRow(lut)
             }
             row("Transform", model.chain.transform)
             // Interlaced I4 (§4): after Transform, an interlaced source only.
@@ -364,6 +364,39 @@ struct DisplayChainReadout: View {
 
     private func row(_ label: String, _ value: String) -> some View {
         row(label, Text(value))
+    }
+
+    /// The LUT row with its FILE NAME ON A LINE OF ITS OWN, one line, truncated in the middle, and the rest of the line
+    /// below it, wrapping as before (docs/BUGS.md, 0.9.6 UI polish batch 4 item 1). Wrapped inside the line, a long name
+    /// was broken mid-word and hyphenated, which reads as a name the file does not have. Not `FileNameText.wrappable`:
+    /// this readout is selectable, and its zero-width spaces would be copied with the text.
+    @ViewBuilder private func lutRow(_ lut: String) -> some View {
+        let tint = model.chain.lutApplied ? Self.assertion : Color.secondary
+        if let name = model.chain.lutName, let range = lut.range(of: name) {
+            let head = String(lut[..<range.lowerBound]) + name
+            let tail = String(lut[range.upperBound...])
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("LUT")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 70, alignment: .trailing)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(head)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(name)
+                    if !tail.isEmpty {
+                        Text(tail.hasPrefix(" — ") ? String(tail.dropFirst(3)) : tail)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(tint)
+                .textSelection(.enabled)
+            }
+        } else {
+            row("LUT", Text(lut).foregroundColor(tint))
+        }
     }
 
     private func row(_ label: String, _ value: Text) -> some View {

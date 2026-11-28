@@ -60,6 +60,11 @@ final class SRTClient: ObservableObject {
     /// takeover screen. Cleared by disconnect() and by every session-end path, so it cannot stick.
     @Published private(set) var isConnected = false
 
+    /// A connect is in flight: set when this client dials, cleared when its transport is up (the handshake: `handleConnected`) or the attempt
+    /// ends (every failure ends in `disconnect()`, which clears it). The antenna pulses and its tooltip reads "Connecting
+    /// to <name>…" while it is set (docs/BUGS.md, 0.9.6 UI polish item 30; `ConnectingText`). Main thread only.
+    @Published private(set) var isConnecting = false
+
     /// User-facing connection error, published so the UI can surface a failed connect without the
     /// user reading the Xcode log.
     ///
@@ -524,6 +529,7 @@ final class SRTClient: ObservableObject {
         // route lands on a display that is already ours.
         SRTFrameRouter.shared.beginTakeover()
         isConnected = true
+        isConnecting = true
         haveConnected = false
         haveVideoStream = false
         startStatsTimer()   // also clears every per-stream announce latch — see there
@@ -729,6 +735,7 @@ final class SRTClient: ObservableObject {
         guard isCurrent(generation, "connected") else { return }
         guard session != nil else { return }   // raced a disconnect
         haveConnected = true
+        isConnecting = false
         connectedAtHost = CACurrentMediaTime()
         retireError()
         NSLog("[SRT] transport up in %@. Waiting for the demuxer to identify the stream…", elapsed())
@@ -983,6 +990,7 @@ final class SRTClient: ObservableObject {
         // or one after a connect that failed before a session existed — can never leave
         // `isConnected` stuck true.
         isConnected = false
+        isConnecting = false
         guard let session else { return }
         self.session = nil
         NSLog("[SRT] tearing down (+%@)", elapsed())
@@ -1029,6 +1037,7 @@ final class SRTClient: ObservableObject {
     /// Undo the display takeover when a connect fails before a session ever ran.
     private func teardownDisplayAndState() {
         isConnected = false
+        isConnecting = false
         statsTimer?.invalidate()
         statsTimer = nil
         SRTFrameRouter.shared.deactivate()

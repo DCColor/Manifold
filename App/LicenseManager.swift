@@ -486,6 +486,21 @@ final class LicenseManager: ObservableObject {
     /// rather than gates. See `userFacingKeychainFault`.
     @Published private(set) var keychainFaultStatus: OSStatus?
 
+    /// The trial's launch notice, "3 days left in your trial." (docs/BUGS.md, 0.9.6 UI polish item 34; `TrialNotice`): set
+    /// the first time this launch the state is a trial with 3 days or fewer left, and taken by the first window that shows
+    /// it (`takeTrialNotice`), so one window shows it once per launch. Trial only: a licensed or beta key (`.licensed`) and
+    /// every other state never set it.
+    @Published private(set) var trialNotice: String?
+    /// The notice has been offered this launch. A later re-evaluation (a validate, a deactivate) never offers it again.
+    private var trialNoticeOffered = false
+
+    /// Hands the trial notice to one window and clears it, so no other window shows it. nil when there is none to show.
+    func takeTrialNotice() -> String? {
+        guard let text = trialNotice else { return nil }
+        trialNotice = nil
+        return text
+    }
+
     /// The license client's storage: `activationRecord` and `storedLicenseKey` in
     /// `KeychainStore.licenseItems`, and the pre-P1 plist machine id (never when redirected).
     let store: LicenseRecordStore
@@ -717,6 +732,11 @@ final class LicenseManager: ObservableObject {
             licenseType = .unknown
             state = trial.active ? .trial(daysRemaining: trial.daysRemaining)
                                  : (trial.expired ? .trialExpired : .unlicensed)
+            if case .trial(let days) = state, !trialNoticeOffered, let text = TrialNotice.text(daysRemaining: days) {
+                trialNoticeOffered = true
+                trialNotice = text
+                NSLog("[LICENSE] trial notice offered: %d day(s) left", days)
+            }
         }
     }
 

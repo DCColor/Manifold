@@ -47,12 +47,15 @@ struct DisplayChain: Equatable {
     var chroma: String = "—"
     /// Colour S3: the file's container tags against its own bitstream, when they disagree. nil otherwise.
     var tags: String? = nil
-    /// Colour S4: this window's display's EDR headroom — "headroom 8.97 of 8.97", or "display is in SDR
-    /// mode". From the renderer's own sample of its window's screen, the one the `[EDR]` log prints.
+    /// Colour S4: this window's display's EDR headroom — "HDR headroom 8.97× (all of it)" (0.9.6 naming item 19), or
+    /// "display is in SDR mode". From the renderer's own sample of its window's screen, the one the `[EDR]` log prints.
     var headroom: String = "—"
     /// Colour S6, L3 (D7): the window's LUT — "name.cube — 3D 33³ · tetrahedral · out Rec.2020 PQ (HDR10)
     /// (stated)" — or nil with none. `InterpretationLUTModel.readoutLine`.
     var lut: String? = nil
+    /// The LUT's file name, as it appears at the start of `lut`, so the view can let it wrap without a hyphen
+    /// (`FileNameText`, docs/BUGS.md, 0.9.6 UI polish batch 4 item 1). `lut` stays plain: the `[CHAIN] LUT` log prints it.
+    var lutName: String? = nil
     /// The Source line's override words — "overridden (Override 1·1·9)", its tail — or nil when the source is not
     /// overridden. The view draws them in the Color control's colour, the app's yellow (LG session, 2026-10-22; amber until 2026-10-25).
     var overriddenWords: String? = nil
@@ -341,6 +344,7 @@ final class DisplayChainModel: ObservableObject {
                                 tags: renderer?.sourceColorNote,
                                 headroom: HeadroomReadout.text(renderer?.displayHeadroom),
                                 lut: deck.lut.readoutLine,
+                                lutName: deck.lut.name,
                                 overriddenWords: overriddenWords,
                                 lutApplied: deck.lut.isApplied,
                                 calibrationApplies: deck.chrome?.displayTransform == .reference,

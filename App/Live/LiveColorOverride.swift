@@ -394,6 +394,15 @@ struct ColorInterpretationControl: View {
         }
     }
 
+    /// Next Tag Override: the next preset for this control's subject, wrapping to Auto, as Color ▸ Next Tag Override does
+    /// (`WindowDeck.cycleColorOverride`, which picks the same subject: the live stream when there is one, else the file).
+    private func cycleNext() {
+        switch subject {
+        case .live(let s): model.cycle(on: s)
+        case .file:        fileModel.cycle()
+        }
+    }
+
     /// The codes on screen now — Custom's pickers start from them. nil on a stream that has not stated
     /// its colour yet.
     private var effectiveCodes: (primaries: Int, transfer: Int, matrix: Int)? {
@@ -429,6 +438,11 @@ struct ColorInterpretationControl: View {
         Section {
             Button(subject == .file ? "Reset to File’s Tags" : "Reset to Stream’s Tags") { choose(.auto) }
                 .disabled(current == .auto)
+            // Color ▸ Next Tag Override, here too, so the command exists in both places (Robbie, 2026-11-28; docs/BUGS.md,
+            // 0.9.6 UI polish item 8, batch 4). The same action as the menu and its key (`WindowDeck.cycleColorOverride`).
+            // Its key is named in the title, not bound: a key equivalent on a control-bar menu's item would be a second
+            // claimant for the chord, as the A/V menu's note says. No key by default, so the title stands alone.
+            Button(ShortcutCenter.shared.registry.hint("Next Tag Override", .cycleInterpretation)) { cycleNext() }
         }
         Section("Colorimetry") {
             Picker("Colorimetry", selection: presetBinding) {
