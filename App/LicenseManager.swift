@@ -436,6 +436,10 @@ extension LicenseRecordSync.Outcome: @unchecked Sendable {}
 final class LicenseManager: ObservableObject {
     static let shared = LicenseManager()
 
+    /// License startup runs once per launch. `bootstrap` hangs off a `.task` on the WindowGroup's content, which runs once per
+    /// window; without this a second window ran it again, with a second Keychain read and prompt (docs/BUGS.md 0.9.6, part C).
+    private let startupOnce = LaunchOnce()
+
     // ⚠️ NO LICENCE STATE IN THE PREFERENCES PLIST. `license.activated`, `license.validated` and
     // `license.type` were written here until the license client port, and are no longer written or
     // read. They are left where they are: adoption rule 2 deletes nothing a shipped release wrote, and
@@ -574,6 +578,11 @@ final class LicenseManager: ObservableObject {
     /// their preferences plist is now recovered silently and completely on the next launch
     /// instead of being shown the trial-expired gate.
     func bootstrap() async {
+        // Once per launch, claimed before anything runs, so windows opening together can't both start it (`LaunchOnce`).
+        guard startupOnce.claim() else {
+            NSLog("[LICENSE] startup already ran this launch — skipped for this window")
+            return
+        }
         #if DEBUG
         if let reason = LicenseCrypto.runRoundTripSelfCheck() {
             print("[LICENSE] public-key self-check: \(reason)")
