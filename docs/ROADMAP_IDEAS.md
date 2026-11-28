@@ -523,9 +523,20 @@ its own timing measure. One shared queue is what makes the three-scope readings 
 Size guess: Medium
 
 ## Card pull: sticky would-repeat band
-Version: 0.9.6
+Version: after 1.0 (deferred from 0.9.6, Robbie, 2026-11-27)
 
 What: after a Play's first timed pull, the would-repeat test at a matched rate allows 0.5 ms past the half-frame band, so a Play that starts at the band's edge stops repeating a frame (`CARD_PULL_MARGIN.md` §21.4, §21.6); needs its own soak with `MANIFOLD_DECKLINK_CADENCE_LOG=2`.
+
+Trigger: edge-start holds at 59.94 seen outside the rehearsal (a tester report, or a soak other than the release rehearsal). Until then it stays a known limitation: rarely, one repeated frame at the start of a 59.94 Play (`BUGS.md`, the LOW known-limitation entry). Design and the replays: `CARD_PULL_MARGIN.md` §21.6–§21.7.
+
+## Window presents on its own display link (option A)
+Version: after 1.0 (deferred from 0.9.6, Robbie, 2026-11-27)
+
+What: with output on, the window presents on its own thread at its display's own refresh, from a newest-frame mailbox, so the SDI pacer never touches the `CAMetalLayer` and a WindowServer stall can't reach the SDI tick. Plain B (the 0.9.5 default) took the transaction off the pacer's presents; option A takes the present off the pacer altogether. Design, the nights behind it and the rollout (a DEBUG switch, off by default, first): `WINDOW_PRESENT_PATH.md` §4.2, with the night 4 and plain-B follow-ups later in that file.
+
+Triggers, either one:
+- testers report SDI repeats during playback;
+- the window's frame drops at 100 or 119.88 fps on a 120 Hz display with output on start to matter (today a known limitation for 1.0; `BUGS.md`, the plain-B entry's residual costs).
 
 ## Markers scope: comment lines option (1 / 2 / 3)
 Version: 0.9.6

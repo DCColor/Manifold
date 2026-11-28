@@ -2700,6 +2700,8 @@ mismatch (2 ms band) and the would-skip test (`:6367-6368`) are unchanged. This 
   (`MANIFOLD_DECKLINK_CADENCE_LOG=2`, `[PULLPHASE]`), so that each pull's branch, headroom and next-frame state are recorded. That is
   needed to confirm the change does what §21.4 infers: no steady-state pull changes, and an edge-start Play keeps its phase.
 - `BUGS.md` carries it as a LOW known limitation for the 0.9.5 notes; `ROADMAP_IDEAS.md` lists the sticky band under 0.9.6.
+- **Amended (Robbie, 2026-11-27): the sticky band is deferred past 1.0,** no longer the 0.9.6 candidate. Trigger: edge-start holds at
+  59.94 seen outside the rehearsal. Until then it is a known limitation for 1.0 as well. `ROADMAP_IDEAS.md` carries it with that trigger.
 
 ### 21.7 Replay on the 0.9.5 baseline 2 night (2026-11-25; read-only)
 

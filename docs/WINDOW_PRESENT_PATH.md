@@ -1,5 +1,9 @@
 # The window present path under the output pacer
 
+> **Status (Robbie, 2026-11-27): option A is deferred past 1.0.** It was the 0.9.6 plan. Plain B (the 0.9.5 default) ships in 1.0, and
+> the window's frame drops at 100/119.88 fps on a 120 Hz display with output on stay a known limitation. `ROADMAP_IDEAS.md`, *Window
+> presents on its own display link (option A)*, lists the triggers that would bring it back. The design below is unchanged.
+
 Read-only audit, 2026-11-18. No code was changed, built or launched, and no git command was run. Line numbers are the working tree at
 `a6f541c`, whose only uncommitted change is `docs/CARD_PULL_MARGIN.md` (from the session's git-status snapshot). The logs are read in
 place under `~/Code/_scratch/`: night 1 `manifold-cardpull-s1/` (§12 of `CARD_PULL_MARGIN.md`), night 2 `manifold-cardpull-s1r/` (§13),
