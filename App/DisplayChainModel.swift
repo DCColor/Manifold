@@ -264,7 +264,7 @@ final class DisplayChainModel: ObservableObject {
         // ── TRANSFORM ───────────────────────────────────────────────────────────────────────
         var transformLine: String
         switch mode {
-        case .os:     transformLine = "As macOS shows it — source colorspace declared to the layer"
+        case .os:     transformLine = "macOS — the system color-manages the picture from its tags (colorspace declared to the layer)"
         case .bypass: transformLine = "Bypass — no colorspace declared, no conversion"
         // Colour S1: the renderer's own plan, so the line names the curve and the Lb/Lw IN USE —
         // the same object that decided the picture, never a re-derivation.
@@ -325,7 +325,7 @@ final class DisplayChainModel: ObservableObject {
                 // Honest third case rather than a guess. A PQ or HLG source has no rTRC at all
                 // (§3: transfer is declared through `cicp` and a LUT), so there is no curve to
                 // compare and neither sentence above would be true.
-                verdict = "Source declares its transfer outside the rTRC (PQ/HLG); "
+                verdict = "The source is PQ or HLG, which an ICC profile's curve (rTRC) can't describe; "
                         + "no curve comparison is possible."
             }
         }

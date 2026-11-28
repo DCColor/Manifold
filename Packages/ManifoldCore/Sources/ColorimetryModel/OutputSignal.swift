@@ -265,8 +265,9 @@ public struct OutputSignal: Equatable, Sendable {
         case (false, true):  defaulted = " (luminance: defaults)"
         case (false, false): defaulted = ""
         }
-        let unknown = (m.maxCLL == 0 || m.maxFALL == 0) ? " (0 = unknown)" : ""
-        return "mastering \(gamut) · \(lum)\(defaulted) · MaxCLL \(m.maxCLL) · MaxFALL \(m.maxFALL)\(unknown)"
+        // A zero means the source didn't state it (0.9.6 UI polish item 21): said in words, not as "(0 = unknown)".
+        func level(_ v: some BinaryInteger) -> String { v == 0 ? "not stated" : "\(v)" }
+        return "mastering \(gamut) · \(lum)\(defaulted) · MaxCLL \(level(m.maxCLL)) · MaxFALL \(level(m.maxFALL))"
     }
 
     /// One line for the log: "PQ · Rec. 2020 · mastering P3 D65 · 1000 / 0.0050 cd/m² (defaults) · MaxCLL 0 · …".

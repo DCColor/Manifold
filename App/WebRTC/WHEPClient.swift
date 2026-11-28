@@ -188,7 +188,7 @@ final class WHEPClient: ObservableObject {
         // field, not a home-directory backdoor.)
         guard let session = ManifoldWHEPSession(stunServer: nil, error: &createError) else {
             NSLog("[WHEP] FAILED at PeerConnection create: %@", createError ?? "unknown")
-            lastError = "Couldn’t start the connection."
+            lastError = "Couldn’t start the connection. Connect again; if it keeps happening, quit and reopen Manifold."
             return
         }
         self.session = session
@@ -315,7 +315,7 @@ final class WHEPClient: ObservableObject {
                 NSLog("[WHEP] FAILED at DTLS/transport.")
                 // Keep a more specific ICE message if one was already set (ICE .failed fires first in
                 // that cascade); otherwise a clear generic.
-                self.lastError = self.lastError ?? "The connection to the stream failed."
+                self.lastError = self.lastError ?? "The connection to the stream failed. Check your network, then connect again."
                 // A spontaneous transport failure does not route through disconnect() on its own,
                 // so the source flag would stick true. Tear down: clears isConnected, releases the
                 // display, and frees the session so ⌃⌥H can retry (connect() guards on session==nil).
@@ -711,7 +711,7 @@ final class WHEPClient: ObservableObject {
         var error: NSString?
         guard session.setRemoteAnswer(answer, error: &error) else {
             NSLog("[WHEP] FAILED at setRemoteDescription: %@", error ?? "unknown")
-            lastError = "Couldn’t negotiate the stream with the server."
+            lastError = "Couldn’t agree on the stream with the server. Check the address and that the broadcast is live, then connect again."
             disconnect()
             return
         }

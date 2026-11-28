@@ -252,10 +252,12 @@ final class ClipFolderTests: XCTestCase {
         XCTAssertEqual(FrameFileName.clipFolder(in: root, name: "MyClip"), .root(root, reason: .couldNotCreate))
     }
 
-    func testFallbackNoticeNamesTheFolderNotAPath() {
+    /// Since batch 3 (2026-11-27) the notice names no folder at all: it is the banner's detail sentence, and a name inside a
+    /// sentence can wrap and be hyphenated. Never a path either.
+    func testFallbackNoticeNamesNoFolderAndNoPath() {
         let a = FrameFileName.fallbackNotice(folder: "MyClip", reason: .fileInTheWay)
         let b = FrameFileName.fallbackNotice(folder: "MyClip", reason: .couldNotCreate)
-        for t in [a, b] { XCTAssertTrue(t.contains("“MyClip”")); XCTAssertFalse(t.contains("/")) }
+        for t in [a, b] { XCTAssertFalse(t.contains("MyClip")); XCTAssertFalse(t.contains("/")) }
     }
 }
 

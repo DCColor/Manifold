@@ -77,14 +77,24 @@ enum DisplayTransformMode: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
-    /// The name in the menu. Plain enough to be chosen from without a manual; §6.3's pulldown with
-    /// its meaning-carrying subtitles ("what your client will see" / "no colour management") is
-    /// Phase 2b and lives in the control bar, not here.
+    /// The name, everywhere: the Color menu, the control's face and pulldown, the registry (docs/manual/NAMING_PROPOSAL.md
+    /// D6, Robbie, 2026-11-27). Was "As macOS Shows It" / "Reference (BT.1886)" / "Bypass — No Color Management" in the
+    /// menu and the short form on the face; the detail moved to `menuSubtitle`.
     var menuTitle: String {
         switch self {
-        case .os:        return "As macOS Shows It"
-        case .reference: return "Reference (BT.1886)"
-        case .bypass:    return "Bypass — No Color Management"
+        case .os:        return "macOS"
+        case .reference: return "Reference"
+        case .bypass:    return "Bypass"
+        }
+    }
+
+    /// The second line under the name: in the Color menu (`NSMenuItem.subtitle`, set by `MenuKeyKeeper`) and in the
+    /// control's pulldown (`DisplayTransformControl.rowLabel`). One string for both (D6).
+    var menuSubtitle: String {
+        switch self {
+        case .os:        return "What your client will see"
+        case .reference: return "BT.1886, as a reference monitor shows it"
+        case .bypass:    return "No color management"
         }
     }
 
@@ -140,6 +150,9 @@ final class DisplayTransformMenuState: ObservableObject {
     @Published private(set) var enabled = false
     /// The key window's file gives the renderer no picture, so there is nothing to reinterpret.
     @Published private(set) var interpretationGreyed = false
+    /// The key window shows a live stream, so Color ▸ Reset reads "Reset to Stream’s Tags", as the color control's own item
+    /// does (docs/BUGS.md, 0.9.6 UI polish item 8). Else "Reset to File’s Tags", the registry's title.
+    @Published private(set) var interpretationIsStream = false
 
     /// Interlaced I4: the key window's field view, and whether its source offers the views (else the items are disabled).
     @Published private(set) var fieldView: FieldView?
@@ -168,6 +181,8 @@ final class DisplayTransformMenuState: ObservableObject {
         if enabled != newEnabled { enabled = newEnabled }
         let newGreyed = deck?.engine?.mediaKind.feedsRenderer == false
         if interpretationGreyed != newGreyed { interpretationGreyed = newGreyed }
+        let newIsStream = deck.map { DeckRegistry.shared.liveLabel(for: $0) != nil } ?? false
+        if interpretationIsStream != newIsStream { interpretationIsStream = newIsStream }
         let newFieldView = deck?.chrome?.fieldView
         let newFieldsOffered = deck?.chrome?.fieldViewOffered ?? false
         if fieldView != newFieldView { fieldView = newFieldView }
@@ -222,14 +237,15 @@ struct DisplayTransformCommands: Commands {
             Divider()
             ShortcutMenuItem(id: .cycleInterpretation, registry: shortcuts)
                 .disabled(state.interpretationGreyed)
-            ShortcutMenuItem(id: .resetInterpretation, registry: shortcuts)
+            ShortcutMenuItem(id: .resetInterpretation, registry: shortcuts,
+                             title: state.interpretationIsStream ? "Reset to Stream’s Tags" : nil)
                 .disabled(state.interpretationGreyed)
             // Interlaced I4 (docs/INTERLACED_FINDINGS.md §14): the key window's field view. Disabled unless its source is a
             // woven interlaced file. No default key (§14.2 decision 8).
             Divider()
             Menu("Fields") {
                 ForEach(FieldView.allCases, id: \.self) { view in
-                    Toggle(view == .weave ? "Weave" : "\(view.menuTitle) (Display Only)", isOn: fieldBinding(for: view))
+                    Toggle(view == .weave ? view.menuTitle : "\(view.menuTitle) (Display Only)", isOn: fieldBinding(for: view))
                         .disabled(!state.fieldsOffered)
                 }
             }

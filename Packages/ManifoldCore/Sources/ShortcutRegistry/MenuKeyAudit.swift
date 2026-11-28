@@ -98,6 +98,20 @@ public enum MenuKeyAudit {
     /// Export Diagnostics… is not a registry action (it has no key); Export Frame for Support… is `.exportFrameForSupport`.
     public static let supportGroup = (menu: "Help", titles: ["Export Diagnostics…", "Export Frame for Support…"])
 
+    /// Titles an item shows instead of its registry title, by state (naming decisions, 2026-11-27): Share Frame for an HDR
+    /// picture, the DeckLink item by whether output is on, Color ▸ Reset for a stream. The registry title stays the one the
+    /// Keyboard Shortcuts window lists.
+    public static let titleVariants: [ShortcutID: [String]] = [
+        .shareFrame: ["Share Frame (SDR)…"],
+        .toggleDeckLink: ["Start DeckLink Output", "Stop DeckLink Output"],
+        .resetInterpretation: ["Reset to Stream’s Tags"],
+    ]
+
+    /// Every title the item for `id` may carry: the registry's, then its variants.
+    public static func titles(for id: ShortcutID, registryTitle: String) -> [String] {
+        [registryTitle] + (titleVariants[id] ?? [])
+    }
+
     /// The key equivalent and modifiers a menu item carries for `chord`: what `KeyChord.menuShortcut` hands SwiftUI.
     public static func expected(_ chord: KeyChord, layout: KeyLayout = CurrentKeyLayout()) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
         guard let shortcut = chord.menuShortcut(layout: layout) else { return nil }
@@ -120,7 +134,8 @@ public enum MenuKeyAudit {
             if let tier = def.debug, !registry.isDebugEnabled(tier) { continue }
             guard let home = menuHomes[def.id] else { problems.append(.missing(def.id, menu: "(no home)")); continue }
             if def.debug != nil, !menus.contains(home) { continue }
-            guard let item = items.first(where: { $0.menu == home && $0.title == def.title && !$0.isHidden }) else {
+            let titles = Self.titles(for: def.id, registryTitle: def.title)
+            guard let item = items.first(where: { $0.menu == home && titles.contains($0.title) && !$0.isHidden }) else {
                 problems.append(.missing(def.id, menu: home)); continue
             }
             guard let chord = registry.menuChord(for: def.id), let want = expected(chord, layout: layout) else {

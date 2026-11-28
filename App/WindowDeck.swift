@@ -437,26 +437,57 @@ final class WindowDeck: ObservableObject {
         if let name = displayName { base = name }
         else if let live = DeckRegistry.shared.liveLabel(for: self) { base = live }
         else { base = "Manifold" }
-        var title = base
+        return ([base] + titleMarkers.map(\.text)).joined(separator: " — ")
+    }
+
+    /// One standing marker: what kind it is, and its words. `titleMarkers` is THE ONE SOURCE OF THE MARKER TEXT (Robbie,
+    /// 2026-11-28): the window title joins all of them, the file name overlay (N) shows some of them, in the same words.
+    struct TitleMarker: Equatable {
+        enum Kind { case color, lut, range, audioOffset, fieldView, comparing, bypass }
+        let kind: Kind
+        let text: String
+    }
+
+    /// The markers after the name, in title order (`windowTitle` cases 4–7 above, and the Range override).
+    var titleMarkers: [TitleMarker] {
+        var markers: [TitleMarker] = []
+        func add(_ kind: TitleMarker.Kind, _ text: String) { markers.append(TitleMarker(kind: kind, text: text)) }
         if let live = DeckRegistry.shared.liveSource(for: self) {
-            if let color = colorOverride.titleSuffix(for: live) { title += " — " + color }
+            if let color = colorOverride.titleSuffix(for: live) { add(.color, color) }
         } else if let color = fileColor.titleSuffix {
             // Colour S5: a file's override, in the same words.
-            title += " — " + color
+            add(.color, color)
         }
         // Colour S6, L3: the window's LUT, on any source and with none — " — LUT name.cube", "(bypassed)".
-        if let lutWords = lut.titleSuffix { title += " — " + lutWords }
+        if let lutWords = lut.titleSuffix { add(.lut, lutWords) }
+        // The Inspector's Range override, while it is not Auto (0.9.6 UI polish item 36): it changes the picture, so it is
+        // marked like a color override. A file only; a stream's range has no override here. Words: `RangeOverride.marker`.
+        if displayName != nil, let range = engine?.rangeOverride.marker { add(.range, range) }
         if DeckRegistry.shared.liveLabel(for: self) != nil, audioOffset.isAvailable, audioOffset.sessionMs != 0 {
-            title += " — " + LiveAudioOffsetModel.indicator(audioOffset.sessionMs)
+            add(.audioOffset, LiveAudioOffsetModel.indicator(audioOffset.sessionMs))
         }
         // `chrome` is weak and nil before the window is configured; a nil chrome is the default
         // mode, so an absent marker is the right answer during that gap rather than a guess.
         // Colour S2: during a hold the title says what is being compared, in place of the Bypass
         // marker (the picture is then NOT in the chosen mode). Both come back on release.
         // Interlaced I4: a field view, " — Field 1 (display only)", whatever the display transform (docs/INTERLACED_FINDINGS.md §14).
-        if chrome?.fieldViewOffered == true, let fields = chrome?.fieldView.titleSuffix { title += " — " + fields }
-        if let held = chrome?.heldDisplayTransform { return title + " — COMPARING: " + held.compareLabel }
-        return chrome?.displayTransform == .bypass ? title + " — Bypass" : title
+        if chrome?.fieldViewOffered == true, let fields = chrome?.fieldView.titleSuffix { add(.fieldView, fields) }
+        if let held = chrome?.heldDisplayTransform { add(.comparing, "COMPARING: " + held.compareLabel) }
+        else if chrome?.displayTransform == .bypass { add(.bypass, "Bypass") }
+        return markers
+    }
+
+    /// THE INSPECTOR'S RANGE OVERRIDE (0.9.6 UI polish item 36): the engine's setter, then the title, SYNCHRONOUSLY — the
+    /// shape of `FileColorOverride.set`, `setDisplayTransform` and the LUT, whose markers pass. The batch 3 attended check
+    /// (2026-11-28) found the " — Range: Full (set)" marker missing with only the deferred `engine.$rangeOverride`
+    /// subscription driving it (`observeTitleInputs`, which stays as a backstop). Logged so the next check has evidence.
+    @MainActor
+    func setRangeOverride(_ range: RangeOverride) {
+        guard let engine else { return }
+        engine.setRangeOverride(range)
+        applyWindowTitle()
+        NSLog("[RANGE] override → %@ (title marker %@)", range.label,
+              titleMarkers.contains { $0.kind == .range } ? "on" : "off")
     }
 
     /// Push `windowTitle` at the window, if there is one yet.
@@ -2219,6 +2250,8 @@ private final class DeckHostView: NSView {
             engine.$currentURL.map { _ in () }.eraseToAnyPublisher(),
             engine.$metadata.map   { _ in () }.eraseToAnyPublisher(),
             engine.$hasMedia.map   { _ in () }.eraseToAnyPublisher(),
+            // The Inspector's Range override is a title marker too (0.9.6 UI polish item 36).
+            engine.$rangeOverride.map { _ in () }.eraseToAnyPublisher(),
         ]
 
         Publishers.MergeMany(inputs)

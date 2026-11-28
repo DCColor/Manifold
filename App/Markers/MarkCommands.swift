@@ -26,8 +26,8 @@ struct MarkCommands: Commands {
             ShortcutMenuItem(id: .editMarker, registry: shortcuts)
             ShortcutMenuItem(id: .deleteMarker, registry: shortcuts)
             Divider()
-            Button(ShortcutCenter.hint("Previous Marker", .previousMarker)) { ShortcutCenter.shared.runFromMenu(.previousMarker) }
-            Button(ShortcutCenter.hint("Next Marker", .nextMarker)) { ShortcutCenter.shared.runFromMenu(.nextMarker) }
+            Button("Previous Marker") { ShortcutCenter.shared.runFromMenu(.previousMarker) }
+            Button("Next Marker") { ShortcutCenter.shared.runFromMenu(.nextMarker) }
             Divider()
             ShortcutMenuItem(id: .markIn, registry: shortcuts)
             ShortcutMenuItem(id: .markOut, registry: shortcuts)

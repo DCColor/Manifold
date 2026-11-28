@@ -333,7 +333,7 @@ private struct GeneralSettingsPane: View {
                 }
                 .pickerStyle(.inline)
 
-                Picker("Raster size for new windows", selection: $rasterDefault) {
+                Picker("Window size for new windows", selection: $rasterDefault) {
                     ForEach(RasterSize.settingsChoices) { size in
                         Text(size.menuTitle).tag(size)
                     }
@@ -351,10 +351,10 @@ private struct GeneralSettingsPane: View {
 
             // docs/SETTINGS_EXPORT_PLAN.md §5: here and not in the File menu, as a once-per-machine action.
             Section("Export and Import") {
-                LabeledContent("Settings") {
+                LabeledContent("Move to another Mac") {
                     HStack {
-                        Button("Export Settings…") { transfer.showingExport = true }
-                        Button("Import Settings…") { transfer.chooseFileToImport() }
+                        Button("Export Shortcuts and Streams…") { transfer.showingExport = true }
+                        Button("Import Shortcuts and Streams…") { transfer.chooseFileToImport() }
                     }
                 }
                 if transfer.hasBackups {
@@ -566,30 +566,40 @@ private struct ScopesSettingsPane: View {
     var body: some View {
         Form {
             Section("Scopes") {
-                Picker("Scope Scale", selection: $scopeScale) {
+                Picker("Scope scale", selection: $scopeScale) {
                     ForEach(ScopeScale.selectable) { scale in
                         Text(scale.label).tag(scale)
                     }
                 }
-                LabeledContent("Master scope intensity") {
+                LabeledContent("Scope brightness") {
                     HStack(spacing: 8) {
                         Image(systemName: "sun.min").foregroundStyle(.secondary)
                         Slider(value: $globalScopeIntensity, in: Preferences.scopeIntensityRange)
                             .frame(width: 160)
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
+                        // The value, as a multiple of the default (0.9.6 UI polish item 25: a slider with no number).
+                        Text(String(format: "%.1f×", globalScopeIntensity))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 36, alignment: .trailing)
                     }
                 }
                 // Built as Master scope intensity is, directly under it. One value for all four image scopes; the
                 // audio meters do not read it.
-                LabeledContent("Graticule brightness") {
+                LabeledContent("Grid brightness") {
                     HStack(spacing: 8) {
                         Image(systemName: "sun.min").foregroundStyle(.secondary)
                         Slider(value: $graticuleBrightness, in: Preferences.graticuleBrightnessRange)
                             .frame(width: 160)
                         Image(systemName: "sun.max").foregroundStyle(.secondary)
+                        // The value, as a multiple of the default (0.9.6 UI polish item 25: a slider with no number).
+                        Text(String(format: "%.1f×", graticuleBrightness))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 36, alignment: .trailing)
                     }
                 }
-                SettingsCaption("Graticule brightness sets the lines in every scope; at its lowest the lines are off and "
+                SettingsCaption("Grid brightness sets the graticule lines in every scope; at its lowest the lines are off and "
                                 + "the labels stay. Each scope's own intensity and trace color are in its header, in the "
                                 + "scopes tray.")
                 Picker("Marker text size", selection: $markerTextSize) {
@@ -611,8 +621,8 @@ private struct ScopesSettingsPane: View {
             }
 
             Section("Frame guide") {
-                ColorPicker("Outside (darken) color", selection: colorBinding($guideDarkenHex))
-                sliderRow("Outside opacity", $guideDarkenOpacity, in: 0.0...1.0,
+                ColorPicker("Color outside the guide", selection: colorBinding($guideDarkenHex))
+                sliderRow("Opacity outside the guide", $guideDarkenOpacity, in: 0.0...1.0,
                           readout: pct(guideDarkenOpacity))
                 ColorPicker("Guide line color", selection: colorBinding($guideLineHex))
                 Stepper("Guide line width: \(Int(guideLineWidth)) pt",
@@ -620,7 +630,7 @@ private struct ScopesSettingsPane: View {
             }
 
             // The top/bottom platform keep-out lines.
-            Section("Social safe zones") {
+            Section("Social media safe zones") {
                 ColorPicker("Social safe zone color", selection: colorBinding($safeLineHex))
                 Stepper("Social safe zone width: \(Int(safeLineWidth)) pt",
                         value: $safeLineWidth, in: 1...8, step: 1)
@@ -707,13 +717,13 @@ private struct DeckLinkSettingsPane: View {
                 }
                 .pickerStyle(.segmented)
                 SettingsCaption(deckLinkScaling == .fit
-                     ? "Fit to mode: Follow source picks the mode at the source's frame rate whose size is closest to the source's, and scales the picture up or down to fill it, keeping its shape, with black around it. A source that is exactly a mode's size goes out unscaled."
-                     : "1:1 pixels: Follow source picks the smallest mode at the source's frame rate that holds the picture without scaling, and outputs it 1:1 with black around it. A picture larger than every mode is scaled down to fit.")
+                     ? "Fit to mode: Match source picks the mode at the source's frame rate whose size is closest to the source's, and scales the picture up or down to fill it, keeping its shape, with black around it. A source that is exactly a mode's size goes out unscaled."
+                     : "1:1 pixels: Match source picks the smallest mode at the source's frame rate that holds the picture without scaling, and outputs it 1:1 with black around it. A picture larger than every mode is scaled down to fit.")
                 Picker("SDI output modes", selection: $deckLinkModeSet) {
                     ForEach(SDIOutputModeSet.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                SettingsCaption("Include DCI adds 2048×1080 and 4096×2160, to Follow source and to the output mode picker.")
+                SettingsCaption("Include DCI adds 2048×1080 and 4096×2160, to Match source and to the output mode picker.")
             }
         }
     }

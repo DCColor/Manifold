@@ -559,9 +559,9 @@ final class LicenseManager: ObservableObject {
     /// Says three things in order, because a message that only said the first would read as an
     /// accusation: it is not their fault, they have not lost anything, and they are not blocked.
     var userFacingKeychainFault: String? {
-        guard let status = keychainFaultStatus else { return nil }
+        guard keychainFaultStatus != nil else { return nil }   // the status itself is in the log (item 23)
         return """
-               Manifold couldn't read your license from the Keychain (\(keychainStatusDescription(status))).                This does not mean your license is gone — it is still stored, and nothing has been                changed or removed. Manifold is running normally in the meantime. Quitting and                reopening usually clears it; if it keeps happening, send a diagnostics report                (Help ▸ Export Diagnostics…) rather than re-entering your key.
+               Manifold couldn't read your license from the Keychain.                This does not mean your license is gone — it is still stored, and nothing has been                changed or removed. Manifold is running normally in the meantime. Quitting and                reopening usually clears it; if it keeps happening, send a diagnostics report                (Help ▸ Export Diagnostics…) rather than re-entering your key.
                """
     }
 
@@ -770,8 +770,8 @@ final class LicenseManager: ObservableObject {
                 NSLog("[LICENSE] ⚠️ the server answered but the license could not be stored (%@)",
                       keychainStatusDescription(status))
                 lastMessage = """
-                              Your license was accepted, but Manifold couldn't save it to the Keychain \
-                              (\(keychainStatusDescription(status))). This Mac keeps the same machine ID, \
+                              Your license was accepted, but Manifold couldn't save it to the Keychain. \
+                              This Mac keeps the same machine ID, \
                               so entering the key again uses no extra activation: quit, reopen, and enter \
                               it once more. If that fails, send a diagnostics report.
                               """
@@ -780,8 +780,8 @@ final class LicenseManager: ObservableObject {
                 NSLog("[LICENSE] ⚠️ the machine ID could not be recorded (%@) — nothing sent",
                       keychainStatusDescription(status))
                 lastMessage = """
-                              Manifold couldn't save this Mac's license record to the Keychain \
-                              (\(keychainStatusDescription(status))). Nothing was sent to the license \
+                              Manifold couldn't save this Mac's license record to the Keychain. \
+                              Nothing was sent to the license \
                               server. Quit and reopen Manifold, then try again.
                               """
             }

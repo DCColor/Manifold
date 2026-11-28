@@ -90,7 +90,7 @@ struct MarkersScopeView: View {
     /// opens it, or brings it to the front when it is already open. The help names the menu item's current key, if any.
     private var openEditorHelp: String {
         let key = ShortcutCenter.shared.registry.label(for: .showMarkerList).map { " (\($0))" } ?? ""
-        return "Open the Markers window, as Mark ▸ Show Marker List does\(key)"
+        return "Open the Markers window, as Mark ▸ Show Markers Window does\(key)"
     }
 
     @ViewBuilder
@@ -109,7 +109,7 @@ struct MarkersScopeView: View {
         .labelsHidden()
         .help("The size of the marker list's text and rows in this scope. Also in Settings ▸ Scopes & Guides.")
         ScopeGearSectionHeader("Markers")
-        Button("Open Markers Editor") { openWindow(id: MarkersWindowScene.windowID) }
+        Button("Show Markers Window") { openWindow(id: MarkersWindowScene.windowID) }
             .help(openEditorHelp)
         Button("Import Markers…") { model.presentImport() }.disabled(!model.isActive)
         Button("Export Markers…") { model.presentExport() }.disabled(!model.isActive || model.markers.isEmpty)

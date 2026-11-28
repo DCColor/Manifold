@@ -1045,7 +1045,7 @@ final class DiagnosticsExporter: ObservableObject {
             } catch {
                 NSLog("[DIAG] ⚠️ could not write diagnostics: %@", String(describing: error))
                 let alert = NSAlert()
-                alert.messageText = "Couldn’t save the diagnostics file."
+                alert.messageText = "Couldn’t save the diagnostics file. Choose another folder and try again."
                 alert.informativeText = error.localizedDescription
                 alert.alertStyle = .warning
                 alert.runModal()

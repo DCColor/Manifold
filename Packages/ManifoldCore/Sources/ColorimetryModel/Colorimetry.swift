@@ -284,11 +284,11 @@ public struct SourceColorimetry: Equatable, Sendable {
     public var isOverridden: Bool { primaries.provenance == .overridden }
 
     /// The one word the Color control's face prints: which of the three tiers this colorimetry came
-    /// from. A partly-declared source reads "Declared" here (any axis declared) — the chain readout's
+    /// from. A partly-declared source reads "Tagged" here (any axis declared) — the chain readout's
     /// `sourceProvenance` is the finer answer.
     public var tier: String {
         if isOverridden { return "Overridden" }
-        return isDeclared ? "Declared" : "Assumed"
+        return isDeclared ? "Tagged" : "Assumed"
     }
 
     /// The same fact in the renderer's vocabulary, so the chain readout and this type cannot

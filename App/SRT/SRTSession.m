@@ -729,8 +729,8 @@ static void runSession(ManifoldSRTSession *s) {
             // an instruction to anyone.
             if (err == SRT_ENOSERVER) {
                 snprintf(message, sizeof(message),
-                         "Nothing answered at %s:%s — SRT is UDP, so a listener that isn’t "
-                         "running looks exactly like a blocked port. (%s)",
+                         "Nothing answered at %s:%s. Check that the sender is running and that no "
+                         "firewall is blocking the port. (%s)",
                          s->host, s->port, srt_strerror(err, sysErr));
             } else if (err == SRT_ECONNREJ) {
                 snprintf(message, sizeof(message),

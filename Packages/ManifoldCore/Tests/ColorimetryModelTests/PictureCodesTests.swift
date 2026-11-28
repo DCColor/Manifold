@@ -58,6 +58,6 @@ final class PictureCodesTests: XCTestCase {
     func testOutputLabel() {
         XCTAssertEqual(PictureCodes.outputLabel(.auto), "Same as Source")
         XCTAssertEqual(PictureCodes.outputLabel(.rec2020PQ), "Rec.2020 PQ (HDR10)")
-        XCTAssertEqual(PictureCodes.outputLabel(.custom(primaries: 9, transfer: 1, matrix: 9)), "Custom 9·1·9")
+        XCTAssertEqual(PictureCodes.outputLabel(.custom(primaries: 9, transfer: 1, matrix: 9)), "LUT output 9·1·9")
     }
 }

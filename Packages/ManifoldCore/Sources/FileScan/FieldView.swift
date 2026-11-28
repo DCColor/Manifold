@@ -70,7 +70,7 @@ public enum FieldView: String, CaseIterable, Equatable, Sendable {
     /// The menu's and the pulldown's item: "Weave", "Field 1", "Field 2", "Deinterlace".
     public var menuTitle: String {
         switch self {
-        case .weave: return "Weave"
+        case .weave: return "Both fields (Weave)"
         case .field1: return "Field 1"
         case .field2: return "Field 2"
         case .deinterlace: return "Deinterlace"
@@ -125,12 +125,13 @@ public enum FieldView: String, CaseIterable, Equatable, Sendable {
 }
 
 extension SourceScan {
-    /// The chain readout's Source-row prefix: "1080i59.94 TFF", "field sequence, TFF". nil when not interlaced, so a
+    /// The chain readout's Source-row prefix: "1080i59.94 top field first", "field sequence, top field first" (words, not
+    /// TFF/BFF, since 0.9.6 UI polish item 27). nil when not interlaced, so a
     /// progressive or unknown source's line is unchanged. `fieldToken` is the field rate's label ("59.94"). The scan can
     /// arrive before the metadata does: with no height yet it says "interlaced, TFF", never "0i TFF" (found on the I4 run).
     public func chainPrefix(height: Int, fieldToken: String?) -> String? {
         guard isInterlaced else { return nil }
-        let order = fieldOrder?.short ?? "order not stated"
+        let order = fieldOrder?.words ?? "field order not stated"
         if picturesAreFields { return "field sequence, \(order)" }
         guard height > 0 else { return "interlaced, \(order)" }
         return "\(height)i\(fieldToken ?? "") \(order)"

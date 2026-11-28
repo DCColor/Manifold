@@ -213,7 +213,7 @@ public enum ChromaReadout {
             return "\(fourCC(carried)) — not a format the renderer samples" + (note.map { " · \($0)" } ?? "")
         }
         let head = "\(chroma.label) \(ChromaSubsampling.sampledBitDepth(carried))-bit (\(fourCC(carried)))"
-        let tail = (chroma == .c444 ? " · DeckLink v210 output: reduced once to 4:2:2 (halfband)" : "")
+        let tail = (chroma == .c444 ? " · SDI output: reduced once to 4:2:2, filtered (v210, halfband)" : "")
             + (note.map { " · \($0)" } ?? "")
         switch source {
         case .notStated:

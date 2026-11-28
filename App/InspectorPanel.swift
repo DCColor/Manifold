@@ -16,15 +16,15 @@ struct InspectorPanel: View {
     /// This window's markers, for the Chapters row: the same libav reader and mapping the Markers list uses, on every
     /// route (docs/CHAPTER_MARKERS_PLAN.md §2.5). Observed by that row alone, so a marker edit does not redraw the panel.
     let markers: MarkerModel
+    /// The Range override's setter: `WindowDeck.setRangeOverride`, which also puts " — Range: Full (set)" in the title.
+    let setRangeOverride: (RangeOverride) -> Void
 
     /// Range as displayed: the file's tag, annotated when the user is asserting
-    /// an override (honest that it's an assertion, not read from the file).
+    /// an override (honest that it's an assertion, not read from the file). The override's words are
+    /// `RangeOverride.setLabel` ("Full (set)"), the same ones the title and the file name overlay use (Robbie, 2026-11-28).
     private func rangeValue(_ m: VideoMetadata) -> String {
-        switch engine.rangeOverride {
-        case .auto:  return m.colorRange
-        case .full:  return "\(m.colorRange) → Full (override)"
-        case .legal: return "\(m.colorRange) → Legal (override)"
-        }
+        guard let set = engine.rangeOverride.setLabel else { return m.colorRange }
+        return "\(m.colorRange) → \(set)"
     }
 
     var body: some View {
@@ -84,7 +84,7 @@ struct InspectorPanel: View {
                 // Only when it actually crops: a `clap` equal to the encoded raster declares that
                 // nothing is cropped, which is not news.
                 if m.cleanApertureCrops {
-                    MetadataRow(label: "Clean Aperture", value: m.cleanAperture.displayString)
+                    MetadataRow(label: "Clean aperture", value: m.cleanAperture.displayString)
                     // ⚠️ WHERE AN INEXACT CROP BECOMES VISIBLE. The renderer crops the offscreen to
                     // the aperture, and the rect has to sit on the 2-px chroma grid to stay
                     // bit-exact — so a declaration that does not already sit there is ROUNDED onto
@@ -144,18 +144,21 @@ struct InspectorPanel: View {
                 MetadataRow(label: "Primaries", value: m.labeled(m.colorPrimaries, m.colorPrimariesCode))
                 MetadataRow(label: "Transfer", value: m.labeled(m.transferFunction, m.transferFunctionCode))
                 MetadataRow(label: "Matrix", value: m.labeled(m.colorMatrix, m.colorMatrixCode))
-                MetadataRow(label: "Range", value: rangeValue(m))
+                // Yellow while set: the app's colour for an override, an assertion the user is making (the Color
+                // control, COMPARING).
+                MetadataRow(label: "Range", value: rangeValue(m),
+                            tint: engine.rangeOverride == .auto ? nil : Color.appYellow)
                 RangeOverrideRow(
                     selection: Binding(
                         get: { engine.rangeOverride },
-                        set: { engine.setRangeOverride($0) }
+                        set: { setRangeOverride($0) }
                     )
                 )
                 // Active full-range chroma convention — readout only (no control).
                 // Only meaningful when the effective range is Full; "—" otherwise.
                 MetadataRow(label: "Full Chroma",
                             value: engine.effectiveIsFullRange ? engine.fullRangeChromaConvention.label : "—")
-                MetadataRow(label: "nclc", value: m.nclcTriple)
+                MetadataRow(label: "Color tags (nclc)", value: m.nclcTriple)
                 // The file's Dolby Vision configuration, and what of it reaches the screen: the base layer only.
                 // Absent when the file carries no DOVI record. Orange when there is no base layer Manifold can show,
                 // the same register as the Picture row.
@@ -180,7 +183,7 @@ struct InspectorPanel: View {
 
                 if !m.textTracks.isEmpty {
                     Divider().overlay(.white.opacity(0.15)).padding(.vertical, 6)
-                    SectionHeader(m.textTracks.count == 1 ? "Timed Text" : "Timed Text (\(m.textTracks.count))")
+                    SectionHeader(m.textTracks.count == 1 ? "Subtitles" : "Subtitles (\(m.textTracks.count))")
                     ForEach(Array(m.textTracks.enumerated()), id: \.offset) { _, track in
                         TextTrackRow(track: track)
                     }
@@ -337,6 +340,8 @@ private struct MetadataRow: View {
     /// convention `AudioTrackRow` uses for inferred/undeclared layouts — so a non-value
     /// can never be misread as something the file actually said.
     var isFact: Bool = true
+    /// The value's colour when it says something is set by the user (the Range override), else nil.
+    var tint: Color? = nil
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -346,7 +351,7 @@ private struct MetadataRow: View {
             Spacer(minLength: 16)
             Text(value)
                 .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.white.opacity(isFact ? 0.92 : 0.5))
+                .foregroundStyle(tint ?? .white.opacity(isFact ? 0.92 : 0.5))
                 .italic(!isFact)
                 .multilineTextAlignment(.trailing)
         }
@@ -457,9 +462,11 @@ private struct ContentLightSection: View {
             MetadataRow(label: "MaxCLL",
                         value: lightValue(c.maxCLL, unspecified: c.maxCLLIsUnspecified),
                         isFact: !c.maxCLLIsUnspecified)
+                .help("Maximum content light level: the brightest pixel in the program, in nits")
             MetadataRow(label: "MaxFALL",
                         value: lightValue(c.maxFALL, unspecified: c.maxFALLIsUnspecified),
                         isFact: !c.maxFALLIsUnspecified)
+                .help("Maximum frame-average light level: the brightest frame on average, in nits")
         } else {
             MetadataRow(label: "Content Light", value: presence.label, isFact: presence.isFact)
         }

@@ -95,8 +95,8 @@ final class ColorimetryModelTests: XCTestCase {
     func testProvenanceAndTier() {
         let overridden = SourceColorimetry.resolve(declared: .assumedRec709, override: .rec709)
         let cases: [(String, SourceColorimetry, SourceColorProvenance, String, String)] = [
-            ("declared",   declared2020PQ,  .tagged,        "Declared",   "tagged"),
-            ("partly",     partlyDeclared,  .partlyAssumed, "Declared",   "partly assumed"),
+            ("declared",   declared2020PQ,  .tagged,        "Tagged",     "tagged"),
+            ("partly",     partlyDeclared,  .partlyAssumed, "Tagged",     "partly assumed"),
             ("undeclared", .assumedRec709,  .assumed,       "Assumed",    "assumed"),
             ("overridden", overridden,      .overridden,    "Overridden", "overridden"),
         ]

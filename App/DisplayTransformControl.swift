@@ -99,7 +99,7 @@ struct DisplayTransformControl: View {
               ? "Display transform: BYPASS — no color management. Diagnostic only."
               : (mode == .reference
                  ? "Display transform: Reference — BT.1886 for this display"
-                 : "Display transform: as macOS shows it — what your client will see")))
+                 : "Display transform: macOS — what your client will see")))
         .onAppear { chainModel.bind(deck: deck) }
         // Keeps the chain's Transform line honest when the mode is changed from the Color MENU
         // rather than from this pulldown. `chrome` is observed, so this fires for both routes.
@@ -176,7 +176,7 @@ struct DisplayTransformControl: View {
         .accessibilityLabel(isBypass
                             ? "Display transform: Bypass, no color management"
                             : (mode == .reference ? "Display transform: Reference, BT.1886"
-                                                  : "Display transform: as macOS shows it"))
+                                                  : "Display transform: macOS"))
     }
 
     // MARK: Tier 2 — the pulldown
@@ -188,14 +188,14 @@ struct DisplayTransformControl: View {
     @ViewBuilder
     private var menuContent: some View {
         Toggle(isOn: binding(for: .os)) {
-            Text(Self.rowLabel("As macOS Shows It", "what your client will see"))
+            Text(Self.rowLabel(DisplayTransformMode.os.menuTitle, DisplayTransformMode.os.menuSubtitle))
         }
         Toggle(isOn: binding(for: .reference)) {
-            Text(Self.rowLabel("Reference", "BT.1886, as a reference monitor shows it"))
+            Text(Self.rowLabel(DisplayTransformMode.reference.menuTitle, DisplayTransformMode.reference.menuSubtitle))
         }
         Divider()
         Toggle(isOn: binding(for: .bypass)) {
-            Text(Self.rowLabel("Bypass", "no color management"))
+            Text(Self.rowLabel(DisplayTransformMode.bypass.menuTitle, DisplayTransformMode.bypass.menuSubtitle))
         }
         Divider()
         // Tier 3 lives behind one more step, per §6.3's progressive disclosure: "available, not

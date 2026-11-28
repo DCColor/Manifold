@@ -16,7 +16,7 @@ import StillImageInfo
 
 struct StillImageSurface: NSViewRepresentable {
     /// What the chain readout and the greyed controls say. Exactly what happens to the picture.
-    static let colorLine = "Still image: shown as macOS shows it"
+    static let colorLine = "Still image: shown in macOS mode"
 
     @ObservedObject var engine: FrameEngine
 

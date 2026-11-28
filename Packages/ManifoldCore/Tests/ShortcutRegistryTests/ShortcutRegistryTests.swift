@@ -145,7 +145,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertNil(ShortcutRegistry.reserved[share])
         XCTAssertEqual(r.definitions.filter { $0.defaultChords.contains(share) }.map(\.id), [.shareFrame])
         XCTAssertEqual(r.definition(.cycleInterpretation).title, "Next Tag Override")
-        XCTAssertEqual(r.definition(.resetInterpretation).title, "Reset Tags to Source")
+        XCTAssertEqual(r.definition(.resetInterpretation).title, "Reset to File’s Tags")
     }
 
     /// Help ▸ Export Frame for Support… is not a debug action: with every debug tier off (the release-gate switch) it

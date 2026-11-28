@@ -38,7 +38,7 @@ final class DeckLinkConnectorMappingTests: XCTestCase {
         let m = DeckLinkConnectorMapping.verdictAfterChange(outputting: true, selected: .inactive,
                                                             deviceName: "DeckLink 8K Pro (2)", forcedStop: false)
         XCTAssertEqual(m, DeckLinkConnectorMapping.becameInactiveMessage(device: "DeckLink 8K Pro (2)"))
-        XCTAssertTrue(m?.contains("DeckLink 8K Pro (2) became inactive") ?? false)
+        XCTAssertTrue(m?.contains("DeckLink 8K Pro (2) stopped being active") ?? false)
         XCTAssertTrue(m?.contains("start output again") ?? false)
     }
 

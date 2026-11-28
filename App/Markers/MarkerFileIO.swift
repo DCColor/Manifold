@@ -155,7 +155,7 @@ enum MarkerFileIO {
                 }
             }
         } catch {
-            model.show("The markers could not be written there.")
+            model.show("The markers couldn’t be written there. Choose another folder and try again.")
             NSSound.beep()
         }
     }
@@ -205,7 +205,7 @@ enum MarkerFileIO {
             let a = NSAlert()
             a.messageText = "\(placement.outside.count) of \(parsed.entries.count) markers fall outside this file."
             a.informativeText = "This file starts at \(basis.label(0)). Shifted by \(sign)\(amount), every marker fits: "
-                + "the EDL was probably made on a timeline starting at a different hour (Frame.io assumes 01:00:00:00)."
+                + "the EDL was probably made on a timeline starting at a different hour (many tools assume 01:00:00:00)."
             a.addButton(withTitle: "Shift by \(sign)\(amount)")
             a.addButton(withTitle: "Import As Is")
             a.addButton(withTitle: "Cancel")

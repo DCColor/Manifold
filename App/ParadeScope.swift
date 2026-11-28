@@ -278,7 +278,7 @@ struct ParadeScopeView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.5))
-                    .help("Reset parade to RGB")
+                    .help("Reset parade colors")
                 }
                 .padding(.horizontal, 6)
                 .frame(height: scopeHeaderHeight)

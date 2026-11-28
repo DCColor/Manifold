@@ -41,7 +41,7 @@ final class SettingsTransferModel: ObservableObject {
 
     static func chooseExportDestination() -> URL? {
         let panel = NSSavePanel()
-        panel.title = "Export Settings"
+        panel.title = "Export Shortcuts and Streams"
         // The stem only: the panel adds the extension from `allowedContentTypes`, and given the full name it doubled it.
         panel.nameFieldStringValue = (SettingsFile.suggestedFilename(on: Date()) as NSString).deletingPathExtension
         panel.allowedContentTypes = [fileType]
@@ -231,7 +231,7 @@ struct ExportSettingsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Export Settings").font(.headline)
+            Text("Export Shortcuts and Streams").font(.headline)
             switch run.phase {
             case .choosing: choosing
             case .reading(let position, let total): working("Reading stream \(max(position, 1)) of \(total)…", canStop: true)
@@ -569,7 +569,7 @@ struct ImportSettingsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(session.restoring ? "Restore Shortcuts" : "Import Settings").font(.headline)
+            Text(session.restoring ? "Restore Shortcuts" : "Import Shortcuts and Streams").font(.headline)
             switch session.phase {
             case .locked: locked
             case .opening: working("Opening…")

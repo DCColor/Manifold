@@ -44,7 +44,7 @@ enum ControlDisplayMode: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .overlay: return "Overlay (floating)"
-        case .docked:  return "Docked (fixed bar)"
+        case .docked:  return "Below the picture"
         }
     }
 }

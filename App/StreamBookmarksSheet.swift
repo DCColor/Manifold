@@ -328,7 +328,7 @@ struct StreamBookmarksSheet: View {
                 Text("Unsaved — Done will discard this draft.")
                     .foregroundStyle(.orange)
             } else {
-                Text("Streams aren’t saved until you press Save. Done closes this sheet and discards anything typed here.")
+                Text("An https:// address is a web stream (WHEP), srt:// is SRT, and an address with .m3u8 in it is HLS. Streams aren’t saved until you press Save. Done closes this sheet and discards anything typed here.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -426,7 +426,7 @@ struct StreamBookmarksSheet: View {
                 .wrapsInsteadOfClipping()
         } else {
             Text(isEnteringHLS
-                 ? "Not for HLS — Apple’s player owns the audio."
+                 ? "HLS streams can’t take an audio offset."
                  : "Positive = sound later, negative = earlier (\(LiveAudioOffsetModel.signed(range.lowerBound)) to \(LiveAudioOffsetModel.signed(range.upperBound)) ms).")
                 .font(.caption).foregroundStyle(.secondary)
                 .wrapsInsteadOfClipping()

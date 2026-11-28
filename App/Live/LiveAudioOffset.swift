@@ -45,7 +45,7 @@ final class LiveAudioOffsetModel: ObservableObject {
     init(deck: WindowDeck) { self.deck = deck }
 
     /// The one-line note the disabled HLS control carries.
-    static let hlsNote = "No audio offset on HLS — Apple’s player owns the audio."
+    static let hlsNote = "HLS streams can’t take an audio offset."
 
     /// An offset can be applied to this connect: a live source Manifold plays the audio of.
     var isAvailable: Bool { source != nil && source != .hls }
@@ -306,7 +306,7 @@ struct AudioOffsetControl: View {
         Button("Save Sync Clip…") {
             SyncClipLibrary.saveClip(frameInterval: calibration.frameInterval, window: NSApp.keyWindow)
         }
-        Button("Download ProRes Sync Clips…") { SyncClipLibrary.openDownload() }
+        Button("Download Sync Clips…") { SyncClipLibrary.openDownload() }
     }
 
     @ViewBuilder

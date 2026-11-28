@@ -98,7 +98,7 @@ enum RasterSize: String, CaseIterable, Identifiable, Hashable {
     /// What the View menu and the Settings picker call it.
     var menuTitle: String {
         switch self {
-        case .automatic:   return "Automatic (fit on open)"
+        case .automatic:   return "Fit when opened"
         case .percent100:  return "100%"
         case .percent75:   return "75%"
         case .percent50:   return "50%"

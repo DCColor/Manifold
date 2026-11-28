@@ -215,7 +215,7 @@ struct GuidesPanel: View {
             }
 
             Divider().padding(.vertical, 2)
-            Toggle("Social safe zones", isOn: $safeLinesOn)
+            Toggle("Social media safe zones", isOn: $safeLinesOn)
                 .font(.caption)
             Menu("Platform preset") {
                 ForEach(safeLinePresets, id: \.label) { p in

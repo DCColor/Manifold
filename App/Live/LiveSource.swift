@@ -113,7 +113,7 @@ enum LiveSource: CaseIterable {
     var displayLabel: String {
         switch self {
         case .ndi: return "NDI stream"
-        case .web: return "WHEP stream"
+        case .web: return "Web stream"
         case .srt: return "SRT stream"
         case .hls: return "HLS stream"
         }

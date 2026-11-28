@@ -32,7 +32,7 @@ public enum StreamType: String, Codable, Sendable {
     /// know by name and expect to see. Deliberately never "WHEP".
     public var label: String {
         switch self {
-        case .web: return "Web Stream"
+        case .web: return "Web stream"
         case .srt: return "SRT"
         case .hls: return "HLS"
         }

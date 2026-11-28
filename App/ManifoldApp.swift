@@ -336,7 +336,7 @@ struct ManifoldApp: App {
                 // C1); one item starts or stops the DeckLink output. A window that does not own the devices beeps.
                 // Connect to First NDI Source is a debug hook now (⌃⌥N), not a menu item.
                 ShortcutMenuItem(id: .disconnectLive, registry: shortcuts)
-                ShortcutMenuItem(id: .toggleDeckLink, registry: shortcuts)
+                DeckLinkMenuItem(registry: shortcuts)
             }
             // The View menu: raster size (⌘1–⌘4, ⌘0) — how large the picture is drawn, as a
             // percentage of the source raster. The app's first real menu of window commands; see

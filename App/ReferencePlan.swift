@@ -124,7 +124,7 @@ struct ReferencePlan: Equatable {
             return ReferencePlan(
                 layerColorSpace: cs, shader: nil,
                 summary: "Reference unavailable — the source profile's curve is not a single power law "
-                       + "(\(why)); shown as macOS shows it",
+                       + "(\(why)); shown in macOS mode",
                 logLine: "[REFERENCE] ⚠️ refused\(on): source profile curve is \(why) — showing as OS")
         }
         let c = BT1886(cal)
@@ -137,7 +137,7 @@ struct ReferencePlan: Equatable {
             summary: "Reference — BT.1886, "
                    + String(format: "white %g · black %g cd/m²", cal.whiteNits, cal.blackNits)
                    + "\(shape), encoded for the declared "
-                   + String(format: "γ%.3f", gamma) + ", source colorspace declared to the layer",
+                   + String(format: "γ%.3f", gamma) + ", color-managed from its tags (colorspace declared to the layer)",
             logLine: "[REFERENCE] profile-described display\(on): BT.1886 \(lbLw)\(shape), a=\(c.a) b=\(c.b), "
                    + String(format: "encoded for declared γ%.6f (exponent 2.4/γ = %.6f at Lb 0)", gamma, 2.4 / gamma))
     }

@@ -1262,6 +1262,12 @@ struct ContentView: View {
             // Interlaced I4: the field-view marker, on the same picture-rect layer, so it stays with the picture in full
             // screen and with the controls hidden. Nothing in Weave or for a source that offers no field views (§14.8).
             .overlay(alignment: .topTrailing) { FieldViewMarker(chrome: chrome) }
+            // The Bypass corner marker (docs/BUGS.md, 0.9.6 UI polish item 37, Robbie 2026-11-28): while Bypass is on and the
+            // floating bar is hidden, windowed or full screen. Below the field-view marker when both are up.
+            .overlay(alignment: .topTrailing) {
+                BypassCornerMarker(chrome: chrome,
+                                   barHidden: !controlsShown && hasSource && engine.mediaKind.feedsRenderer)
+            }
             // An audio-only file's card, on the picture rect like the guides. The floating controls sit over this rect
             // and can take three rows in a narrow window, so the card keeps above them; the docked bar is below it.
             .overlay {
@@ -1326,14 +1332,15 @@ struct ContentView: View {
         .clipped()
         .overlay(alignment: .topTrailing) {
             if showInspector && engine.hasMedia {
-                InspectorPanel(metadata: engine.metadata, engine: engine, chrome: chrome, markers: deck.markers)
+                InspectorPanel(metadata: engine.metadata, engine: engine, chrome: chrome, markers: deck.markers,
+                               setRangeOverride: { [deck] range in deck.setRangeOverride(range) })
                     .padding(16)
                     .transition(.opacity)
             }
         }
         .overlay(alignment: .top) {
             if showFileNameOverlay, engine.hasMedia, let name = overlayFileName {
-                Text(name)
+                FileNameOverlayText(name: name, deck: deck, engine: engine, chrome: chrome, fileColor: deck.fileColor)
                     .font(.system(.callout, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.95))
                     .padding(.horizontal, 14)
@@ -1793,9 +1800,12 @@ struct ContentView: View {
             .inspector: DeckShortcut { showInspector.toggle() },
             .fileName: DeckShortcut { showFileNameOverlay.toggle() },
             .alwaysShowControls: DeckShortcut(enabled: { hasSource && !isDocked }) { togglePin() },
-            .exportFrame: DeckShortcut(enabled: { metalRenderer != nil && engine.mediaKind.feedsRenderer }) { metalRenderer?.exportCurrentFrame() },
+            // `deck.hasPicture`, not `mediaKind.feedsRenderer` alone: an empty window is `.none`, which feeds the renderer
+            // (a live stream is `.none` with a picture), so the old gate let File ▸ Export Frame and Share Frame stay enabled
+            // with nothing loaded (D10 retest, 2026-11-28). `hasPicture` adds "this window shows a source".
+            .exportFrame: DeckShortcut(enabled: { metalRenderer != nil && deck.hasPicture }) { metalRenderer?.exportCurrentFrame() },
             // File ▸ Share Frame…: Export Frame's image through the share sheet (FrameShare.swift). Gated as Export Frame is.
-            .shareFrame: DeckShortcut(enabled: { metalRenderer != nil && engine.mediaKind.feedsRenderer }) { shareFrame() },
+            .shareFrame: DeckShortcut(enabled: { metalRenderer != nil && deck.hasPicture }) { shareFrame() },
             // Help ▸ Export Frame for Support…: the diagnostic set through a save panel, on this window.
             .exportFrameForSupport: DeckShortcut(enabled: { metalRenderer != nil }) {
                 metalRenderer?.exportFrameForSupport(window: deck.window)
@@ -1851,7 +1861,10 @@ struct ContentView: View {
                 DeckRegistry.shared.retireLiveIfOwned(by: deck)
             },
             // One toggle (⇧⌘D): stop when the card is outputting, else start.
-            .toggleDeckLink: DeckShortcut(enabled: device) {
+            // With no card (or a driver that can't output), nothing to start: grayed in the menu and a beep on the key, rather
+            // than a start that is refused (0.9.6 UI polish item 33). Stopping is always allowed.
+            .toggleDeckLink: DeckShortcut(enabled: { device() && (DeckLinkService.shared.isOutputting
+                                                                   || DeckLinkService.shared.driverStatus.canOutput) }) {
                 if DeckLinkService.shared.isOutputting {
                     DeckRegistry.shared.stopDeckLinkOutput(from: deck)
                 } else {
@@ -2237,7 +2250,7 @@ struct ContentView: View {
                                 .disabled(d.isInactive)
                         }
                         if deckLink.devices.contains(where: \.isInactive) {
-                            Button("Grayed: " + DeckLinkConnectorMapping.inactiveNote.lowercased()) {}.disabled(true)
+                            Button("Grayed out: " + DeckLinkConnectorMapping.inactiveNote.prefix(1).lowercased() + DeckLinkConnectorMapping.inactiveNote.dropFirst()) {}.disabled(true)
                         }
                     }
                     // Where the mapping is changed. Shown only while the app is installed (DesktopVideoSetup.swift).
@@ -2252,7 +2265,7 @@ struct ContentView: View {
                 // playback governed by the mute button, and a pick here waits for the next start.
                 Section("Audio") {
                     Picker("Audio destination", selection: deckLinkAudioDestinationBinding) {
-                        Text("SDI (follows video)").tag(DeckLinkService.AudioDestination.sdi)
+                        Text("SDI, with the picture").tag(DeckLinkService.AudioDestination.sdi)
                         Text("Computer").tag(DeckLinkService.AudioDestination.computer)
                     }
                     .pickerStyle(.inline)
@@ -2272,11 +2285,11 @@ struct ContentView: View {
                     // chosen, which is half the fix; `deckLinkModeBinding` — which now names the
                     // mode actually in force instead of this row — is the other half.
                     if !deckLink.followSourceAvailable {
-                        Button("Follow source — unavailable") {}.disabled(true)
+                        Button("Match source — unavailable") {}.disabled(true)
                     }
                     Picker("Output mode", selection: deckLinkModeBinding) {
                         if deckLink.followSourceAvailable {
-                            Text("Follow source (\(deckLink.sourceDerivedMode?.label ?? ""))")
+                            Text("Match source (\(deckLink.sourceDerivedMode?.label ?? ""))")
                                 .tag(Self.followSourceTag)
                         }
                         // SDI scaling follow-up F3: 2160p, 1080p and 720p at every rate the card offers each, then 2K
@@ -2403,7 +2416,7 @@ struct ContentView: View {
             }
             .foregroundStyle(captions.enabled ? Color.appYellow : .white.opacity(0.9))
             .help(captions.isLoaded
-                  ? (captions.enabled ? "Captions on — click to hide" : "Captions off — click to show")
+                  ? (captions.enabled ? "Subtitles on — click to hide" : "Subtitles off — click to show")
                   : "Load subtitles…")
 
             Menu {
@@ -2805,7 +2818,8 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var connectErrorBanner: some View {
-        if let message = whep.lastError ?? srt.lastError ?? hls.lastError ?? ndi.lastError ?? engine.playbackNotice {
+        let transportError = whep.lastError ?? srt.lastError ?? hls.lastError ?? ndi.lastError
+        if let message = transportError ?? engine.playbackNotice {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -2829,7 +2843,11 @@ struct ContentView: View {
             .padding(.top, 16)
             .transition(.move(edge: .top).combined(with: .opacity))
             .task(id: message) {
-                // Auto-dismiss. A new attempt or the close button clears it sooner; the id change
+                // ERRORS STAND (naming decision D7, Robbie, 2026-11-27): a transport's error stays until it is closed or
+                // replaced (a new attempt clears it; a connect that works clears it). Only a NOTICE (`playbackNotice`)
+                // hides on its own. Until 0.9.6 every message hid after 9 s, often before it was read.
+                guard transportError == nil else { return }
+                // Auto-dismiss a notice. A new message or the close button clears it sooner; the id change
                 // then cancels this sleep, so a stale timer can't wipe a fresh message.
                 //
                 // ⚠️ THE GUARD IS WHAT MAKES THAT SENTENCE TRUE, and it was missing. A cancelled
@@ -2840,14 +2858,13 @@ struct ContentView: View {
                 // it when two connect errors land close together, which is why it survived.
                 try? await Task.sleep(nanoseconds: 9_000_000_000)
                 guard !Task.isCancelled else { return }
-                clearConnectErrorBanner()
+                engine.playbackNotice = nil
             }
         }
     }
 
-    /// Everything `connectErrorBanner` can show, cleared at once: by its close button and by its 9 s timer. ONE FUNCTION FOR
-    /// BOTH so they cannot drift apart again: the timer once cleared WHEP, SRT and NDI but not HLS, so an HLS message stood
-    /// until it was closed by hand (docs/BUGS.md, 0.9.6 UI polish, batch 2 fix 2).
+    /// Everything `connectErrorBanner` can show, cleared at once by its close button. Since D7 the 9 s timer clears only a
+    /// notice (`playbackNotice`): a transport's error stands. (Batch 2 fix 2 made the timer clear HLS too; D7 supersedes it.)
     private func clearConnectErrorBanner() {
         whep.clearError()
         srt.clearError()
@@ -2857,18 +2874,36 @@ struct ContentView: View {
     }
 
     /// Export Frame's, Export Frame for Support's and Share Frame's result (`WindowDeck.frameSaveNotice`, docs/BUGS.md, 0.9.6
-    /// UI polish item 3): "Saved “<file>”." with Show in Finder, or what went wrong. Its own banner, not a term on
+    /// UI polish item 3): "Saved <file>" with Show in Finder, or what went wrong. Its own banner, not a term on
     /// `connectErrorBanner`, whose slot holds only mutually exclusive messages: a save can land while a connection error is
-    /// up. Transient, in that banner's style and with its timer idiom: 6 s for a saved frame, 9 s for a failure, or closed.
+    /// up. A saved frame hides after 6 s; a failure stands until closed or replaced (D7).
     @ViewBuilder private var frameSaveBanner: some View {
         if let notice = deck.frameSaveNotice {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: notice.isFailure ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                     .foregroundStyle(notice.isFailure ? Color.orange : Color.green)
-                Text(notice.text)
-                    .font(.callout)
-                    .foregroundStyle(.white)
-                    .fixedSize(horizontal: false, vertical: true)
+                // The file name on the headline's line and never wrapped: one line, truncated in the middle, so a long name
+                // is never broken and hyphenated (Robbie, 2026-11-27). The detail sentence names no file or folder.
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(notice.headline)
+                            .fixedSize()
+                        if let name = notice.fileName {
+                            Text(name)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(name)
+                        }
+                    }
+                    if let detail = notice.detail {
+                        Text(detail)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(.white)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(notice.text)
                 Spacer(minLength: 8)
                 if let url = notice.fileURL {
                     Button("Show in Finder") {
@@ -2894,8 +2929,10 @@ struct ContentView: View {
             .transition(.move(edge: .top).combined(with: .opacity))
             .task(id: notice) {
                 // The id is the notice, so a second save restarts the timer; the guard keeps a cancelled sleep from clearing
-                // the newer notice (see `connectErrorBanner`).
-                try? await Task.sleep(nanoseconds: UInt64(notice.autoHideSeconds * 1_000_000_000))
+                // the newer notice (see `connectErrorBanner`). A failure has no timer: errors stand until closed or replaced
+                // (naming decision D7).
+                guard let seconds = notice.autoHideSeconds else { return }
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 deck.frameSaveNotice = nil
             }
@@ -3177,6 +3214,11 @@ struct ContentView: View {
                 .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(1)                       // see the leading readout
                 .frame(minWidth: 86, alignment: .trailing)
+                // WHICH MODE BOTH READOUTS ARE IN (docs/BUGS.md, 0.9.6 UI polish item 45, naming decision D5 option A): a small
+                // tag above this readout, TC / FRAMES / TIME. A file with no timecode shows TIME in timecode mode, so the
+                // fallback is visible. An overlay, like the source glyph, so the docked bar's measured height never changes.
+                .overlay(alignment: .topTrailing) { readoutModeTag }
+                .help(readoutHelp)
                 .onTapGesture { cycleReadout() }
         }
     }
@@ -3620,7 +3662,7 @@ struct ContentView: View {
         wakeHUD()
         guard let anchor = shareAnchor.view(fallback: deck.window?.contentView) else { NSSound.beep(); return }
         FrameSharer.shared.share(anchor: anchor, focus: renderer.hostView,
-                                 onFailure: { [weak deck] in deck?.frameSaveNotice = .failed($0) }) {
+                                 onFailure: { [weak deck] in deck?.frameSaveNotice = $0 }) {
             renderer.writeFrameForShare(into: $0)
         }
     }
@@ -3632,7 +3674,7 @@ struct ContentView: View {
             Image(systemName: "chart.bar.xaxis")
         }
         .foregroundStyle(chrome.showTray ? Color.appYellow : .white.opacity(0.9))
-        .help(keys.helpText("Scopes tray", .scopesTray))
+        .help(keys.helpText("Show or hide scopes", .scopesTray))
     }
 
     // Display transform (§6.3 tiers 1–3) — Phase 2b. Next to the Color control because
@@ -3671,7 +3713,7 @@ struct ContentView: View {
         }
         // Pinned reads in the app's yellow, as Loop does when on (§8 item 16; Robbie, 2026-10-25).
         .foregroundStyle(pinned ? Color.appYellow : live)
-        .help(keys.helpText(pinned ? "Unpin controls" : "Pin controls", .alwaysShowControls))
+        .help(keys.helpText(pinned ? "Always show controls: on" : "Always show controls", .alwaysShowControls))
         // Test drivers find the button by this, not by its help text, which names the shortcut.
         .accessibilityIdentifier("pinControls")
     }
@@ -3816,8 +3858,8 @@ struct ContentView: View {
     /// Swift type-checker's limit (see the notes on the currentURL observer), and a nested
     /// conditional inside an already-enormous modifier chain is exactly the shape that tips it.
     private var reloadHelp: String {
-        if fileWatch.changedOnDisk { return "This file changed on disk — click to reload" }
-        if fileWatch.sentForEditing { return "Editing in Flip — reload to pick up any changes" }
+        if fileWatch.changedOnDisk { return "This file changed on disk — click to refresh its metadata" }
+        if fileWatch.sentForEditing { return "Editing in Flip — click to refresh its metadata" }
         return "Refresh metadata"
     }
 
@@ -3931,10 +3973,47 @@ struct ContentView: View {
     }
 
     private func cycleReadout() {
+        readoutMode = nextReadoutMode
+    }
+
+    /// The mode the next click on the right-hand readout chooses.
+    private var nextReadoutMode: ReadoutMode {
         let all = ReadoutMode.allCases.filter { $0 != .frame || engine.mediaKind != .audioOnly }
         // A stored mode this file skips counts as the one before it, so the next press still moves on.
         let i = all.firstIndex(of: readoutMode) ?? all.startIndex
-        readoutMode = all[(i + 1) % all.count]
+        return all[(i + 1) % all.count]
+    }
+
+    /// The tag over the right-hand readout (item 45): the mode both readouts show now.
+    private var readoutModeTag: some View {
+        Text(Self.readoutTag(effectiveMode))
+            .font(.system(size: 7, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.55))
+            .fixedSize()
+            .offset(y: -9)
+            .accessibilityHidden(true)
+    }
+
+    private static func readoutTag(_ mode: ReadoutMode) -> String {
+        switch mode {
+        case .source: return "TC"
+        case .frame: return "FRAMES"
+        case .elapsed: return "TIME"
+        }
+    }
+
+    private static func readoutWords(_ mode: ReadoutMode) -> String {
+        switch mode {
+        case .source: return "timecode"
+        case .frame: return "frames"
+        case .elapsed: return "elapsed time"
+        }
+    }
+
+    /// "Timecode — click for frames", and so on: what is showing and what a click shows next.
+    private var readoutHelp: String {
+        let now = Self.readoutWords(effectiveMode)
+        return now.prefix(1).uppercased() + now.dropFirst() + " — click for " + Self.readoutWords(nextReadoutMode)
     }
 
     private func timeString(_ seconds: Double) -> String {
@@ -4049,5 +4128,64 @@ private struct DividerHandle: NSViewRepresentable {
             // it genuinely finished over the handle.
             onHoverChange?(bounds.contains(convert(event.locationInWindow, from: nil)))
         }
+    }
+}
+
+
+/// THE BYPASS CORNER MARKER (docs/BUGS.md, 0.9.6 UI polish item 37; Robbie, 2026-11-28). The bar's BYPASS badge hides with the
+/// floating bar, so while Bypass is on and the bar is hidden (windowed or full screen) this says so in the picture's top-trailing
+/// corner, styled like `FieldViewMarker` (a dark capsule, coloured words) in the Bypass badge's amber. Bypass only: COMPARING
+/// and the A/V offset stay on the bar. Not during a hold (the picture is then not in Bypass; the bar says COMPARING). The
+/// docked bar never hides, so it never needs this. SwiftUI on the picture surface's overlay, never Metal, as the field-view
+/// marker: it cannot reach the offscreen ring, the scopes, SDI or an export.
+private struct BypassCornerMarker: View {
+    @ObservedObject var chrome: WindowChrome
+    let barHidden: Bool
+
+    private var shown: Bool { barHidden && chrome.heldDisplayTransform == nil && chrome.displayTransform == .bypass }
+    /// Below the field-view marker when it is up: its 12 pt inset, its capsule (11 pt text + 2 × 3), and 6 pt between.
+    private var fieldMarkerUp: Bool { chrome.fieldViewOffered && chrome.fieldView.marker != nil }
+
+    var body: some View {
+        Group {
+            if shown {
+                Text("BYPASS")
+                    .font(.system(size: 11, weight: .heavy, design: .rounded))
+                    .foregroundStyle(Color.orange)
+                    .fixedSize()
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(.black.opacity(0.55)))
+                    .opacity(0.85)
+                    .padding(.horizontal, 12)
+                    .padding(.top, fieldMarkerUp ? 12 + 20 + 6 : 12)
+                    .allowsHitTesting(false)
+                    .accessibilityLabel("Display transform: Bypass, no color management")
+                    .accessibilityIdentifier("bypassCornerMarker")
+                    .accessibilityAddTraits(.isStaticText)
+                    .transition(.opacity)
+            }
+        }
+        .onChange(of: shown) { _, now in
+            print(now ? "[BYPASS] corner marker shown (window only)" : "[BYPASS] corner marker hidden")
+        }
+    }
+}
+
+/// The file name overlay's text (View ▸ File Name, N): the name, then the Bypass, Range and color override markers in the
+/// window title's words (Robbie, 2026-11-28). The words come from `WindowDeck.titleMarkers`, the one source of marker text,
+/// filtered to those three kinds. Observes what they read, so a change redraws it (`fileColor` is not observed by ContentView).
+private struct FileNameOverlayText: View {
+    let name: String
+    let deck: WindowDeck
+    @ObservedObject var engine: FrameEngine
+    @ObservedObject var chrome: WindowChrome
+    @ObservedObject var fileColor: FileColorOverrideModel
+
+    private static let kinds: Set<WindowDeck.TitleMarker.Kind> = [.color, .range, .bypass]
+
+    var body: some View {
+        let markers = deck.titleMarkers.filter { Self.kinds.contains($0.kind) }.map(\.text)
+        Text(([name] + markers).joined(separator: " — "))
     }
 }

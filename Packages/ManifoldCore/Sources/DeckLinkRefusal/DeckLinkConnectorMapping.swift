@@ -52,21 +52,21 @@ public enum DeckLinkDuplex: Equatable, Sendable {
 
 public enum DeckLinkConnectorMapping {
     /// Beside the greyed devices, in the DeckLink menu and in Settings.
-    public static let inactiveNote = "Inactive in the card's current connector mapping"
+    public static let inactiveNote = "Not active in the card's current setup (Blackmagic Desktop Video Setup)"
 
     /// A start refused because the selected device is inactive. Output stays off.
     public static func startRefusedMessage(device: String) -> String {
-        "\(device) is inactive in the card's current connector mapping. Choose an active device, or change the mapping in Desktop Video Setup, then start output again."
+        "\(device) isn't active in the card's current setup. Choose an active device, or change the card's setup in Blackmagic Desktop Video Setup, then start output again."
     }
 
     /// Output stopped because the selected device became inactive.
     public static func becameInactiveMessage(device: String) -> String {
-        "DeckLink output stopped: \(device) became inactive when the card's connector mapping changed. Choose an active device, or change the mapping back in Desktop Video Setup, then start output again."
+        "DeckLink output stopped: \(device) stopped being active when the card's setup changed. Choose an active device, or change the card's setup back in Blackmagic Desktop Video Setup, then start output again."
     }
 
     /// Output stopped because the driver stopped it for a mapping change, the device itself still active.
     public static let mappingChangedMessage =
-        "DeckLink output stopped: the card's connector mapping changed, and the driver stops running output when it does. Start output again."
+        "DeckLink output stopped: the card's setup changed, and the driver stops running output when it does. Start output again."
 
     /// What a connector-mapping change does to running output, decided once the new mapping is active (`ProfileActivated`,
     /// devices re-read). nil: nothing; output (if any) carries on. Otherwise the message, and output stops.

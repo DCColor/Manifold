@@ -44,9 +44,9 @@ enum VectorscopeBoxAmplitude: String, CaseIterable, Identifiable {
     /// Compact header tag.
     var headerTag: String {
         switch self {
-        case .percent75:  return "75"
-        case .percent100: return "100"
-        case .both:       return "75+100"
+        case .percent75:  return "75%"
+        case .percent100: return "100%"
+        case .both:       return "75+100%"
         }
     }
     var shows75: Bool { self != .percent100 }
@@ -438,7 +438,7 @@ struct VectorscopeScopeView: View {
             }
             ScopeGearSectionHeader("Graticule extras")
             Toggle("Outer ring ticks", isOn: $outerTicks).font(.caption)
-            Toggle("Skintone axis (I)", isOn: $skintoneAxis).font(.caption)
+            Toggle("Skin tone line", isOn: $skintoneAxis).font(.caption)
             ScopeGearSectionHeader("Reference markers")
             VectorscopeTargetRow(label: "Marker 1", isOn: $target1On, value: $target1Value)
             VectorscopeTargetRow(label: "Marker 2", isOn: $target2On, value: $target2Value)
@@ -465,7 +465,7 @@ struct VectorscopeScopeView: View {
                     // graticule reference. Was hardcoded "709"; now it reads the real matrix, so a
                     // 2020 source no longer mislabels as 709 while CIE/inspector say 2020.
                     ScopeSlotHeader(name: "VECTORSCOPE",
-                                    suffix: " · \(ycbcrMatrixLabel(model.sourceMatrixCode)) · gr \(graticuleLabel) · box \(boxAmplitude.headerTag)\(model.headerNote.map { " · \($0)" } ?? "")",
+                                    suffix: " · \(ycbcrMatrixLabel(model.sourceMatrixCode)) · graticule \(graticuleLabel) · boxes \(boxAmplitude.headerTag)\(model.headerNote.map { " · \($0)" } ?? "")",
                                     selection: slotSelection)
                     vectorscopeOptions
                     Spacer(minLength: 4)

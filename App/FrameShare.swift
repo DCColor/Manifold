@@ -41,6 +41,19 @@ struct ShareFrameMenuItem: View {
     }
 }
 
+/// File ▸ Start DeckLink Output / Stop DeckLink Output: the title says what a click does (docs/BUGS.md, 0.9.6 UI polish item
+/// 33; it read "Start/Stop DeckLink Output" in every state). The registry title, which the Keyboard Shortcuts window lists,
+/// stays "Start/Stop DeckLink Output" (`MenuKeyAudit.titleVariants`). Lives here beside `ShareFrameMenuItem`, the other File
+/// item whose title follows state.
+struct DeckLinkMenuItem: View {
+    @ObservedObject var registry: ShortcutRegistry
+    @ObservedObject private var deckLink = DeckLinkService.shared
+    var body: some View {
+        ShortcutMenuItem(id: .toggleDeckLink, registry: registry,
+                         title: deckLink.isOutputting ? "Stop DeckLink Output" : "Start DeckLink Output")
+    }
+}
+
 /// The NSViews the share sheet may hang from, in this window: More (…) in Compact and Narrow, where Share Frame… sits under
 /// Export Frame, and the Share button beside Export in Full, which has no More. Registered by `ShareAnchorView`; held weakly.
 final class ShareAnchor {
@@ -75,7 +88,7 @@ final class FrameSharer: NSObject, @preconcurrency NSSharingServicePickerDelegat
     private struct Pending {
         let folder: URL
         weak var focus: NSView?
-        let onFailure: (String) -> Void
+        let onFailure: (FrameSaveNotice) -> Void
     }
 
     /// Each share in flight, first by picker, then by the service chosen from it.
@@ -105,7 +118,7 @@ final class FrameSharer: NSObject, @preconcurrency NSSharingServicePickerDelegat
     /// share sheet on `anchor`. A share that cannot be prepared, or that its service fails, calls `onFailure` with the
     /// banner's text; a Cancel does not. `focus` (the player view) is made first responder when the sheet closes, sent or
     /// cancelled.
-    func share(anchor: NSView, focus: NSView?, onFailure: @escaping (String) -> Void, write: (URL) -> URL?) {
+    func share(anchor: NSView, focus: NSView?, onFailure: @escaping (FrameSaveNotice) -> Void, write: (URL) -> URL?) {
         sweep(keepingInFlight: true)
         guard let root = Self.root else { onFailure(ShareFailure.couldNotPrepare); return }
         let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)

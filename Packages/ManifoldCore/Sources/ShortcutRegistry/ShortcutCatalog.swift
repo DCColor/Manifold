@@ -282,7 +282,7 @@ public enum ShortcutCatalog {
               note: "The marker at the playhead, else the nearest one before it"),
         // ⌃⌘M, not ⇧⌘M: Terminal's Service "Open man Page in Terminal" holds ⇧⌘M on the build Mac (checked 2026-11-15;
         // ⌥⌘M is Minimize All, ⌘M Minimize). ⌃⌘M: no Service, no symbolic hotkey, not reserved.
-        .init(.showMarkerList, "Show Marker List", .mark, .app, .menu, .char("m", [.control, .command])),
+        .init(.showMarkerList, "Show Markers Window", .mark, .app, .menu, .char("m", [.control, .command])),
         .init(.previousMarker, "Previous Marker", .mark, .fileTransport, .key, .code(KeyCode.up, [.shift]), repeats: true),
         .init(.nextMarker, "Next Marker", .mark, .fileTransport, .key, .code(KeyCode.down, [.shift]), repeats: true),
         .init(.markIn, "Mark In", .mark, .fileTransport, .menu, .char("i")),
@@ -344,9 +344,9 @@ public enum ShortcutCatalog {
         .init(.cie2020, "CIE: Show/Hide Rec. 2020 Triangle", .scopes, .window, .key, nil),
 
         // ── Colour ──────────────────────────────────────────────────────────────────────────────
-        .init(.displayOS, "As macOS Shows It", .color, .window, .menu, .char("1", optCmd)),
-        .init(.displayReference, "Reference (BT.1886)", .color, .window, .menu, .char("2", optCmd)),
-        .init(.displayBypass, "Bypass — No Color Management", .color, .window, .menu, .char("3", optCmd)),
+        .init(.displayOS, "macOS", .color, .window, .menu, .char("1", optCmd)),
+        .init(.displayReference, "Reference", .color, .window, .menu, .char("2", optCmd)),
+        .init(.displayBypass, "Bypass", .color, .window, .menu, .char("3", optCmd)),
         .init(.transformChain, "Show/Hide Transform Chain", .color, .window, .menu, .char("4", optCmd)),
         // C for Compare (Robbie, 2026-10-24); D is free.
         .init(.holdCompare, "Hold to Compare: macOS ↔ Reference", .color, .window, .hold, .char("c"),
@@ -356,7 +356,7 @@ public enum ShortcutCatalog {
         .init(.holdCompareLUTOff, "Hold to Compare with the LUT Off", .color, .window, .hold, .char("c", [.option]),
               note: "Does nothing with no LUT applied"),
         .init(.cycleInterpretation, "Next Tag Override", .color, .window, .menu, nil),
-        .init(.resetInterpretation, "Reset Tags to Source", .color, .window, .menu, nil),
+        .init(.resetInterpretation, "Reset to File’s Tags", .color, .window, .menu, nil),
 
         // ── Audio ───────────────────────────────────────────────────────────────────────────────
         .init(.audioLater1, "Audio Later by 1 ms", .audio, .live, .key, .code(KeyCode.rightBracket, [.option]),

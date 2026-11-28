@@ -56,6 +56,20 @@ final class MenuKeyAuditTests: XCTestCase {
                        [.wrongKey(.scopesTray, found: "no key")])
     }
 
+    /// An item whose title follows state (naming decisions, 2026-11-27) is found under each of its titles, and only those.
+    func testTitleVariantsAreTheSameItem() {
+        for (id, variant) in [(ShortcutID.toggleDeckLink, "Stop DeckLink Output"), (.toggleDeckLink, "Start DeckLink Output"),
+                              (.shareFrame, "Share Frame (SDR)…"), (.resetInterpretation, "Reset to Stream’s Tags")] {
+            let title = registry.definition(id).title
+            let menus = goodMenus().map { $0.title == title
+                ? MenuItemSnapshot(menu: $0.menu, title: variant, keyEquivalent: $0.keyEquivalent, modifiers: NSEvent.ModifierFlags(rawValue: $0.modifiers)) : $0 }
+            XCTAssertEqual(MenuKeyAudit.audit(menus, registry: registry, layout: USKeyLayout()), [], variant)
+        }
+        let wrong = goodMenus().map { $0.title == "Start/Stop DeckLink Output"
+            ? MenuItemSnapshot(menu: "File", title: "Pause DeckLink Output", keyEquivalent: $0.keyEquivalent, modifiers: NSEvent.ModifierFlags(rawValue: $0.modifiers)) : $0 }
+        XCTAssertEqual(MenuKeyAudit.audit(wrong, registry: registry, layout: USKeyLayout()), [.missing(.toggleDeckLink, menu: "File")])
+    }
+
     func testAMissingOrHiddenItemIsReported() {
         let without = goodMenus().filter { $0.title != "Show/Hide Scopes" }
         XCTAssertEqual(MenuKeyAudit.audit(without, registry: registry, layout: USKeyLayout()), [.missing(.scopesTray, menu: "View")])

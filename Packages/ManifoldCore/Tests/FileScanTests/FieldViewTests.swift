@@ -111,10 +111,10 @@ final class FieldViewTests: XCTestCase {
     }
 
     func testChainPrefix() {
-        XCTAssertEqual(scan(true).chainPrefix(height: 1080, fieldToken: "59.94"), "1080i59.94 TFF")
-        XCTAssertEqual(scan(true, order: .bottomFirst).chainPrefix(height: 1080, fieldToken: "50"), "1080i50 BFF")
-        XCTAssertEqual(scan(true, fields: true).chainPrefix(height: 540, fieldToken: "59.94"), "field sequence, TFF")
-        XCTAssertEqual(scan(true).chainPrefix(height: 0, fieldToken: nil), "interlaced, TFF")
+        XCTAssertEqual(scan(true).chainPrefix(height: 1080, fieldToken: "59.94"), "1080i59.94 top field first")
+        XCTAssertEqual(scan(true, order: .bottomFirst).chainPrefix(height: 1080, fieldToken: "50"), "1080i50 bottom field first")
+        XCTAssertEqual(scan(true, fields: true).chainPrefix(height: 540, fieldToken: "59.94"), "field sequence, top field first")
+        XCTAssertEqual(scan(true).chainPrefix(height: 0, fieldToken: nil), "interlaced, top field first")
         XCTAssertNil(scan(false).chainPrefix(height: 1080, fieldToken: "29.97"))
         XCTAssertNil(scan(nil).chainPrefix(height: 1080, fieldToken: "29.97"))
     }

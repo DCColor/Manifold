@@ -5,27 +5,54 @@
 //
 //  Until 0.9.6 Export Frame saved with no word on screen: a saved frame said nothing about where it went, and a failed PNG
 //  write went only to the log. Share Frame only beeped. A save now ends in a short banner: the file's name and Show in
-//  Finder, or what went wrong and what to do. The banner names the file and its folder, which the user chose; never a path.
+//  Finder, or what went wrong and what to do.
+//
+//  THE FILE NAME IS NEVER INSIDE A SENTENCE (Robbie, 2026-11-27). A long name wrapped mid-word and was hyphenated, which
+//  reads as a different name. So the banner is three parts: a headline ("Saved", "Couldn’t save"), the file name on the same
+//  line, shown on one line and truncated in the middle when it doesn't fit, and a detail sentence that names no file or
+//  folder. Never a path.
 //
 
 import Foundation
 
 /// The banner a frame save leaves in its window.
 public enum FrameSaveNotice: Equatable, Sendable {
-    /// Saved at `url`. `note` is a second sentence, when the frame did not go where the settings said (the per-clip
-    /// folder's fallback, `FrameFileName.fallbackNotice`).
+    /// Saved at `url`. `note` is a detail sentence, when the frame did not go where the settings said (the per-clip folder's
+    /// fallback, `FrameFileName.fallbackNotice`).
     case saved(url: URL, note: String?)
-    /// Not saved, or not shared: the whole message.
-    case failed(String)
+    /// Not saved, or not shared. `fileName` is the file that could not be written, when there is one.
+    case failed(headline: String, fileName: String?, detail: String?)
 
-    public var text: String {
+    public var headline: String {
         switch self {
-        case .saved(let url, let note):
-            let line = "Saved “\(url.lastPathComponent)”."
-            return note.map { "\(line) \($0)" } ?? line
-        case .failed(let message):
-            return message
+        case .saved: return "Saved"
+        case .failed(let headline, _, _): return headline
         }
+    }
+
+    /// Shown on the headline's line, never wrapped: one line, truncated in the middle.
+    public var fileName: String? {
+        switch self {
+        case .saved(let url, _): return url.lastPathComponent
+        case .failed(_, let name, _): return name
+        }
+    }
+
+    /// The sentence under the headline. Names no file and no folder.
+    public var detail: String? {
+        switch self {
+        case .saved(_, let note): return note
+        case .failed(_, _, let detail): return detail
+        }
+    }
+
+    /// All three parts as one line, for the accessibility label and the tests.
+    public var text: String {
+        var line = headline
+        if let fileName { line += " “\(fileName)”" }
+        line += "."
+        if let detail { line += " \(detail)" }
+        return line
     }
 
     /// The saved file, for Show in Finder. nil for a failure.
@@ -39,11 +66,16 @@ public enum FrameSaveNotice: Equatable, Sendable {
         return false
     }
 
-    /// How long the banner stays up. A saved frame needs only a glance; a failure stays as long as a connection error does
-    /// (9 s, `ContentView.connectErrorBanner`). Either can be closed sooner.
-    public var autoHideSeconds: Double { isFailure ? 9 : 6 }
+    /// How long the banner stays up, or nil: it stays until closed or replaced. A saved frame needs only a glance; a failure
+    /// is an error, and errors stand (naming decision D7, Robbie, 2026-11-27).
+    public var autoHideSeconds: Double? { isFailure ? nil : 6 }
 
-    /// The same notice with `note` added to a saved frame's line. A failure is unchanged: its message is the news.
+    /// THE RENDERER'S SPELLING, KEPT. `MetalVideoRenderer.writeFrameExport` (batch 2, 0.9.6) writes
+    /// `.failed(failure.message(fileName:folderName:))`, and batch 3 may not change that file. `message` now returns the
+    /// structured notice, and this passes it through, so the name still lands on its own line.
+    public static func failed(_ notice: FrameSaveNotice) -> FrameSaveNotice { notice }
+
+    /// The same notice with `note` added to a saved frame's detail. A failure is unchanged: its detail is the news.
     public func adding(note: String?) -> FrameSaveNotice {
         guard let note, case .saved(let url, let existing) = self else { return self }
         return .saved(url: url, note: existing.map { "\($0) \(note)" } ?? note)
@@ -89,33 +121,40 @@ public enum FrameSaveFailure: Equatable, Sendable {
         return diagnose(folderExists: exists, folderWritable: writable, freeBytes: free, neededBytes: neededBytes)
     }
 
-    /// The banner. Names the file and its folder (both chosen by the user and on screen in Settings), never a path, and says
-    /// what to do.
-    public func message(fileName: String, folderName: String) -> String {
+    /// What to do, without a file or folder name (the name is the banner's own line).
+    public var detail: String {
         let settings = "Settings ▸ Files ▸ Frame Export"
         switch self {
-        case .folderMissing:
-            return "Couldn’t save “\(fileName)”: the folder “\(folderName)” isn’t there anymore. Choose a folder in \(settings)."
-        case .folderNotWritable:
-            return "Couldn’t save “\(fileName)”: Manifold can’t write to the folder “\(folderName)”. Choose another folder in \(settings)."
-        case .diskFull:
-            return "Couldn’t save “\(fileName)”: the disk is full. Free some space, then export again."
-        case .unknown:
-            return "Couldn’t save “\(fileName)” in “\(folderName)”. Try again, or choose another folder in \(settings)."
+        case .folderMissing: return "Its folder isn’t there anymore. Choose a folder in \(settings)."
+        case .folderNotWritable: return "Manifold can’t write to its folder. Choose another folder in \(settings)."
+        case .diskFull: return "The disk is full. Free some space, then export again."
+        case .unknown: return "Try again, or choose another folder in \(settings)."
         }
     }
+
+    /// The banner for a frame that could not be written as `fileName`.
+    public func notice(fileName: String) -> FrameSaveNotice {
+        .failed(headline: "Couldn’t save", fileName: fileName, detail: detail)
+    }
+
+    /// `notice(fileName:)` under the name the renderer calls (see `FrameSaveNotice.failed(_:)`). The folder is not named:
+    /// the detail sentence says "its folder".
+    public func message(fileName: String, folderName _: String) -> FrameSaveNotice { notice(fileName: fileName) }
 }
 
 /// What Share Frame's banner says when the share could not happen. A cancel says nothing.
 public enum ShareFailure {
+    public static let headline = "Couldn’t share the frame"
+
     /// The JPEG could not be written to the app's own share folder, or the folder could not be made.
-    public static let couldNotPrepare = "Couldn’t prepare the frame to share. Try again, or use Export Frame… to save it instead."
+    public static let couldNotPrepare = FrameSaveNotice.failed(headline: headline, fileName: nil,
+                                                               detail: "Try again, or use Export Frame… to save it instead.")
 
     /// The chosen service (Mail, Messages, AirDrop…) reported a failure. `detail` is the system's own description.
-    public static func couldNotShare(detail: String) -> String {
+    public static func couldNotShare(detail: String) -> FrameSaveNotice {
         let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "Couldn’t share the frame. Try again, or use Export Frame… to save it instead." }
-        return "Couldn’t share the frame: \(trimmed)"
+        return .failed(headline: headline, fileName: nil,
+                       detail: trimmed.isEmpty ? "Try again, or use Export Frame… to save it instead." : trimmed)
     }
 
     /// A service's "failure" that is the user's own Cancel (Messages reports one this way), which shows no banner.

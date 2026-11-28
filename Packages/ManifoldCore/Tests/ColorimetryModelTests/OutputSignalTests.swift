@@ -57,7 +57,7 @@ final class OutputSignalTests: XCTestCase {
         XCTAssertTrue(m.primariesDefaulted)
         XCTAssertTrue(m.luminanceDefaulted)
         XCTAssertEqual(s.staticMetadataLabel,
-                       "mastering P3 D65 · 1000 / 0.0050 cd/m² (defaults) · MaxCLL 0 · MaxFALL 0 (0 = unknown)")
+                       "mastering P3 D65 · 1000 / 0.0050 cd/m² (defaults) · MaxCLL not stated · MaxFALL not stated")
     }
 
     /// The source's values are sent as stated, and a half it leaves out takes the default for that half only.

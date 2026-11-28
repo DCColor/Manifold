@@ -513,7 +513,7 @@ struct AudioMeterScopeView: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
-                    ScopeSlotHeader(name: "METERS", suffix: headerSuffix, selection: slotSelection)
+                    ScopeSlotHeader(name: "AUDIO METERS", suffix: headerSuffix, selection: slotSelection)
                     // ⚠️ THE GEAR GOES HERE — immediately after the slot header and BEFORE the
                     // Spacer, the same index the other four use (waveform and parade's
                     // `ScopeValueAxisGear`, `vectorscopeOptions`, `cieOptions`). That keeps the
@@ -881,7 +881,7 @@ struct MeterOptionsGear: View {
 
     var body: some View {
         ScopeGear(title: "Meter options",
-                  help: "Reference marker: one line across every channel, typed in dBFS. Read against SAMPLE peak — this meter does not measure true peak, so a marker set to a true-peak delivery ceiling is not a true-peak check.") {
+                  help: "Reference marker: one line across every channel, typed in dBFS. Read against sample peak — this meter does not measure true peak, so a marker set to a true-peak delivery ceiling is not a true-peak check.") {
             ScopeGearSectionHeader("Reference marker", isFirst: true)
             MeterMarkerRow(isOn: $markerOn, db: $markerDB)
         }

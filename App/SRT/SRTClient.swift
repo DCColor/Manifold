@@ -1106,7 +1106,7 @@ final class SRTClient: ObservableObject {
                 NSLog("[SRT] %.0fs since the stream was identified, still no picture — %llu access units, %llu keyframes",
                       Self.firstPictureGrace, stats.accessUnits, stats.keyframes)
                 showError(stats.accessUnits > 0
-                    ? "Connected, but still waiting for a keyframe from the sender."
+                    ? "Connected, but waiting for the sender’s first full picture."
                     : "Connected, but no video is arriving from the sender.")
             }
         } else if haveConnected {

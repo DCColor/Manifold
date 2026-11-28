@@ -40,6 +40,13 @@ public enum RangeOverride: String, CaseIterable, Sendable {
         case .legal: return "Legal"
         }
     }
+
+    /// "Full (set)" / "Legal (set)", nil at Auto: the override's words wherever it is marked (the Inspector's Range row).
+    public var setLabel: String? { self == .auto ? nil : label + " (set)" }
+
+    /// "Range: Full (set)", nil at Auto: the standing marker, in the window title and the file name overlay
+    /// (`WindowDeck.titleMarkers`). Built from `setLabel`, so the two can't drift apart.
+    public var marker: String? { setLabel.map { "Range: " + $0 } }
 }
 
 /// How to interpret FULL-range chroma — a decode property, not a UI concept.
@@ -60,7 +67,7 @@ public enum FullRangeChromaConvention: Int32, CaseIterable, Sendable {
 
     public var label: String {
         switch self {
-        case .fullSwing: return "Full-swing (spec)"
+        case .fullSwing: return "Full range (as the spec says)"
         case .resolve:   return "Resolve"
         }
     }

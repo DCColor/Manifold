@@ -350,8 +350,8 @@ struct ColorInterpretationControl: View {
         }
         // The cycle's key is the registry's, with no default since 2026-10-23 (it was ⌃⌥C): named only when bound.
         .help((subject == .file
-               ? "Color interpretation — Auto trusts the file’s tags; a preset or Override asserts them"
-               : "Color interpretation — Auto trusts the stream; a preset or Override asserts it")
+               ? "Tags — Auto trusts the file’s tags; a preset or Override sets them"
+               : "Tags — Auto trusts the stream’s tags; a preset or Override sets them")
               + (ShortcutCenter.shared.registry.label(for: .cycleInterpretation).map { " (\($0) cycles the presets)" } ?? ""))
     }
 
@@ -537,7 +537,7 @@ struct ColorInterpretationControl: View {
                     .disabled(lut.name == nil)
             }
             Section(lut.outputSpace.isCustom
-                    ? "Custom — " + lut.outputSpace.lutSpaceLabel.replacingOccurrences(of: "Custom ", with: "") + " in use"
+                    ? "Custom — " + lut.outputSpace.lutSpaceLabel.replacingOccurrences(of: "LUT output ", with: "") + " in use"
                     : "Custom") {
                 outputAxisMenu("Primaries", 0, CustomColorimetry.primaries)
                 outputAxisMenu("Transfer", 1, CustomColorimetry.transfers)
@@ -718,7 +718,7 @@ struct ColorInterpretationControl: View {
             if fileModel.override.isCustom { return fileModel.override.shortLabel + " · Overridden" }
             let d = fileModel.declared
             let stated = [d.primaries, d.transfer, d.matrix].compactMap { $0 }.count
-            tier = fileModel.override != .auto ? "Overridden" : (stated == 0 ? "Assumed" : "Declared")
+            tier = fileModel.override != .auto ? "Overridden" : (stated == 0 ? "Assumed" : "Tagged")
             (p, t) = (fileModel.effective.primaries, fileModel.effective.transfer)
         }
         return "\(SourceColorimetry.primariesName(p).replacingOccurrences(of: "Rec.", with: "")) "

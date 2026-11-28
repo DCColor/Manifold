@@ -39,6 +39,6 @@ public enum PictureCodes {
     public static func outputLabel(_ o: ColorimetryOverride) -> String {
         if o == .auto { return "Same as Source" }
         guard o.isCustom, let t = o.preset else { return o.label }
-        return "Custom \(t.primaries)·\(t.transfer)·\(t.matrix)"
+        return "LUT output \(t.primaries)·\(t.transfer)·\(t.matrix)"
     }
 }

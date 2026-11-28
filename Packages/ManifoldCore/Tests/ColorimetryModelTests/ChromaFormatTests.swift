@@ -83,7 +83,7 @@ final class ChromaFormatTests: XCTestCase {
 
     func testReadoutFourFourFourNamesTheOneReduction() {
         XCTAssertEqual(ChromaReadout.text(carried: x444, source: .declared(.c444), reason: nil),
-                       "4:4:4 10-bit (x444) — native · DeckLink v210 output: reduced once to 4:2:2 (halfband)")
+                       "4:4:4 10-bit (x444) — native · SDI output: reduced once to 4:2:2, filtered (v210, halfband)")
     }
 
     func testReadoutNoPictureAndUnsampledFormat() {
@@ -181,7 +181,7 @@ final class ChromaFormatTests: XCTestCase {
         XCTAssertEqual(ChromaReadout.text(carried: x422, source: .declared(.c422), reason: nil, note: "software decode"),
                        "4:2:2 10-bit (x422) — native · software decode")
         XCTAssertEqual(ChromaReadout.text(carried: x444, source: .declared(.c444), reason: nil, note: "software decode"),
-                       "4:4:4 10-bit (x444) — native · DeckLink v210 output: reduced once to 4:2:2 (halfband) · software decode")
+                       "4:4:4 10-bit (x444) — native · SDI output: reduced once to 4:2:2, filtered (v210, halfband) · software decode")
         XCTAssertEqual(ChromaReadout.text(carried: x420, source: .declared(.c420), reason: nil, note: nil),
                        "4:2:0 10-bit (x420) — native")
     }

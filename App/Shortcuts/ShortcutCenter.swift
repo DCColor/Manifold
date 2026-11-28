@@ -103,6 +103,7 @@ final class ShortcutCenter: KeyDispatchHost {
                                                      (NSApplication.didResignActiveNotification, "app not active"),
                                                      (NSMenu.didBeginTrackingNotification, "a menu opened")]
         MenuKeyKeeper.shared.start(registry: registry)
+        MenuAvailability.shared.start()
         #if DEBUG
         // `MANIFOLD_MENU_AUDIT=1`: the menu bar judged against the registry every 3 s (`MenuKeyAudit`), one line a pass.
         if ProcessInfo.processInfo.environment["MANIFOLD_MENU_AUDIT"] == "1" {
@@ -148,6 +149,9 @@ final class ShortcutCenter: KeyDispatchHost {
     static func hint(_ text: String, _ id: ShortcutID) -> String {
         shared.registry.hint(text, id)
     }
+
+    /// Whether the menu's window can do `id` now: what `MenuAvailability` grays out while a menu is open.
+    func canPerformFromMenu(_ id: ShortcutID) -> Bool { canPerform(id, on: menuDeck) }
 
     /// A menu item's action. Beeps when this window cannot do it now, as a disabled shortcut always did.
     func runFromMenu(_ id: ShortcutID) {
@@ -210,15 +214,64 @@ extension View {
     }
 }
 
-/// A menu item for a shortcut: the registry's title and key, and `runFromMenu`.
+/// A menu item for a shortcut: the registry's title and key, and `runFromMenu`. Grayed out, while its menu is open, when its
+/// window can't do it (`MenuAvailability`, File, View and Color only).
 struct ShortcutMenuItem: View {
     let id: ShortcutID
     @ObservedObject var registry: ShortcutRegistry
     var title: String? = nil
+    @ObservedObject private var availability = MenuAvailability.shared
 
     var body: some View {
         Button(title ?? registry.definition(id).title) { ShortcutCenter.shared.runFromMenu(id) }
             .registryShortcut(id, registry)
+            .disabled(availability.grayed.contains(id))
+    }
+}
+
+/// THE FILE, VIEW AND COLOR MENUS GRAY OUT WHAT CAN'T ACT (naming decision D10, Robbie, 2026-11-27; docs/BUGS.md, 0.9.6 UI
+/// polish item 32). Until 0.9.6 every item stayed enabled and beeped when chosen, so the menu never said what was available.
+///
+/// ⚠️ ONLY WHILE A MENU IS OPEN. The set is worked out when menu tracking begins and emptied when it ends. A menu item that
+/// is disabled also loses its KEY: AppKit won't fire a disabled item's key equivalent. Graying from a set kept between menu
+/// opens would go stale (a file loads, the set still says "nothing to export") and swallow ⌥⌘E. With the set empty while
+/// the menus are closed, a key always reaches `runFromMenu`, which acts or beeps exactly as before.
+///
+/// Mark, Help and Debug are left as they were (D10 names File, View and Color). Color's display modes and tag items already
+/// gray out from `DisplayTransformMenuState`, which is live.
+@MainActor
+final class MenuAvailability: ObservableObject {
+    static let shared = MenuAvailability()
+
+    /// The items to gray out now. Empty while no menu is open.
+    @Published private(set) var grayed: Set<ShortcutID> = []
+
+    private static let menus: Set<String> = ["File", "View", "Color"]
+    private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        let nc = NotificationCenter.default
+        observers.append(nc.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { MenuAvailability.shared.menuOpened() }
+        })
+        observers.append(nc.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { MenuAvailability.shared.menuClosed() }
+        })
+    }
+
+    /// Called once at launch so the observers exist before the first menu opens.
+    func start() {}
+
+    private func menuOpened() {
+        let center = ShortcutCenter.shared
+        let next = Set(MenuKeyAudit.menuHomes.compactMap { id, home in
+            Self.menus.contains(home) && !center.canPerformFromMenu(id) ? id : nil
+        })
+        if next != grayed { grayed = next }
+    }
+
+    private func menuClosed() {
+        if !grayed.isEmpty { grayed = [] }
     }
 }
 
@@ -297,7 +350,8 @@ final class MenuKeyKeeper {
             if let tier = def.debug, !registry.isDebugEnabled(tier) { continue }
             guard let home = MenuKeyAudit.menuHomes[def.id],
                   let top = bar.items.first(where: { $0.title == home })?.submenu,
-                  let item = items(top).first(where: { $0.title == def.title && !$0.isHidden }) else { continue }
+                  case let titles = MenuKeyAudit.titles(for: def.id, registryTitle: def.title),
+                  let item = items(top).first(where: { titles.contains($0.title) && !$0.isHidden }) else { continue }
             ours.append(ObjectIdentifier(item))
             guard let chord = registry.menuChord(for: def.id), let want = MenuKeyAudit.expected(chord) else { continue }
             wants.append((item, want.key, want.modifiers, def.title))
@@ -317,6 +371,34 @@ final class MenuKeyKeeper {
                 want.item.keyEquivalent = want.key
                 want.item.keyEquivalentModifierMask = want.mods
                 note("'\(want.title)' had lost its key; put back")
+            }
+        }
+        keepSubtitles(in: bar, items: items)
+        keepFullScreenKey(in: bar, items: items)
+    }
+
+    /// View ▸ Enter Full Screen is the system's item, and macOS shows it with fn-F, a key Manifold never names. It shows
+    /// ⌃⌘F instead, the full-screen key Manifold always answers (`ShortcutCatalog`, `.fullScreen`'s fixed chord; docs/BUGS.md,
+    /// 0.9.6 UI polish item 43). The item's action is unchanged, so ⌃⌘F through the menu toggles full screen exactly as the
+    /// dispatcher's ⌃⌘F did. ⌘F, the registry's rebindable key, stays the dispatcher's.
+    private func keepFullScreenKey(in bar: NSMenu, items: (NSMenu) -> [NSMenuItem]) {
+        let mods: NSEvent.ModifierFlags = [.control, .command]
+        for item in items(bar) where item.action == #selector(NSWindow.toggleFullScreen(_:)) {
+            guard item.keyEquivalent != "f" || item.keyEquivalentModifierMask != mods else { continue }
+            item.keyEquivalent = "f"
+            item.keyEquivalentModifierMask = mods
+            note("Enter Full Screen shows ⌃⌘F")
+        }
+    }
+
+    /// The Color menu's display modes carry a second line (`DisplayTransformMode.menuSubtitle`, naming decision D6,
+    /// 2026-11-27). SwiftUI's menu items have no subtitle, so it is set here, on the same passes that keep the keys: a
+    /// rebuild that drops it gets it back. Set only when it differs, so the change notification it posts ends here.
+    private func keepSubtitles(in bar: NSMenu, items: (NSMenu) -> [NSMenuItem]) {
+        guard let color = bar.items.first(where: { $0.title == "Color" })?.submenu else { return }
+        for mode in DisplayTransformMode.allCases {
+            for item in items(color) where item.title == mode.menuTitle && item.subtitle != mode.menuSubtitle {
+                item.subtitle = mode.menuSubtitle
             }
         }
     }

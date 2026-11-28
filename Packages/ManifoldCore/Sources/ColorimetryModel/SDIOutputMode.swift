@@ -55,7 +55,7 @@ public enum SDIScaling: String, CaseIterable, Sendable {
     /// The stored value, or the default when absent or unrecognised.
     public static func stored(_ raw: String?) -> SDIScaling { raw.flatMap(Self.init(rawValue:)) ?? .default }
 
-    public var label: String { self == .fit ? "Fit to mode" : "1:1 pixels" }
+    public var label: String { self == .fit ? "Fit to mode" : "1:1 pixels (scale down only if larger)" }
 }
 
 /// Where the program audio goes while DeckLink output is on. The stored value is the STARTING value only
@@ -75,7 +75,7 @@ public enum DeckLinkAudioDestination: String, CaseIterable, Sendable {
     }
 
     /// The pickers' wording.
-    public var label: String { self == .sdi ? "SDI (follows video)" : "Computer" }
+    public var label: String { self == .sdi ? "SDI, with the picture" : "Computer" }
 
     /// The short name, for the tooltip and diagnostics.
     public var shortLabel: String { self == .sdi ? "SDI" : "Computer" }

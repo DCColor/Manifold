@@ -230,7 +230,7 @@ struct YRGBScopeView: View {
                 HStack(spacing: 4) {
                     // Y is weighted by the picture matrix, named here from the same feed-written code the waveform's
                     // header reads, so it changes with a LUT or an override exactly as the waveform's does.
-                    ScopeSlotHeader(name: "YRGB",
+                    ScopeSlotHeader(name: "YRGB PARADE",
                                     suffix: valueScopeHeaderSuffix(lead: "Y \(ycbcrMatrixLabel(model.sourceMatrixCode)) · RGB",
                                                                    active: activeScale, sdrScale: scopeScale,
                                                                    forced: verticalScale != .auto, note: model.headerNote),
@@ -257,7 +257,7 @@ struct YRGBScopeView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white.opacity(0.5))
-                    .help("Reset parades to color")
+                    .help("Reset parade colors")
                 }
                 .padding(.horizontal, 6)
                 .frame(height: scopeHeaderHeight)

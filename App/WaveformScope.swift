@@ -356,7 +356,7 @@ func resolveVerticalScale(override: ScopeVerticalScale, transferCode: Int?) -> A
 /// so it reads as an override, not an auto-detected one.
 func valueScopeHeaderSuffix(lead: String, active: ActiveVerticalScale,
                             sdrScale: ScopeScale, forced: Bool, note: String? = nil) -> String {
-    let star = forced ? "*" : ""
+    let star = forced ? " (set)" : ""
     let tail = note.map { " · \($0)" } ?? ""
     switch active {
     case .sdr: return " · \(lead) (\(sdrScale.headerTag))\(tail)"
