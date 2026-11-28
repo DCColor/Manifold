@@ -49,7 +49,7 @@ For more, see the Sync and Color Guide's *Quick answers*.
 | "Nothing answered at …" (SRT) | The sender isn't running, or a firewall is blocking it. Check the address and port. |
 | "Connected, but no video is arriving from the sender." | The connection works, but the sender isn't sending yet. |
 | "That stream is … — Manifold's SRT support is H.264 and HEVC only." | Set the sender to H.264 or HEVC. |
-| "The stream server refused the connection" (web stream) | The server turned Manifold away. Often the broadcast hasn't started; the message may include the server's reason. |
+| "The stream server refused the connection (HTTP …)." (web stream) | The server turned Manifold away. Often the broadcast hasn't started. When the server gave a reason, it follows in quotes, shortened. |
 | "Couldn't find a network route to the stream (it may be behind a firewall)." | Check your network and firewall. |
 | A message disappeared before you read it | Errors stay until you close them. Notices, such as a file playing without its audio, close after a few seconds; open the file again to see one again. |
 | Sound and picture are out of sync | Calibrate the stream. See *Live streams*. |

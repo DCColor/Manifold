@@ -82,7 +82,7 @@ Rec. 709 / Source Primaries Graticule**, **Vectorscope: 75% / 100% / Both Boxes*
 | Hold to compare macOS and Reference | C (hold) |
 | Hold to compare with Bypass | ⇧C (hold) |
 | Hold to compare with the LUT off | ⌥C (hold) |
-| Next Tag Override / Reset to File's Tags | none |
+| Next Tag Override / Reset to File's Tags (Color menu and Tags) | none |
 
 ### Audio
 

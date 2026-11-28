@@ -4,7 +4,8 @@ Manifold exports frames and markers. It doesn't export video clips.
 
 ### Save the frame on screen
 
-Press **⌥⌘E**, choose **File ▸ Export Frame…**, or click **Export Frame…** in the controls.
+Press **⌥⌘E**, choose **File ▸ Export Frame…**, or click **Export Frame…** in the controls. It works on a video file
+or a live stream.
 
 Manifold saves the frame straight away, with no dialog:
 
@@ -25,7 +26,8 @@ each clip's frames in a folder named after it.
 
 ### Share the frame on screen
 
-Press **⇧⌘E**, choose **File ▸ Share Frame…**, or click **Share Frame…** in the controls. Manifold makes a JPEG and
+Press **⇧⌘E**, choose **File ▸ Share Frame…**, or click **Share Frame…** in the controls (a video file or a live
+stream). Manifold makes a JPEG and
 opens the macOS share menu, so you can send it by Mail, Messages, AirDrop and so on.
 
 For an HDR picture the item reads **Share Frame (SDR)…**: the shared JPEG is converted to SDR, and its name ends in

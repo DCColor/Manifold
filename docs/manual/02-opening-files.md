@@ -46,7 +46,8 @@ on, the card and the sound go to your monitor too.
 
 Click **Inspector** in the controls, or press **⌘I** (**View ▸ Show/Hide Inspector**). The Inspector shows:
 
-- the file name, codec, size, frame rate and scan (progressive or interlaced);
+- the file name, in full (a long name wraps onto more lines), codec, size, frame rate and scan (progressive or
+  interlaced);
 - the start timecode, and where it came from when it isn't the file's timecode track;
 - the color the file says it is, and HDR information when the file has it;
 - each audio track, and any captions or chapters in the file;
@@ -85,7 +86,7 @@ subtitles** and the position: **Title-safe** or **Bottom edge**.
 - **View ▸ 100%** (⌘1), **75%** (⌘2), **50%** (⌘3) and **25%** (⌘4) size the picture against the file's own size.
   **Fit to Screen** (⌘0) makes it as large as the screen allows. Drag the window's edge for any other size.
 - **Press ⌘F** to enter or leave full screen.
-- **Press N** to show or hide the file name over the picture (**View ▸ Show/Hide File Name**). It also shows Bypass, a tag correction and a range setting when one is on.
+- **Press N** to show or hide the file name over the picture (**View ▸ Show/Hide File Name**). It also shows Bypass, a tag correction and a range setting when one is on. A name too long for the window is shortened in the middle.
 
 To choose the size new windows open at, choose **Manifold ▸ Settings…**, click **General** and set **Window size for
 new windows**.

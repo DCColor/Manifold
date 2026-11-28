@@ -16,8 +16,9 @@ A live stream has no scrubber, and markers aren't available on it.
    Stream…**.
 2. Choose **NDI**, then the source.
 
-The antenna turns green while a source is connected, and the NDI menu puts a checkmark beside it. "Searching for NDI
-sources…" means Manifold is still looking.
+While Manifold connects, the antenna pulses and its tooltip says "Connecting to …" with the source's name. It turns
+green once the source is connected, and the NDI menu puts a checkmark beside it. "Searching for NDI sources…" means
+Manifold is still looking.
 
 The first time, macOS asks whether Manifold can find devices on your local network. Click **Allow**: Manifold uses it
 only to find NDI sources. If you clicked Don't Allow, turn it on in macOS System Settings ▸ Privacy & Security ▸
@@ -36,7 +37,9 @@ Local Network.
 4. For an SRT stream with a passphrase, type it in **Passphrase**.
 5. Click **Save**, then **Connect**.
 
-Saved streams then appear in the Streaming menu, under **Streams**. Click one to connect.
+Saved streams then appear in the Streaming menu, under **Streams**. Click one to connect. While it connects, the
+antenna pulses and its tooltip says "Connecting to …" with the stream's name; it turns green once the connection is
+made.
 
 **To connect once without saving,** paste the address under **Connect without saving** and click **Paste & Connect**.
 
@@ -52,6 +55,8 @@ An orange message at the top of the picture says what went wrong, for example:
 - "Nothing answered at …" (SRT): the sender isn't running, or a firewall is in the way. Check the address and port,
   and that the sender is on.
 - "Connected, but no video is arriving from the sender.": the connection works, but the sender isn't sending yet.
+- "The stream server refused the connection (HTTP …)." (web stream): the server turned Manifold away. When the server
+  gave a reason, it follows in quotes, shortened, for example “Live broadcast not started yet.”
 - "The stream stopped sending video (the broadcaster may have ended it).": the stream ended at the sender.
 - "That stream is not playing yet — it connected, but no video has started after … seconds. Still trying." (HLS).
 - "No NDI source found on this network within 5 seconds." or "Couldn't connect to “…”." (NDI): check that the NDI

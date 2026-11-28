@@ -21,6 +21,8 @@ your first file.
 
 Manifold runs as a free trial for 7 days from the first time you open it. To see how many days are left, choose
 **Manifold ▸ Settings…** (⌘,) and click **License**. The status reads, for example, "Trial — 5 days left".
+When 3 days or fewer are left, a notice at the top of a window says so each time you open Manifold, for example
+"3 days left in your trial." It closes by itself after a few seconds.
 
 **To activate a license:**
 

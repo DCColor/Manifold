@@ -6,7 +6,8 @@ Click **Show or hide scopes** in the controls, or press **⌥⌘S** (**View ▸ 
 below the picture, and the window grows to make room.
 
 - **To change a scope,** click its name at the top left and choose another.
-- **To make the scopes taller or shorter,** drag the line along the top of the strip.
+- **To make the scopes taller or shorter,** drag the line along the top of the strip. In full screen too: there the
+  picture gets smaller to make room, since the window can't grow.
 
 Each window keeps its own scopes. A new window starts with the scopes you set up last.
 

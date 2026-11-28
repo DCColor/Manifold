@@ -46,7 +46,8 @@ Choose **Color ▸ Show/Hide Transform Chain** (⌥⌘4), or **Show Transform Ch
 - **Source:** the file's color, and whether the file stated it or Manifold assumed it.
 - **Transform:** the display mode and what it's doing.
 - **Display:** your display, from its macOS color profile.
-- **Headroom:** for HDR, how much extra brightness the display can show.
+- **Headroom:** for HDR, how much brighter than SDR white the display can show, for example "HDR headroom 8.97×
+  (all of it)".
 
 A correction or LUT is marked in the panel and in the window title, so a changed picture is never silent.
 *Detail: the guide's "Reading the transform chain".*
@@ -70,7 +71,9 @@ These settings are remembered for each display, and they apply to SDR in Referen
 ### HDR
 
 PQ and HLG files show as HDR when HDR is on for the display in macOS. The **Headroom** line in the Transform chain
-panel says how much brightness the display offers.
+panel says how much brightness the display offers, in multiples of SDR white: "8.97×" is 8.97 times as bright.
+"(all of it)" means Manifold is using everything the display offers; "available, none in use" means HDR is on for the
+display but nothing on screen is using it yet; "display is in SDR mode" means HDR is off for that display.
 
 - In **macOS** mode, macOS fits the HDR picture to your display, as QuickTime does.
 - In **Reference**, HDR is shown at its true brightness, and anything brighter than the display can show clips.
@@ -87,7 +90,8 @@ If a file or stream says the wrong color, or none, correct it from **Tags** in t
    **Rec.2020 SDR**.
 
 **Auto** goes back to what the file says. **Reset to File's Tags** (or **Reset to Stream's Tags**) does the same, in
-the control and in the Color menu.
+the control and in the Color menu. **Next Tag Override**, in both places too, steps to the next correction in the
+list, and back to Auto after the last.
 The control and the window title show when a correction is on, and the scopes and SDI output follow it.
 
 If a file's video range is wrong, set **Range** in the Inspector (⌘I) to **Full** or **Legal**. While it isn't
