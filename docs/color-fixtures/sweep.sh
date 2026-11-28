@@ -3,7 +3,7 @@
 # ⚠️⚠️ AIR ONLY. NEVER RUN THIS ON THE MAC STUDIO (docs/BUGS.md, "Scripts", 2026-10-31). ⚠️⚠️
 # `pkill -f "MacOS/Manifold"` matches EVERY Manifold process by path, the installed /Applications/Manifold.app
 # included, and `open -a "$APP"` addresses the app by path. Both break CLAUDE.md's launch/quit rules (launch by
-# binary, quit by PID through scripts/manifold-proc.sh); on the Studio the installed copy rewrites licence
+# binary, quit by PID through scripts/manifold-proc.sh); on the Studio the installed copy rewrites license
 # values in the real plist when it is launched or quit that way.
 #
 # EXPERIMENT 3 sweep — for each candidate layer destination: launch Manifold on the wedge,

@@ -131,7 +131,7 @@ BUGS.md:695-699 and 750-756 record the still-open question of whether a public b
 | Esc / Return | Diagnostics export: Cancel / Export… (Return only with a connection) | `DiagnosticsExport.swift:1131`, `:1139` |
 | Return | Get Flip sheet: Get Flip | `ContentView.swift:989` |
 | Return / Esc | Calibration: Start, Apply (and Save), Cancel, Close | `Live/CalibrationMode.swift:563`, `:570`, `:574`, `:582`, `:587` |
-| Return | Licence: Activate | `LicenseManager.swift:1128` |
+| Return | License: Activate | `LicenseManager.swift:1128` |
 
 ### 1.8 Actions with no key that the plan expects one for
 
@@ -462,7 +462,7 @@ It should not offer import, export, or multiple presets in 1.0: no user need for
   - The control set's exports.
 - Apps are quit only by a Quit event to the bundle path. No screenshots.
 - Defaults are read before any write, and every write sequence stops at its first failure. The snapshot leaves
-  out licence keys, which are compared by presence only and never restored.
+  out license keys, which are compared by presence only and never restored.
 
 | # | Prediction | Pass band | Fail |
 |---|---|---|---|
@@ -562,7 +562,7 @@ needed four, all small.
 | P3 | In-process: D holds and releases; ⇧D compares against Bypass; repeats are swallowed. ⌘D, ⌥D, ⌃D, ⇧⌘D, ⌥⇧D, ⌃⌥D, ⌃⇧D and ⌥⌘D are neither consumed nor held (⌃⌥D reaches only the SRT hook, and only with the predicate on). With a text view first responder everything passes through. A missed key-up and a reset (window not key) both end the hold. "Nothing to compare" lets the key go on | **PASS** (in-process; by hand in §6) |
 | P4 | In-process: K held + J/L steps −1 / +1 per press, with no shuttle. K held + L held past 300 ms plays at +½×, and releasing L stops it; the same with J at −½×; releasing K stops it too. J, K and L alone keep HEAD's behaviour, including a held L ramping | **PASS** (in-process; by hand in §6) |
 | P5 | `manifold.shortcuts` written once (read first) with inspector → ⌥⌘I. Two launches both show View ▸ Show/Hide Inspector ⌥⌘I, and the log says "some customised". In the Keyboard Shortcuts window, Reset All… then the sheet's Reset All (Accessibility clicks) changed the menu to ⌘I in the same run, with no relaunch, and removed the key. In-process: sorted-key JSON is byte-exact, unknown IDs and top-level keys survive, an unreadable value is never overwritten, and an override equal to the default is not stored | **PASS** |
-| P6 | No launch without overrides wrote `manifold.shortcuts`. After the runs, the only added keys were `NSWindow Frame …` (19 in all, one of them `keyboard-shortcuts`), with none changed or removed. Each was read, then deleted, stopping at the first failure. The domain is dictionary-equal to the snapshot (1525 keys, plus the 3 licence keys, checked for presence only and never restored), and `streamBookmarks` is still `4466c076` | **PASS** |
+| P6 | No launch without overrides wrote `manifold.shortcuts`. After the runs, the only added keys were `NSWindow Frame …` (19 in all, one of them `keyboard-shortcuts`), with none changed or removed. Each was read, then deleted, stopping at the first failure. The domain is dictionary-equal to the snapshot (1525 keys, plus the 3 license keys, checked for presence only and never restored), and `streamBookmarks` is still `4466c076` | **PASS** |
 | P7 | The 20-file control set (I1's `control.txt`), exported through the Export frame button: `.rgba16f`, `.v210` and `.v210.json` are byte-identical, and PNG pixels and ICC are equal, **20 / 20**. The window was not measured (no screenshots). No renderer, shader, export or DeckLink file is in the diff (`git diff --stat`). The tagged log lines are identical except HEAD's `[COMPARE] … monitor installed` replaced by `[SHORTCUTS] key monitor installed`, and one more `[CHAIN] Source: no source` at startup, a launch-timing line I1 also saw between HEAD runs | **PASS** |
 | P8 | `swift test`: **588 / 588** (HEAD 540, plus 48 in `ShortcutRegistryTests`: 26 registry, 22 dispatch) | **PASS** |
 | P9 | Profile warnings (paths and line numbers normalised, from a clean rebuild of the app target): HEAD 12 distinct, tree 11, every one in HEAD's set. The one that went is HEAD's `HoldToCompare.swift` "`NSEvent` to `Sendable`", because its monitor was removed | **PASS** |
@@ -634,7 +634,7 @@ test is added anyway.
   set's exports.
 - Every app run sets `MANIFOLD_DEBUG_STREAMS_SANDBOX`, so a P2 build never reads or migrates the real
   `streamBookmarks` (BUGS.md, P2: the real migration is attended).
-- Defaults are compared with a snapshot taken at 13:30 (1535 keys; the 3 licence keys by presence only, never
+- Defaults are compared with a snapshot taken at 13:30 (1535 keys; the 3 license keys by presence only, never
   restored; `streamBookmarks` hash `ac81278e`).
 
 | # | Prediction | Pass band | Fail |
@@ -683,7 +683,7 @@ inside the band. About 40 min of it went to item 2's measurement and to the wind
 | Q8 | Manifold ▸ Keyboard Shortcuts… opens the window; Help's remains. The legend reads back by Accessibility. **First build: the item sat above Settings…**, because a `CommandGroup(after: .appSettings)` lands there. Moved to `before: .systemServices`; it now follows Settings… and its separator. The "Customized" tooltip on the dot was not read: no row was customised in the app | **PASS** after one fix |
 | Q9 | Accessibility frames with the pointer over the speaker. **HEAD: the play button and the speaker move 38 pt left** (439 → 401, 489 → 451). **Tree: 0 pt**, also with the pointer 40 pt into the fader | **PASS**. The cause: the row is centred, and the inserted fader shifted it out from under the pointer |
 | Q10 | No renderer change except the export's `diagnosticSet` parameter. `.v210` and `.rgba16f` byte-identical (Q2) | **PASS** |
-| Q11 | No `manifold.shortcuts` written. **One key changed by this run: `manifold.raster.size`**, from `auto` to `50`, by item 2's measurement clicking View ▸ 50% on HEAD. It was read and restored to `auto`. The 14 `NSWindow Frame …` keys the launches added were each read, then deleted. The domain is then dictionary-equal to the 13:30 snapshot: 1535 keys, the 3 licence keys present (presence only), `streamBookmarks` `ac81278e`. No sandbox domain is left | **PASS** after restoring the one key |
+| Q11 | No `manifold.shortcuts` written. **One key changed by this run: `manifold.raster.size`**, from `auto` to `50`, by item 2's measurement clicking View ▸ 50% on HEAD. It was read and restored to `auto`. The 14 `NSWindow Frame …` keys the launches added were each read, then deleted. The domain is then dictionary-equal to the 13:30 snapshot: 1535 keys, the 3 license keys present (presence only), `streamBookmarks` `ac81278e`. No sandbox domain is left | **PASS** after restoring the one key |
 | Q12 | `swift test`: **611 / 611** (HEAD 602 / 602, plus 9 new) | **PASS** |
 | Q13 | Profile warnings from clean builds, paths and lines normalised: HEAD 12, tree 12, the same set | **PASS** |
 

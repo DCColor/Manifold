@@ -21,12 +21,12 @@ Line references are to `106e1d6` unless they name P1 code.
 ## Decisions (Robbie, 2026-10-19)
 
 Stage **P1**:
-1. **Licence data.** Stop writing `license.email` and `license.machineId` to UserDefaults; keep
+1. **License data.** Stop writing `license.email` and `license.machineId` to UserDefaults; keep
    them only in the Keychain `activationRecord`; the UI reads them from there. On the first launch
    after upgrade, delete the plist values ONLY after the record has been read back and matches. If
    the Keychain read fails, leave the plist values alone and log it. A licensed user must never be
    de-activated by this migration.
-2. **Disk cache.** The licence, updater, WHEP and HLS-playlist requests use a URLSession with no URL
+2. **Disk cache.** The license, updater, WHEP and HLS-playlist requests use a URLSession with no URL
    cache. Report separately what AVFoundation's HLS playback caches, without changing AVPlayer. On
    upgrade, delete `~/Library/Caches/com.graviton.manifold/Cache.db`.
 3. **Logs.** Redact at the source and keep NSLog (diagnostics and the test harness depend on it):
@@ -97,7 +97,7 @@ per bookmark keyed by its stable id; deleting a bookmark deletes its item, renam
 
 **Export/Import Settings (0.9.2; decided by Robbie, 2026-11-03; `docs/SETTINGS_EXPORT_PLAN.md` §7):**
 - **A file of shortcuts only** is plain JSON. It holds shortcut bindings and the app version, build and export date. No stream
-  address, passphrase or licence data.
+  address, passphrase or license data.
 - **A file with streams** reverses "stream secrets never leave the Keychain" for one user action. It holds their names, URLs and SRT
   passphrases, encrypted (AES-GCM-256, key by PBKDF2-HMAC-SHA256, 1,000,000 iterations) with a password the user chooses, of at least 12
   characters. There is never a plaintext file with stream URLs or passphrases.
@@ -129,8 +129,8 @@ entitlement is `com.apple.security.cs.disable-library-validation` (`App/Manifold
 | Key | Holds | Status |
 |---|---|---|
 | `license.email` | The licensee's full email (0.8.4 `LicenseManager.swift:783`) | **P1**: no longer written; removed once the Keychain record reads back equal (`LicenseRecordSync.swift`) |
-| `license.machineId` | Random UUID sent to the licence server (0.8.4 `:610`, `:660-661`) | **P1**: as above |
-| `license.activated`, `license.validated`, `license.type` | Licence state flags and type | **License client port**: no longer written or read; left in place (0.8.4 does not need them) |
+| `license.machineId` | Random UUID sent to the license server (0.8.4 `:610`, `:660-661`) | **P1**: as above |
+| `license.activated`, `license.validated`, `license.type` | License state flags and type | **License client port**: no longer written or read; left in place (0.8.4 does not need them) |
 | `streamBookmarks` | Saved streams: `id`, `name`, `type`, `audioOffsetMs`, `colorOverride`, and since P2 `address` (`scheme://host[:port]`) and `secretRef` (the Keychain account), with `urlString` empty (`StreamBookmark.swift`). Before P2 `urlString` held the whole URL but the passphrase, and a WHEP/HLS path or SRT `streamid` can be the stream key | **P2**: the URL and passphrase are in the Keychain; existing entries move at launch, each only after its item reads back equal |
 | `recentLUTs` | Up to 10 entries: absolute `.cube` path, plain bookmark, output space (`InterpretationLUT.swift:286`, `:300`) | unchanged |
 | `exportFolderBookmark` | Security-scoped bookmark to the chosen export folder (`Preferences.swift:195`, `:204`) | unchanged |
@@ -179,7 +179,7 @@ About 70 other keys hold UI preferences only. AppKit adds `NSWindow Frame …` k
 - **`~/Library/Caches/com.graviton.manifold/Cache.db` (+ `-wal`, `-shm`, `fsCachedData`)** was the
   `URLSession.shared` disk cache.
   - At the audit it held:
-    - the licence server's `/activate` and `/validate` replies (the activate reply likely carries
+    - the license server's `/activate` and `/validate` replies (the activate reply likely carries
       the email);
     - the update manifest;
     - WHEP request URLs, whose paths are stream keys.
@@ -385,7 +385,7 @@ installed copies do until they update.
 | Recent files | `…/ApplicationRecentDocuments/com.graviton.manifold.sfl*` |
 | Settings backups (0.9.2) | `~/Library/Application Support/com.graviton.manifold/Settings Backups/` |
 | The user's exports | Export folder, Desktop, wherever diagnostics were saved |
-| Machine registration | On the licence server |
+| Machine registration | On the license server |
 
 ---
 
@@ -447,4 +447,4 @@ installed copies do until they update.
    client (Graviton-Releases `shared/SHARED_README.md:198`). Manifold's trial is its own: 7 days,
    Keychain-backed, voided by a clock rollback, and applied only while the client says unlicensed
    (`App/LicenseManager.swift:16-18`, `:56-57`).
-7. What the licence server logs, and for how long.
+7. What the license server logs, and for how long.

@@ -5,7 +5,8 @@ American English everywhere a user reads (Robbie, 2026-11-15): menus, buttons, t
 alerts, banners, Settings, accessibility labels, export summaries and the files Manifold writes.
 
 Scans STRING LITERALS (never comments) in App/ and Packages/*/Sources, Swift and Objective-C, and the
-release notes as text: RELEASE_NOTES.md and docs/release-notes/*.md (Robbie, 2026-11-16).
+release notes as text: RELEASE_NOTES.md and docs/release-notes/*.md (Robbie, 2026-11-16), and the user
+manual's chapters, docs/manual/*.md except OUTLINE.md (Robbie, 2026-11-27).
 Also flags day-month-year dates ("16 November 2026"): write "November 16, 2026".
 Not scanned, on purpose:
   * a literal inside a log call (NSLog, print, os_log, Logger methods, fatalError, assert…), or
@@ -245,13 +246,18 @@ def self_check():
 
 
 def note_findings(root):
-    """The release notes, line by line, as text (they are all user-facing)."""
+    """The release notes and the user manual's chapters, line by line, as text (they are all user-facing)."""
     paths = [os.path.join(root, "RELEASE_NOTES.md")]
     rn = os.path.join(root, "docs", "release-notes")
     if os.path.isdir(rn):
         # *-changelog.md is skipped: changelogs copy commit titles word for word, and those can't change.
         paths += [os.path.join(rn, f) for f in sorted(os.listdir(rn))
                   if f.endswith(".md") and not f.endswith("-changelog.md")]
+    manual = os.path.join(root, "docs", "manual")
+    if os.path.isdir(manual):
+        # The user manual's chapters (Robbie, 2026-11-27). OUTLINE.md is a planning document that quotes code, so it is skipped.
+        paths += [os.path.join(manual, f) for f in sorted(os.listdir(manual))
+                  if f.endswith(".md") and f != "OUTLINE.md"]
     for path in paths:
         if not os.path.isfile(path):
             continue

@@ -669,7 +669,7 @@ problem wearing a loss costume; Run C cannot.
 **Smaller item, now weaker:** the 400 ms default may be larger than the wired link in Runs A/B
 needed, given the measured absence of jitter there. But Run D carried 370 ms of deliberate
 latency on the Wi-Fi path and used it, and Run C's cushion was being consumed by decode-error
-recovery rather than sitting idle. Two runs on one link are not licence to lower a default that
+recovery rather than sitting idle. Two runs on one link are not license to lower a default that
 other links are visibly spending.
 
 ---

@@ -194,7 +194,7 @@ Reading:
 | H0.11 | Phase against the 1 Hz write | **No shared phase** (`:653`) | |
 | H0.12 | Needs sound | **UNKNOWN**: only 0.93 h of video without sound since the watchdog (`rc-noaudio-sdi-1`), 0 stalls | |
 | H0.13 | Needs the DeckLink output | **UNKNOWN**: 0 in 2.51 h output off; about 15 h output off with none would be needed (`:1108`) | |
-| H0.14 | Licence Keychain prompts | **Nothing ties them**: no SecurityAgent line near the freezes (`:655`) | |
+| H0.14 | License Keychain prompts | **Nothing ties them**: no SecurityAgent line near the freezes (`:655`) | |
 | H0.15 | A transient that clears by itself | **Ruled out**: 0 near-misses in 53.9 h | |
 
 ---

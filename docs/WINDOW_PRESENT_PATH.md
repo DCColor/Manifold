@@ -178,7 +178,7 @@ From `win.py` over the `[PACER] desktop` lines with rendered > 0. Misses are fro
 | Display sleep | UNKNOWN for the nights. `pmset -g` today: `displaysleep 0`. No display-off event in `pmset -g log` for any of the nights (assertions only) | the same | the same | — | No evidence |
 | Slots | yrgb→Waveform \| Meters \| Meters | Waveform \| Parade \| Markers | Waveform \| Parade \| Markers | Markers + 2 UNKNOWN | **No.** N2 and N3 are the same |
 | Zoom | running, no windows | closed | closed | UNKNOWN | **No.** N3 was closed and bad |
-| Signing | ad-hoc, licence prompt denied | the same | the same | Developer ID | No (N1–N3 the same) |
+| Signing | ad-hoc, license prompt denied | the same | the same | Developer ID | No (N1–N3 the same) |
 | Binary | `.build-pullphase` (3f05914) | the same | `.build-pacerphase` (fb553d3 + C) | `.build-rc094` | No (N1 = N2) |
 | WindowServer `ASEProcessing` lines (unified log, read today) | 0 in 22:20–23:10 | 0 in 00:09–01:43 | about 2,400–3,600 a minute through every video block, 0 in the audio-only block (02:56–03:17) | not read | No (N1 = N2), but see §2.4 |
 | `pmset -g log` assertions in the 59.94 hours | coreaudiod contexts 357 released; otherwise Manifold, AirPlay, Claude, cloudd | 54; the same others | 75; the same others | not read | No (inference: N1's coreaudiod churn is Zoom) |
@@ -196,7 +196,7 @@ From `win.py` over the `[PACER] desktop` lines with rendered > 0. Misses are fro
 - Ruled out as the sole cause: time of night, uptime, slots, Zoom, signing, the display mode, the binary, option C. CONFIRMED by the
   table.
 - **One pattern fits all four nights: how many ad-hoc launches came before the 59.94 block that night.** Each such launch raises the
-  licence keychain prompt twice, and `rc-soak.py` denies it by accessibility clicks (§12.1). The signed 0.9.4 build had none, and
+  license keychain prompt twice, and `rc-soak.py` denies it by accessibility clicks (§12.1). The signed 0.9.4 build had none, and
   its 5th block was good. This is a hypothesis with no mechanism shown. UNKNOWN (inference: state left in WindowServer by
   SecurityAgent windows, or by the earlier processes, which raises compositor latency). The test is in §4.4.
 - Whatever the state is, the gate turns it into SDI damage through one path: handlers that return late make every present run on a

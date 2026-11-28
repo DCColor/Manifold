@@ -92,7 +92,7 @@ own rows when that pane is chosen.
 | Color & Display | **Scopes & Guides**: Scopes, Framing guides, Broadcast safe zones (since 2026-10-29: Scopes, Broadcast safe zones, Frame guide, Social safe zones, the guides popover's order and names; BUGS.md) | No colour-management setting is app-wide: colour is per window in the Color menu by design. A tab called Color & Display would promise settings that are not there |
 | DeckLink Output | **DeckLink Output**: device status, output settings | The DeckLink status row moved here from I/O and Runtimes |
 | Streams | **Sources**: NDI Runtime, Pro Video Formats | No stream setting is app-wide (bookmarks are their own sheet, overrides are per bookmark). What is left is what makes sources available |
-| Privacy & Licence | **License** | No privacy setting is stored (Include file names is per export, by design). "License": the app's strings are American English (BUGS.md pre-ship checklist) |
+| Privacy & License | **License** | No privacy setting is stored (Include file names is per export, by design). "License": the app's strings are American English (BUGS.md pre-ship checklist) |
 | Advanced | **Advanced**, debug gate only | Read-only (§1). Same predicate as Keyboard Shortcuts' debug section (`ShortcutDebugGate.showsDebugSection`) |
 
 Spelling: the brief says "Highlight colour" and "Playhead colour"; the UI says **color** (American English, as above).
@@ -164,7 +164,7 @@ the pane last shown in this launch. Manifold ▸ License… selects License, the
 | S8 | 24-file control set, HEAD vs tree: `.rgba16f`, `.v210`, `.v210.json`, PNG, display read-back and three scope images byte-identical; also with `-manifold.highlightColor 00A0FF` on 4 files | every byte | any byte |
 | S9 | SDI loop, paused, 2 interlaced fixtures in Weave: read-back = HEAD's, every received frame = the read-back, late = 0 dropped = 0 | 0 different | any |
 | G | `swift test` 642 + new, all pass; the same 12 compiler warnings as HEAD | as stated | otherwise |
-| D | After the runs the domain is dictionary-equal to the snapshot; licence keys present (3), never written; streamBookmarks unchanged | equal | any |
+| D | After the runs the domain is dictionary-equal to the snapshot; license keys present (3), never written; streamBookmarks unchanged | equal | any |
 
 Estimate: about 3 h (band 2–4½ h).
 
@@ -187,7 +187,7 @@ read-back and scope dumps. No keystrokes; every quit a Quit event to the built a
 | S8 | 216 / 216 files byte-identical, HEAD vs tree (24 each of PNG, `.rgba16f`, `.v210`, `.v210.json`; 48 display read-back files; 72 scope images). With `-manifold.highlightColor 00A0FF`, 36 / 36 identical to HEAD on 4 files | **PASS** |
 | S9 | TFF and BFF fixtures: read-backs byte-identical to HEAD's (4 / 4 files); 130 and 131 received frames = the read-back, 0 different, on both builds; late = 0 dropped = 0; probe read SDI after | **PASS** |
 | G | `swift test` **647 / 647** (642 + 5). Clean Profile builds: the same warnings as HEAD's, 13 locations by line and column (the I4 record's 12 counted differently) | **PASS** |
-| D | 17 frame keys added and the Settings window's frame key changed by the runs: each read and stashed (`stash/`), the added deleted, the changed written back to the snapshot's value, one `set -e` sequence. Domain then dictionary-equal to the snapshot (1 626 keys); licence keys present (3), values never read, never written; streamBookmarks `18c6da5d…` unchanged | **PASS** |
+| D | 17 frame keys added and the Settings window's frame key changed by the runs: each read and stashed (`stash/`), the added deleted, the changed written back to the snapshot's value, one `set -e` sequence. Domain then dictionary-equal to the snapshot (1 626 keys); license keys present (3), values never read, never written; streamBookmarks `18c6da5d…` unchanged | **PASS** |
 
 The final build differs from the measured one by comments only (`SettingsView.swift` header, `ManifoldApp.swift`); it was
 rebuilt and the Settings run repeated on it (same sizes, same panes).
@@ -286,7 +286,7 @@ and Accessibility label now read "Customized: differs from Manifold's default."
 | P | Control set, HEAD `2a1b090` vs tree: **216 / 216** files byte-identical (24 each of PNG, `.rgba16f`, `.v210`, `.v210.json`; 48 display read-back files; 72 scope images); the app in light appearance on 4 files: **36 / 36** identical to HEAD | **PASS** |
 | S | SDI loop, paused, TFF and BFF fixtures in Weave: read-backs byte-identical to HEAD's (4 / 4 files); 129 and 128 received frames = the read-back, 0 different (HEAD 130 and 127, 0 different); late = 0 dropped = 0; probe read SDI after every capture | **PASS** |
 | G | `swift test` **654 / 654** (647 + 7: 6 audit, 1 dispatch). Clean Profile build: the same 13 warning locations as HEAD's (`WindowSizer.swift` is unchanged from HEAD; a stray blank line left by the first item-3 attempt was reverted, which moved two of its warnings by one line in the first count) | **PASS** |
-| D | My menu clicks wrote `showTray` and `manifold.raster.size` (window state, last writer wins), and the runs added 55 window-frame keys and changed 2: each read and stashed, the two keys and the changed frame keys written back to the snapshot's values, the added frame keys deleted, one `set -e` sequence. Domain then dictionary-equal to the snapshot (1 626 keys); licence keys present (3), never read or written; streamBookmarks `18c6da5d…` unchanged | **PASS** |
+| D | My menu clicks wrote `showTray` and `manifold.raster.size` (window state, last writer wins), and the runs added 55 window-frame keys and changed 2: each read and stashed, the two keys and the changed frame keys written back to the snapshot's values, the added frame keys deleted, one `set -e` sequence. Domain then dictionary-equal to the snapshot (1 626 keys); license keys present (3), never read or written; streamBookmarks `18c6da5d…` unchanged | **PASS** |
 
 **DEBUG hooks left in** (both off unless their environment variable is set): `MANIFOLD_MENU_AUDIT=1` (the menu-bar audit
 every 3 s) and `MANIFOLD_DEBUG_APPEARANCE=1` (`App/AppearanceProbe.swift`). The two temporary diagnosis probes (the View

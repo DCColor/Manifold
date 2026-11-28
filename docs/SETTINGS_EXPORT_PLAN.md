@@ -108,7 +108,7 @@ models (`LiveAudioOffset.swift:139-148`, `LiveColorOverride.swift:181-183`).
 | DeckLink per machine | `.enableOnLaunch`, `.audioTrimSeconds`, `.manualOutputMode` (`DeckLinkService.swift:70`, `:525`, `:610`), `.audioDestination` (`SDIOutputMode.swift`, `DeckLinkAudioDestination.defaultsKey`) | **Never** | Tied to one card and signal path. Starting a broadcast output because of an imported file is the wrong surprise |
 | Per-display calibration | `displayCalibrations` (`DisplayCalibrationStore.swift:35`) | **Out** | See below |
 | Machine-bound paths | `exportFolderBookmark` (`Preferences.swift:196`), `recentLUTs` (`RecentLUTs.swift:31`) | **Never** | Bookmarks to this Mac's paths |
-| Licence | Keychain and `license.*` keys | **Never** | Brief, and `PRIVACY_AUDIT.md:23-27` |
+| License | Keychain and `license.*` keys | **Never** | Brief, and `PRIVACY_AUDIT.md:23-27` |
 | Debug and session state | `manifold.debugMenu`, `manifold.captureLiveAudioWAV`, `playbackVolume`, window frames | **Never** | Not settings a person chose to carry |
 
 **Per-display calibration on another Mac.** The key is vendor-model-serial, and the entry says what one physical display
@@ -368,8 +368,8 @@ when it would delete a stream, in its own words because the file can bring them 
 
 ### 4.5 What import never touches
 
-The licence, and any existing stream or its Keychain item. Import writes only through `ShortcutRegistry.applyImport` and, later,
-`StreamBookmarkStore.add`. `KeychainStore.license` is not reachable from the new target. A6 checks licence-related keys around an
+The license, and any existing stream or its Keychain item. Import writes only through `ShortcutRegistry.applyImport` and, later,
+`StreamBookmarkStore.add`. `KeychainStore.license` is not reachable from the new target. A6 checks license-related keys around an
 import by presence only.
 
 ---
@@ -390,7 +390,7 @@ before anything retires a stream, and a drop at the top of the picture's `.dropD
 - SwiftUI makes a new window for an opened file. `DeckRegistry.previewSettingsFile` shows the preview on another window if one is free,
   even one that is playing, and closes the new one.
 - One import at a time, across every window: a second file is declined with a beep, and the window showing the import comes forward.
-- Nothing opens while the licence gate is up, because the sheet would sit on top of it.
+- Nothing opens while the license gate is up, because the sheet would sit on top of it.
 
 ---
 
@@ -496,7 +496,7 @@ Both files decrypted in Python, with entries and header counts correct and no st
 payload and a changed header gave the one message; cut JSON was refused before the prompt. The preview showed Added, Renamed
 (different URL, passphrase differs, could not compare), Already here and Not imported. Undo returned the list to the four seeded streams.
 Into an empty sandbox: 4 added, a repeat said Already here (4), all four dial URLs matched by hash, and no stream prompt appeared. The
-real `streamBookmarks`, the 8 real stream items and the licence key names were unchanged by hash and name.
+real `streamBookmarks`, the 8 real stream items and the license key names were unchanged by hash and name.
 
 **Limit:** with fake URLs, step 6's real connection did not run in this pass. A connect to a fake host read its item with no prompt and
 failed at DNS, as expected. The Studio-to-Air round trip connected to a real stream, 2026-11-05 (below). No run against local OBS SRT and
@@ -510,7 +510,7 @@ The Air, signed build (A6):
 10. ~~Run the PBKDF2 timing probe.~~ **Not needed:** the count is frozen at 1,000,000 (§2.5).
 11. Export on the Studio, import on the Air, and the reverse. Streams connect with nothing asked.
 12. Confirm a signed build reads its own items without a prompt.
-13. `.code` nudge binding and the Fn warning on the Air's keyboard. Licence unaffected on both, by presence only.
+13. `.code` nudge binding and the Fn warning on the Air's keyboard. License unaffected on both, by presence only.
 
 Result, step 11, 2026-11-05 (Robbie, attended): passed. Streams exported with a password on one Mac, imported on the other, and connected
 to a real stream with no URL, passphrase or Keychain prompt. This also gives the real connection the sandbox pass couldn't (step 6).

@@ -902,10 +902,10 @@ during the ms6 block's launch.
   are UNKNOWN.** No log line names slot kinds, `[SCOPE-PERF]` was off on both nights (`App/ScopePerf.swift:19` needs
   `MANIFOLD_SCOPE_PERF=1`), and no stash of the keys exists under `~/Code/_scratch` or `docs/`.
 
-**Signing and licence: a second rig difference, not in the hypothesis.** CONFIRMED:
+**Signing and license: a second rig difference, not in the hypothesis.** CONFIRMED:
 - The 0.9.4 candidate (`.build-rc094`) is Developer ID signed (TeamIdentifier `8UQ7MDM87B`); the Stage 1 candidate is ad-hoc, built with
   `CODE_SIGNING_ALLOWED=NO` (§11.6).
-- Every Stage 1 launch: the licence keychain read took 7.2 s and returned −128, `[LICENSE] state: KEYCHAIN UNREADABLE`, twice per launch
+- Every Stage 1 launch: the license keychain read took 7.2 s and returned −128, `[LICENSE] state: KEYCHAIN UNREADABLE`, twice per launch
   (the second 20 s into the first Play, in every block; no missed deadline within 40 s of it). `rc-soak.py` denies that prompt (`:53-57`) at launch and every
   30 s while SecurityAgent runs (`:196`). Use is still permitted (`App/LicenseManager.swift:530`). 0.9.4: `LICENSED (Standard)` in 0.46 s.
 - Whether SecurityAgent stayed alive during the blocks: UNKNOWN (not running at 23:36).
@@ -1121,7 +1121,7 @@ exit, and no zoom.us process was running at setup or before any block. **The tim
 | | Night 1 (§12) | Night 2 |
 |---|---|---|
 | Slots | yrgb (→ Waveform) \| meters \| meters, no Markers (§12.1) | **Waveform \| Parade \| Markers**, set by §12.7's sequence; the earlier values stashed in `prefs-stash-20261116-235904.txt` and restored at exit (`soak.out`: "slots restored: yrgb \| meters \| meters", re-read afterwards) |
-| Signing | ad-hoc, licence prompt denied | ad-hoc, unchanged (CONTROL is the same binary) |
+| Signing | ad-hoc, license prompt denied | ad-hoc, unchanged (CONTROL is the same binary) |
 | Zoom | **running, no windows** (Robbie) | closed; `ps -axo comm=` at setup and before each block (`zoomcheck`) |
 | Window display | ASUS PA147, 59.936 Hz (§12.1) | ASUS PA147, 59.936 Hz in all 4 blocks (`<label>.json` `window_display`, from `[LINK]`). `system_profiler` at each block start: ASUS PA147 **1920 × 550** @ 60.00 Hz; LG TV SSCR2 3840 × 2160 @ 120 Hz, main (`soak.out`) |
 | Markers | `no-gear` in all 12 Regenerates | Markers slot open in all 4 blocks; 21 Regenerates, all remade 5, none made while playing (MARKERS PASS, `soak.report:108`) |

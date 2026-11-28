@@ -1,18 +1,18 @@
 # Third-party notices — status and open obligations
 
 Companion to the About window (`App/AboutWindow.swift`, Manifold ▸ About Manifold). The window
-carries the attributions and the reproduced licence texts. This file records where each licence
+carries the attributions and the reproduced license texts. This file records where each license
 came from, and the one obligation attribution does **not** discharge.
 
-Licence bodies live in `App/Licenses/` as verbatim copies of upstream files and are bundled as
-resources. **Nothing in this repo restates a licence from memory.** If a licence needs updating,
+License bodies live in `App/Licenses/` as verbatim copies of upstream files and are bundled as
+resources. **Nothing in this repo restates a license from memory.** If a license needs updating,
 re-copy it from the source tree — do not edit the copy.
 
 ---
 
 ## Provenance
 
-| Component | Version | Licence | Copied from |
+| Component | Version | License | Copied from |
 |---|---|---|---|
 | FFmpeg (libavformat, libavcodec, libavutil, libswscale, libswresample) | n8.1.1 @ `239f2c733de4` | LGPL-2.1-or-later | `git.ffmpeg.org/ffmpeg.git` at the pinned commit — `LICENSE.md`, `COPYING.LGPLv2.1` |
 | libsrt | 1.5.6 | MPL-2.0 | `~/Code/Manifold/manifold-srt-build/srt/LICENSE` |
@@ -51,7 +51,7 @@ conditions. There are three, and each is discharged by a different mechanism:
 
 | §6 requirement | How Manifold satisfies it | Where it lives |
 |---|---|---|
-| **Notice** — state that the Library is used and is covered by this Licence, and supply a copy of the Licence | About panel credits the five libraries, states LGPL-2.1-or-later, and reproduces the full licence text plus FFmpeg's own `LICENSE.md` | `App/AboutWindow.swift`, `App/Licenses/LGPL-2.1.txt` |
+| **Notice** — state that the Library is used and is covered by this License, and supply a copy of the License | About panel credits the five libraries, states LGPL-2.1-or-later, and reproduces the full license text plus FFmpeg's own `LICENSE.md` | `App/AboutWindow.swift`, `App/Licenses/LGPL-2.1.txt` |
 | **§6(b) — relinking** | FFmpeg ships as five **shared** dylibs in `Contents/Frameworks`, loaded via `@rpath`, which the user can replace. `disable-library-validation` is what lets a replacement actually load under hardened runtime | `ThirdParty/ffmpeg/README.md`, `App/Manifold.entitlements` |
 | **Corresponding source** | The exact source is published as a tarball, *and* a §6(c) written offer is made in the shipped binary | below |
 
@@ -77,7 +77,7 @@ Builds made before 2026-10-09 print the r1 URL, without the suffix
   line (a new `-rN`, enforced by `scripts/build_ffmpeg.sh`), changes the filename, and exactly one
   upload happens automatically. **A published tarball is never overwritten**: the upload runs
   only when the URL answers 404 `Not found`.
-- **Published before the binary**, so no build is ever downloadable whose licence notice points
+- **Published before the binary**, so no build is ever downloadable whose license notice points
   at a 404.
 
 ### The written offer
@@ -160,14 +160,14 @@ weak even where the risk is arguable.
   they are tiny and never change — which makes the question moot. That is the current intent.
 - **The "cost of physically performing the distribution" phrasing**, which LGPL 2.1 wrote with
   physical media in mind. We serve a download at no charge, which is strictly more generous, but
-  the offer's wording is inherited from the licence and a lawyer may want it adapted.
+  the offer's wording is inherited from the license and a lawyer may want it adapted.
 - **Whether `scripts/build_ffmpeg.sh` itself must be published** as part of "corresponding
   source". LGPL 2.1 §6(a) says "the complete corresponding machine-readable source code for the
   Library" and, unlike GPLv3, does not define Corresponding Source to include build scripts. We
   publish the configure line, which is the part that determines the output. Including the whole
   script would cost nothing and remove the question — worth doing if an opinion says so.
 - **Whether the About panel's notice is sufficiently "prominent"** for §6's notice requirement.
-  It is behind Manifold ▸ About Manifold ▸ Licences. That is the conventional place and is where
+  It is behind Manifold ▸ About Manifold ▸ Licenses. That is the conventional place and is where
   every other component's notice lives, but "prominent" is a judgement call.
 
 None of these block shipping in my view; all four are cheap to adjust if an opinion differs.
@@ -185,7 +185,7 @@ distribution — it says so in its own text — so that ships verbatim. `ndi.lin
 notice, has been down since 2026-10-29; NDI's licensing page is
 <https://docs.ndi.video/all/developing-with-ndi/sdk/licensing>.
 
-Requirements the SDK licence does place on us, all met in the About window:
+Requirements the SDK license does place on us, all met in the About window:
 
 - **3(f) trademarks.** NDI marks may be used only to identify compatibility, must be clearly noted
   as NDI's marks, and must not suggest sponsorship. The window states NDI® is a registered
@@ -201,14 +201,14 @@ Requirements the SDK licence does place on us, all met in the About window:
 
 **Blackmagic DeckLink SDK EULA.** We redistribute no part of the SDK, so the EULA's
 sub-licensing clauses (1.4, 1.5) are not engaged. EULA clause **0.1** explicitly excludes the
-files we actually use — `/Mac/Include` — from clauses 1, 4.3, 4.4, 5, 7 and 8, and the licence
+files we actually use — `/Mac/Include` — from clauses 1, 4.3, 4.4, 5, 7 and 8, and the license
 for those files is the permission notice in their own headers, which is what the About window
 reproduces. That notice's clause (3) requires the notice in all copies **except** where the copy
 is "solely in the form of machine-executable object code", which is what we ship — so
 reproducing it is good practice rather than a strict obligation. Clause **6.2** permits
 "XXX compatible with Blackmagic Design DeckLink" phrasing, which is the only way the mark is used.
 
-**Mbed TLS dual licence.** Apache-2.0 OR GPL-2.0-or-later, user's choice. **We take Apache-2.0.**
+**Mbed TLS dual license.** Apache-2.0 OR GPL-2.0-or-later, user's choice. **We take Apache-2.0.**
 The upstream `LICENSE` file contains both texts and is reproduced unedited, so the About window
 shows the GPL text too; the note above it states which one we are taking.
 
@@ -216,7 +216,7 @@ shows the GPL text too; the note above it states which one we are taking.
 
 ## Re-checking any of this
 
-Every claim above is checkable against a path in the table. To refresh a licence after a
+Every claim above is checkable against a path in the table. To refresh a license after a
 dependency bump, copy the file again into `App/Licenses/` and update the version in
-`Attributions.all`. The About window logs `[ABOUT] ⚠️ licence resource missing from the bundle`
+`Attributions.all`. The About window logs `[ABOUT] ⚠️ license resource missing from the bundle`
 and says so on screen if a file fails to bundle, so a broken copy is visible rather than silent.

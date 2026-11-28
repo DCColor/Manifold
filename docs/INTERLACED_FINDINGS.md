@@ -396,7 +396,7 @@ screenshots; every quit by a Quit event to the bundle path. Runs: `build/interla
 | C1 | Frame-0 signal on all 16 files identical to HEAD's (`Rec.709 · EOTF 0 · HDR flag clear`); no signal line changed | **PASS** |
 | E | 20-file control set (I1's), Export Frame for Support on HEAD and tree: `.rgba16f`, `.v210`, `.v210.json` **60 / 60 byte-identical**; PNG pixels and ICC equal 20 / 20 | **PASS** |
 | G | `swift test` **623 / 623** (HEAD 612, plus 11). Profile warnings: the same 11 as HEAD's clean build (paths and lines normalised) | **PASS** |
-| D | After the runs: 54 keys added, all `NSWindow Frame …`; each read, then deleted, stopping at the first failure. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys never in a snapshot (presence only, untouched) | **PASS** |
+| D | After the runs: 54 keys added, all `NSWindow Frame …`; each read, then deleted, stopping at the first failure. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; license keys never in a snapshot (presence only, untouched) | **PASS** |
 
 **Findings.**
 
@@ -496,7 +496,7 @@ VideoToolbox planes matches within 1 code on the v210 and 0.17 code in the offsc
 | F3 | `late=0 dropped=0` on all 12 loop runs | **PASS** |
 | G1 | `swift test` **631 / 631** (626 + 5) | **PASS** |
 | G2 | Profile warnings: the same 11 on HEAD and tree (and as I2's set) | **PASS** |
-| H1 | 21 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | **PASS** |
+| H1 | 21 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; license keys stripped from the snapshot (presence only), never written | **PASS** |
 
 ### 12.4 Where the rest of the bleed comes from: the decode (measured, read-only)
 
@@ -596,7 +596,7 @@ carry the same filter** (route `vt`); they are not changed (BUGS.md, *8-bit H.26
 | F8 | Readout `[CHROMA] 4:2:0 8-bit (420v) — native`, `[CHROMA-FILE] … → 420v 4:2:0 · 8-bit source (exact ×4)`, `[BITDEPTH] 8-bit source …`; no fallback | **PASS** |
 | G1 | `swift test` 633 / 633 (631 + 2) | **PASS** |
 | G2 | Profile warnings: the same 11 as HEAD (clean builds) | **PASS** |
-| H1 | 14 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | **PASS** |
+| H1 | 14 keys added, all `NSWindow Frame …`; each read, then deleted. Final domain dictionary-equal to the snapshot; `streamBookmarks` hash unchanged; license keys stripped from the snapshot (presence only), never written | **PASS** |
 | S1 | Streams: measured (13.1), not changed | as predicted |
 
 ## 14. I4 — display options (files): scope, predictions, results
@@ -682,7 +682,7 @@ outside the app.
 | I | **Cost**: paused and idle for 30 s in Field 1, the display link stops as in Weave; CPU within 0.5 points of Weave. Playing, the GPU time per frame rises by ≤ 0.05 ms (one 1080 compute pass); scope publishes per second equal to Weave's (±1). Weave: no change from HEAD | as stated | otherwise |
 | L | **Logs**: on the progressive set every line identical to HEAD's, apart from launch and quit timing as in §10.6 L; on interlaced files the only additions are `[FIELDS]` lines, `[CHAIN] Fields` lines and the "1080i…" prefix on `[CHAIN] Source` | as stated | any other change |
 | G | `swift test`: all pass, 633 plus the new tests. Profile warnings: the same 11 as HEAD (clean builds, paths and lines normalised) | as stated | any failure or new warning |
-| D | Defaults: the domain dictionary-equal to the snapshot after the runs (window-frame keys read, then deleted, stopping at the first failure); `streamBookmarks` hash unchanged; licence keys stripped from the snapshot (presence only), never written | equal | any difference |
+| D | Defaults: the domain dictionary-equal to the snapshot after the runs (window-frame keys read, then deleted, stopping at the first failure); `streamBookmarks` hash unchanged; license keys stripped from the snapshot (presence only), never written | equal | any difference |
 
 ### 14.4 Results
 
@@ -709,7 +709,7 @@ no screenshots. Analysis: `build/interlaced-i4/analyze.py` (`an-interlaced.txt`,
 | I | Paused: the display link stops ~62 ticks after a view change, as after a Weave redraw; CPU 0.03 / 0.04 / 0.13 / 0.04 % (Weave / Field 1 / Field 2 / Deinterlace; HEAD Weave 0.05 %). Playing: GPU 0.087 / 0.116 / 0.113 / 0.114 ms a frame (HEAD Weave 0.085): **+0.03 ms**; scope publishes 30 / 30 / 30 a second in every view (vectorscope 29 once in Deinterlace) | **PASS** |
 | L | Logs, normalised for timing, window numbers and pids: no line other than `[FIELDS]`, `[CHAIN] Fields` and the Source prefix differs from HEAD's. The `CVDisplayLinkStart → -6660` recovery appears in both builds' runs (BUGS.md, known) | **PASS** |
 | G | `swift test` **641 / 641** (633 + 8). Clean Profile builds: **12** warnings on HEAD and on the tree after normalising, identical sets (the prediction's "11" was taken from the I3 record; which line is new since then was not traced) | **PASS** (count restated) |
-| D | Defaults: 46 `NSWindow Frame` keys added by the runs, each read then deleted (`set -e`); the domain is then dictionary-equal to the snapshot; `streamBookmarks` 18c6da5dbe73c5e4 unchanged; licence keys present before and after (3, values never read out), never written; `showTray` false throughout (launch argument only) | **PASS** |
+| D | Defaults: 46 `NSWindow Frame` keys added by the runs, each read then deleted (`set -e`); the domain is then dictionary-equal to the snapshot; `streamBookmarks` 18c6da5dbe73c5e4 unchanged; license keys present before and after (3, values never read out), never written; `showTray` false throughout (launch argument only) | **PASS** |
 
 ### 14.5 Findings
 
@@ -812,7 +812,7 @@ confirmed in 14.4).
 | K7 | **Cost**: paused in Field 1 for 30 s the display link stops and CPU stays within 0.1 point of the I4 run's (0.04 %); the marker adds no `[RENDER-PERF]` work (it is not Metal) | as stated | otherwise |
 | K8 | **Logs**: one `[FIELDS] marker` line per marker shown or hidden, nothing else new | as stated | any other change |
 | G | `swift test` 641 plus the new marker test, all pass; the same 12 Profile warnings | as stated | any failure or new warning |
-| D | Defaults: dictionary-equal to the snapshot after the runs (frame keys read, then deleted, stopping at the first failure); `streamBookmarks` unchanged; licence keys stripped (presence only), never written | equal | any difference |
+| D | Defaults: dictionary-equal to the snapshot after the runs (frame keys read, then deleted, stopping at the first failure); `streamBookmarks` unchanged; license keys stripped (presence only), never written | equal | any difference |
 
 ### 14.8 Results
 
@@ -831,7 +831,7 @@ marker is read by Accessibility (its text and frame), the pixels from the export
 | K7 | Paused in Field 1: the display link stopped as before; CPU 0.04 % (I4 run 0.04 %). Playing: GPU 0.11–0.13 ms a frame steady, the same as the I4 run (the marker is not Metal) | **PASS** |
 | K8 | `[FIELDS] marker shown — FIELD 1 (window only)` 75 times and `[FIELDS] marker hidden` 25 (one per change, Field 1 → Field 2 included); none on the progressive set; no other log line differs from the I4 run's apart from the two I4 fixes already in `3f7daad` | **PASS** |
 | G | `swift test` **642 / 642** (641 + 1); clean Profile build: the same 12 warnings | **PASS** |
-| D | 11 `NSWindow Frame` keys added, and **two keys changed** by the stray Open panel (K5): `NSNavPanelExpandedSizeForOpenMode` and `NSOSPLastRootDirectory`, the system open panel's own. Each was read and stashed (`marker/stash-*.txt`), then written back to the snapshot's value; the frame keys were read, then deleted; one `set -e` sequence. The domain is then dictionary-equal to the snapshot; `streamBookmarks` unchanged; licence keys present (3, values never read out), never written | **PASS** (after the restore) |
+| D | 11 `NSWindow Frame` keys added, and **two keys changed** by the stray Open panel (K5): `NSNavPanelExpandedSizeForOpenMode` and `NSOSPLastRootDirectory`, the system open panel's own. Each was read and stashed (`marker/stash-*.txt`), then written back to the snapshot's value; the frame keys were read, then deleted; one `set -e` sequence. The domain is then dictionary-equal to the snapshot; `streamBookmarks` unchanged; license keys present (3, values never read out), never written | **PASS** (after the restore) |
 
 **Findings.**
 1. **The Open panel during the run.** Where it came from was not established: it appeared as `open -a` handed the app its

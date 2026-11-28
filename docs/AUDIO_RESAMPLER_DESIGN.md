@@ -3643,7 +3643,7 @@ timeline:
 **Protocol (unattended).** Build `.build-cc/avlag-Profile`: HEAD plus the DEBUG-only `[AV-LAG]` line
 and the `MANIFOLD_SRT_DEBUG_URL` override (BUGS.md, PRE-SHIP entry). Each run:
 - ffmpeg serves the file as a local SRT listener (`-re -c copy -pes_payload_size 0`);
-- Manifold launches with the override and the licence prompt is denied by osascript;
+- Manifold launches with the override and the license prompt is denied by osascript;
 - ⌃⌥D is pressed by osascript, and the whole 1424 s file plays.
 
 Two runs:
@@ -4477,9 +4477,9 @@ On top of stage A (`98d1f69`).
   `StreamBookmarkModel`, a leaf target the app links as a product, like `DisplayProviders` (and
   `project.yml` lists it).
 - So the test decodes with the REAL type, inside `swift test` with the rest, with no app host,
-  keychain or licence prompt.
+  keychain or license prompt.
 - An app test target would need `xcodebuild test` with the app as host, which raises the unsigned
-  build's licence prompt: not something that runs unattended. The store (`StreamBookmarkStore`) stays
+  build's license prompt: not something that runs unattended. The store (`StreamBookmarkStore`) stays
   in the app.
 
 **The chord check (asked for before choosing keys): no conflict.**
@@ -4677,7 +4677,7 @@ ffmpeg → MediaMTX → WHEP (`offsetB-whep-level.manifold.log`, 19:36–19:52, 
 #### Monday — the attended session (Robbie)
 
 **Build:** `.build-cc/offsetB-Profile/Build/Products/Profile/Manifold.app`.
-- Launch it by double-click: deny the licence prompt; allow the stream-passphrase prompt if one
+- Launch it by double-click: deny the license prompt; allow the stream-passphrase prompt if one
   appears.
 - **Stay connected for the whole of each block.** A disconnect starts a new session, and its
   offset with it.
@@ -4752,7 +4752,7 @@ repeat its step 3 on MediaMTX WHEP: OBS profile `MediaMTX Local`, Start Streamin
 is a hold you only check on.**
 
 **Build:** `.build-cc/stageD-Profile/Build/Products/Profile/Manifold.app` (the seven MP4 clips are
-bundled). Same launch rules as above: deny the licence prompt; ALLOW the stream-passphrase prompt
+bundled). Same launch rules as above: deny the license prompt; ALLOW the stream-passphrase prompt
 (Cloudflare SRT will not dial without it).
 
 **⚠️ Two rules for every block below:**
@@ -7210,7 +7210,7 @@ proposal is its negative. **−** = sound heard **early**.
   - WHEP: at least 240 s connected AND a `[WHEP-SRFIT]` window with the slope IN USE, per §19.10 item
     3's addendum. All three settled at +242…+243 s.
   - SRT: 60 s.
-- **Keychain:** the licence prompt was denied by script, and only that prompt (the helper matches the
+- **Keychain:** the license prompt was denied by script, and only that prompt (the helper matches the
   prompt's text). Robbie allowed the SRT passphrase prompt once with Always Allow before the run.
 - **Logs:** `~/Desktop/manifold-soak/cf1914/`: `<whep|srt>-<n>.manifold.log`, `run.driver.log`,
   `preflight.*`, and `srt-0-whip-ingest-nobytes.manifold.log`. The drivers are in the session

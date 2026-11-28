@@ -3045,7 +3045,7 @@ at 1.2 s against 1.0 s.
 **What changes (decision 1):** `--enable-parser=hevc`, the fifth numbered configure change, carried
 through the baseline banner, `CONFIGURE_ARGS` (LAYER 1), `EXPECTED_PARSERS` (LAYER 2), a LAYER 3
 check beside the h264 one, and `ThirdParty/ffmpeg/README.md`. Same pin (`239f2c733de4`). **Two more
-places the audit did not list:** the configure line printed in the About panel's FFmpeg licence
+places the audit did not list:** the configure line printed in the About panel's FFmpeg license
 text (`App/AboutWindow.swift`, "Configured exactly as follows"), which must match the shipped build;
 and the gate's refusal line, which today prints only the codec (`[SRT] stream is hevc — …`), so it
 gains the profile and size. Log-only: the gate, the banner and the teardown do not change.
@@ -3174,7 +3174,7 @@ left a `BUILD.txt` without `--enable-parser=hevc` behind the About panel's offer
 - **Still open (BUGS.md pre-ship list):** run it on the exported, notarized release build, the one
   path these tests could not reach (quarantined, `spctl` accepted, lsof under hardened runtime).
 
-**User-visible:** none in behaviour. The About panel's FFmpeg licence text gains one configure flag
+**User-visible:** none in behaviour. The About panel's FFmpeg license text gains one configure flag
 and the source URL gains `-r2`; not a release-notes item. **Defaults:** exported before the first launch; afterwards 15 run-added
 `NSWindow Frame` keys, each checked absent from the snapshot and deleted by name; the domain is
 dictionary-equal to the snapshot (1 141 keys). `streamBookmarks` was never written (every run dialled
@@ -4512,7 +4512,7 @@ MANIFOLD_FORCE_CHROMA_420". **Fail:** any of those not so.
 **Builds:** HEAD `1bd07de`, from a clean worktree (vendored `ThirdParty` and the DeckLink SDK copied in,
 `xcodegen`), `.build-cc/s1head-Profile`; S1, `.build-cc/s1-Profile`. Both unsigned Profile; the same
 warning set (10 distinct; only a timestamp differs). **Driver:** a scratch copy of the
-`scripts/soak/repro/run.sh` pattern: launch, Deny the licence prompt, `open -a` (files) or ⌃⌥D on a local
+`scripts/soak/repro/run.sh` pattern: launch, Deny the license prompt, `open -a` (files) or ⌃⌥D on a local
 ffmpeg SRT listener, then ⌃⌥E and quit. Fixtures: `scripts/chroma/generate.sh 420`.
 
 | # | Result | Verdict |
@@ -4644,7 +4644,7 @@ carry what it gives, or `x420` with the banner); AVFoundation refusing `x422`/`x
 Both unsigned Profile; the same warning set (11, line numbers apart). The S2 binary was rebuilt once
 after the first batch (the banner's spelling, "color", and a timing line on the libav probe); three
 fixtures re-run on it gave exports byte-identical to the first build's. **Driver:** a scratch
-`run1.sh` (launch, Deny the licence prompt, `open -a` the file, Debug ▸ Chroma Scrub Bench or 62 s of
+`run1.sh` (launch, Deny the license prompt, `open -a` the file, Debug ▸ Chroma Scrub Bench or 62 s of
 play, quit) and `srt1.sh` (S1's local-listener pattern). **Measurement:** `scripts/chroma/measure.swift`.
 **Fixtures:** `generate.sh 422 444 420 s2`; real files from `/Volumes/DCCOLOR/TEST FLIP/`.
 
@@ -5127,7 +5127,7 @@ streamed, DistroAV's NDI Main Output "OBS PGM" carrying the Image source `p2-bar
    scene shows the bars; Tools ▸ DistroAV NDI Settings ▸ Main Output on, named "OBS PGM".
 2. Launch the final build from Terminal, logging:
    `".build-cc/e8c-Profile/Build/Products/Profile/Manifold.app/Contents/MacOS/Manifold" > ~/Desktop/ndi-e8c.log 2>&1 &`
-   (an unsigned build: Deny the licence prompt).
+   (an unsigned build: Deny the license prompt).
 3. Connect the NDI source "OBS PGM" from the streaming menu, wait 5 s, press **⌃⌥E**, then quit Manifold.
 4. Repeat 2 and 3 with `.build-cc/e8head-Profile/…` (log `~/Desktop/ndi-head.log`): HEAD's control.
 5. Afterwards compare OBS's log for the session with the row (no output started but NDI).
@@ -5463,7 +5463,7 @@ scanned per rung):
 
 **Gates:** Profile build, no warnings in the touched files; `swift test` 742 / 742; `soaklog.test.mjs` 8 / 8.
 
-**Defaults:** exported before the first launch (1 634 keys after the licence keys and `streamBookmarks` were stripped;
+**Defaults:** exported before the first launch (1 634 keys after the license keys and `streamBookmarks` were stripped;
 presence only). After the last quit, 17 run-added `NSWindow Frame` keys were deleted by name. The domain is
 dictionary-equal to the snapshot, apart from `playbackVolume` and `showTray`, which Robbie changed during the session
 and which were left as they are. `streamBookmarks` was never written. The Cloudflare bookmark was connected by Robbie
@@ -7803,7 +7803,7 @@ B). Rows the same as 1:1 are listed once.
   - The remaining routes are ⌃⌥H with `MANIFOLD_STREAM_DEBUG_URL` (a keystroke), or Edit ▸ Paste over the user's
     clipboard. Neither was used.
 - *What the attempts touched:* nothing. The open sheet blocked Quit, so those launches were terminated by PID.
-  `streamBookmarks` was read back unchanged. The sheet's keychain prompts were the licence item's (denied), not a
+  `streamBookmarks` was read back unchanged. The sheet's keychain prompts were the license item's (denied), not a
   stream passphrase.
 - *Recorded as UNKNOWN.* To close it: a person pastes the URL, or a DEBUG launch-environment dial is added (a new
   pre-ship removal).
@@ -8146,7 +8146,7 @@ proposal to signal SDR on HDMI by setting the HDR flag with EOTF 0; (3) every SD
 dropout at a same-mode colour change, recorded. Both loops in place (SDI out → SDI in, HDMI out → HDMI in, device 0,
 profile `1dfd`). The HDMI input was switched per capture only (`capture --input hdmi`), never persisted; the probe
 read device 0's input as SDI after every capture and every control, and `Rec2020Output` false after every case of
-`controls.sh` (the only controls that held it). The drivers stop at the first probe that reads otherwise; none did. Defaults: snapshot without licence keys; restored dictionary-equal (one key, `showTray`,
+`controls.sh` (the only controls that held it). The drivers stop at the first probe that reads otherwise; none did. Defaults: snapshot without license keys; restored dictionary-equal (one key, `showTray`,
 read and written back; window-frame keys deleted).
 
 **Predictions** (`build/s7-5b/predictions.md`, written 18:24:55, before any build or run):
