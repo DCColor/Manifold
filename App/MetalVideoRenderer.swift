@@ -6472,6 +6472,10 @@ final class MetalVideoRenderer {
     /// The window's banner, for an export that could not go where the settings said (the per-clip folder). MAIN THREAD.
     var onExportNotice: ((String) -> Void)?
 
+    /// The window's banner for a finished save (docs/BUGS.md, 0.9.6 UI polish item 3): the file written, or why it could not
+    /// be. Called by `writeFrameExport` once per save, after any `onExportNotice` for the same export. MAIN THREAD.
+    var onFrameSaved: ((FrameSaveNotice) -> Void)?
+
     /// Share Frame… (Robbie, 2026-11-15; FrameShare.swift): the frame Export Frame would capture, as an 8-bit SDR JPEG
     /// (quality 0.9, sRGB, `ShareJPEG`: one ColorSync draw, which tone-maps HLG and PQ), under Export Frame's base name with
     /// `.jpg`, written into `folder` for the share sheet. Export Frame's PNG is unchanged. SILENT: no `[EXPORT]` lines,
@@ -6728,8 +6732,13 @@ final class MetalVideoRenderer {
                 }
             }
             #endif
+            onFrameSaved?(.saved(url: url, note: nil))
         } else {
-            print("[EXPORT] PNG write failed")
+            // The encoder says only that it failed; the folder says why (0.9.6 UI polish item 3). No path in the log line.
+            let folder = url.deletingLastPathComponent()
+            let failure = FrameSaveFailure.diagnose(folder: folder, neededBytes: Int64(export.width) * Int64(export.height) * 8)
+            print("[EXPORT] PNG write failed (\(failure.logLabel))")
+            onFrameSaved?(.failed(failure.message(fileName: url.lastPathComponent, folderName: folder.lastPathComponent)))
         }
     }
 

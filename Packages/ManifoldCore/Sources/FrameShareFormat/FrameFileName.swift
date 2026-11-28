@@ -181,14 +181,14 @@ extension FrameFileName {
         }
     }
 
-    /// The banner when a per-clip export fell back to the export location. Names the folder, which is the clip's own name
-    /// and on screen already; never a path.
+    /// The banner's second sentence when a per-clip export fell back to the export location; it follows "Saved “<file>”."
+    /// (`FrameSaveNotice`, 0.9.6). Names the folder, which is the clip's own name and on screen already; never a path.
     public static func fallbackNotice(folder: String, reason: FallbackReason) -> String {
         switch reason {
         case .fileInTheWay:
-            return "Frame exported to the export folder, not to “\(folder)”: a file with that name is in the way."
+            return "It’s in the export folder, not in “\(folder)”: a file with that name is in the way."
         case .couldNotCreate:
-            return "Frame exported to the export folder: the folder “\(folder)” couldn’t be created."
+            return "It’s in the export folder: the folder “\(folder)” couldn’t be created."
         }
     }
 }

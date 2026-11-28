@@ -1396,12 +1396,14 @@ struct ContentView: View {
             VStack(spacing: 8) {
                 arbitrationNotice
                 connectErrorBanner
+                frameSaveBanner
                 deckLinkRefusalBanner
                 sdiSoundStoppedBanner
                 dolbyVisionBanner
             }
         }
         .animation(.easeInOut(duration: 0.25), value: whep.lastError)
+        .animation(.easeInOut(duration: 0.25), value: deck.frameSaveNotice)
         .animation(.easeInOut(duration: 0.2), value: showInspector)
         .animation(.easeInOut(duration: 0.2), value: showFileNameOverlay)
     }
@@ -2813,8 +2815,7 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button {
-                    whep.clearError(); srt.clearError(); hls.clearError(); ndi.clearError()
-                    engine.playbackNotice = nil
+                    clearConnectErrorBanner()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
@@ -2839,10 +2840,64 @@ struct ContentView: View {
                 // it when two connect errors land close together, which is why it survived.
                 try? await Task.sleep(nanoseconds: 9_000_000_000)
                 guard !Task.isCancelled else { return }
-                whep.clearError()
-                srt.clearError()
-                ndi.clearError()
-                engine.playbackNotice = nil
+                clearConnectErrorBanner()
+            }
+        }
+    }
+
+    /// Everything `connectErrorBanner` can show, cleared at once: by its close button and by its 9 s timer. ONE FUNCTION FOR
+    /// BOTH so they cannot drift apart again: the timer once cleared WHEP, SRT and NDI but not HLS, so an HLS message stood
+    /// until it was closed by hand (docs/BUGS.md, 0.9.6 UI polish, batch 2 fix 2).
+    private func clearConnectErrorBanner() {
+        whep.clearError()
+        srt.clearError()
+        hls.clearError()
+        ndi.clearError()
+        engine.playbackNotice = nil
+    }
+
+    /// Export Frame's, Export Frame for Support's and Share Frame's result (`WindowDeck.frameSaveNotice`, docs/BUGS.md, 0.9.6
+    /// UI polish item 3): "Saved “<file>”." with Show in Finder, or what went wrong. Its own banner, not a term on
+    /// `connectErrorBanner`, whose slot holds only mutually exclusive messages: a save can land while a connection error is
+    /// up. Transient, in that banner's style and with its timer idiom: 6 s for a saved frame, 9 s for a failure, or closed.
+    @ViewBuilder private var frameSaveBanner: some View {
+        if let notice = deck.frameSaveNotice {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: notice.isFailure ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundStyle(notice.isFailure ? Color.orange : Color.green)
+                Text(notice.text)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                if let url = notice.fileURL {
+                    Button("Show in Finder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    }
+                    .controlSize(.small)
+                }
+                Button {
+                    deck.frameSaveNotice = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.55))
+                .accessibilityLabel("Close")
+            }
+            .padding(12)
+            .frame(maxWidth: 520, alignment: .leading)
+            .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(notice.isFailure ? Color.orange.opacity(0.55) : Color.white.opacity(0.22)))
+            .padding(.top, 16)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .task(id: notice) {
+                // The id is the notice, so a second save restarts the timer; the guard keeps a cancelled sleep from clearing
+                // the newer notice (see `connectErrorBanner`).
+                try? await Task.sleep(nanoseconds: UInt64(notice.autoHideSeconds * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                deck.frameSaveNotice = nil
             }
         }
     }
@@ -3564,7 +3619,10 @@ struct ContentView: View {
         guard let renderer = metalRenderer else { NSSound.beep(); return }
         wakeHUD()
         guard let anchor = shareAnchor.view(fallback: deck.window?.contentView) else { NSSound.beep(); return }
-        FrameSharer.shared.share(anchor: anchor, focus: renderer.hostView) { renderer.writeFrameForShare(into: $0) }
+        FrameSharer.shared.share(anchor: anchor, focus: renderer.hostView,
+                                 onFailure: { [weak deck] in deck?.frameSaveNotice = .failed($0) }) {
+            renderer.writeFrameForShare(into: $0)
+        }
     }
 
     // Scopes tray (VIEW STATE) — open/close. Which scopes fill the three slots is

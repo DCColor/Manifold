@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 import ShortcutRegistry   // ShortcutRegistry — File ▸ Share Frame…'s item
-import FrameShareFormat   // ShareLabel — "Share Frame (SDR)…" for an HDR picture (Robbie, 2026-11-15)
+import FrameShareFormat   // ShareLabel — "Share Frame (SDR)…" for an HDR picture (Robbie, 2026-11-15); ShareFailure (0.9.6)
 
 // Share Frame… (Robbie, 2026-11-15): the frame Export Frame would capture, through the macOS share sheet
 // (NSSharingServicePicker): Messages, Mail, AirDrop, Notes, Photos and the rest.
@@ -19,6 +19,10 @@ import FrameShareFormat   // ShareLabel — "Share Frame (SDR)…" for an HDR pi
 //
 // PRIVACY. Nothing leaves the app but the image itself: no path or name is logged, and the only log line is
 // "[SHARE] frame shared", with no target and no file name.
+//
+// FAILURES (0.9.6 UI polish item 3). A share that could not be prepared, or a service that reported a failure, shows the
+// window's frame-save banner (`ShareFailure`) instead of only beeping. A Cancel, in the picker or in a service's own sheet,
+// shows nothing.
 
 /// The key deck's picture is PQ or HLG, for File ▸ Share Frame…'s title, which cannot observe a deck from inside a
 /// `commands` builder (Robbie, 2026-11-15; `ShareLabel`). Set by `WindowDeck` when the key deck changes or its picture does.
@@ -67,10 +71,11 @@ struct ShareAnchorView: NSViewRepresentable {
 final class FrameSharer: NSObject, @preconcurrency NSSharingServicePickerDelegate, @preconcurrency NSSharingServiceDelegate {
     static let shared = FrameSharer()
 
-    /// One share in flight: its folder, and the view keyboard focus returns to when its sheet closes.
+    /// One share in flight: its folder, the view keyboard focus returns to when its sheet closes, and its window's banner.
     private struct Pending {
         let folder: URL
         weak var focus: NSView?
+        let onFailure: (String) -> Void
     }
 
     /// Each share in flight, first by picker, then by the service chosen from it.
@@ -96,25 +101,26 @@ final class FrameSharer: NSObject, @preconcurrency NSSharingServicePickerDelegat
     /// At launch: whatever a previous run left (a crash, a target that never reported back).
     static func sweepAtLaunch() { shared.sweep(keepingInFlight: true) }
 
-    /// Write the frame with `write` (which returns the file, or nil when there is no frame) and open the share sheet on
-    /// `anchor`. Beeps when there is nothing to share. `focus` (the player view) is made first responder when the sheet
-    /// closes, sent or cancelled.
-    func share(anchor: NSView, focus: NSView?, write: (URL) -> URL?) {
+    /// Write the frame with `write` (which returns the file, or nil when there is no frame or the write failed) and open the
+    /// share sheet on `anchor`. A share that cannot be prepared, or that its service fails, calls `onFailure` with the
+    /// banner's text; a Cancel does not. `focus` (the player view) is made first responder when the sheet closes, sent or
+    /// cancelled.
+    func share(anchor: NSView, focus: NSView?, onFailure: @escaping (String) -> Void, write: (URL) -> URL?) {
         sweep(keepingInFlight: true)
-        guard let root = Self.root else { NSSound.beep(); return }
+        guard let root = Self.root else { onFailure(ShareFailure.couldNotPrepare); return }
         let folder = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         } catch {
-            NSSound.beep(); return
+            onFailure(ShareFailure.couldNotPrepare); return
         }
         guard let file = write(folder) else {
             try? FileManager.default.removeItem(at: folder)
-            NSSound.beep(); return
+            onFailure(ShareFailure.couldNotPrepare); return
         }
         let picker = NSSharingServicePicker(items: [file])
         picker.delegate = self
-        byPicker[ObjectIdentifier(picker)] = Pending(folder: folder, focus: focus)
+        byPicker[ObjectIdentifier(picker)] = Pending(folder: folder, focus: focus, onFailure: onFailure)
         picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: anchor.isFlipped ? .minY : .maxY)
     }
 
@@ -143,8 +149,13 @@ final class FrameSharer: NSObject, @preconcurrency NSSharingServicePickerDelegat
         finish(sharingService)
     }
 
-    /// Also a cancel from the service's own sheet (Messages' Cancel reports a user-cancelled error).
+    /// Also a cancel from the service's own sheet (Messages' Cancel reports a user-cancelled error), which shows nothing.
     func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: Error) {
+        let e = error as NSError
+        if !ShareFailure.isCancel(domain: e.domain, code: e.code),
+           let pending = byService[ObjectIdentifier(sharingService)] {
+            pending.onFailure(ShareFailure.couldNotShare(detail: e.localizedDescription))
+        }
         finish(sharingService)
     }
 

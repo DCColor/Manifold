@@ -363,6 +363,15 @@ final class WindowDeck: ObservableObject {
         }
     }
 
+    /// The frame-save banner (docs/BUGS.md, 0.9.6 UI polish item 3): Export Frame's, Export Frame for Support's and Share
+    /// Frame's result in this window, shown by `ContentView.frameSaveBanner` and cleared by its timer or close button. Its own
+    /// slot, not `engine.playbackNotice`: a save can land while a connection error is showing, and it carries Show in Finder.
+    @Published var frameSaveNotice: FrameSaveNotice?
+
+    /// The per-clip folder's fallback sentence (`MetalVideoRenderer.onExportNotice`), which arrives just before the same
+    /// export's `onFrameSaved` and is folded into its banner there.
+    fileprivate var pendingExportNote: String?
+
     var frameName: FrameName? {
         if let engine, engine.hasMedia, let url = engine.currentURL {
             let t = engine.currentTime
@@ -1174,10 +1183,20 @@ final class DeckRegistry {
             guard Thread.isMainThread else { return }
             MainActor.assumeIsolated { deck?.pictureIsHDR = renderer?.pictureIsHDR ?? false }
         }
-        // An export that could not use the per-clip folder says so in this window's banner (item 7).
+        // An export that could not use the per-clip folder says so in this window's banner (item 7): as the second sentence
+        // of the save's own banner, which follows at once (0.9.6 UI polish item 3).
         renderer.onExportNotice = { [weak deck] text in
             guard Thread.isMainThread else { return }
-            MainActor.assumeIsolated { deck?.engine?.playbackNotice = text }
+            MainActor.assumeIsolated { deck?.pendingExportNote = text }
+        }
+        // Every save ends in a banner: the file's name and Show in Finder, or why it failed (0.9.6 UI polish item 3).
+        renderer.onFrameSaved = { [weak deck] notice in
+            guard Thread.isMainThread else { return }
+            MainActor.assumeIsolated {
+                guard let deck else { return }
+                deck.frameSaveNotice = notice.adding(note: deck.pendingExportNote)
+                deck.pendingExportNote = nil
+            }
         }
 
         // …and the engine feeds this window's renderer, and only this one.
